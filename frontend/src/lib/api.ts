@@ -942,9 +942,69 @@ export interface StrategyAlertEvent {
   [key: string]: unknown
 }
 
+// ===== 自由策略 =====
+export interface FreeStrategySummary {
+  id: string
+  name: string
+  revision: number
+  config: Record<string, any>
+  created_at?: string
+  updated_at?: string
+  source?: string
+}
+
+export interface FreeBacktestConfig {
+  strategy_id: string
+  symbols: string[]
+  timeframe: '1d' | '30m' | '5m' | '1m'
+  start?: string
+  end?: string
+  asset_type: 'stock' | 'etf'
+  initial_capital: number
+  fees_pct: number
+  commission_pct?: number | null
+  stamp_tax_pct: number
+  slippage_bps: number
+  lot_size: number
+  max_exposure_pct: number
+  settlement: 't1' | 't0'
+  fill_policy: 'next_open' | 'close'
+}
+
+export interface FreeBacktestResult {
+  initial_capital: number
+  final_equity: number
+  return_pct: number
+  max_drawdown_pct: number
+  equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
+  orders: Record<string, any>[]
+  fills: Record<string, any>[]
+  positions: Record<string, number>
+  logs: { timestamp: string; level: string; message: string }[]
+  metadata?: Record<string, any>
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  freeStrategies: () => request<{ strategies: FreeStrategySummary[]; templates: { id: string; name: string }[] }>('/api/free-strategies'),
+  freeStrategy: (id: string) => request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`),
+  freeTemplates: () => request<{ templates: (FreeStrategySummary & { id: string; name: string; source: string })[] }>('/api/free-strategies/templates'),
+  saveFreeStrategy: (payload: { id?: string; name: string; source: string; config?: Record<string, any> }) =>
+    request<FreeStrategySummary>('/api/free-strategies', { method: 'POST', body: JSON.stringify(payload) }),
+  updateFreeStrategy: (id: string, payload: { name: string; source: string; config?: Record<string, any> }) =>
+    request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteFreeStrategy: (id: string) => request<{ ok: boolean }>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  startFreeBacktest: (payload: FreeBacktestConfig) =>
+    request<{ job_id: string; status: string; source_revision: number }>('/api/free-strategies/backtest', { method: 'POST', body: JSON.stringify(payload) }),
+  cancelFreeBacktest: (jobId: string) => request<{ ok: boolean }>(`/api/free-strategies/backtest/${jobId}/cancel`, { method: 'POST' }),
+  paperAccounts: () => request<{ accounts: Record<string, any>[] }>('/api/free-strategies/paper/accounts'),
+  createPaperAccount: (payload: FreeBacktestConfig & { name: string }) =>
+    request<Record<string, any>>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  paperAccount: (id: string) => request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}`),
+  paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop') =>
+    request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
 
   // ===== Auth (访问认证) =====
   authStatus: () =>

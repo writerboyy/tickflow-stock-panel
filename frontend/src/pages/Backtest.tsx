@@ -4,9 +4,10 @@ import { FactorBacktest } from './backtest/FactorBacktest'
 import { StrategyBacktest } from './backtest/StrategyBacktest'
 import { StrategyOptimizer } from './backtest/StrategyOptimizer'
 import { StrategyWalkForward } from './backtest/StrategyWalkForward'
-import { BarChart3, FlaskConical, SlidersHorizontal, Waypoints } from 'lucide-react'
+import { FreeStrategy } from './backtest/FreeStrategy'
+import { BarChart3, Code2, FlaskConical, SlidersHorizontal, Waypoints } from 'lucide-react'
 
-type Tab = 'factor' | 'strategy' | 'optimizer' | 'walkforward'
+type Tab = 'factor' | 'strategy' | 'optimizer' | 'walkforward' | 'free'
 
 const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
   factor: {
@@ -29,6 +30,11 @@ const MODES: Record<Tab, { title: string; subtitle: string; hint: string }> = {
     subtitle: '滚动窗口样本外验证',
     hint: '每折训练区间优化、测试区间验证，看样本外是否退化以识别过拟合。',
   },
+  free: {
+    title: '自由策略',
+    subtitle: '运行本机 Python bar 策略和持久模拟盘',
+    hint: '独立源码快照、历史回测与模拟账户；默认股票和 ETF 均为 T+1，可切换 T+0。',
+  },
 }
 
 const TAB_ICONS: Record<Tab, typeof BarChart3> = {
@@ -36,21 +42,22 @@ const TAB_ICONS: Record<Tab, typeof BarChart3> = {
   strategy: FlaskConical,
   optimizer: SlidersHorizontal,
   walkforward: Waypoints,
+  free: Code2,
 }
 
 export function Backtest() {
   const [activeTab, setActiveTab] = useState<Tab>('strategy')
 
   const modeSwitch = (
-    <div className="inline-flex rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
-      {(['factor', 'strategy', 'optimizer', 'walkforward'] as const).map(tab => {
+    <div className="inline-flex max-w-full shrink-0 overflow-x-auto rounded-btn border border-border bg-surface/80 p-0.5 shadow-sm">
+      {(['factor', 'strategy', 'optimizer', 'walkforward', 'free'] as const).map(tab => {
         const Icon = TAB_ICONS[tab]
         const active = activeTab === tab
         return (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`inline-flex items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-[5px] px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer ${
               active
                 ? 'bg-accent text-white shadow-sm'
                 : 'text-secondary hover:bg-elevated hover:text-foreground'
@@ -85,6 +92,7 @@ export function Backtest() {
         {activeTab === 'strategy' && <StrategyBacktest />}
         {activeTab === 'optimizer' && <StrategyOptimizer />}
         {activeTab === 'walkforward' && <StrategyWalkForward />}
+        {activeTab === 'free' && <FreeStrategy />}
       </main>
     </div>
   )
