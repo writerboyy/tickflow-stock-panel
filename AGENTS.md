@@ -60,6 +60,18 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Commit Every Code Change
+
+**Make completed code changes traceable in Git.**
+
+- After a code change is verified, create a focused Git commit before finishing the task.
+- Commit only files related to that change. Keep unrelated or pre-existing user changes out of the commit.
+- Use a descriptive commit message that states the behavior or problem changed.
+- Review the staged diff before committing, and do not commit generated artifacts or secrets.
+- Report the commit hash and a short change summary in the final response.
+- Do not push commits or open a pull request unless the user explicitly asks.
+- If a commit cannot be created safely, explain the blocker instead of silently leaving verified code uncommitted.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
