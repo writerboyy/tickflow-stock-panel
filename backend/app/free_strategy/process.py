@@ -75,16 +75,25 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         engine = FreeStrategyEngine(payload["source"], payload["timeframe"], config)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
+        replayed_rows = 0
+        first_bar: datetime | None = None
+        last_bar: datetime | None = None
+        symbols_seen: set[str] = set()
+        trading_days = 0
         if payload["timeframe"] == "1d":
             bars = _read_rows(repo, payload["symbols"], start, end, payload["asset_type"], payload["timeframe"])
             output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
+            replayed_rows = len(bars)
+            symbols_seen.update(bar.symbol for bar in bars)
+            trading_days = len({bar.timestamp.date() for bar in bars})
+            first_bar = min(bar.timestamp for bar in bars)
+            last_bar = max(bar.timestamp for bar in bars)
             result = engine.run(bars)
         else:
             output.put({"type": "progress", "message": "按交易日读取并回放分钟K", "progress": 0.35})
             cursor = start
             days_seen = 0
             days_with_bars = 0
-            symbols_seen: set[str] = set()
             while cursor <= end:
                 if cursor.weekday() < 5:
                     bars = _read_rows(
@@ -93,7 +102,11 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                     )
                     rows = list(bars)
                     if rows:
-                        symbols_seen.update(bar.symbol for bar in rows)
+                        replayed_rows += len(rows)
+                        for bar in rows:
+                            symbols_seen.add(bar.symbol)
+                            first_bar = bar.timestamp if first_bar is None else min(first_bar, bar.timestamp)
+                            last_bar = bar.timestamp if last_bar is None else max(last_bar, bar.timestamp)
                         engine.run(rows, return_result=False)
                         days_with_bars += 1
                 days_seen += 1
@@ -108,7 +121,10 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
             engine.state = engine.context.state.copy()
             result = engine.result()
+            trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
+        missing_symbols = [symbol for symbol in payload["symbols"] if symbol not in symbols_seen]
+        minute_table = "kline_etf_minute" if payload["asset_type"] == "etf" else "kline_minute"
         result["metadata"] = {
             "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
             "timeframe": payload["timeframe"], "asset_type": payload["asset_type"],
@@ -120,6 +136,17 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             "nav_filter": five_fortunes.get("nav_filter"),
             "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
             "liquidity_scope": five_fortunes.get("liquidity_scope"),
+            "data_coverage": {
+                "rows": replayed_rows,
+                "first_bar": first_bar.isoformat() if first_bar else None,
+                "last_bar": last_bar.isoformat() if last_bar else None,
+                "trading_days": trading_days,
+                "requested_symbols": list(payload["symbols"]),
+                "seen_symbols": sorted(symbols_seen),
+                "missing_symbols": missing_symbols,
+                "configured_provider": payload.get("data_provider", "tickflow"),
+                "storage": "kline_daily" if payload["timeframe"] == "1d" else minute_table,
+            },
         }
         if payload.get("run_dir"):
             Path(payload["run_dir"]).mkdir(parents=True, exist_ok=True)

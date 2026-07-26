@@ -21,6 +21,7 @@ from app.config import settings
 from app.free_strategy.process import start_process
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
 from app.free_strategy.templates import TEMPLATES
+from app.services import preferences
 
 router = APIRouter(prefix="/api/free-strategies", tags=["free-strategy"])
 _jobs: dict[str, tuple[mp.Process, Any]] = {}
@@ -176,7 +177,8 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
             "source": strategy["source"], "strategy_id": strategy.get("id"), "strategy_name": strategy.get("name"),
             "source_revision": strategy.get("revision"), "symbols": req.symbols,
-            "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config}
+            "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
+            "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
 
 
 @router.post("/backtest")
