@@ -25,6 +25,15 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 
+class MinuteSyncCancelled(RuntimeError):
+    """分钟同步任务已被用户取消或任务注册表判定超时。"""
+
+
+def _raise_if_minute_cancelled(should_cancel: Callable[[], bool] | None) -> None:
+    if should_cancel and should_cancel():
+        raise MinuteSyncCancelled("分钟 K 同步已取消")
+
+
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
     """先写临时文件再原子替换, 避免进程中断留下损坏的 parquet。
 
@@ -622,6 +631,7 @@ def sync_minute_batch(
     segment_trading_days: int = 20,
     on_segment: Callable[[pl.DataFrame], None] | None = None,
     asset_type: AssetType = "stock",
+    should_cancel: Callable[[], bool] | None = None,
 ) -> pl.DataFrame:
     """批量拉取多股分钟 K。
 
@@ -639,10 +649,12 @@ def sync_minute_batch(
         不进入全局 out → 内存峰值从「全量」降到「单段」。适用于 sync_and_persist_minute。
         不传时 (如 get_minute_batch 的实时补拉) 保持原契约: 累积进 out 末尾一次性返回。
     """
+    _raise_if_minute_cancelled(should_cancel)
     df, fallback = _try_custom_minute(
         symbols, start_time=start_time, end_time=end_time,
         asset_type=asset_type, freq="1m", on_chunk_done=on_chunk_done,
     )
+    _raise_if_minute_cancelled(should_cancel)
     if not fallback:
         # 自定义源成功: 遵守与 TickFlow 路径一致的 on_segment 契约。
         # 传了 on_segment (如 sync_and_persist_minute 流式落盘) → 调 on_segment, 返回空 df;
@@ -680,13 +692,15 @@ def sync_minute_batch(
     for seg_idx, (cur_start, cur_end) in enumerate(time_segments):
         # 当前的日期段描述 (供进度展示)
         if cur_start and cur_end:
-            seg_label = f"{cur_start.strftime('%m-%d')}~{cur_end.strftime('%m-%d')}"
+            seg_label = f"{cur_start.strftime('%Y-%m-%d')}~{cur_end.strftime('%Y-%m-%d')}"
         else:
             seg_label = "最新"
         seg_total = len(time_segments)
         chunks = chunked(symbols, batch_size)
         for i, chunk in enumerate(chunks):
+            _raise_if_minute_cancelled(should_cancel)
             sleep_between_batches(step, rpm)
+            _raise_if_minute_cancelled(should_cancel)
             step += 1
             try:
                 if cur_start and cur_end:
@@ -705,6 +719,8 @@ def sync_minute_batch(
             except Exception as e:  # noqa: BLE001
                 logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
                 continue
+
+            _raise_if_minute_cancelled(should_cancel)
 
             if isinstance(raw, dict):
                 for sym, sub in raw.items():
@@ -998,12 +1014,14 @@ def sync_and_persist_minute(
     days: int = 5,
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> int:
     """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
     使用 start_time / end_time 区间拉取, 确保所有标的覆盖同一时间段。
     on_chunk_done(current, total) 每个 chunk 完成后回调。
     """
+    _raise_if_minute_cancelled(should_cancel)
     minute_provider = preferences.get_minute_data_provider()
     # resolver 调用统一走 _resolve_minute_provider, 与 _try_custom_minute 共用异常边界。
     # resolver 异常时视为非 custom (minute_is_custom=False), 走 capset 检查 →
@@ -1073,6 +1091,7 @@ def sync_and_persist_minute(
         segment_trading_days=segment_days,
         on_segment=_persist,
         asset_type="stock",
+        should_cancel=should_cancel,
     )
 
     if written_box[0] == 0:

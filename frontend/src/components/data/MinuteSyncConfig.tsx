@@ -58,8 +58,8 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
   const [fetchingMode, setFetchingMode] = useState<'' | '40d' | '1y'>('')
   const handleFetch = (mode: '40d' | '1y') => {
     if (!hasMinuteCap) return
-    // 单次获取 = 按「分段大小」拉一段 (向前扩展); 1年 = 拉365天按分段切多段
-    const fetchDays = mode === '40d' ? localSegment : 365
+    // extend 的 days 语义是交易日;约 250 个交易日对应一个自然年。
+    const fetchDays = mode === '40d' ? localSegment : 250
     setFetchingMode(mode)
     api.syncMinute(fetchDays, true).then((res) => {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
@@ -173,7 +173,7 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
           {fetchingMode === '1y' ? (
             <><Loader2 className="h-3.5 w-3.5 animate-spin" /><span>分段获取中…</span></>
           ) : (
-            <><Calendar className="h-3.5 w-3.5" /><span>获取最近 1 年</span><span className="text-[9px] opacity-70">分段拉取</span></>
+            <><Calendar className="h-3.5 w-3.5" /><span>向前扩展 1 年</span><span className="text-[9px] opacity-70">约 250 个交易日</span></>
           )}
         </button>
         </div>

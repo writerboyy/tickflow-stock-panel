@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,15 +23,14 @@ logger = logging.getLogger(__name__)
 
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
 
-# 运行超过此秒数视为卡死(reload 后孤儿 task / 网络读无限阻塞等)。
+# 连续无进度超过此秒数视为卡死(reload 后孤儿 task / 网络读无限阻塞等)。
 # 由 reap_stale() 在 /run 和 /jobs/{id} 轮询端点检查 — 保证卡死后能自愈,
 # 无需用户再次点击「同步」。
 #
 # 超时阈值按任务类型区分:
 #   - 普通任务(日K管道/扩展/修正/重算): 1200s (20 分钟)
 #   - 长任务(分钟K全市场同步,数据量是日K的 ~240 倍): 1800s (30 分钟)
-# 分钟K即使流式落盘后仍可能跑十几到数十分钟(限速 sleep 是主因),
-# 用 600s 会误杀正常任务并留下写盘僵尸线程。
+# 分钟K即使流式落盘后仍可能跑数小时;只要批次进度持续更新就不应被误杀。
 DEFAULT_JOB_TIMEOUT_S = 1200
 LONG_JOB_TIMEOUT_S = 1800
 # 向后兼容: 旧调用方引用 STALE_JOB_TIMEOUT_S
@@ -44,6 +43,10 @@ def _default_store_dir() -> Path:
 
 
 _STORE_DIR = _default_store_dir()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 class JobStore:
@@ -133,6 +136,7 @@ class JobStore:
                 "stage_pct": 0,
                 "log": [],
                 "started_at": None,
+                "last_progress_at": None,
                 "finished_at": None,
                 "duration_s": None,
                 "result": None,
@@ -148,7 +152,9 @@ class JobStore:
             if not j:
                 return
             j["status"] = "running"
-            j["started_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            now = _utc_now_iso()
+            j["started_at"] = now
+            j["last_progress_at"] = now
 
     def succeed(self, job_id: str, result: Any) -> None:
         with self._lock:
@@ -156,7 +162,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "succeeded"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = _utc_now_iso()
             j["progress"] = 100
             j["result"] = result
             j["duration_s"] = _duration_s(j)
@@ -165,19 +171,30 @@ class JobStore:
             self._delete_oldest()
             self._write_file(j)
 
-    def fail(self, job_id: str, error: str) -> None:
+    def fail(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        expected_last_progress_at: str | None = None,
+    ) -> bool:
         with self._lock:
-            j = self._active_jobs.pop(job_id, None)
+            j = self._active_jobs.get(job_id)
             if not j:
-                return
+                return False
+            current_activity = j.get("last_progress_at") or j.get("started_at")
+            if expected_last_progress_at is not None and current_activity != expected_last_progress_at:
+                return False
+            self._active_jobs.pop(job_id, None)
             j["status"] = "failed"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = _utc_now_iso()
             j["error"] = error
             j["duration_s"] = _duration_s(j)
             if self._active_id == job_id:
                 self._active_id = None
             self._delete_oldest()
             self._write_file(j)
+            return True
 
     # ===== progress =====
 
@@ -187,14 +204,17 @@ class JobStore:
             j = self._active_jobs.get(job_id)
             if not j:
                 return
+            previous_stage = j["stage"]
             j["stage"] = stage
             j["progress"] = max(0, min(100, int(pct)))
             if stage_pct is not None:
                 j["stage_pct"] = max(0, min(100, int(stage_pct)))
-            elif j["stage"] != stage:
+            elif previous_stage != stage:
                 j["stage_pct"] = 0
+            now = _utc_now_iso()
+            j["last_progress_at"] = now
             entry = {
-                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "ts": now,
                 "stage": stage,
                 "msg": msg,
             }
@@ -237,8 +257,14 @@ class JobStore:
     def active_id(self) -> str | None:
         return self._active_id
 
+    def is_active(self, job_id: str) -> bool:
+        """任务记录仍处于 pending/running 时返回 True,供 worker 协作式取消检查。"""
+        with self._lock:
+            j = self._active_jobs.get(job_id)
+            return bool(j and j.get("status") in ("pending", "running"))
+
     def reap_stale(self, timeout_s: int | None = None) -> None:
-        """回收运行超过阈值(卡死)的 running job(标记为 failed)。
+        """回收连续无进度超过阈值的 running job(标记为 failed)。
 
         在 /run 和 /jobs/{id} 轮询端点都会调用 — 保证卡死后任意轮询都能自愈,
         无需用户再次手动触发同步。reload 后的孤儿 task(内存里已无 job 记录)
@@ -255,29 +281,33 @@ class JobStore:
             j = self._active_jobs.get(jid)
             if not j or j.get("status") != "running":
                 return
-            started = j.get("started_at")
-            if not started:
+            last_activity = j.get("last_progress_at") or j.get("started_at")
+            if not last_activity:
                 return
             # 优先用显式传入, 其次 job 自身阈值, 最后默认值
             effective_timeout = timeout_s if timeout_s is not None else j.get("timeout_s", DEFAULT_JOB_TIMEOUT_S)
         # 时间计算放到锁外(避免 datetime 解析持锁)。
-        # started_at 形如 "2026-07-04T12:00:00Z"(start() 用 datetime.utcnow 存)。
+        # 时间形如 "2026-07-04T12:00:00Z"。
         # 两端都用 timezone-aware UTC 比较,避免 naive/aware 混用导致 TypeError。
         try:
-            start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            elapsed = (datetime.now(start_dt.tzinfo) - start_dt).total_seconds()
+            activity_dt = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
+            idle_s = (datetime.now(activity_dt.tzinfo) - activity_dt).total_seconds()
         except Exception:  # noqa: BLE001
             return
-        if elapsed > effective_timeout:
-            logger.warning("reap_stale: 强制取消卡死 job %s (已运行 %.0fs, 阈值 %ss)",
-                           jid, elapsed, effective_timeout)
-            self.fail(jid, f"超时自动取消 (运行 {int(elapsed)}s, 疑似卡死)")
-            # 强制释放重任务锁: 卡死的线程无法被中断, 锁永远不会自然释放。
-            # job 已标记 failed, 即使僵尸线程后续写入 parquet, 下次拉取会覆盖, 安全。
-            try:
-                _heavy_run_lock.release()
-            except RuntimeError:
-                pass
+        if idle_s > effective_timeout:
+            error = f"超时自动取消 (连续 {int(idle_s)}s 无进度, 疑似卡死)"
+            failed = self.fail(
+                jid,
+                error,
+                expected_last_progress_at=last_activity,
+            )
+            if failed:
+                logger.warning(
+                    "reap_stale: 取消卡死 job %s (无进度 %.0fs, 阈值 %ss)",
+                    jid,
+                    idle_s,
+                    effective_timeout,
+                )
 
     def clear(self) -> None:
         """清空所有任务（内存 + 磁盘文件）。"""
@@ -299,6 +329,7 @@ def _summary(j: dict[str, Any]) -> dict[str, Any]:
         "progress": j["progress"],
         "stage_pct": j.get("stage_pct", 0),
         "started_at": j["started_at"],
+        "last_progress_at": j.get("last_progress_at"),
         "finished_at": j["finished_at"],
         "duration_s": j["duration_s"],
         "result": j["result"],
@@ -325,14 +356,12 @@ job_store = JobStore()
 # 重任务互斥锁 — 防「僵尸并发」
 # ================================================================
 # create() 的单飞去重能挡住 pending/running 窗口内的重复点击, 但挡不住
-# reap_stale 把卡死 job 标记 failed、清掉 _active_id 之后 —— 此时 executor
-# 线程仍在跑(线程无法被中断), 下一次 /run 会视作无活跃任务而另起一条,
-# 与僵尸线程并发读改写同一 parquet。
+# reap_stale 把卡死 job 标记 failed 后,executor 线程可能仍在等待当前网络请求。
 #
 # 该锁绑定「实际执行体(协程/线程)」的生命周期而非 job 状态: 每个重任务在真正
 # 开跑前 try_acquire_run_slot(), 结束(含异常)在 finally 里 release_run_slot()。
-# 僵尸任务因卡在 executor await 中始终未 release, 新任务 try_acquire 失败 → 快速
-# 失败而非并发执行。代价: 真卡死时需重启进程才能再次跑重任务(优先保证数据不损坏)。
+# 该锁只允许实际 worker 的 finally 释放。新任务在旧 worker 真正退出前快速失败,
+# 不允许两个线程并发读改写同一 parquet。
 _heavy_run_lock = threading.Lock()
 
 

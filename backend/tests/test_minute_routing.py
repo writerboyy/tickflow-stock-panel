@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import polars as pl
+import pytest
 
 from app.plugins.stocksdk import provider as sp
 from app.plugins.stocksdk.provider import StockSDKProvider
@@ -365,6 +366,52 @@ def test_sync_minute_batch_custom_empty_df_skips_on_segment(monkeypatch):
     on_segment_spy.assert_not_called()
     assert isinstance(df, pl.DataFrame)
     assert df.is_empty()
+
+
+def test_sync_minute_batch_stops_before_fetch_when_cancelled(monkeypatch):
+    """取消信号必须阻止下一批请求,避免已失败任务继续后台取数。"""
+    monkeypatch.setattr(kline_sync, "_try_custom_minute", lambda *a, **kw: (None, True))
+    client = MagicMock()
+    monkeypatch.setattr(kline_sync, "get_client", lambda: client)
+
+    with pytest.raises(kline_sync.MinuteSyncCancelled):
+        kline_sync.sync_minute_batch(
+            ["600519.SH"],
+            start_time=datetime(2025, 1, 1),
+            end_time=datetime(2025, 1, 2),
+            batch_size=1,
+            should_cancel=lambda: True,
+        )
+
+    client.klines.batch.assert_not_called()
+
+
+def test_minute_segment_progress_label_includes_year(monkeypatch):
+    """跨年补历史时日志必须显示年份,避免把不同年份误认成重复区间。"""
+    monkeypatch.setattr(kline_sync, "_try_custom_minute", lambda *a, **kw: (None, True))
+    client = MagicMock()
+    client.klines.batch.return_value = None
+    monkeypatch.setattr(kline_sync, "get_client", lambda: client)
+    labels = []
+
+    kline_sync.sync_minute_batch(
+        ["600519.SH"],
+        start_time=datetime(2025, 1, 1),
+        end_time=datetime(2025, 1, 2),
+        batch_size=1,
+        on_chunk_done=lambda _done, _total, label: labels.append(label),
+    )
+
+    assert labels == ["2025-01-01~2025-01-02"]
+
+
+def test_one_year_minute_request_uses_trading_days():
+    """UI 旧请求 days=365 应归一为约一年的 250 个交易日。"""
+    from app.api import kline as kline_api
+
+    assert kline_api._normalize_minute_sync_request(365, False) == (250, True)
+    assert kline_api._normalize_minute_sync_request(20, True) == (20, True)
+    assert kline_api._normalize_minute_sync_request(5, False) == (5, False)
 
 
 # ---------- 测试 12: sync_and_persist_minute + custom provider 端到端落盘 (Issue 1) ----------

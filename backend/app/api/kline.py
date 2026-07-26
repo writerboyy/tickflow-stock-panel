@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
 
+MINUTE_TRADING_DAYS_PER_YEAR = 250
+
+
+def _normalize_minute_sync_request(days: int, extend: object) -> tuple[int, bool]:
+    """归一化手动分钟同步范围。
+
+    历史前端把“一年”发送为 365,而后端的 extend days 语义是交易日,会再次按
+    7/5 放大。兼容旧请求并按约 250 个交易日处理。
+    """
+    normalized = max(1, int(days))
+    extend_backward = bool(extend) or normalized >= 365
+    if normalized == 365:
+        normalized = MINUTE_TRADING_DAYS_PER_YEAR
+    return normalized, extend_backward
+
 
 def _minute_allowed(capset) -> bool:
     """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
@@ -762,9 +777,11 @@ async def sync_minute(request: Request):
                     pass
             progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
-            days = override_days if override_days else get_minute_sync_days()
-            # extend=1 → 向前扩展; days>=365 也自动向前扩展
-            extend_backward = bool(extend_flag) or days >= 365
+            requested_days = override_days if override_days else get_minute_sync_days()
+            days, extend_backward = _normalize_minute_sync_request(
+                requested_days,
+                extend_flag,
+            )
 
             def _on_chunk(done: int, total: int, seg_label: str) -> None:
                 # 进度映射: 10% (标的池解析完) → 95%, 留 5% 给写入+刷新
@@ -776,9 +793,12 @@ async def sync_minute(request: Request):
                     universe, repo, capset, days=days,
                     extend_backward=extend_backward,
                     on_chunk_done=_on_chunk,
+                    should_cancel=lambda: not job_store.is_active(job_id),
                 )
 
             written = await loop.run_in_executor(_long_task_executor, _run)
+            if not job_store.is_active(job_id):
+                return
 
             # 刷新视图
             from app.jobs.daily_pipeline import _refresh_single_view
@@ -787,6 +807,9 @@ async def sync_minute(request: Request):
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
             job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
             invalidate_storage_cache()
+        except kline_sync.MinuteSyncCancelled:
+            if job_store.is_active(job_id):
+                job_store.fail(job_id, "分钟 K 同步已取消")
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()

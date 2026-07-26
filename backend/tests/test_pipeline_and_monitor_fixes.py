@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
+
 import polars as pl
 import pytest
 
@@ -60,6 +63,45 @@ def test_run_slot_is_exclusive():
     pipeline_jobs.release_run_slot()
     # 重复释放幂等, 不抛
     pipeline_jobs.release_run_slot()
+
+
+def _iso_ago(**delta) -> str:
+    return (datetime.now(timezone.utc) - timedelta(**delta)).isoformat()
+
+
+def test_job_activity_timestamp_has_subsecond_precision():
+    """竞态检查依赖时间戳能区分同一秒内的两次进度更新。"""
+    assert re.search(r"\.\d{6}Z$", pipeline_jobs._utc_now_iso())
+
+
+def test_reap_stale_uses_last_progress_not_total_runtime(tmp_path):
+    """长任务只要仍在推进,就不应因总运行时间超过阈值而失败。"""
+    store = JobStore(store_dir=tmp_path / "jobs")
+    jid, _ = store.create(timeout_s=60)
+    store.start(jid)
+    store._active_jobs[jid]["started_at"] = _iso_ago(hours=2)
+    store._active_jobs[jid]["last_progress_at"] = _iso_ago(seconds=5)
+
+    store.reap_stale()
+
+    assert store.get(jid)["status"] == "running"
+
+
+def test_reap_stale_does_not_release_live_worker_slot(tmp_path):
+    """标记超时不等于线程已退出,重任务锁必须由实际 worker 的 finally 释放。"""
+    store = JobStore(store_dir=tmp_path / "jobs")
+    jid, _ = store.create(timeout_s=60)
+    store.start(jid)
+    store._active_jobs[jid]["last_progress_at"] = _iso_ago(minutes=2)
+
+    assert pipeline_jobs.try_acquire_run_slot() is True
+    try:
+        store.reap_stale()
+
+        assert store.get(jid)["status"] == "failed"
+        assert pipeline_jobs.try_acquire_run_slot() is False
+    finally:
+        pipeline_jobs.release_run_slot()
 
 
 # ── 监控 sector fail-closed ──────────────────────────────────────────────
