@@ -483,8 +483,10 @@ def run_now(
     # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
     minute_on = preferences.get_minute_sync_enabled()
+    etf_minute_on = preferences.get_etf_minute_sync_enabled()
     minute_days = preferences.get_minute_sync_days()
     written_minute = 0
+    written_etf_minute = 0
     if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
         minute_start = today - _td(days=minute_days)
         emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
@@ -510,6 +512,37 @@ def run_now(
         else:
             logger.info("sync_minute skipped: user disabled")
 
+    if etf_minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+        etf_minute_symbols = _resolve_etf_minute_symbols(repo)
+        if etf_minute_symbols:
+            minute_start = today - _td(days=minute_days)
+            emit("sync_etf_minute", 93, f"获取ETF分钟K [{minute_start} ~ {today}]…")
+            logger.info("sync_etf_minute: [%s ~ %s] start", minute_start, today)
+
+            def _etf_minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+                emit("sync_etf_minute", 93 + int(cur / max(tot, 1)),
+                     f"ETF分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+                     stage_pct=int(100 * cur / max(tot, 1)), skip_log=True)
+
+            written_etf_minute = kline_sync.sync_and_persist_minute(
+                etf_minute_symbols, repo, capset, days=minute_days,
+                on_chunk_done=_etf_minute_chunk_progress, asset_type="etf",
+            )
+            etf_minute_dir = repo.store.data_dir / "kline_etf_minute"
+            etf_minute_cover_days = len(list(etf_minute_dir.glob("date=*"))) if etf_minute_dir.exists() else 0
+            emit("sync_etf_minute", 94, f"ETF分钟K完成,覆盖 {etf_minute_cover_days} 天")
+            logger.info("sync_etf_minute: [%s ~ %s] done, %d days", minute_start, today, etf_minute_cover_days)
+            _invalidate("etf_minute")
+        else:
+            skipped.append("sync_etf_minute")
+            logger.warning("sync_etf_minute skipped: ETF instruments unavailable")
+    else:
+        skipped.append("sync_etf_minute")
+        if etf_minute_on:
+            logger.info("sync_etf_minute skipped: no KLINE_MINUTE_BATCH capability")
+        else:
+            logger.info("sync_etf_minute skipped: user disabled")
+
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
@@ -528,6 +561,7 @@ def run_now(
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
         "minute_rows": written_minute,
+        "etf_minute_rows": written_etf_minute,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
@@ -579,6 +613,14 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
 def _resolve_minute_symbols(capset: CapabilitySet) -> list[str]:
     """分钟 K 同步标的 — 与日K共用同一标的池。"""
     return _resolve_universe(capset)
+
+
+def _resolve_etf_minute_symbols(repo: KlineRepository) -> list[str]:
+    """ETF 分钟K同步标的 — 仅使用已同步的 ETF 维表。"""
+    instruments = repo.get_etf_instruments()
+    if instruments.is_empty() or "symbol" not in instruments.columns:
+        return []
+    return sorted({str(symbol) for symbol in instruments["symbol"].to_list() if symbol})
 
 
 def _refresh_instruments_view(repo: KlineRepository) -> None:

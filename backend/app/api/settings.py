@@ -340,6 +340,7 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
+    asset_type: str = "stock"
 
 
 class DataProvidersIn(BaseModel):
@@ -406,6 +407,7 @@ def get_preferences() -> dict:
         "realtime_allowed": _realtime_allowed(),
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
+        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
@@ -680,15 +682,19 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     """
     from app.services import preferences
     days = max(1, min(30, req.minute_sync_days))
+    asset_type = req.asset_type.lower()
+    if asset_type not in ("stock", "etf"):
+        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
     updates: dict = {
-        "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
     }
+    updates["etf_minute_sync_enabled" if asset_type == "etf" else "minute_sync_enabled"] = req.minute_sync_enabled
     if req.minute_sync_segment_days is not None:
         updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
     preferences.save(updates)
     return {
-        "minute_sync_enabled": req.minute_sync_enabled,
+        "minute_sync_enabled": preferences.get_minute_sync_enabled(),
+        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
         "minute_sync_days": days,
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
     }

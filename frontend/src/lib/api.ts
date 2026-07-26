@@ -872,6 +872,7 @@ export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
   minute_sync_enabled: boolean
+  etf_minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
   daily_data_provider?: string
@@ -1093,13 +1094,14 @@ export const api = {
       '/api/settings/preferences/data-providers',
       { method: 'PUT', body: JSON.stringify(cfg) },
     ),
-  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number, assetType: 'stock' | 'etf' = 'stock') =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
       body: JSON.stringify({
         minute_sync_enabled: enabled,
         minute_sync_days: days,
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
+        asset_type: assetType,
       }),
     }),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
@@ -1397,24 +1399,25 @@ export const api = {
       `/api/kline/sync?symbol=${encodeURIComponent(symbol)}&days=${days}`,
       { method: 'POST' },
     ),
-  syncMinute: (days?: number, extend?: boolean, latestYear?: boolean) =>
+  syncMinute: (days?: number, extend?: boolean, latestYear?: boolean, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; job_id: string }>('/api/kline/sync_minute', {
       method: 'POST',
       body: JSON.stringify({
         ...(days ? { days } : {}),
         ...(extend ? { extend: true } : {}),
         ...(latestYear ? { latest_year: true } : {}),
+        asset_type: assetType,
       }),
     }),
-  syncMinuteSingle: (symbol: string) =>
+  syncMinuteSingle: (symbol: string, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
-      body: JSON.stringify({ symbol }),
+      body: JSON.stringify({ symbol, asset_type: assetType }),
     }),
-  clearMinute: () =>
+  clearMinute: (assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
       method: 'POST',
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, asset_type: assetType }),
     }),
   extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
@@ -2297,6 +2300,7 @@ export interface DataStatus {
   etf_daily: TableStats | null
   etf_enriched: TableStats | null
   etf_instruments: InstrumentsStats | null
+  etf_minute: TableStats | null
   minute: TableStats | null
   adj_factor: TableStats | null
   instruments: InstrumentsStats | null
@@ -2320,6 +2324,8 @@ export interface DataStatus {
     etf_instruments_size_mb?: number
     etf_adj_factor_files?: number
     etf_adj_factor_size_mb?: number
+    etf_minute_files?: number
+    etf_minute_size_mb?: number
     minute_files: number
     minute_size_mb: number
     adj_factor_files: number

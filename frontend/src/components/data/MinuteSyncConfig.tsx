@@ -4,20 +4,24 @@ import { Loader2, Trash2, Download, Calendar } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined; onJobStart?: (jobId: string) => void }) {
+export function MinuteSyncConfig({ caps, onJobStart, assetType = 'stock' }: { caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined; onJobStart?: (jobId: string) => void; assetType?: 'stock' | 'etf' }) {
   const qc = useQueryClient()
+  const isEtf = assetType === 'etf'
+  const assetLabel = isEtf ? 'ETF' : 'A股'
   const prefs = useQuery({
     queryKey: QK.preferences,
     queryFn: api.preferences,
   })
   const update = useMutation({
     mutationFn: ({ enabled, days, segmentDays }: { enabled: boolean; days: number; segmentDays?: number }) =>
-      api.updateMinuteSync(enabled, days, segmentDays),
+      api.updateMinuteSync(enabled, days, segmentDays, assetType),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
   })
 
   const hasMinuteCap = !!caps?.capabilities?.['kline.minute.batch']
-  const enabled = prefs.data?.minute_sync_enabled ?? false
+  const enabled = isEtf
+    ? (prefs.data?.etf_minute_sync_enabled ?? false)
+    : (prefs.data?.minute_sync_enabled ?? false)
   const days = prefs.data?.minute_sync_days ?? 5
   const segmentDays = prefs.data?.minute_sync_segment_days ?? 20
   const [localDays, setLocalDays] = useState(days)
@@ -47,7 +51,7 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
   // 清空分钟K数据 (二次确认)
   const [confirmClear, setConfirmClear] = useState(false)
   const clearMutation = useMutation({
-    mutationFn: () => api.clearMinute(),
+    mutationFn: () => api.clearMinute(assetType),
     onSuccess: () => {
       setConfirmClear(false)
       qc.invalidateQueries({ queryKey: QK.dataStatus })
@@ -60,8 +64,8 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
     if (!hasMinuteCap) return
     setFetchingMode(mode)
     const request = mode === '40d'
-      ? api.syncMinute(localSegment, true)
-      : api.syncMinute(undefined, false, true)
+      ? api.syncMinute(localSegment, true, false, assetType)
+      : api.syncMinute(undefined, false, true, assetType)
     request.then((res) => {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.dataStatus })
@@ -90,7 +94,7 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
             />
           </button>
           <span className="text-xs text-foreground font-medium">
-            自动同步{enabled ? '已开启' : '已关闭'}
+            盘后自动同步{enabled ? '已开启' : '已关闭'}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -116,7 +120,7 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
         </div>
       </div>
 
-      {/* 分段大小: 控制单次 SDK 请求覆盖的交易日数。每段拉完即落盘,避免全量攒内存 OOM。
+      {!isEtf && <>{/* 分段大小: 控制单次 SDK 请求覆盖的交易日数。每段拉完即落盘,避免全量攒内存 OOM。
           「往前获取」与「获取 1 年」共用此设置 (两者都经过 sync_and_persist_minute)。 */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-1.5">
@@ -145,7 +149,14 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
       <div className="text-[10px] text-muted leading-relaxed -mt-1">
         每段拉完即写盘,避免内存堆积。越小越省内存但越慢,默认 20 平衡。
       </div>
+      </>}
       </div>
+
+      {isEtf && (
+        <div className="text-[10px] text-muted leading-relaxed">
+          ETF 盘后自动同步使用上方开关；分段大小沿用股票分钟K设置。
+        </div>
+      )}
 
       {/* 区块 B: 手动获取 (一次性操作, 独立于上方自动同步开关) */}
       <div className="pt-3 border-t border-border space-y-2">
@@ -179,8 +190,8 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
         </button>
         </div>
         <div className="text-[10px] text-muted leading-relaxed">
-          A股标的 · 前复权价格 · 最近一年会补齐整个固定窗口 ·{' '}
-          均按上方「分段大小」分段拉取、每段即落盘
+          {assetLabel}标的 · 前复权价格 · 最近一年会补齐整个固定窗口 ·{' '}
+          {isEtf ? '均按股票分钟K的分段大小' : '均按上方「分段大小」'}分段拉取、每段即落盘
         </div>
       </div>
 
@@ -188,11 +199,11 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
       <button
         onClick={() => setConfirmClear(true)}
         disabled={clearMutation.isPending}
-        title="清空分钟K数据"
+        title={`清空${assetLabel}分钟K数据`}
         className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn border border-danger/30 text-danger/80 text-xs font-medium hover:bg-danger/10 disabled:opacity-40 transition-colors duration-150"
       >
         <Trash2 className="h-3 w-3" />
-        清空分钟K数据
+        清空{assetLabel}分钟K数据
       </button>
 
       {/* 清空确认弹窗 */}
@@ -200,9 +211,9 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !clearMutation.isPending && setConfirmClear(false)} />
           <div className="relative rounded-card border border-border bg-surface shadow-2xl mx-4 px-6 py-5 max-w-sm w-full space-y-4">
-            <div className="text-sm text-foreground text-center font-medium">确认清空分钟K数据？</div>
+            <div className="text-sm text-foreground text-center font-medium">确认清空{assetLabel}分钟K数据？</div>
             <div className="text-[11px] text-muted text-center leading-relaxed">
-              此操作仅删除分钟K (kline_minute) 数据, <span className="text-foreground/80">不影响</span>日K、复权因子、指标等其他数据。清空后可重新获取。
+              此操作仅删除分钟K ({isEtf ? 'kline_etf_minute' : 'kline_minute'}) 数据, <span className="text-foreground/80">不影响</span>日K、复权因子、指标等其他数据。清空后可重新获取。
             </div>
             <div className="flex items-center justify-center gap-3">
               <button onClick={() => setConfirmClear(false)} disabled={clearMutation.isPending}

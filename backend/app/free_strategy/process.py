@@ -5,7 +5,6 @@ import json
 import logging
 import multiprocessing as mp
 import queue
-import traceback
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -29,7 +28,11 @@ def _read_rows(repo: Any, symbols: list[str], start: date, end: date, asset_type
     frame = repo.get_minute_range(symbols, start, end, asset_type)
     rows = [Bar(symbol=str(row["symbol"]), timestamp=row["datetime"], open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=float(row["close"]), volume=float(row.get("volume") or 0), amount=float(row.get("amount") or 0)) for row in frame.iter_rows(named=True)]
     if not rows:
-        raise ValueError("没有可用的分钟K历史数据，请确认已开通分钟K能力并完成同步")
+        asset_label = "ETF" if asset_type == "etf" else "股票"
+        raise ValueError(
+            f"没有可用的{asset_label}分钟K历史数据。请先同步{asset_label}分钟K，"
+            "或将周期切换为 1d 后重新运行。"
+        )
     return group_bars(rows, timeframe)
 
 
@@ -50,7 +53,8 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             (Path(payload["run_dir"]) / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         output.put({"type": "result", "result": result})
     except BaseException as exc:  # noqa: BLE001 - worker must report all script errors
-        output.put({"type": "error", "error": f"{exc}\n{traceback.format_exc(limit=8)}"})
+        logger.exception("free strategy backtest failed")
+        output.put({"type": "error", "error": str(exc)})
 
 
 def start_process(payload: dict[str, Any]) -> tuple[mp.Process, Any]:

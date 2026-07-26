@@ -90,6 +90,11 @@ def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
 
 
+def get_etf_minute_sync_enabled() -> bool:
+    """ETF 分钟K是否随盘后管道自动同步。默认关闭。"""
+    return load().get("etf_minute_sync_enabled", False)
+
+
 def get_minute_intraday_refresh() -> bool:
     """自选列表分时图是否跟随实时行情刷新。
 

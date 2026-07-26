@@ -236,6 +236,7 @@ export function Data() {
   const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
   const indexAuto = prefs.data?.pipeline_pull_index ?? true
   const etfAuto = prefs.data?.pipeline_pull_etf ?? false
+  const etfMinuteAuto = prefs.data?.etf_minute_sync_enabled ?? false
   const pipelineSteps = [
     '日K',
     ...(hasAdjCap ? ['复权'] : []),
@@ -243,6 +244,7 @@ export function Data() {
     ...(indexAuto ? ['指数'] : []),
     ...(etfAuto ? ['ETF'] : []),
     ...((hasMinuteCap && minuteAuto) ? ['分钟K'] : []),
+    ...((hasMinuteCap && etfMinuteAuto) ? ['ETF分钟K'] : []),
   ]
 
   // 数据画像卡片显隐(由页面设置弹窗控制,存 localStorage)
@@ -294,11 +296,12 @@ export function Data() {
   // ETF 统计(后端已按 asset_type='etf' 从 index 存储中拆分)
   const etfOverviewStats = s ? {
     rows: 0,
-    earliest_date: s.etf_daily?.earliest_date ?? s.etf_enriched?.earliest_date ?? null,
-    latest_date: s.etf_daily?.latest_date ?? s.etf_enriched?.latest_date ?? null,
-    symbols_covered: s.etf_daily?.symbols_covered ?? s.etf_instruments?.rows ?? 0,
-    trading_days: s.etf_daily?.trading_days ?? s.etf_enriched?.trading_days ?? 0,
+    earliest_date: s.etf_daily?.earliest_date ?? s.etf_enriched?.earliest_date ?? s.etf_minute?.earliest_date ?? null,
+    latest_date: s.etf_daily?.latest_date ?? s.etf_enriched?.latest_date ?? s.etf_minute?.latest_date ?? null,
+    symbols_covered: s.etf_daily?.symbols_covered ?? s.etf_instruments?.rows ?? s.etf_minute?.symbols_covered ?? 0,
+    trading_days: s.etf_daily?.trading_days ?? s.etf_enriched?.trading_days ?? s.etf_minute?.trading_days ?? 0,
   } : null
+  const hasEtfData = !!(s?.etf_instruments?.rows || s?.etf_daily?.rows || s?.etf_minute?.trading_days)
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
@@ -323,6 +326,7 @@ export function Data() {
     sync_index: 'index_daily',
     sync_minute: 'minute',
     extend_minute: 'minute',
+    sync_etf_minute: 'etf',
   }
   const activeCard = isRunning && job.data ? STAGE_CARD[job.data.stage] ?? null : null
 
@@ -481,14 +485,17 @@ export function Data() {
             capLimits={caps.data?.capabilities}
             tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('etf')}
-            auto={etfAuto}
-            subLabel="维表 · 日K · 指标"
+            auto={etfAuto || etfMinuteAuto}
+            subLabel="维表 · 日K · 指标 · 分钟K"
             fieldTabs={[
               { label: '维表', table: 'etf_instruments' },
               { label: '日K', table: 'etf_daily' },
               { label: '指标', table: 'etf_enriched' },
+              { label: '分钟K', table: 'etf_minute' },
             ] as FieldTab[]}
             onShowFields={(t) => setSchemaTable(t ?? 'etf_daily')}
+            onSettings={hasEtfData ? () => setOpenSettings(v => v === 'etf-minute' ? null : 'etf-minute') : undefined}
+            settingsOpen={openSettings === 'etf-minute'}
           />
         )
       case 'minute':
@@ -1107,6 +1114,14 @@ export function Data() {
         {openSettings === 'minute' && (
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
             <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {openSettings === 'etf-minute' && (
+          <SettingsModal title="ETF 分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
+            <MinuteSyncConfig caps={caps.data} assetType="etf" onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
           </SettingsModal>
         )}
       </AnimatePresence>

@@ -26,7 +26,7 @@ _TABLE_TTL_LARGE = 120.0  # 大表(分钟K等)单独 TTL，避免多分区聚合
 _STORAGE_TTL = 60.0  # storage 文件扫描独立 TTL,stage 写完不触发重算
 
 # 聚合慢的大表（分区数多、行数多），使用更长的 TTL
-_LARGE_TABLES = {"minute"}
+_LARGE_TABLES = {"minute", "etf_minute"}
 
 _storage_cache: dict[str, Any] | None = None
 _storage_cache_ts: float = 0.0
@@ -41,6 +41,7 @@ _table_cache: dict[str, dict | None] = {
     "etf_daily": None,
     "etf_enriched": None,
     "etf_instruments": None,
+    "etf_minute": None,
     "minute": None,
     "adj_factor": None,
     "instruments": None,
@@ -376,13 +377,13 @@ def _safe_aggregate_adj_factor(repo) -> dict | None:
         return None
 
 
-def _safe_aggregate_minute(repo) -> dict | None:
-    """kline_minute 统计 — 从分区目录名获取交易日数，跳过全表扫描。
+def _safe_aggregate_minute(repo, directory: str = "kline_minute") -> dict | None:
+    """分钟K统计 — 从分区目录名获取交易日数，跳过全表扫描。
 
     分钟 K 按 date=YYYY-MM-DD 分区存储，直接数目录即可，
     无需 count(*) / count(DISTINCT ...) 等昂贵查询。
     """
-    minute_dir = repo.store.data_dir / "kline_minute"
+    minute_dir = repo.store.data_dir / directory
     if not minute_dir.exists():
         return None
 
@@ -491,6 +492,7 @@ def _compute_storage(data_dir: Path) -> dict:
         "etf_enriched": data_dir / "kline_etf_enriched",
         "etf_instruments": data_dir / "instruments_etf",
         "etf_adj_factor": data_dir / "adj_factor_etf",
+        "etf_minute": data_dir / "kline_etf_minute",
         "minute": data_dir / "kline_minute",
         "adj_factor": data_dir / "adj_factor",
         "instruments": data_dir / "instruments",
@@ -599,6 +601,7 @@ def status(request: Request) -> dict:
     "etf_daily":         _get_table_stats("etf_daily",         lambda: _safe_aggregate_etf_daily(repo)),
     "etf_enriched":      _get_table_stats("etf_enriched",      lambda: _safe_aggregate_etf_enriched(repo)),
     "etf_instruments":   _get_table_stats("etf_instruments",   lambda: _safe_aggregate_etf_instruments(repo)),
+    "etf_minute":        _get_table_stats("etf_minute",        lambda: _safe_aggregate_minute(repo, "kline_etf_minute")),
     "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo)),
         "adj_factor":  _get_table_stats("adj_factor",  lambda: _safe_aggregate_adj_factor(repo)),
         "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo)),

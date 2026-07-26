@@ -417,8 +417,8 @@ def test_one_year_minute_request_uses_trading_days():
 def test_latest_year_minute_sync_uses_latest_trade_date(monkeypatch, tmp_path):
     """最近一年必须以最新交易日回溯 365 天,不从本地最早分钟数据继续向前。"""
     monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "tickflow")
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
     monkeypatch.setattr(
         kline_sync,
         "resolve_limit",
@@ -456,9 +456,9 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
     # mock sync_and_persist_minute 内部依赖 (通过 monkeypatch kline_sync 模块属性)
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
-    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda *args: None)
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
 
@@ -486,6 +486,42 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     assert written == expected_df.height
     assert written > 0
     get_client_spy.assert_not_called()
+
+
+def test_sync_and_persist_etf_minute_uses_separate_storage(monkeypatch, tmp_path):
+    """ETF 分钟K必须写入 kline_etf_minute，且向数据源透传 asset_type。"""
+    expected_df = _mock_minute_df("510300.SH")
+    mock_provider = MagicMock()
+    mock_provider.get_minute.return_value = expected_df
+    _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
+
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *args, **kwargs: MagicMock(batch=100, rpm=30))
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
+
+    written_paths = []
+
+    def write_partition(df, path):
+        written_paths.append(path)
+        return df.height
+
+    monkeypatch.setattr(kline_sync, "_write_minute_partition", write_partition)
+
+    repo = MagicMock()
+    repo.store.data_dir = tmp_path
+    capset = MagicMock()
+
+    written = kline_sync.sync_and_persist_minute(
+        ["510300.SH"], repo, capset, asset_type="etf",
+    )
+
+    assert written == expected_df.height
+    assert written_paths == [tmp_path / "kline_etf_minute"]
+    _, kwargs = mock_provider.get_minute.call_args
+    assert kwargs["asset_type"] == "etf"
+    assert "kline_etf_minute" in repo.db.execute.call_args.args[0]
 
 
 # ---------- 测试 13: get_provider 异常时 fall through TickFlow (Issue 2) ----------
