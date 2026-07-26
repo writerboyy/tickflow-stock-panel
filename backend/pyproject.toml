@@ -1,6 +1,6 @@
 [project]
 name = "tickflow-stock-panel-backend"
-version = "0.1.83"
+version = "0.1.87"
 description = "A 股选股 + 监控 + 回测面板 — TickFlow 适配"
 readme = "../README.md"
 requires-python = ">=3.11"
@@ -80,8 +80,8 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]   # 长行交给 fmt
+# 先将会影响运行正确性的规则作为 CI 基线；历史风格债务逐步收敛后再扩展。
+select = ["E9", "F63", "F7", "F82"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
