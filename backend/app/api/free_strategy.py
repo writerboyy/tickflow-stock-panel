@@ -201,8 +201,9 @@ def cancel_backtest(job_id: str):
 
 
 def _paper_loop(account_id: str, root: str) -> None:
+    from dataclasses import asdict
     import time
-    from datetime import date
+    from datetime import date, datetime, time as clock_time
     from app.free_strategy.process import _read_rows
     from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
     from app.tickflow.repository import DataStore, KlineRepository
@@ -221,6 +222,9 @@ def _paper_loop(account_id: str, root: str) -> None:
         config.pop("name", None)
         engine_config = FreeStrategyConfig(**config)
         repo = KlineRepository(DataStore(Path(root).parent))
+        engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
+        engine.account.restore(state.get("account", {}))
+        engine.restore_runtime(state.get("runtime"))
     except Exception:
         # Keep the supervisor alive and make the failure inspectable from the API.
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"id": account_id}
@@ -238,19 +242,35 @@ def _paper_loop(account_id: str, root: str) -> None:
         path.write_text(json.dumps({"timestamp": now_iso(), "account_id": account_id}), encoding="utf-8")
         try:
             today = date.today()
-            bars = _read_rows(repo, symbols, today, today, asset_type, timeframe)
+            try:
+                bars = _read_rows(repo, symbols, today, today, asset_type, timeframe)
+            except ValueError as exc:
+                # 盘前和盘中尚未有完整 bar 时保持账户运行，等下一轮数据同步即可。
+                if "没有可用" not in str(exc):
+                    raise
+                bars = []
             fresh = [bar for bar in bars if bar.timestamp.isoformat() > (last_bar or "")]
+            fill_count = len(engine.account.fills)
+            log_count = len(engine.logs)
             if fresh:
-                engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
-                engine.account.restore(state.get("account", {}))
-                result = engine.run(fresh)
-                state["account"] = engine.account.snapshot()
-                state["state"] = result.get("state", {})
+                engine.run(fresh, finalize_session=False)
                 last_bar = fresh[-1].timestamp.isoformat()
+            # 分钟策略在最后一根收盘 bar 写入后执行；日线策略则在盘后同步到当天
+            # 日K后执行。状态落盘后同一交易日不会再次触发。
+            did_finish = False
+            if datetime.now().time() >= clock_time(15, 1):
+                did_finish = engine.finish_session()
+            if fresh or did_finish:
+                state["account"] = engine.account.snapshot()
+                state["state"] = engine.state
+                state["runtime"] = engine.runtime_snapshot()
                 state["last_bar"] = last_bar
-                for fill in result.get("fills", []):
+                for fill in engine.account.fills[fill_count:]:
                     with (account_root / "ledger.jsonl").open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps({"timestamp": now_iso(), "type": "fill", **fill}, ensure_ascii=False) + "\n")
+                        handle.write(json.dumps({"timestamp": now_iso(), "type": "fill", **asdict(fill)}, ensure_ascii=False) + "\n")
+                for log in engine.logs[log_count:]:
+                    with (account_root / "ledger.jsonl").open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps({"type": "log", **log}, ensure_ascii=False) + "\n")
                 state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             state["status"] = "paused"

@@ -160,14 +160,28 @@ class FreeStrategyEngine:
         self._bought_dates: dict[str, date] = {}
         self._counter = 0
         self._callbacks: dict[str, Callable[..., Any]] = {}
+        self._active_session_date: date | None = None
+        self._session_finished = False
+        self._last_bars = BarsView()
+        self._last_timestamp: datetime | None = None
+        self._current_prices: dict[str, float] = {}
+        self._current_close_prices: dict[str, float] = {}
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
         exec(compile(source, "<free_strategy>", "exec"), namespace, namespace)
-        self._callbacks = {name: namespace[name] for name in
-                           ("initialize", "before_trading_start", "on_bar", "after_trading_end")
-                           if callable(namespace.get(name))}
+        callback_names = {
+            "initialize": ("initialize",),
+            "before_trading_start": ("before_trading_start", "on_session_start"),
+            "on_bar": ("on_bar",),
+            "after_trading_end": ("after_trading_end", "on_session_end", "after_market_close"),
+        }
+        self._callbacks = {
+            canonical: next((namespace[name] for name in names if callable(namespace.get(name))), None)
+            for canonical, names in callback_names.items()
+        }
+        self._callbacks = {name: callback for name, callback in self._callbacks.items() if callback is not None}
         if "on_bar" not in self._callbacks:
             raise ValueError("策略必须定义 on_bar(context, bars)")
         if "initialize" in self._callbacks:
@@ -263,32 +277,63 @@ class FreeStrategyEngine:
         if elapsed > self.config.callback_timeout_seconds:
             raise TimeoutError(f"{name} 回调超过 {self.config.callback_timeout_seconds:g} 秒")
 
-    def run(self, bars: Iterable[Bar]) -> dict[str, Any]:
+    def runtime_snapshot(self) -> dict[str, Any]:
+        """保存模拟盘恢复所需的会话边界，避免盘后任务重复执行。"""
+        return {
+            "session_date": self._active_session_date.isoformat() if self._active_session_date else None,
+            "session_finished": self._session_finished,
+            "last_timestamp": self._last_timestamp.isoformat() if self._last_timestamp else None,
+        }
+
+    def restore_runtime(self, raw: dict[str, Any] | None) -> None:
+        raw = raw or {}
+        session_date = raw.get("session_date")
+        last_timestamp = raw.get("last_timestamp")
+        self._active_session_date = date.fromisoformat(session_date) if session_date else None
+        self._session_finished = bool(raw.get("session_finished", False))
+        self._last_timestamp = datetime.fromisoformat(last_timestamp) if last_timestamp else None
+
+    def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:
+        self._active_session_date = timestamp.date()
+        self._session_finished = False
+        self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
+        self.context.now = timestamp
+        self.context._sync({symbol: bar.close for symbol, bar in bars_now.items()})
+        self._run_callback("before_trading_start", bars_now)
+        if self.config.settlement == "t1":
+            for symbol, bought_date in list(self._bought_dates.items()):
+                if bought_date < timestamp.date():
+                    self.account.available[symbol] = self.account.positions.get(symbol, 0.0)
+                    self._bought_dates.pop(symbol, None)
+
+    def finish_session(self) -> bool:
+        """执行当日盘后任务；同一会话重复调用不会重复执行。"""
+        if self._active_session_date is None or self._session_finished:
+            return False
+        timestamp = self._last_timestamp or datetime.now()
+        self.context.now = timestamp
+        self._run_callback("after_trading_end", self._last_bars)
+        for order in sorted(self._immediate, key=self._sell_first):
+            self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
+        self._immediate.clear()
+        self.state = copy.deepcopy(self.context.state)
+        self._session_finished = True
+        return True
+
+    def run(self, bars: Iterable[Bar], *, finalize_session: bool = True) -> dict[str, Any]:
         grouped = sorted(list(bars), key=lambda b: (b.timestamp, b.symbol))
         timestamps = sorted({bar.timestamp for bar in grouped})
         by_time = {timestamp: BarsView({bar.symbol: bar for bar in grouped if bar.timestamp == timestamp}) for timestamp in timestamps}
-        dates_seen: set[date] = set()
         self._current_bar: Bar | None = None
-        self._current_prices: dict[str, float] = {}
-        self._current_close_prices: dict[str, float] = {}
         self._next_timestamp = timestamps[0] if timestamps else datetime.now()
         for index, timestamp in enumerate(timestamps):
             self._next_timestamp = timestamp
             bars_now = by_time[timestamp]
-            is_new_day = timestamp.date() not in dates_seen
-            if is_new_day:
-                dates_seen.add(timestamp.date())
-                self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
-                self.context.now = timestamp
-                self.context._sync({s: b.close for s, b in bars_now.items()})
-                self._run_callback("before_trading_start", bars_now)
+            if self._active_session_date != timestamp.date():
+                self.finish_session()
+                self._start_session(timestamp, bars_now)
             # next-open orders created on the previous callback are filled before this bar.
             self._current_prices = {s: b.open for s, b in bars_now.items()}
-            if is_new_day and self.config.settlement == "t1":
-                for symbol, bought_date in list(self._bought_dates.items()):
-                    if bought_date < timestamp.date():
-                        self.account.available[symbol] = self.account.positions.get(symbol, 0.0)
-                        self._bought_dates.pop(symbol, None)
             due = [p for p in self.pending if p[1] <= timestamp]
             self.pending = [p for p in self.pending if p[1] > timestamp]
             for order, _ in sorted(due, key=self._sell_first):
@@ -297,6 +342,8 @@ class FreeStrategyEngine:
             self.context._sync({s: b.close for s, b in bars_now.items()})
             self._current_bar = next(iter(bars_now.values()), None)
             self._current_close_prices = {s: b.close for s, b in bars_now.items()}
+            self._last_bars = bars_now
+            self._last_timestamp = timestamp
             for symbol, bar in bars_now.items():
                 self.history.setdefault(symbol, []).append(bar)
             for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
@@ -310,13 +357,8 @@ class FreeStrategyEngine:
             self.state = copy.deepcopy(self.context.state)
             prices = {s: b.close for s, b in bars_now.items()}
             self.account.equity_curve.append({"timestamp": timestamp.isoformat(), "equity": self.account.equity(prices), "cash": self.account.cash, "positions": dict(self.account.positions)})
-            if index + 1 == len(timestamps) or timestamps[index + 1].date() != timestamp.date():
-                self.context.now = timestamp
-                self._run_callback("after_trading_end", bars_now)
-                for order in sorted(self._immediate, key=self._sell_first):
-                    self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
-                self._immediate.clear()
-                self.state = copy.deepcopy(self.context.state)
+            if finalize_session and (index + 1 == len(timestamps) or timestamps[index + 1].date() != timestamp.date()):
+                self.finish_session()
         return self.result()
 
     def result(self) -> dict[str, Any]:

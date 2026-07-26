@@ -70,3 +70,29 @@ def after_trading_end(context):
     ]
     result = FreeStrategyEngine(source, timeframe="1m").run(bars)
     assert result["state"]["events"] == ["before", "bar", "scheduled", "bar", "after"]
+
+
+def test_paper_session_end_runs_once_and_supports_session_aliases():
+    source = """
+def initialize(context):
+    context.state['events'] = []
+
+def on_session_start(context):
+    context.state['events'].append('start')
+
+def on_bar(context, bars):
+    context.state['events'].append('bar')
+
+def after_market_close(context):
+    context.state['events'].append('after')
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    engine.run([Bar("X", datetime(2024, 1, 2, 14, 59), 1, 1, 1, 1)], finalize_session=False)
+    assert engine.state["events"] == ["start", "bar"]
+    assert engine.finish_session() is True
+    assert engine.finish_session() is False
+    assert engine.state["events"] == ["start", "bar", "after"]
+
+    engine.run([Bar("X", datetime(2024, 1, 3, 9, 30), 1, 1, 1, 1)], finalize_session=False)
+    assert engine.finish_session() is True
+    assert engine.state["events"] == ["start", "bar", "after", "start", "bar", "after"]
