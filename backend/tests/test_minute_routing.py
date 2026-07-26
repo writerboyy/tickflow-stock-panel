@@ -414,6 +414,36 @@ def test_one_year_minute_request_uses_trading_days():
     assert kline_api._normalize_minute_sync_request(5, False) == (5, False)
 
 
+def test_latest_year_minute_sync_uses_latest_trade_date(monkeypatch, tmp_path):
+    """最近一年必须以最新交易日回溯 365 天,不从本地最早分钟数据继续向前。"""
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "tickflow")
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(
+        kline_sync,
+        "resolve_limit",
+        lambda *args, **kwargs: MagicMock(batch=100, rpm=30),
+    )
+    monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
+    sync_spy = MagicMock(return_value=pl.DataFrame())
+    monkeypatch.setattr(kline_sync, "sync_minute_batch", sync_spy)
+
+    repo = MagicMock()
+    repo.latest_daily_date.return_value = date(2026, 7, 24)
+    repo.store.data_dir = tmp_path
+    capset = MagicMock()
+    capset.has.return_value = True
+
+    written = kline_sync.sync_and_persist_minute(
+        ["600519.SH"], repo, capset, latest_year=True,
+    )
+
+    assert written == 0
+    kwargs = sync_spy.call_args.kwargs
+    assert kwargs["start_time"] == datetime(2025, 7, 24)
+    assert kwargs["end_time"] == datetime(2026, 7, 25)
+
+
 # ---------- 测试 12: sync_and_persist_minute + custom provider 端到端落盘 (Issue 1) ----------
 
 def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):

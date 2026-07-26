@@ -1015,6 +1015,7 @@ def sync_and_persist_minute(
     on_chunk_done: Callable[[int, int, str], None] | None = None,
     extend_backward: bool = False,
     should_cancel: Callable[[], bool] | None = None,
+    latest_year: bool = False,
 ) -> int:
     """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
@@ -1045,7 +1046,13 @@ def sync_and_persist_minute(
 
     now = datetime.now()
 
-    if extend_backward:
+    if latest_year:
+        # TickFlow 分钟线文档限制为最近一年。以最新本地交易日为终点,
+        # 强制覆盖整个窗口,不受已有分钟数据的最早/最新日期影响。
+        latest_trade_date = repo.latest_daily_date() or now.date()
+        start_time = datetime.combine(latest_trade_date - timedelta(days=365), datetime.min.time())
+        end_time = datetime.combine(latest_trade_date + timedelta(days=1), datetime.min.time())
+    elif extend_backward:
         # 向前扩展模式: 从本地最早数据往前补, 叠加已有数据避免缺口。
         earliest_dt = _earliest_minute_datetime(repo)
         # 按交易日换算自然日 (7/5 系数)。>41 交易日时 +10 天余量覆盖节假日。

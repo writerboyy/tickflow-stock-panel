@@ -722,7 +722,7 @@ def refresh_views(request: Request):
 async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
-    body 可选: { "days": int } — 指定拉取天数 (不传则用偏好设置)。
+    body 可选: { "days": int, "extend": bool, "latest_year": bool }。
     """
     import asyncio
 
@@ -738,8 +738,8 @@ async def sync_minute(request: Request):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    # 可选 body: { "days": int, "extend": bool }
-    # days: 拉取天数; extend: 向前扩展模式 (从最早数据往前补)
+    # days: 拉取天数; extend: 从最早数据往前补;
+    # latest_year: 按最新交易日回溯一年并补齐整个窗口。
     body = {}
     try:
         body = await request.json()
@@ -747,6 +747,7 @@ async def sync_minute(request: Request):
         pass
     override_days = body.get("days")
     extend_flag = body.get("extend")
+    latest_year = bool(body.get("latest_year"))
 
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
     job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
@@ -794,6 +795,7 @@ async def sync_minute(request: Request):
                     extend_backward=extend_backward,
                     on_chunk_done=_on_chunk,
                     should_cancel=lambda: not job_store.is_active(job_id),
+                    latest_year=latest_year,
                 )
 
             written = await loop.run_in_executor(_long_task_executor, _run)

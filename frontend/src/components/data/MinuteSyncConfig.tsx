@@ -58,10 +58,11 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
   const [fetchingMode, setFetchingMode] = useState<'' | '40d' | '1y'>('')
   const handleFetch = (mode: '40d' | '1y') => {
     if (!hasMinuteCap) return
-    // extend 的 days 语义是交易日;约 250 个交易日对应一个自然年。
-    const fetchDays = mode === '40d' ? localSegment : 250
     setFetchingMode(mode)
-    api.syncMinute(fetchDays, true).then((res) => {
+    const request = mode === '40d'
+      ? api.syncMinute(localSegment, true)
+      : api.syncMinute(undefined, false, true)
+    request.then((res) => {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       qc.invalidateQueries({ queryKey: QK.dataStatus })
       // 通知主页面跟踪 job 进度 (ActiveJobCard 会显示实时进度+日志)
@@ -173,12 +174,12 @@ export function MinuteSyncConfig({ caps, onJobStart }: { caps: { label: string; 
           {fetchingMode === '1y' ? (
             <><Loader2 className="h-3.5 w-3.5 animate-spin" /><span>分段获取中…</span></>
           ) : (
-            <><Calendar className="h-3.5 w-3.5" /><span>向前扩展 1 年</span><span className="text-[9px] opacity-70">约 250 个交易日</span></>
+            <><Calendar className="h-3.5 w-3.5" /><span>获取最近 1 年</span><span className="text-[9px] opacity-70">以最新交易日为终点</span></>
           )}
         </button>
         </div>
         <div className="text-[10px] text-muted leading-relaxed">
-          A股标的 · 前复权价格 · 从本地最早数据向前叠加 ·{' '}
+          A股标的 · 前复权价格 · 最近一年会补齐整个固定窗口 ·{' '}
           均按上方「分段大小」分段拉取、每段即落盘
         </div>
       </div>
