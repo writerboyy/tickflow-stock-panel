@@ -47,7 +47,7 @@ def on_bar(context, bars):
     if (selected) {
       setName(selected.name)
       setSource(detail.data?.source ?? '')
-      setConfig(prev => ({ ...prev, strategy_id: selected.id, ...(selected.config ?? {}) }))
+      setConfig(prev => ({ ...prev, ...(selected.config ?? {}), strategy_id: selected.id }))
     }
   }, [selected, detail.data])
 
