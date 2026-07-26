@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
@@ -16,6 +18,7 @@ from app.services.pipeline_jobs import JobStore
 from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 # ── JobStore 单飞 ────────────────────────────────────────────────────────
 
@@ -102,6 +105,56 @@ def test_reap_stale_does_not_release_live_worker_slot(tmp_path):
         assert pipeline_jobs.try_acquire_run_slot() is False
     finally:
         pipeline_jobs.release_run_slot()
+
+
+# ── 盘后 ETF 分钟K ───────────────────────────────────────────────────
+
+def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
+    """ETF 分钟K开关开启后应跟随盘后管道执行，且不混入 A 股标的。"""
+    for dirname in ("kline_daily", "kline_daily_enriched"):
+        (tmp_path / dirname / "date=2026-07-24").mkdir(parents=True)
+
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=tmp_path),
+        latest_daily_date=MagicMock(return_value=None),
+        get_etf_instruments=MagicMock(return_value=pl.DataFrame({
+            "symbol": ["510300.SH", "159915.SZ", "510300.SH"],
+        })),
+        rebuild_views=MagicMock(),
+    )
+    capset = CapabilitySet({
+        Cap.KLINE_MINUTE_BATCH: CapabilityLimits(batch=100, rpm=30),
+    })
+    sync_calls = []
+
+    def sync_minute(symbols, passed_repo, passed_capset, **kwargs):
+        sync_calls.append((symbols, passed_repo, passed_capset, kwargs))
+        return 321
+
+    monkeypatch.setattr(daily_pipeline.instrument_sync, "sync_instruments", lambda *_: 0)
+    monkeypatch.setattr(daily_pipeline, "_resolve_universe", lambda *_: [])
+    monkeypatch.setattr(daily_pipeline, "_refresh_single_view", lambda *_: None)
+    monkeypatch.setattr(daily_pipeline, "_invalidate", lambda *_: None)
+    monkeypatch.setattr(daily_pipeline.kline_sync, "sync_and_persist_minute", sync_minute)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_a_share", lambda: False)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_adj_factor_provider", lambda: "tickflow")
+    monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_index", lambda: False)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_etf", lambda: False)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_minute_sync_enabled", lambda: False)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_etf_minute_sync_enabled", lambda: True)
+    monkeypatch.setattr(daily_pipeline._prefs, "get_minute_sync_days", lambda: 5)
+
+    result = daily_pipeline.run_now(repo, capset)
+
+    assert result["etf_minute_rows"] == 321
+    assert "sync_etf_minute" not in result["skipped_stages"]
+    assert len(sync_calls) == 1
+    symbols, passed_repo, passed_capset, kwargs = sync_calls[0]
+    assert symbols == ["159915.SZ", "510300.SH"]
+    assert passed_repo is repo
+    assert passed_capset is capset
+    assert kwargs["days"] == 5
+    assert kwargs["asset_type"] == "etf"
 
 
 # ── 监控 sector fail-closed ──────────────────────────────────────────────
