@@ -1,24 +1,11 @@
 import { useMemo, useState } from 'react'
 import { Activity, CalendarDays, ChartNoAxesCombined, ClipboardList, ScrollText } from 'lucide-react'
 import type { FreeBacktestResult } from '@/lib/api'
+import { FiveFortunesProcessChart, type FiveFortunesDailyReport } from './charts/FiveFortunesProcessChart'
+import { FreeStrategyDailyReturnChart } from './charts/FreeStrategyDailyReturnChart'
 import { FreeStrategyPerformanceChart } from './charts/FreeStrategyPerformanceChart'
 
 type ResultTab = 'performance' | 'orders' | 'daily' | 'decisions' | 'logs'
-
-interface DailyReport {
-  date: string
-  regime: string
-  raw_regime?: string
-  regime_changed?: boolean
-  target: string[]
-  candidates: Array<{ symbol: string; score?: number }>
-  filtered_count?: number
-  candidate_count?: number
-  liquidity_pool_count?: number
-  filter_rejections?: Record<string, number>
-  decision?: { reason?: string; held?: string; held_rank?: number; filter_fail_symbols?: string[] }
-  risk_action?: { action?: string; drawdown?: number } | null
-}
 
 const TABS: Array<{ id: ResultTab; label: string; icon: typeof Activity }> = [
   { id: 'performance', label: '绩效', icon: ChartNoAxesCombined },
@@ -107,11 +94,11 @@ function OrdersView({ result }: { result: FreeBacktestResult }) {
 
 function DailyView({ result }: { result: FreeBacktestResult }) {
   const rows = result.daily_equity_curve ?? []
-  return <TableWrap><table className="w-full min-w-[1040px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>总资产</th><th>现金</th><th>仓位</th><th>日收益</th><th>基准日收益</th><th>超额</th><th>回撤</th><th>持仓</th></tr></thead><tbody>{rows.map(row => <tr key={row.date} className="border-t border-border"><td className="whitespace-nowrap py-2">{row.date}</td><td>{number(row.equity)}</td><td>{number(row.cash)}</td><td>{percent(row.exposure_pct, 1)}</td><td>{percent(row.daily_return_pct)}</td><td>{percent(row.benchmark_daily_return_pct)}</td><td>{percent(row.excess_daily_return_pct)}</td><td className="text-danger">{percent(row.drawdown_pct)}</td><td className="max-w-96 font-mono text-[10px]">{Object.entries(row.positions).filter(([, quantity]) => quantity > 0).map(([symbol, quantity]) => `${symbol} ${number(quantity, 0)}`).join(' · ') || '空仓'}</td></tr>)}</tbody></table></TableWrap>
+  return <div className="space-y-4"><div className="border-b border-border pb-3"><FreeStrategyDailyReturnChart result={result} /></div><TableWrap><table className="w-full min-w-[1040px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>总资产</th><th>现金</th><th>仓位</th><th>日收益</th><th>基准日收益</th><th>超额</th><th>回撤</th><th>持仓</th></tr></thead><tbody>{rows.map(row => <tr key={row.date} className="border-t border-border"><td className="whitespace-nowrap py-2">{row.date}</td><td>{number(row.equity)}</td><td>{number(row.cash)}</td><td>{percent(row.exposure_pct, 1)}</td><td>{percent(row.daily_return_pct)}</td><td>{percent(row.benchmark_daily_return_pct)}</td><td>{percent(row.excess_daily_return_pct)}</td><td className="text-danger">{percent(row.drawdown_pct)}</td><td className="max-w-96 font-mono text-[10px]">{Object.entries(row.positions).filter(([, quantity]) => quantity > 0).map(([symbol, quantity]) => `${symbol} ${number(quantity, 0)}`).join(' · ') || '空仓'}</td></tr>)}</tbody></table></TableWrap></div>
 }
 
-function DecisionsView({ reports }: { reports: DailyReport[] }) {
-  return <TableWrap><table className="w-full min-w-[1180px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>状态</th><th>决策</th><th>目标</th><th>候选</th><th>过滤</th><th>流动性池</th><th>风控</th></tr></thead><tbody>{reports.map(report => <tr key={report.date} className="border-t border-border align-top"><td className="whitespace-nowrap py-2">{report.date}</td><td><div>{report.regime}</div>{report.raw_regime && report.raw_regime !== report.regime ? <div className="text-[10px] text-muted">原始 {report.raw_regime}</div> : null}</td><td>{DECISION_LABELS[report.decision?.reason ?? ''] ?? report.decision?.reason ?? '—'}</td><td className="font-mono">{report.target.join(', ') || '空仓'}</td><td className="max-w-80"><div>{report.candidate_count ?? report.candidates.length} 个</div><div className="mt-1 text-[10px] text-muted">{report.candidates.map(item => `${item.symbol}${item.score == null ? '' : ` ${number(item.score, 2)}`}`).join(' · ') || '—'}</div></td><td className="max-w-64 text-[10px]">{Object.entries(report.filter_rejections ?? {}).map(([key, count]) => `${key} ${count}`).join(' · ') || '—'}</td><td>{report.liquidity_pool_count ?? '—'}</td><td>{report.risk_action ? `${report.risk_action.action ?? ''} ${percent(Number(report.risk_action.drawdown ?? 0) * 100)}` : '—'}</td></tr>)}</tbody></table></TableWrap>
+function DecisionsView({ reports, fills }: { reports: FiveFortunesDailyReport[]; fills: Record<string, any>[] }) {
+  return <div className="space-y-4"><div className="border-b border-border pb-3"><FiveFortunesProcessChart reports={reports} fills={fills} /></div><TableWrap><table className="w-full min-w-[1180px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>状态</th><th>决策</th><th>目标</th><th>候选</th><th>过滤</th><th>流动性池</th><th>风控</th></tr></thead><tbody>{reports.map(report => <tr key={report.date} className="border-t border-border align-top"><td className="whitespace-nowrap py-2">{report.date}</td><td><div>{report.regime}</div>{report.raw_regime && report.raw_regime !== report.regime ? <div className="text-[10px] text-muted">原始 {report.raw_regime}</div> : null}</td><td>{DECISION_LABELS[report.decision?.reason ?? ''] ?? report.decision?.reason ?? '—'}</td><td className="font-mono">{report.target.join(', ') || '空仓'}</td><td className="max-w-80"><div>{report.candidate_count ?? report.candidates.length} 个</div><div className="mt-1 text-[10px] text-muted">{report.candidates.map(item => `${item.symbol}${item.score == null ? '' : ` ${number(item.score, 2)}`}`).join(' · ') || '—'}</div></td><td className="max-w-64 text-[10px]">{Object.entries(report.filter_rejections ?? {}).map(([key, count]) => `${key} ${count}`).join(' · ') || '—'}</td><td>{report.liquidity_pool_count ?? '—'}</td><td>{report.risk_action ? `${report.risk_action.action ?? ''} ${percent(Number(report.risk_action.drawdown ?? 0) * 100)}` : '—'}</td></tr>)}</tbody></table></TableWrap></div>
 }
 
 function LogsView({ result }: { result: FreeBacktestResult }) {
@@ -121,12 +108,16 @@ function LogsView({ result }: { result: FreeBacktestResult }) {
 export function FreeStrategyResult({ result }: { result: FreeBacktestResult }) {
   const [tab, setTab] = useState<ResultTab>('performance')
   const reports = useMemo(() => (
-    (result.state?.five_fortunes?.daily_reports ?? []) as DailyReport[]
+    (result.state?.five_fortunes?.daily_reports ?? []) as FiveFortunesDailyReport[]
   ), [result])
   const metadata = result.metadata ?? {}
+  const coverage = metadata.data_coverage as Record<string, any> | undefined
+  const requestedCount = Array.isArray(coverage?.requested_symbols) ? coverage.requested_symbols.length : Number(metadata.symbol_count ?? 0)
+  const seenCount = Array.isArray(coverage?.seen_symbols) ? coverage.seen_symbols.length : requestedCount
   return <section className="shrink-0 overflow-hidden rounded-md border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5"><div><div className="text-xs font-medium">回测结果</div><div className="mt-0.5 text-[10px] text-muted">{String(metadata.strategy_name ?? '')}{metadata.source_revision ? ` · 修订 ${metadata.source_revision}` : ''}{metadata.start ? ` · ${metadata.start} 至 ${metadata.end}` : ''}</div></div><div className="flex flex-wrap gap-1 text-[10px] text-muted"><span>{String(metadata.asset_type ?? '').toUpperCase()} {String(metadata.timeframe ?? '')}</span><span>·</span><span>{Number(metadata.data_days ?? result.daily_equity_curve?.length ?? 0)} 个交易日</span>{metadata.nav_filter === 'skipped_no_data' ? <><span>·</span><span>NAV 过滤已跳过</span></> : null}</div></div>
+    {coverage ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2 text-[10px] text-muted"><span>数据源 {String(coverage.configured_provider ?? '—')}</span><span>表 {String(coverage.storage ?? '—')}</span><span>{number(coverage.rows, 0)} 根 bar</span><span>{String(coverage.first_bar ?? '—')} 至 {String(coverage.last_bar ?? '—')}</span><span className={seenCount === requestedCount ? '' : 'text-danger'}>{seenCount}/{requestedCount} 标的</span>{Array.isArray(coverage.missing_symbols) && coverage.missing_symbols.length ? <span className="text-danger">缺失 {coverage.missing_symbols.join(', ')}</span> : null}</div> : null}
     <div className="flex overflow-x-auto border-b border-border px-2" role="tablist">{TABS.map(item => { const Icon = item.icon; const active = item.id === tab; return <button key={item.id} type="button" role="tab" aria-selected={active} onClick={() => setTab(item.id)} className={`inline-flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-3 text-[11px] transition-colors ${active ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{item.label}{item.id === 'decisions' && reports.length ? <span className="tabular-nums">{reports.length}</span> : null}</button> })}</div>
-    <div className="p-3">{tab === 'performance' && <PerformanceView result={result} />}{tab === 'orders' && <OrdersView result={result} />}{tab === 'daily' && <DailyView result={result} />}{tab === 'decisions' && <DecisionsView reports={reports} />}{tab === 'logs' && <LogsView result={result} />}</div>
+    <div className="p-3">{tab === 'performance' && <PerformanceView result={result} />}{tab === 'orders' && <OrdersView result={result} />}{tab === 'daily' && <DailyView result={result} />}{tab === 'decisions' && <DecisionsView reports={reports} fills={result.fills} />}{tab === 'logs' && <LogsView result={result} />}</div>
   </section>
 }

@@ -12,6 +12,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
     const dates = rows.map(row => row.date)
     const nav = rows.map(row => row.strategy_nav)
     const benchmark = rows.map(row => row.benchmark_nav)
+    const excess = rows.map(row => row.excess_nav)
     const drawdown = rows.map(row => -row.drawdown_pct)
     const exposure = rows.map(row => row.exposure_pct)
     const navByDate = new Map(rows.map(row => [row.date, row.strategy_nav]))
@@ -27,6 +28,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
       return marks
     }, [])
     const hasBenchmark = benchmark.some(value => value != null)
+    const hasExcess = excess.some(value => value != null)
     return {
       animation: false,
       grid: [
@@ -65,6 +67,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
           markPoint: tradeMarks.length ? { symbolSize: 8, label: { show: false }, data: tradeMarks } : undefined,
         },
         ...(hasBenchmark ? [{ name: result.benchmark_symbol ?? '基准', type: 'line', data: benchmark, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#64748b', width: 1.2, type: 'dashed' }, itemStyle: { color: '#64748b' } }] : []),
+        ...(hasExcess ? [{ name: '超额净值', type: 'line', data: excess, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#0f766e', width: 1.4 }, itemStyle: { color: '#0f766e' } }] : []),
         { name: '仓位', type: 'line', data: exposure, symbol: 'none', yAxisIndex: 1, lineStyle: { color: '#d97706', width: 1.1 }, itemStyle: { color: '#d97706' }, areaStyle: { color: 'rgba(217,119,6,0.08)' } },
         { name: '回撤', type: 'line', data: drawdown, xAxisIndex: 1, yAxisIndex: 2, symbol: 'none', lineStyle: { color: '#dc2626', width: 1 }, itemStyle: { color: '#dc2626' }, areaStyle: { color: 'rgba(220,38,38,0.12)' } },
       ],
@@ -77,6 +80,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
       <div className="flex flex-wrap items-center gap-3 px-1 pb-2 text-[10px] text-muted">
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-blue-600" />策略净值</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 border-t border-dashed border-slate-500" />基准</span>
+        <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-teal-700" />超额净值</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-amber-600" />仓位</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-red-600" />回撤</span>
       </div>
