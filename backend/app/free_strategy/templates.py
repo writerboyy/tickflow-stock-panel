@@ -50,7 +50,7 @@ def on_bar(context, bars):
 ''',
     },
     "five_fortunes": {
-        "name": "五福策略（TickFlow 完整适配）",
+        "name": "五福策略（TickFlow 默认规则适配）",
         "config": {
             "symbols": [*WUFU_MINUTE_POOL, DEFENSIVE_ETF],
             "timeframe": "1m",
@@ -59,11 +59,11 @@ def on_bar(context, bars):
             "settlement": "t1",
             "fill_policy": "next_open",
         },
-        "source": '''from app.free_strategy.five_fortunes import (
+    "source": '''from app.free_strategy.five_fortunes import (
     after_trading_end,
+    before_trading_start,
     initialize,
     on_bar,
-    on_session_start,
 )
 ''',
     },
