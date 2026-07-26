@@ -1333,7 +1333,7 @@ class KlineRepository:
                     & (pl.col("datetime").dt.date() >= start)
                     & (pl.col("datetime").dt.date() <= end)
                 )
-                .sort(["symbol", "datetime"])
+                .sort(["datetime", "symbol"])
                 .collect(streaming=True)
             )
         except Exception as e:  # noqa: BLE001

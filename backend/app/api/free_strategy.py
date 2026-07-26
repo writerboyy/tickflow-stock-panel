@@ -36,6 +36,17 @@ def _paper_store(request: Request) -> PaperAccountStore:
     return PaperAccountStore(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir)
 
 
+def _run_root(request: Request) -> Path:
+    data_dir = getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir
+    return Path(data_dir) / "free_strategy_runs"
+
+
+def _run_path(request: Request, job_id: str) -> Path:
+    if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+        raise HTTPException(status_code=400, detail="非法回测任务 ID")
+    return _run_root(request) / job_id
+
+
 def recover_paper_accounts(data_dir: Path) -> None:
     """应用重启时恢复之前处于 running 的受管进程。"""
     store = PaperAccountStore(data_dir)
@@ -71,6 +82,7 @@ class BacktestWrite(BaseModel):
     max_exposure_pct: float = Field(default=1.0, gt=0, le=1)
     settlement: Literal["t1", "t0"] = "t1"
     fill_policy: Literal["next_open", "close"] = "next_open"
+    benchmark_symbol: str = "510300.SH"
 
 
 class PaperWrite(BacktestWrite):
@@ -100,6 +112,39 @@ def list_templates():
 @router.post("")
 def create_strategy(req: StrategyWrite, request: Request):
     return _strategy_store(request).save(req.id, req.name, req.source, req.config)
+
+
+@router.get("/backtest")
+def list_backtests(request: Request):
+    result = []
+    for path in sorted(_run_root(request).glob("*"), key=lambda item: item.stat().st_mtime, reverse=True):
+        result_path = path / "result.json"
+        if not path.is_dir() or not result_path.exists():
+            continue
+        try:
+            run = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        result.append({
+            "job_id": path.name,
+            "final_equity": run.get("final_equity"),
+            "return_pct": run.get("return_pct"),
+            "max_drawdown_pct": run.get("max_drawdown_pct"),
+            "fills": len(run.get("fills", [])),
+            "metadata": run.get("metadata", {}),
+        })
+    return {"runs": result}
+
+
+@router.get("/backtest/{job_id}")
+def get_backtest_result(job_id: str, request: Request):
+    path = _run_path(request, job_id) / "result.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="回测结果不存在")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="回测结果文件损坏") from None
 
 
 @router.get("/{strategy_id}")
@@ -142,7 +187,7 @@ def create_backtest(req: BacktestWrite, request: Request):
         raise HTTPException(status_code=404, detail="自由策略不存在") from None
     job_id = uuid.uuid4().hex[:12]
     payload = _job_payload(req, strategy, request)
-    run_root = Path(payload["data_dir"]) / "free_strategy_runs" / job_id
+    run_root = _run_path(request, job_id)
     run_root.mkdir(parents=True, exist_ok=True)
     (run_root / "strategy.py").write_text(strategy["source"], encoding="utf-8")
     payload["run_dir"] = str(run_root)

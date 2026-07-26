@@ -7,6 +7,8 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
+from itertools import groupby
+from statistics import mean, pstdev
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
@@ -27,6 +29,7 @@ class FreeStrategyConfig:
     settlement: str = "t1"
     fill_policy: str = "next_open"
     asset_type: str = "stock"
+    benchmark_symbol: str = "510300.SH"
     callback_timeout_seconds: float = 30.0
 
 
@@ -78,6 +81,9 @@ class Account:
         self.positions = {k: float(v) for k, v in raw.get("positions", {}).items()}
         self.available = {k: float(v) for k, v in raw.get("available", {}).items()}
         self.avg_cost = {k: float(v) for k, v in raw.get("avg_cost", {}).items()}
+        self.orders = [Order(**item) for item in raw.get("orders", [])]
+        self.fills = [Fill(**item) for item in raw.get("fills", [])]
+        self.equity_curve = list(raw.get("equity_curve", []))
 
     def equity(self, prices: dict[str, float]) -> float:
         return self.cash + sum(qty * prices.get(symbol, self.avg_cost.get(symbol, 0.0))
@@ -100,7 +106,7 @@ class Context:
         self.state: dict[str, Any] = copy.deepcopy(engine.state)
         self.now: datetime | None = None
         self.period = engine.timeframe
-        self.portfolio = SimpleNamespace(cash=engine.account.cash, positions={}, available_positions={}, total_value=engine.account.cash)
+        self.portfolio = SimpleNamespace(cash=engine.account.cash, positions={}, available_positions={}, avg_cost={}, total_value=engine.account.cash)
         self.account = self.portfolio
         self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
 
@@ -108,6 +114,7 @@ class Context:
         self.portfolio.cash = self._engine.account.cash
         self.portfolio.positions = dict(self._engine.account.positions)
         self.portfolio.available_positions = dict(self._engine.account.available)
+        self.portfolio.avg_cost = dict(self._engine.account.avg_cost)
         self.portfolio.total_value = self._engine.account.equity(prices)
 
     def schedule(self, callback: Callable[..., Any], at: str | time) -> None:
@@ -166,6 +173,9 @@ class FreeStrategyEngine:
         self._last_timestamp: datetime | None = None
         self._current_prices: dict[str, float] = {}
         self._current_close_prices: dict[str, float] = {}
+        self._benchmark_curve: list[dict[str, Any]] = []
+        self._session_equity_snapshot: dict[str, Any] | None = None
+        self._session_benchmark_close: float | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
@@ -293,6 +303,29 @@ class FreeStrategyEngine:
         self._session_finished = bool(raw.get("session_finished", False))
         self._last_timestamp = datetime.fromisoformat(last_timestamp) if last_timestamp else None
 
+    def checkpoint(self) -> dict[str, Any]:
+        """返回可用于分段历史回测或模拟盘恢复的完整运行状态。"""
+        return {
+            "account": self.account.snapshot(),
+            "state": self.context.state,
+            "runtime": self.runtime_snapshot(),
+            "benchmark_curve": self._benchmark_curve,
+            "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
+            "order_counter": self._counter,
+        }
+
+    def restore_checkpoint(self, raw: dict[str, Any]) -> None:
+        self.account.restore(raw.get("account", {}))
+        self.context.state = copy.deepcopy(raw.get("state", self.context.state))
+        self.state = copy.deepcopy(self.context.state)
+        self.restore_runtime(raw.get("runtime"))
+        self._benchmark_curve = list(raw.get("benchmark_curve", []))
+        self._bought_dates = {
+            symbol: date.fromisoformat(value)
+            for symbol, value in raw.get("bought_dates", {}).items()
+        }
+        self._counter = int(raw.get("order_counter", len(self.account.orders)))
+
     def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:
         self._active_session_date = timestamp.date()
         self._session_finished = False
@@ -306,7 +339,7 @@ class FreeStrategyEngine:
                     self.account.available[symbol] = self.account.positions.get(symbol, 0.0)
                     self._bought_dates.pop(symbol, None)
 
-    def finish_session(self) -> bool:
+    def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""
         if self._active_session_date is None or self._session_finished:
             return False
@@ -316,21 +349,53 @@ class FreeStrategyEngine:
         for order in sorted(self._immediate, key=self._sell_first):
             self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
         self._immediate.clear()
-        self.state = copy.deepcopy(self.context.state)
+        if self._session_equity_snapshot is not None:
+            self.account.equity_curve.append({
+                "timestamp": timestamp.isoformat(),
+                "equity": self.account.equity(self._current_close_prices),
+                "cash": self.account.cash,
+                "positions": dict(self.account.positions),
+            })
+        if self._session_benchmark_close is not None:
+            self._benchmark_curve.append({"timestamp": timestamp.isoformat(), "close": self._session_benchmark_close})
+        if persist_state:
+            self.state = copy.deepcopy(self.context.state)
         self._session_finished = True
         return True
 
-    def run(self, bars: Iterable[Bar], *, finalize_session: bool = True) -> dict[str, Any]:
-        grouped = sorted(list(bars), key=lambda b: (b.timestamp, b.symbol))
-        timestamps = sorted({bar.timestamp for bar in grouped})
-        by_time = {timestamp: BarsView({bar.symbol: bar for bar in grouped if bar.timestamp == timestamp}) for timestamp in timestamps}
+    def run(
+        self,
+        bars: Iterable[Bar],
+        *,
+        finalize_session: bool = True,
+        return_result: bool = True,
+    ) -> dict[str, Any] | None:
+        """按时间回放 bar。
+
+        分钟回测会一次处理数百万根 bar，不能为每个时间戳反复扫描全量数据。
+        ``process._read_rows`` 对生产数据保证按 ``datetime, symbol`` 排序；直接传入
+        的 list 则保留旧行为，发现乱序时才排序。
+        """
+        if isinstance(bars, list):
+            ordered = bars
+            if any(
+                (ordered[index].timestamp, ordered[index].symbol)
+                < (ordered[index - 1].timestamp, ordered[index - 1].symbol)
+                for index in range(1, len(ordered))
+            ):
+                ordered = sorted(ordered, key=lambda bar: (bar.timestamp, bar.symbol))
+            stream: Iterable[Bar] = ordered
+        else:
+            stream = bars
         self._current_bar: Bar | None = None
-        self._next_timestamp = timestamps[0] if timestamps else datetime.now()
-        for index, timestamp in enumerate(timestamps):
+        self._next_timestamp = datetime.now()
+        handled = False
+        for timestamp, rows_at_time in groupby(stream, key=lambda bar: bar.timestamp):
+            handled = True
             self._next_timestamp = timestamp
-            bars_now = by_time[timestamp]
+            bars_now = BarsView({bar.symbol: bar for bar in rows_at_time})
             if self._active_session_date != timestamp.date():
-                self.finish_session()
+                self.finish_session(persist_state=return_result)
                 self._start_session(timestamp, bars_now)
             # next-open orders created on the previous callback are filled before this bar.
             self._current_prices = {s: b.open for s, b in bars_now.items()}
@@ -342,10 +407,15 @@ class FreeStrategyEngine:
             self.context._sync({s: b.close for s, b in bars_now.items()})
             self._current_bar = next(iter(bars_now.values()), None)
             self._current_close_prices = {s: b.close for s, b in bars_now.items()}
+            benchmark = bars_now.get(self.config.benchmark_symbol)
+            if benchmark is not None:
+                self._session_benchmark_close = benchmark.close
             self._last_bars = bars_now
             self._last_timestamp = timestamp
             for symbol, bar in bars_now.items():
                 self.history.setdefault(symbol, []).append(bar)
+                if len(self.history[symbol]) > 5_000:
+                    del self.history[symbol][:-5_000]
             for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
                 if not done and timestamp.strftime("%H:%M") >= at:
                     callback(self.context)
@@ -354,12 +424,73 @@ class FreeStrategyEngine:
             for order in sorted(self._immediate, key=self._sell_first):
                 self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
             self._immediate.clear()
-            self.state = copy.deepcopy(self.context.state)
             prices = {s: b.close for s, b in bars_now.items()}
-            self.account.equity_curve.append({"timestamp": timestamp.isoformat(), "equity": self.account.equity(prices), "cash": self.account.cash, "positions": dict(self.account.positions)})
-            if finalize_session and (index + 1 == len(timestamps) or timestamps[index + 1].date() != timestamp.date()):
-                self.finish_session()
-        return self.result()
+            self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
+        if handled and finalize_session:
+            self.finish_session(persist_state=return_result)
+        if return_result:
+            self.state = copy.deepcopy(self.context.state)
+            return self.result()
+        return None
+
+    def _daily_performance(self) -> tuple[list[dict[str, Any]], dict[str, float]]:
+        by_day: dict[str, dict[str, Any]] = {}
+        for row in self.account.equity_curve:
+            by_day[row["timestamp"][:10]] = row
+        benchmark_by_day: dict[str, float] = {}
+        for row in self._benchmark_curve:
+            benchmark_by_day[row["timestamp"][:10]] = float(row["close"])
+
+        rows: list[dict[str, Any]] = []
+        base_benchmark = next(iter(benchmark_by_day.values()), None)
+        previous_benchmark = base_benchmark
+        peak = self.config.initial_capital
+        max_drawdown = 0.0
+        for day, item in by_day.items():
+            if day in benchmark_by_day:
+                previous_benchmark = benchmark_by_day[day]
+            equity = float(item["equity"])
+            peak = max(peak, equity)
+            drawdown = (peak - equity) / peak if peak else 0.0
+            max_drawdown = max(max_drawdown, drawdown)
+            strategy_nav = equity / self.config.initial_capital if self.config.initial_capital else 1.0
+            benchmark_nav = (
+                previous_benchmark / base_benchmark
+                if base_benchmark and previous_benchmark is not None else None
+            )
+            rows.append({
+                **item,
+                "date": day,
+                "strategy_nav": strategy_nav,
+                "benchmark_nav": benchmark_nav,
+                "excess_nav": strategy_nav / benchmark_nav if benchmark_nav else None,
+                "drawdown_pct": drawdown * 100,
+                "exposure_pct": (equity - float(item["cash"])) / equity * 100 if equity else 0.0,
+            })
+
+        values = [float(row["equity"]) for row in rows]
+        daily_returns = [current / previous - 1 for previous, current in zip(values, values[1:]) if previous]
+        total_return = values[-1] / self.config.initial_capital - 1 if values and self.config.initial_capital else 0.0
+        trading_days = max(len(rows), 1)
+        annual_return = (1 + total_return) ** (250 / trading_days) - 1 if total_return > -1 else -1.0
+        volatility = pstdev(daily_returns) * math.sqrt(250) if len(daily_returns) > 1 else 0.0
+        sharpe = mean(daily_returns) / pstdev(daily_returns) * math.sqrt(250) if len(daily_returns) > 1 and pstdev(daily_returns) else 0.0
+        benchmark_return = (
+            rows[-1]["benchmark_nav"] - 1
+            if rows and rows[-1]["benchmark_nav"] is not None else 0.0
+        )
+        traded_value = sum(fill.value for fill in self.account.fills)
+        return rows, {
+            "total_return_pct": total_return * 100,
+            "annual_return_pct": annual_return * 100,
+            "benchmark_return_pct": benchmark_return * 100,
+            "excess_return_pct": (total_return - benchmark_return) * 100,
+            "max_drawdown_pct": max_drawdown * 100,
+            "volatility_pct": volatility * 100,
+            "sharpe_ratio": sharpe,
+            "trade_count": float(len(self.account.fills)),
+            "turnover": traded_value / mean(values) if values else 0.0,
+        }
 
     def result(self) -> dict[str, Any]:
         curve = self.account.equity_curve
@@ -369,8 +500,12 @@ class FreeStrategyEngine:
         for value in values:
             peak = max(peak, value)
             drawdown = max(drawdown, (peak - value) / peak if peak else 0.0)
+        daily_curve, performance = self._daily_performance()
         return {"initial_capital": self.config.initial_capital, "final_equity": values[-1] if values else self.config.initial_capital,
                 "return_pct": ((values[-1] / self.config.initial_capital) - 1) * 100 if values else 0.0,
                 "max_drawdown_pct": drawdown * 100, "equity_curve": curve,
+                "daily_equity_curve": daily_curve, "performance": performance,
+                "benchmark_symbol": self.config.benchmark_symbol,
                 "orders": [asdict(v) for v in self.account.orders], "fills": [asdict(v) for v in self.account.fills],
-                "positions": self.account.positions, "logs": self.logs, "state": self.state}
+                "positions": self.account.positions, "logs": self.logs, "state": self.state,
+                "checkpoint": self.checkpoint()}

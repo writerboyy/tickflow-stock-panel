@@ -473,7 +473,9 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
     if "timestamp" in df.columns:
         df = df.with_columns(
-            pl.from_epoch("timestamp", time_unit="ms").alias("datetime"),
+            # TickFlow 的 epoch 是 UTC；策略、交易时段和页面均使用北京时间的
+            # 无时区 wall-clock，必须在落库前转换，否则 09:30 会被存成 01:30。
+            pl.from_epoch("timestamp", time_unit="ms").dt.offset_by("8h").alias("datetime"),
         ).drop("timestamp")
         for drop_col in ("trade_time", "trade_date"):
             if drop_col in df.columns:
@@ -536,6 +538,34 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         _atomic_write_parquet(day_df, out)
         written += day_df.height
     return written
+
+
+def _migrate_utc_minute_wall_clock(repo: KlineRepository, asset_type: AssetType) -> None:
+    """一次性把早期 UTC-naive 分钟K迁移成北京时间 wall-clock。"""
+    minute_dir = repo.store.data_dir / _minute_table(asset_type)
+    marker = minute_dir / ".beijing_wall_clock_v1"
+    if marker.exists():
+        return
+    files = sorted(minute_dir.glob("date=*/part.parquet"))
+    if not files:
+        return
+    sample = pl.read_parquet(files[0], columns=["datetime"])
+    if sample.is_empty() or "datetime" not in sample.columns:
+        return
+    first = sample["datetime"][0]
+    # 正确数据的连续竞价首根为 09:30；旧 UTC 数据落为 01:30。
+    if not hasattr(first, "hour") or first.hour >= 8:
+        marker.write_text("already_beijing", encoding="utf-8")
+        return
+    for path in files:
+        frame = pl.read_parquet(path)
+        if "datetime" not in frame.columns:
+            continue
+        _atomic_write_parquet(
+            frame.with_columns(pl.col("datetime").dt.offset_by("8h").alias("datetime")), path,
+        )
+    marker.write_text("migrated", encoding="utf-8")
+    logger.info("%s minute K timestamps migrated to Asia/Shanghai wall-clock (%d partitions)", asset_type, len(files))
 
 
 def _resolve_minute_provider(
@@ -1049,6 +1079,7 @@ def sync_and_persist_minute(
 
     # 迁移:旧版按 symbol= 分区转为 date= 分区
     _migrate_symbol_to_date_partition(repo, asset_type)
+    _migrate_utc_minute_wall_clock(repo, asset_type)
 
     now = datetime.now()
 

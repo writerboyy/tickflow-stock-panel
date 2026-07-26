@@ -970,6 +970,7 @@ export interface FreeBacktestConfig {
   max_exposure_pct: number
   settlement: 't1' | 't0'
   fill_policy: 'next_open' | 'close'
+  benchmark_symbol: string
 }
 
 export interface FreeBacktestResult {
@@ -978,10 +979,34 @@ export interface FreeBacktestResult {
   return_pct: number
   max_drawdown_pct: number
   equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
+  daily_equity_curve?: Array<{
+    date: string
+    timestamp: string
+    equity: number
+    cash: number
+    positions: Record<string, number>
+    strategy_nav: number
+    benchmark_nav: number | null
+    excess_nav: number | null
+    drawdown_pct: number
+    exposure_pct: number
+  }>
+  performance?: Record<string, number>
+  benchmark_symbol?: string
   orders: Record<string, any>[]
   fills: Record<string, any>[]
   positions: Record<string, number>
   logs: { timestamp: string; level: string; message: string }[]
+  state?: Record<string, any>
+  metadata?: Record<string, any>
+}
+
+export interface FreeBacktestRunSummary {
+  job_id: string
+  final_equity: number
+  return_pct: number
+  max_drawdown_pct: number
+  fills: number
   metadata?: Record<string, any>
 }
 
@@ -1000,6 +1025,8 @@ export const api = {
   startFreeBacktest: (payload: FreeBacktestConfig) =>
     request<{ job_id: string; status: string; source_revision: number }>('/api/free-strategies/backtest', { method: 'POST', body: JSON.stringify(payload) }),
   cancelFreeBacktest: (jobId: string) => request<{ ok: boolean }>(`/api/free-strategies/backtest/${jobId}/cancel`, { method: 'POST' }),
+  freeBacktestRuns: () => request<{ runs: FreeBacktestRunSummary[] }>('/api/free-strategies/backtest'),
+  freeBacktestResult: (jobId: string) => request<FreeBacktestResult>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`),
   paperAccounts: () => request<{ accounts: Record<string, any>[] }>('/api/free-strategies/paper/accounts'),
   createPaperAccount: (payload: FreeBacktestConfig & { name: string }) =>
     request<Record<string, any>>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),

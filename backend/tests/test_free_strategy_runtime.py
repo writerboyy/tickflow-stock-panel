@@ -2,6 +2,7 @@ from datetime import datetime
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+from app.free_strategy.five_fortunes import DEFENSIVE_ETF, REGIME_PROXIES
 
 
 def test_minute_aggregation_respects_lunch_boundary():
@@ -96,3 +97,49 @@ def after_market_close(context):
     engine.run([Bar("X", datetime(2024, 1, 3, 9, 30), 1, 1, 1, 1)], finalize_session=False)
     assert engine.finish_session() is True
     assert engine.state["events"] == ["start", "bar", "after", "start", "bar", "after"]
+
+
+def test_five_fortunes_runs_on_minute_bars_and_records_daily_candidates():
+    source = """
+from app.free_strategy.five_fortunes import after_trading_end, initialize, on_bar, on_session_start
+"""
+    symbols = [*REGIME_PROXIES, "518880.SH", DEFENSIVE_ETF]
+    bars = []
+    for day in range(1, 67):
+        for hour, minute in ((9, 30), (9, 40), (10, 31), (13, 10), (13, 11), (15, 0)):
+            for index, symbol in enumerate(symbols):
+                price = (1 + index * 0.01) * (1.0025 ** day)
+                bars.append(Bar(symbol, datetime(2024, 1 + (day - 1) // 28, 1 + (day - 1) % 28, hour, minute), price, price, price, price, 1, price))
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="etf", fill_policy="next_open", benchmark_symbol="510300.SH"),
+    ).run(iter(bars))
+    reports = result["state"]["five_fortunes"]["daily_reports"]
+    assert reports
+    assert reports[-1]["nav_filter"] == "skipped_no_data"
+    assert result["daily_equity_curve"]
+    assert result["performance"]["benchmark_return_pct"] > 0
+
+
+def test_checkpoint_restores_account_curve_and_strategy_state():
+    source = """
+def initialize(context):
+    context.state.setdefault('days', 0)
+
+def on_bar(context, bars):
+    context.state['days'] += 1
+    if context.state['days'] == 1:
+        context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(lot_size=100, fill_policy="close")
+    first = FreeStrategyEngine(source, config=config)
+    initial = first.run([Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10)])
+
+    resumed = FreeStrategyEngine(source, config=config)
+    resumed.restore_checkpoint(initial["checkpoint"])
+    final = resumed.run([Bar("X", datetime(2024, 1, 3, 15), 11, 11, 11, 11)])
+
+    assert final["state"]["days"] == 2
+    assert len(final["daily_equity_curve"]) == 2
+    assert final["positions"] == {"X": 100.0}

@@ -61,6 +61,19 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
     )
 
 
+def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
+    """TickFlow epoch 01:35 UTC 必须以 09:35 北京时间存储。"""
+    raw = pl.DataFrame({
+        "symbol": ["510300.SH"],
+        "timestamp": [1779327300000],
+        "open": [4.0], "high": [4.1], "low": [3.9], "close": [4.05],
+        "volume": [100.0], "amount": [405.0],
+    })
+    normalized = kline_sync._normalize_minute(raw)
+    value = normalized["datetime"][0]
+    assert (value.hour, value.minute) == (9, 35)
+
+
 # ---------- 测试 1: 自定义源成功返回 1 分钟 K ----------
 
 def test_custom_minute_provider_returns_1m_k(monkeypatch):
