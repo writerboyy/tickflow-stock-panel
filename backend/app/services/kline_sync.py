@@ -512,11 +512,27 @@ def _datetime_to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _sanitize_minute_rows(df: pl.DataFrame) -> pl.DataFrame:
+    """丢弃不可回放的分钟 K，并消除浮点误差造成的 OHLC 边界倒挂。"""
+    required = ("symbol", "datetime", "open", "high", "low", "close")
+    if any(column not in df.columns for column in required):
+        return pl.DataFrame(schema=df.schema)
+    clean = df.filter(
+        pl.all_horizontal(pl.col(column).is_not_null() for column in required)
+        & pl.all_horizontal(pl.col(column).is_finite() for column in required[2:])
+    )
+    return clean.with_columns(
+        pl.max_horizontal("open", "high", "low", "close").alias("high"),
+        pl.min_horizontal("open", "high", "low", "close").alias("low"),
+    )
+
+
 def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
     """按 _trade_date 分区落盘分钟 K (读旧→concat→unique→原子写)。返回写入行数。
 
     抽自原 sync_and_persist_minute 末尾的循环, 供流式落盘 (每段一次) 与一次性迁移共用。
     """
+    df = _sanitize_minute_rows(df)
     if df.is_empty():
         return 0
     df = df.with_columns(pl.col("datetime").dt.date().alias("_trade_date"))
@@ -526,14 +542,14 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         out = minute_dir / f"date={trade_date}" / "part.parquet"
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists():
-            existing = pl.read_parquet(out)
-            if "datetime" in existing.columns:
-                existing = existing.filter(pl.col("datetime").is_not_null())
-            day_df = pl.concat([existing, day_df.drop("_trade_date")]).unique(
+            existing = _sanitize_minute_rows(pl.read_parquet(out))
+            incoming = day_df.drop("_trade_date")
+            day_df = incoming if existing.is_empty() else pl.concat([existing, incoming]).unique(
                 subset=["symbol", "datetime"], keep="last",
             )
         else:
             day_df = day_df.drop("_trade_date")
+        day_df = _sanitize_minute_rows(day_df)
         day_df = day_df.sort("symbol", "datetime")
         _atomic_write_parquet(day_df, out)
         written += day_df.height

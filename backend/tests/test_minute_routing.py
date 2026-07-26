@@ -74,6 +74,51 @@ def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
     assert (value.hour, value.minute) == (9, 35)
 
 
+def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path):
+    minute_dir = tmp_path / "kline_etf_minute"
+    frame = pl.DataFrame({
+        "symbol": ["510300.SH", "159509.SZ"],
+        "datetime": [datetime(2026, 7, 21, 9, 30), datetime(2026, 7, 21, 9, 30)],
+        "open": [4.0, None],
+        "high": [4.05 - 1e-13, None],
+        "low": [4.0 + 1e-13, None],
+        "close": [4.05, None],
+        "volume": [100.0, 100.0],
+        "amount": [405.0, 0.0],
+    })
+
+    written = kline_sync._write_minute_partition(frame, minute_dir)
+    stored = pl.read_parquet(minute_dir / "date=2026-07-21" / "part.parquet")
+
+    assert written == 1
+    assert stored["symbol"].to_list() == ["510300.SH"]
+    assert stored["high"][0] == 4.05
+    assert stored["low"][0] == 4.0
+
+
+def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):
+    minute_dir = tmp_path / "kline_etf_minute"
+    partition = minute_dir / "date=2026-07-21" / "part.parquet"
+    partition.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["159509.SZ"],
+        "datetime": [datetime(2026, 7, 21, 9, 30)],
+        "open": [None], "high": [None], "low": [None], "close": [None],
+        "volume": [0.0], "amount": [0.0],
+    }).write_parquet(partition)
+
+    written = kline_sync._write_minute_partition(
+        _mock_minute_df("510300.SH").with_columns(
+            pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
+        ),
+        minute_dir,
+    )
+    stored = pl.read_parquet(partition)
+
+    assert written == 1
+    assert stored["symbol"].to_list() == ["510300.SH"]
+
+
 # ---------- 测试 1: 自定义源成功返回 1 分钟 K ----------
 
 def test_custom_minute_provider_returns_1m_k(monkeypatch):
