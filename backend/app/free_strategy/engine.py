@@ -251,8 +251,12 @@ class FreeStrategyEngine:
             max_gross = self.account.equity(self._current_prices) * self.config.max_exposure_pct
             qty = min(qty, math.floor(max(0.0, min(self.account.cash, max_gross)) / price / lot) * lot)
         if qty <= 0:
-            order.status = "rejected"
-            order.reason = "数量不足、现金不足或 T+1 未结算"
+            if order.side == "target":
+                order.status = "skipped"
+                order.reason = "目标仓位无需调整或不足一手"
+            else:
+                order.status = "rejected"
+                order.reason = "数量不足、现金不足或 T+1 未结算"
             return
         gross = qty * price
         commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct

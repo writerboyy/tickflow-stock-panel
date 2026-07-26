@@ -204,3 +204,16 @@ def on_bar(context, bars):
     assert result["performance"]["max_drawdown_end"] == "2024-01-04"
     for key in ("alpha_pct", "beta", "sortino_ratio", "information_ratio", "benchmark_volatility_pct"):
         assert key in result["performance"]
+
+
+def test_target_order_below_one_lot_is_skipped_instead_of_rejected():
+    source = """
+def on_bar(context, bars):
+    context.order_target_percent('X', 0.0)
+"""
+    result = FreeStrategyEngine(source, config=FreeStrategyConfig(fill_policy="close")).run([
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
+    ])
+
+    assert result["orders"][0]["status"] == "skipped"
+    assert result["orders"][0]["reason"] == "目标仓位无需调整或不足一手"
