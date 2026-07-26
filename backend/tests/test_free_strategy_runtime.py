@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.five_fortunes import DEFENSIVE_ETF, REGIME_PROXIES
@@ -143,3 +145,62 @@ def on_bar(context, bars):
     assert final["state"]["days"] == 2
     assert len(final["daily_equity_curve"]) == 2
     assert final["positions"] == {"X": 100.0}
+
+
+def test_result_contains_diagnostic_transactions_metrics_and_attribution():
+    source = """
+def on_bar(context, bars):
+    day = context.now.day
+    if day == 1:
+        context.sell('X', quantity=100, reason='no-position')
+        context.buy('X', quantity=100, reason='first-entry')
+    elif day == 2:
+        context.sell('X', quantity=100, reason='first-exit')
+    elif day == 3:
+        context.buy('X', quantity=100, reason='second-entry')
+    elif day == 4:
+        context.sell('X', quantity=100, reason='second-exit')
+"""
+    prices = [10.0, 12.0, 12.0, 11.0, 11.0]
+    benchmark = [100.0, 101.0, 102.0, 101.0, 103.0]
+    bars = []
+    for day, (price, benchmark_price) in enumerate(zip(prices, benchmark), start=1):
+        timestamp = datetime(2024, 1, day, 15)
+        bars.extend([
+            Bar("B", timestamp, benchmark_price, benchmark_price, benchmark_price, benchmark_price),
+            Bar("X", timestamp, price, price, price, price),
+        ])
+
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+            benchmark_symbol="B",
+        ),
+    ).run(bars)
+
+    assert len(result["signals"]) == 5
+    assert len(result["transactions"]) == 5
+    rejected = result["transactions"][0]
+    assert rejected["status"] == "rejected"
+    assert rejected["filled_quantity"] == 0
+    assert rejected["reason"] == "数量不足、现金不足或 T+1 未结算"
+
+    realized = [row["realized_pnl"] for row in result["attribution"] if row["side"] == "sell"]
+    assert realized == [200.0, -100.0]
+    assert result["performance"]["trade_win_rate_pct"] == 50.0
+    assert result["performance"]["profit_loss_ratio"] == 2.0
+
+    daily = result["daily_equity_curve"]
+    assert len(daily) == 5
+    assert daily[0]["daily_return_pct"] == 0.0
+    assert daily[1]["benchmark_daily_return_pct"] == pytest.approx(1.0)
+    assert result["performance"]["max_drawdown_start"] == "2024-01-02"
+    assert result["performance"]["max_drawdown_end"] == "2024-01-04"
+    for key in ("alpha_pct", "beta", "sortino_ratio", "information_ratio", "benchmark_volatility_pct"):
+        assert key in result["performance"]

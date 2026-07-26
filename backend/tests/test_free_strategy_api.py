@@ -1,10 +1,33 @@
 import json
+from datetime import date
 from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.free_strategy import router
+from app.api.free_strategy import BacktestWrite, _job_payload, router
+
+
+def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        datastore=SimpleNamespace(data_dir=tmp_path),
+    )))
+    strategy = {"id": "five", "name": "五福", "source": "def on_bar(context, bars): pass", "revision": 3}
+    payload = _job_payload(
+        BacktestWrite(
+            strategy_id="five",
+            symbols=["510300.SH"],
+            timeframe="1m",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+            asset_type="etf",
+        ),
+        strategy,
+        request,
+    )
+
+    assert payload["config"]["asset_type"] == "etf"
+    assert payload["strategy_name"] == "五福"
 
 
 def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):

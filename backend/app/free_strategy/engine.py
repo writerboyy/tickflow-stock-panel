@@ -350,11 +350,17 @@ class FreeStrategyEngine:
             self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
         self._immediate.clear()
         if self._session_equity_snapshot is not None:
+            position_values = {
+                symbol: quantity * self._current_close_prices.get(symbol, self.account.avg_cost.get(symbol, 0.0))
+                for symbol, quantity in self.account.positions.items()
+                if quantity > 0
+            }
             self.account.equity_curve.append({
                 "timestamp": timestamp.isoformat(),
                 "equity": self.account.equity(self._current_close_prices),
                 "cash": self.account.cash,
                 "positions": dict(self.account.positions),
+                "position_values": position_values,
             })
         if self._session_benchmark_close is not None:
             self._benchmark_curve.append({"timestamp": timestamp.isoformat(), "close": self._session_benchmark_close})
@@ -433,7 +439,117 @@ class FreeStrategyEngine:
             return self.result()
         return None
 
-    def _daily_performance(self) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    @staticmethod
+    def _annual_ratio(values: list[float]) -> float:
+        deviation = pstdev(values) if len(values) > 1 else 0.0
+        return mean(values) / deviation * math.sqrt(250) if deviation else 0.0
+
+    @staticmethod
+    def _beta(strategy_returns: list[float], benchmark_returns: list[float]) -> float:
+        size = min(len(strategy_returns), len(benchmark_returns))
+        if size < 2:
+            return 0.0
+        strategy = strategy_returns[-size:]
+        benchmark = benchmark_returns[-size:]
+        benchmark_mean = mean(benchmark)
+        variance = sum((value - benchmark_mean) ** 2 for value in benchmark)
+        if not variance:
+            return 0.0
+        strategy_mean = mean(strategy)
+        covariance = sum(
+            (strategy_value - strategy_mean) * (benchmark_value - benchmark_mean)
+            for strategy_value, benchmark_value in zip(strategy, benchmark)
+        )
+        return covariance / variance
+
+    def _drawdown_period(self, rows: list[dict[str, Any]]) -> tuple[float, str, str]:
+        if not rows:
+            return 0.0, "", ""
+        peak_value = self.config.initial_capital
+        peak_date = str(rows[0]["date"])
+        best = 0.0
+        best_start = peak_date
+        best_end = peak_date
+        for row in rows:
+            equity = float(row["equity"])
+            if equity > peak_value:
+                peak_value = equity
+                peak_date = str(row["date"])
+            current = (peak_value - equity) / peak_value if peak_value else 0.0
+            if current > best:
+                best = current
+                best_start = peak_date
+                best_end = str(row["date"])
+        return best, best_start, best_end
+
+    def _attribution_rows(self) -> tuple[list[dict[str, Any]], list[float]]:
+        positions: dict[str, tuple[float, float]] = {}
+        rows: list[dict[str, Any]] = []
+        realized_trades: list[float] = []
+        cumulative_realized = 0.0
+        for fill in self.account.fills:
+            held, cost = positions.get(fill.symbol, (0.0, 0.0))
+            cost_basis = 0.0
+            realized_pnl = 0.0
+            if fill.side == "buy":
+                positions[fill.symbol] = (held + fill.quantity, cost + fill.value + fill.fee)
+            elif held > 0:
+                sold = min(fill.quantity, held)
+                cost_basis = cost * sold / held
+                realized_pnl = fill.value * sold / fill.quantity - fill.fee * sold / fill.quantity - cost_basis
+                remaining = held - sold
+                positions[fill.symbol] = (remaining, max(0.0, cost - cost_basis))
+                realized_trades.append(realized_pnl)
+                cumulative_realized += realized_pnl
+            rows.append({
+                "order_id": fill.order_id,
+                "timestamp": fill.timestamp,
+                "symbol": fill.symbol,
+                "side": fill.side,
+                "quantity": fill.quantity,
+                "price": fill.price,
+                "value": fill.value,
+                "fee": fill.fee,
+                "cost_basis": cost_basis,
+                "realized_pnl": realized_pnl,
+                "cumulative_realized_pnl": cumulative_realized,
+                "realized_return_pct": realized_pnl / cost_basis * 100 if cost_basis else 0.0,
+            })
+        return rows, realized_trades
+
+    def _transaction_rows(self) -> list[dict[str, Any]]:
+        fills_by_order: dict[str, list[Fill]] = {}
+        for fill in self.account.fills:
+            fills_by_order.setdefault(fill.order_id, []).append(fill)
+        rows = []
+        for order in self.account.orders:
+            fills = fills_by_order.get(order.id, [])
+            filled_quantity = sum(fill.quantity for fill in fills)
+            fill_value = sum(fill.value for fill in fills)
+            fee = sum(fill.fee for fill in fills)
+            rows.append({
+                "transaction_id": order.id,
+                "order_id": order.id,
+                "submitted_at": order.submitted_at,
+                "filled_at": fills[-1].timestamp if fills else None,
+                "symbol": order.symbol,
+                "requested_side": order.side,
+                "executed_side": fills[-1].side if fills else None,
+                "quantity": order.quantity,
+                "value": order.value,
+                "target_quantity": order.target_quantity,
+                "target_value": order.target_value,
+                "target_percent": order.target_percent,
+                "filled_quantity": filled_quantity,
+                "average_fill_price": fill_value / filled_quantity if filled_quantity else None,
+                "fill_value": fill_value,
+                "fee": fee,
+                "status": order.status,
+                "reason": order.reason,
+            })
+        return rows
+
+    def _daily_performance(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         by_day: dict[str, dict[str, Any]] = {}
         for row in self.account.equity_curve:
             by_day[row["timestamp"][:10]] = row
@@ -444,16 +560,22 @@ class FreeStrategyEngine:
         rows: list[dict[str, Any]] = []
         base_benchmark = next(iter(benchmark_by_day.values()), None)
         previous_benchmark = base_benchmark
+        previous_equity = self.config.initial_capital
         peak = self.config.initial_capital
-        max_drawdown = 0.0
-        for day, item in by_day.items():
+        for day, item in sorted(by_day.items()):
+            benchmark_daily_return = 0.0
             if day in benchmark_by_day:
+                benchmark_daily_return = (
+                    benchmark_by_day[day] / previous_benchmark - 1
+                    if previous_benchmark else 0.0
+                )
                 previous_benchmark = benchmark_by_day[day]
             equity = float(item["equity"])
             peak = max(peak, equity)
             drawdown = (peak - equity) / peak if peak else 0.0
-            max_drawdown = max(max_drawdown, drawdown)
             strategy_nav = equity / self.config.initial_capital if self.config.initial_capital else 1.0
+            daily_return = equity / previous_equity - 1 if previous_equity else 0.0
+            previous_equity = equity
             benchmark_nav = (
                 previous_benchmark / base_benchmark
                 if base_benchmark and previous_benchmark is not None else None
@@ -466,30 +588,67 @@ class FreeStrategyEngine:
                 "excess_nav": strategy_nav / benchmark_nav if benchmark_nav else None,
                 "drawdown_pct": drawdown * 100,
                 "exposure_pct": (equity - float(item["cash"])) / equity * 100 if equity else 0.0,
+                "daily_return_pct": daily_return * 100,
+                "benchmark_daily_return_pct": benchmark_daily_return * 100 if benchmark_nav is not None else None,
+                "excess_daily_return_pct": (
+                    (daily_return - benchmark_daily_return) * 100 if benchmark_nav is not None else None
+                ),
             })
 
         values = [float(row["equity"]) for row in rows]
-        daily_returns = [current / previous - 1 for previous, current in zip(values, values[1:]) if previous]
+        daily_returns = [float(row["daily_return_pct"]) / 100 for row in rows]
+        benchmark_returns = [
+            float(row["benchmark_daily_return_pct"] or 0.0) / 100 for row in rows
+        ]
+        excess_returns = [left - right for left, right in zip(daily_returns, benchmark_returns)]
         total_return = values[-1] / self.config.initial_capital - 1 if values and self.config.initial_capital else 0.0
         trading_days = max(len(rows), 1)
         annual_return = (1 + total_return) ** (250 / trading_days) - 1 if total_return > -1 else -1.0
         volatility = pstdev(daily_returns) * math.sqrt(250) if len(daily_returns) > 1 else 0.0
-        sharpe = mean(daily_returns) / pstdev(daily_returns) * math.sqrt(250) if len(daily_returns) > 1 and pstdev(daily_returns) else 0.0
         benchmark_return = (
             rows[-1]["benchmark_nav"] - 1
             if rows and rows[-1]["benchmark_nav"] is not None else 0.0
         )
+        benchmark_annual_return = (
+            (1 + benchmark_return) ** (250 / trading_days) - 1 if benchmark_return > -1 else -1.0
+        )
+        benchmark_volatility = pstdev(benchmark_returns) * math.sqrt(250) if len(benchmark_returns) > 1 else 0.0
+        beta = self._beta(daily_returns, benchmark_returns)
+        downside = [min(value, 0.0) for value in daily_returns]
+        downside_deviation = math.sqrt(mean(value * value for value in downside)) * math.sqrt(250) if downside else 0.0
+        max_drawdown, drawdown_start, drawdown_end = self._drawdown_period(rows)
+        _, realized_trades = self._attribution_rows()
+        wins = [value for value in realized_trades if value > 0]
+        losses = [value for value in realized_trades if value < 0]
         traded_value = sum(fill.value for fill in self.account.fills)
         return rows, {
             "total_return_pct": total_return * 100,
             "annual_return_pct": annual_return * 100,
             "benchmark_return_pct": benchmark_return * 100,
+            "benchmark_annual_return_pct": benchmark_annual_return * 100,
             "excess_return_pct": (total_return - benchmark_return) * 100,
             "max_drawdown_pct": max_drawdown * 100,
+            "max_drawdown_start": drawdown_start,
+            "max_drawdown_end": drawdown_end,
             "volatility_pct": volatility * 100,
-            "sharpe_ratio": sharpe,
-            "trade_count": float(len(self.account.fills)),
+            "benchmark_volatility_pct": benchmark_volatility * 100,
+            "alpha_pct": (annual_return - beta * benchmark_annual_return) * 100,
+            "beta": beta,
+            "sharpe_ratio": self._annual_ratio(daily_returns),
+            "sortino_ratio": annual_return / downside_deviation if downside_deviation else 0.0,
+            "information_ratio": self._annual_ratio(excess_returns),
+            "positive_day_rate_pct": (
+                sum(value > 0 for value in daily_returns) / len(daily_returns) * 100 if daily_returns else 0.0
+            ),
+            "trade_win_rate_pct": (
+                len(wins) / len(realized_trades) * 100 if realized_trades else 0.0
+            ),
+            "profit_loss_ratio": (
+                mean(wins) / abs(mean(losses)) if wins and losses else 0.0
+            ),
+            "trade_count": len(self.account.fills),
             "turnover": traded_value / mean(values) if values else 0.0,
+            "turnover_pct": traded_value / mean(values) * 100 if values else 0.0,
         }
 
     def result(self) -> dict[str, Any]:
@@ -501,11 +660,14 @@ class FreeStrategyEngine:
             peak = max(peak, value)
             drawdown = max(drawdown, (peak - value) / peak if peak else 0.0)
         daily_curve, performance = self._daily_performance()
+        attribution, _ = self._attribution_rows()
+        orders = [asdict(value) for value in self.account.orders]
         return {"initial_capital": self.config.initial_capital, "final_equity": values[-1] if values else self.config.initial_capital,
                 "return_pct": ((values[-1] / self.config.initial_capital) - 1) * 100 if values else 0.0,
                 "max_drawdown_pct": drawdown * 100, "equity_curve": curve,
                 "daily_equity_curve": daily_curve, "performance": performance,
                 "benchmark_symbol": self.config.benchmark_symbol,
-                "orders": [asdict(v) for v in self.account.orders], "fills": [asdict(v) for v in self.account.fills],
+                "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
+                "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
                 "positions": self.account.positions, "logs": self.logs, "state": self.state,
                 "checkpoint": self.checkpoint()}

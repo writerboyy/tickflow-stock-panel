@@ -108,10 +108,18 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
             engine.state = engine.context.state.copy()
             result = engine.result()
+        five_fortunes = result.get("state", {}).get("five_fortunes", {})
         result["metadata"] = {
+            "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
             "timeframe": payload["timeframe"], "asset_type": payload["asset_type"],
-            "source_revision": payload.get("source_revision"), "nav_filter": "skipped_no_data",
+            "start": payload["start"], "end": payload["end"],
+            "symbols": payload["symbols"], "symbol_count": len(payload["symbols"]),
+            "data_days": len(result.get("daily_equity_curve", [])),
+            "source_revision": payload.get("source_revision"),
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
+            "nav_filter": five_fortunes.get("nav_filter"),
+            "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
+            "liquidity_scope": five_fortunes.get("liquidity_scope"),
         }
         if payload.get("run_dir"):
             Path(payload["run_dir"]).mkdir(parents=True, exist_ok=True)

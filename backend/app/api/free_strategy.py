@@ -172,9 +172,10 @@ def delete_strategy(strategy_id: str, request: Request):
 def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request) -> dict[str, Any]:
     end = req.end or date.today()
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
-    config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end", "asset_type"})
+    config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end"})
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
-            "source": strategy["source"], "source_revision": strategy.get("revision"), "symbols": req.symbols,
+            "source": strategy["source"], "strategy_id": strategy.get("id"), "strategy_name": strategy.get("name"),
+            "source_revision": strategy.get("revision"), "symbols": req.symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config}
 
 
@@ -265,7 +266,7 @@ def _paper_loop(account_id: str, root: str) -> None:
         config.pop("strategy_id", None)
         config.pop("start", None); config.pop("end", None)
         config.pop("name", None)
-        engine_config = FreeStrategyConfig(**config)
+        engine_config = FreeStrategyConfig(asset_type=asset_type, **config)
         repo = KlineRepository(DataStore(Path(root).parent))
         engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
         engine.account.restore(state.get("account", {}))

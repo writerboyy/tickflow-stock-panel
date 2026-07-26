@@ -72,6 +72,8 @@ def initialize(context) -> None:
         "correlation_decisions": [],
         "daily_reports": [],
         "nav_filter": "skipped_no_data",
+        "excluded_no_minute_symbols": list(NO_TICKFLOW_MINUTE),
+        "liquidity_scope": "configured_universe",
     })
     context.schedule(_morning_regime, "09:40")
     context.schedule(_risk_monitor, "10:31")
