@@ -315,6 +315,10 @@ class FreeStrategyEngine:
             "runtime": self.runtime_snapshot(),
             "benchmark_curve": self._benchmark_curve,
             "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
+            "pending_orders": [
+                {"order_id": order.id, "due_at": due_at.isoformat()}
+                for order, due_at in self.pending
+            ],
             "order_counter": self._counter,
         }
 
@@ -328,6 +332,12 @@ class FreeStrategyEngine:
             symbol: date.fromisoformat(value)
             for symbol, value in raw.get("bought_dates", {}).items()
         }
+        orders_by_id = {order.id: order for order in self.account.orders}
+        self.pending = [
+            (orders_by_id[item["order_id"]], datetime.fromisoformat(item["due_at"]))
+            for item in raw.get("pending_orders", [])
+            if item.get("order_id") in orders_by_id
+        ]
         self._counter = int(raw.get("order_counter", len(self.account.orders)))
 
     def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:

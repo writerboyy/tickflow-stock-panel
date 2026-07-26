@@ -269,8 +269,11 @@ def _paper_loop(account_id: str, root: str) -> None:
         engine_config = FreeStrategyConfig(asset_type=asset_type, **config)
         repo = KlineRepository(DataStore(Path(root).parent))
         engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
-        engine.account.restore(state.get("account", {}))
-        engine.restore_runtime(state.get("runtime"))
+        if state.get("checkpoint"):
+            engine.restore_checkpoint(state["checkpoint"])
+        else:
+            engine.account.restore(state.get("account", {}))
+            engine.restore_runtime(state.get("runtime"))
     except Exception:
         # Keep the supervisor alive and make the failure inspectable from the API.
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"id": account_id}
@@ -307,9 +310,11 @@ def _paper_loop(account_id: str, root: str) -> None:
             if datetime.now().time() >= clock_time(15, 1):
                 did_finish = engine.finish_session()
             if fresh or did_finish:
-                state["account"] = engine.account.snapshot()
-                state["state"] = engine.state
-                state["runtime"] = engine.runtime_snapshot()
+                checkpoint = engine.checkpoint()
+                state["checkpoint"] = checkpoint
+                state["account"] = checkpoint["account"]
+                state["state"] = checkpoint["state"]
+                state["runtime"] = checkpoint["runtime"]
                 state["last_bar"] = last_bar
                 for fill in engine.account.fills[fill_count:]:
                     with (account_root / "ledger.jsonl").open("a", encoding="utf-8") as handle:
@@ -363,7 +368,8 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
     if action in {"start", "resume"}:
-        if action == "start" and account_id not in _paper:
+        process = _paper.get(account_id)
+        if process is None or not process.is_alive():
             ctx = mp.get_context("spawn")
             process = ctx.Process(target=_paper_loop, args=(account_id, str(store.root)), daemon=True)
             process.start()
@@ -382,7 +388,22 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
 
 @router.get("/paper/accounts/{account_id}/orders")
 def paper_orders(account_id: str, request: Request):
-    return {"orders": [event for event in _paper_store(request).events(account_id) if event.get("type") == "fill"]}
+    try:
+        state = _paper_store(request).get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    account = state.get("account") or state.get("checkpoint", {}).get("account", {})
+    return {"orders": account.get("orders", [])}
+
+
+@router.get("/paper/accounts/{account_id}/fills")
+def paper_fills(account_id: str, request: Request):
+    store = _paper_store(request)
+    try:
+        store.get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    return {"fills": [event for event in store.events(account_id) if event.get("type") == "fill"]}
 
 
 @router.get("/paper/accounts/{account_id}/logs")

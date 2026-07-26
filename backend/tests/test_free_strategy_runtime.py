@@ -147,6 +147,28 @@ def on_bar(context, bars):
     assert final["positions"] == {"X": 100.0}
 
 
+def test_checkpoint_restores_next_open_pending_orders():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 2:
+        context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(lot_size=100)
+    initial = FreeStrategyEngine(source, config=config)
+    initial.run(
+        [Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10)],
+        finalize_session=False,
+    )
+
+    resumed = FreeStrategyEngine(source, config=config)
+    resumed.restore_checkpoint(initial.checkpoint())
+    result = resumed.run([Bar("X", datetime(2024, 1, 3, 9, 30), 11, 11, 11, 11)])
+
+    assert result["fills"][0]["order_id"] == "o1"
+    assert result["fills"][0]["timestamp"] == "2024-01-03T09:30:00"
+    assert result["positions"] == {"X": 100.0}
+
+
 def test_result_contains_diagnostic_transactions_metrics_and_attribution():
     source = """
 def on_bar(context, bars):
