@@ -35,7 +35,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
       ],
       xAxis: [
         { type: 'category', data: dates, gridIndex: 0, axisLabel: { show: false }, axisTick: { show: false }, axisLine: { lineStyle: { color: ct.border } } },
-        { type: 'category', data: dates, gridIndex: 1, axisLabel: { color: ct.text, fontSize: 10, interval: Math.max(0, Math.floor(dates.length / 6)) }, axisTick: { show: false }, axisLine: { lineStyle: { color: ct.border } } },
+        { type: 'category', data: dates, gridIndex: 1, axisLabel: { color: ct.text, fontSize: 10, hideOverlap: true, interval: Math.max(0, Math.floor(dates.length / 6)), formatter: (value: string) => value.slice(5) }, axisTick: { show: false }, axisLine: { lineStyle: { color: ct.border } } },
       ],
       yAxis: [
         { type: 'value', gridIndex: 0, scale: true, axisLabel: { color: ct.text, fontSize: 10, formatter: (value: number) => value.toFixed(2) }, splitLine: { lineStyle: { color: ct.grid } } },
@@ -79,7 +79,6 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 border-t border-dashed border-slate-500" />基准</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-amber-600" />仓位</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-red-600" />回撤</span>
-        <span className="ml-auto">滚轮缩放 · 拖动平移</span>
       </div>
       <div ref={chartRef} className="h-[330px]" />
     </div>

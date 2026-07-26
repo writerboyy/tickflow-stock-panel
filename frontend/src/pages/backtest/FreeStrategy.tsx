@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AlertTriangle, BookOpen, CirclePause, CirclePlay, Code2, Plus, Save, Square, Trash2 } from 'lucide-react'
 import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
-import { FreeStrategyPerformanceChart } from './charts/FreeStrategyPerformanceChart'
+import { FreeStrategyResult } from './FreeStrategyResult'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const DEFAULT_CONFIG: FreeBacktestConfig = {
@@ -14,15 +14,12 @@ const DEFAULT_CONFIG: FreeBacktestConfig = {
   benchmark_symbol: '510300.SH',
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div className="border-l border-border pl-3"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 text-sm font-semibold tabular-nums">{value}</div></div>
-}
-
 export function FreeStrategy() {
   const [selectedId, setSelectedId] = useState<string>('')
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const templates = useQuery({ queryKey: ['free-strategy-templates'], queryFn: api.freeTemplates })
   const savedRuns = useQuery({ queryKey: ['free-backtest-runs'], queryFn: api.freeBacktestRuns })
+  const paperAccounts = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts })
   const detail = useQuery({ queryKey: ['free-strategy', selectedId], queryFn: () => api.freeStrategy(selectedId), enabled: Boolean(selectedId) })
   const [name, setName] = useState('我的自由策略')
   const [source, setSource] = useState(`def initialize(context):
@@ -38,16 +35,38 @@ def on_bar(context, bars):
   const [error, setError] = useState('')
   const [running, setRunning] = useState(false)
   const [selectedRunId, setSelectedRunId] = useState('')
-  const [account, setAccount] = useState<Record<string, any> | null>(null)
+  const [selectedAccountId, setSelectedAccountId] = useState('')
   const sourceRef = useRef<EventSource | null>(null)
   const jobRef = useRef<string | null>(null)
+  const didAutoSelectStrategy = useRef(false)
 
   const list = strategies.data?.strategies ?? []
   const templateList = templates.data?.templates ?? []
-  const selected = useMemo(() => list.find(item => item.id === selectedId), [list, selectedId])
-  const dailyReports = ((result?.state?.five_fortunes?.daily_reports ?? []) as Array<{ date: string, regime: string, target: string[], candidates: Array<{ symbol: string }> }>)
+  const selected = list.find(item => item.id === selectedId)
+  const accounts = paperAccounts.data?.accounts ?? []
+  const paperDetail = useQuery({
+    queryKey: ['free-paper-account', selectedAccountId],
+    queryFn: () => api.paperAccount(selectedAccountId),
+    enabled: Boolean(selectedAccountId),
+    refetchInterval: selectedAccountId ? 5_000 : false,
+  })
+  const account = paperDetail.data ?? accounts.find(item => item.id === selectedAccountId) ?? null
+  const accountSnapshot = account?.account ?? account
+  const accountPositions = (accountSnapshot?.positions ?? {}) as Record<string, number>
+  const activePositions = Object.entries(accountPositions).filter(([, quantity]) => quantity > 0)
 
   useEffect(() => () => sourceRef.current?.close(), [])
+  useEffect(() => {
+    const first = strategies.data?.strategies[0]
+    if (!didAutoSelectStrategy.current && first) {
+      didAutoSelectStrategy.current = true
+      setSelectedId(first.id)
+    }
+  }, [strategies.data?.strategies])
+  useEffect(() => {
+    const first = paperAccounts.data?.accounts[0]
+    if (!selectedAccountId && first) setSelectedAccountId(String(first.id))
+  }, [paperAccounts.data?.accounts, selectedAccountId])
   useEffect(() => {
     if (selected) {
       setName(selected.name)
@@ -101,13 +120,14 @@ def on_bar(context, bars):
       jobRef.current = job.job_id
       const events = new EventSource(`/api/free-strategies/backtest/${job.job_id}/stream`)
       sourceRef.current = events
+      let finished = false
       events.onmessage = event => {
         const payload = JSON.parse(event.data)
         if (payload.type === 'progress') setProgress(payload.message)
-        if (payload.type === 'result') { setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setRunning(false); void savedRuns.refetch(); events.close() }
-        if (payload.type === 'error') { setError(payload.error); setRunning(false); events.close() }
+        if (payload.type === 'result') { finished = true; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setRunning(false); void savedRuns.refetch(); events.close() }
+        if (payload.type === 'error') { finished = true; setError(payload.error); setRunning(false); events.close() }
       }
-      events.onerror = () => { if (running) setError('回测连接中断，请查看任务日志'); setRunning(false); events.close() }
+      events.onerror = () => { if (!finished) setError('回测连接中断，请查看任务日志'); setRunning(false); events.close() }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err)); setRunning(false)
     }
@@ -120,8 +140,25 @@ def on_bar(context, bars):
 
   const createPaper = async () => {
     if (!config.strategy_id) { setError('请先保存策略'); return }
-    const created = await api.createPaperAccount({ ...config, name: `${name} · 模拟盘` })
-    setAccount(created)
+    setError('')
+    try {
+      const created = await api.createPaperAccount({ ...config, name: `${name} · 模拟盘` })
+      setSelectedAccountId(String(created.id))
+      await paperAccounts.refetch()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const paperAction = async (action: 'start' | 'pause' | 'resume' | 'stop') => {
+    if (!selectedAccountId) return
+    setError('')
+    try {
+      await api.paperAction(selectedAccountId, action)
+      await Promise.all([paperAccounts.refetch(), paperDetail.refetch()])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   if (strategies.isLoading) return <div className="h-full grid place-items-center text-xs text-muted">加载自由策略...</div>
@@ -173,10 +210,30 @@ def on_bar(context, bars):
         {progress && <div className="mt-2 text-[11px] text-muted">{progress}</div>}
         <div className="my-4 border-t border-border" />
         <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">模拟盘</span><button onClick={createPaper} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] hover:border-accent"><CirclePlay className="h-3 w-3" />创建账户</button></div>
-        {account && <div className="rounded border border-border bg-elevated p-2 text-[11px]"><div className="flex items-center justify-between"><span>{account.name}</span><span className="text-warning">{account.status}</span></div><div className="mt-2 flex gap-1"><button title="启动" onClick={async () => setAccount(await api.paperAction(account.id, 'start'))}><CirclePlay className="h-3.5 w-3.5" /></button><button title="暂停" onClick={async () => setAccount(await api.paperAction(account.id, 'pause'))}><CirclePause className="h-3.5 w-3.5" /></button><button title="停止" onClick={async () => setAccount(await api.paperAction(account.id, 'stop'))}><Square className="h-3.5 w-3.5" /></button></div></div>}
+        {accounts.length ? <select className={INPUT} value={selectedAccountId} onChange={event => setSelectedAccountId(event.target.value)} aria-label="模拟账户">
+          {accounts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select> : null}
+        {account ? <div className="mt-2 rounded border border-border bg-elevated p-2.5 text-[11px]">
+          <div className="flex items-center justify-between gap-2"><span className="truncate font-medium">{account.name}</span><span className={account.status === 'running' ? 'text-success' : account.status === 'paused' ? 'text-warning' : 'text-muted'}>{account.status}</span></div>
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
+            <div><span className="text-muted">可用资金</span><div className="mt-0.5 tabular-nums">{Number(accountSnapshot?.cash ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</div></div>
+            <div><span className="text-muted">持仓标的</span><div className="mt-0.5 tabular-nums">{activePositions.length}</div></div>
+            <div className="col-span-2"><span className="text-muted">最新 bar</span><div className="mt-0.5 break-all font-mono text-[10px]">{account.last_bar || '尚未收到行情'}</div></div>
+          </div>
+          <div className="mt-2 max-h-24 overflow-y-auto border-y border-border py-1">
+            {activePositions.map(([symbol, quantity]) => <div key={symbol} className="flex justify-between py-1"><span className="font-mono">{symbol}</span><span className="tabular-nums">{quantity.toLocaleString('zh-CN')}</span></div>)}
+            {!activePositions.length && <div className="py-1 text-muted">当前无持仓</div>}
+          </div>
+          {account.last_error ? <div className="mt-2 break-words text-danger">{account.last_error}</div> : null}
+          <div className="mt-2 flex gap-1">
+            <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={account.status === 'running'} onClick={() => void paperAction(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-40"><CirclePlay className="h-3.5 w-3.5" /></button>
+            <button type="button" title="暂停" disabled={account.status !== 'running'} onClick={() => void paperAction('pause')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-40"><CirclePause className="h-3.5 w-3.5" /></button>
+            <button type="button" title="停止" disabled={account.status === 'stopped'} onClick={() => void paperAction('stop')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-40"><Square className="h-3.5 w-3.5" /></button>
+          </div>
+        </div> : <div className="mt-2 text-[11px] text-muted">创建账户后可启动持久模拟盘。</div>}
       </section>
     </div>
 
-    {result && <section className="shrink-0 rounded-md border border-border bg-surface p-3"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><span className="text-xs font-medium">回测结果</span><span className="text-[10px] text-muted">{result.metadata?.nav_filter === 'skipped_no_data' ? 'NAV/溢价过滤：无数据已跳过' : ''}</span></div><div className="grid grid-cols-4 gap-4 max-lg:grid-cols-2 max-sm:grid-cols-1"><Metric label="期末净值" value={result.final_equity.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} /><Metric label="收益率" value={`${result.return_pct.toFixed(2)}%`} /><Metric label="最大回撤" value={`${result.max_drawdown_pct.toFixed(2)}%`} /><Metric label="成交笔数" value={String(result.fills.length)} /></div>{result.daily_equity_curve?.length ? <div className="mt-4 border-y border-border py-3"><FreeStrategyPerformanceChart result={result} /></div> : null}<div className="mt-3 grid gap-3 lg:grid-cols-2"><div className="overflow-x-auto"><div className="mb-1 text-[11px] font-medium">成交</div><table className="w-full min-w-[520px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-1">时间</th><th className="pb-1">标的</th><th className="pb-1">方向</th><th className="pb-1">数量</th><th className="pb-1">价格</th><th className="pb-1">费用</th></tr></thead><tbody>{result.fills.slice(-20).map((fill, index) => <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="py-1">{fill.timestamp}</td><td>{fill.symbol}</td><td>{fill.side}</td><td>{fill.quantity}</td><td>{Number(fill.price).toFixed(3)}</td><td>{Number(fill.fee).toFixed(2)}</td></tr>)}</tbody></table></div><div className="grid gap-3 sm:grid-cols-2"><div><div className="mb-1 text-[11px] font-medium">当前持仓</div><div className="space-y-1 text-[11px] text-secondary">{Object.entries(result.positions).filter(([, qty]) => qty > 0).map(([symbol, qty]) => <div key={symbol} className="flex justify-between border-b border-border py-1"><span>{symbol}</span><span className="tabular-nums">{qty}</span></div>)}{!Object.values(result.positions).some(qty => qty > 0) && <div className="text-muted">无持仓</div>}</div></div><div><div className="mb-1 text-[11px] font-medium">策略日志</div><div className="max-h-28 space-y-1 overflow-auto text-[10px] text-secondary">{result.logs.slice(-12).map((log, index) => <div key={`${log.timestamp}-${index}`}><span className="text-muted">{log.timestamp.slice(0, 16)}</span> {log.message}</div>)}{!result.logs.length && <div className="text-muted">无策略日志</div>}</div></div></div></div>{dailyReports.length ? <div className="mt-3 overflow-x-auto"><div className="mb-1 text-[11px] font-medium">五福每日决策</div><table className="w-full min-w-[520px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-1">日期</th><th className="pb-1">市场状态</th><th className="pb-1">目标</th><th className="pb-1">候选数</th></tr></thead><tbody>{dailyReports.slice(-12).map(report => <tr key={report.date} className="border-t border-border"><td className="py-1">{report.date}</td><td>{report.regime}</td><td>{report.target.join(',') || '空仓'}</td><td>{report.candidates.length}</td></tr>)}</tbody></table></div> : null}<div className="mt-3 overflow-x-auto"><div className="mb-1 text-[11px] font-medium">逐日资产</div><table className="w-full min-w-[520px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-1">时间</th><th className="pb-1">总资产</th><th className="pb-1">现金</th><th className="pb-1">仓位</th><th className="pb-1">回撤</th></tr></thead><tbody>{(result.daily_equity_curve ?? result.equity_curve).slice(-12).map((row: any) => <tr key={row.timestamp} className="border-t border-border"><td className="py-1">{row.date ?? row.timestamp}</td><td>{row.equity.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</td><td>{row.cash.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</td><td>{row.exposure_pct == null ? Object.keys(row.positions).length : `${row.exposure_pct.toFixed(1)}%`}</td><td>{row.drawdown_pct == null ? '—' : `${row.drawdown_pct.toFixed(2)}%`}</td></tr>)}</tbody></table></div></section>}
+    {result && <FreeStrategyResult result={result} />}
   </div>
 }

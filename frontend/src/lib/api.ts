@@ -990,11 +990,18 @@ export interface FreeBacktestResult {
     excess_nav: number | null
     drawdown_pct: number
     exposure_pct: number
+    position_values?: Record<string, number>
+    daily_return_pct?: number
+    benchmark_daily_return_pct?: number | null
+    excess_daily_return_pct?: number | null
   }>
-  performance?: Record<string, number>
+  performance?: Record<string, number | string>
   benchmark_symbol?: string
   orders: Record<string, any>[]
+  signals?: Record<string, any>[]
+  transactions?: Record<string, any>[]
   fills: Record<string, any>[]
+  attribution?: Record<string, any>[]
   positions: Record<string, number>
   logs: { timestamp: string; level: string; message: string }[]
   state?: Record<string, any>
@@ -1031,6 +1038,9 @@ export const api = {
   createPaperAccount: (payload: FreeBacktestConfig & { name: string }) =>
     request<Record<string, any>>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   paperAccount: (id: string) => request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}`),
+  paperOrders: (id: string) => request<{ orders: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/orders`),
+  paperFills: (id: string) => request<{ fills: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/fills`),
+  paperLogs: (id: string) => request<{ logs: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),
   paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop') =>
     request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
 
