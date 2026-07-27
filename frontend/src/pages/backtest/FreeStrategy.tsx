@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, BookOpen, CirclePause, CirclePlay, Code2, History, Plus, Save, Square, Trash2 } from 'lucide-react'
+import { AlertTriangle, BookOpen, CirclePause, CirclePlay, Code2, History, LoaderCircle, Plus, Save, Square, Trash2 } from 'lucide-react'
 import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
 import { FreeStrategyResult } from './FreeStrategyResult'
@@ -44,6 +44,7 @@ def on_bar(context, bars):
   const [config, setConfig] = useState<FreeBacktestConfig>(DEFAULT_CONFIG)
   const [result, setResult] = useState<FreeBacktestResult | null>(null)
   const [progress, setProgress] = useState('')
+  const [progressPct, setProgressPct] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [running, setRunning] = useState(false)
   const [selectedRunId, setSelectedRunId] = useState('')
@@ -128,28 +129,31 @@ def on_bar(context, bars):
       return
     }
     sourceRef.current?.close()
-    setResult(null); setError(''); setProgress('准备回测'); setRunning(true)
+    jobRef.current = null
+    setResult(null); setError(''); setProgress('正在创建回测任务...'); setProgressPct(0); setRunning(true); setSelectedRunId(''); setWorkspaceView('backtests')
     try {
       const job = await api.startFreeBacktest(config)
       jobRef.current = job.job_id
+      setSelectedRunId(job.job_id)
       const events = new EventSource(`/api/free-strategies/backtest/${job.job_id}/stream`)
       sourceRef.current = events
       let finished = false
       events.onmessage = event => {
         const payload = JSON.parse(event.data)
-        if (payload.type === 'progress') setProgress(payload.message)
-        if (payload.type === 'result') { finished = true; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setRunning(false); setWorkspaceView('backtests'); void savedRuns.refetch(); events.close() }
-        if (payload.type === 'error') { finished = true; setError(payload.error); setRunning(false); events.close() }
+        if (payload.type === 'progress') { setProgress(payload.message); setProgressPct(typeof payload.progress === 'number' ? payload.progress : null) }
+        if (payload.type === 'result') { finished = true; jobRef.current = null; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setProgressPct(1); setRunning(false); void savedRuns.refetch(); events.close() }
+        if (payload.type === 'error') { finished = true; jobRef.current = null; setError(payload.error); setProgress('回测失败'); setProgressPct(null); setRunning(false); events.close() }
       }
-      events.onerror = () => { if (!finished) setError('回测连接中断，请查看任务日志'); setRunning(false); events.close() }
+      events.onerror = () => { if (!finished) { jobRef.current = null; setError('回测连接中断，请查看任务日志'); setProgress('回测连接中断'); setProgressPct(null) } setRunning(false); events.close() }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err)); setRunning(false)
+      setError(err instanceof Error ? err.message : String(err)); setProgress('回测启动失败'); setProgressPct(null); setRunning(false)
     }
   }
 
   const cancel = async () => {
     if (jobRef.current) await api.cancelFreeBacktest(jobRef.current)
-    sourceRef.current?.close(); setRunning(false); setProgress('回测已取消')
+    jobRef.current = null
+    sourceRef.current?.close(); setRunning(false); setProgress('回测已取消'); setProgressPct(null)
   }
 
   const createPaper = async () => {
@@ -254,6 +258,11 @@ def on_bar(context, bars):
           <span className="text-[10px] tabular-nums text-muted">{runs.length} 条</span>
         </div>
         <div className="space-y-1.5">
+          {running ? <div className="rounded border border-accent bg-accent/10 px-2.5 py-2.5" aria-current="true">
+            <div className="flex items-center justify-between gap-2 text-[11px]"><span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-accent"><LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" /><span className="truncate">{name}</span></span><span className="shrink-0 tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div>
+            <div className="mt-1.5 truncate text-[10px] text-muted">{progress}</div>
+            {selectedRunId ? <div className="mt-1 truncate font-mono text-[10px] text-muted">{selectedRunId}</div> : null}
+          </div> : null}
           {runs.map(run => {
             const metadata = run.metadata ?? {}
             const returnPct = Number(run.return_pct ?? 0)
@@ -270,7 +279,17 @@ def on_bar(context, bars):
 
       <div className="min-w-0">
         {error ? <div className="mb-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
-        {result ? <FreeStrategyResult result={result} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
+        {running ? <section className="min-h-[420px] rounded-md border border-border bg-surface p-4" aria-live="polite">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+            <div><div className="inline-flex items-center gap-2 text-sm font-medium"><LoaderCircle className="h-4 w-4 animate-spin text-accent" />回测运行中</div><div className="mt-1 text-[11px] text-muted">{name} · {config.asset_type.toUpperCase()} {config.timeframe} · {config.start} 至 {config.end}</div></div>
+            <button type="button" onClick={cancel} className="inline-flex items-center gap-1.5 rounded-btn border border-border px-3 py-1.5 text-xs text-muted hover:border-danger hover:text-danger"><Square className="h-3.5 w-3.5" />停止</button>
+          </div>
+          <div className="mx-auto mt-16 max-w-xl">
+            <div className="flex items-center justify-between gap-3 text-xs"><span>{progress}</span><span className="tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded bg-elevated"><div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${Math.max(2, Math.round((progressPct ?? 0) * 100))}%` }} /></div>
+            <div className="mt-3 break-all font-mono text-[10px] text-muted">任务 {selectedRunId || '正在生成...'}</div>
+          </div>
+        </section> : result ? <FreeStrategyResult result={result} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
       </div>
     </div>}
   </div>
