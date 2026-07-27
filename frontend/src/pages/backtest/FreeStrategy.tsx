@@ -6,6 +6,8 @@ import { EmptyState } from '@/components/EmptyState'
 import { FreeStrategyResult } from './FreeStrategyResult'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
+type WorkspaceView = 'strategy' | 'backtests'
+
 const DEFAULT_CONFIG: FreeBacktestConfig = {
   strategy_id: '', timeframe: '1d', asset_type: 'etf',
   start: `${new Date().getFullYear() - 3}-01-01`, end: new Date().toISOString().slice(0, 10),
@@ -21,6 +23,7 @@ function withoutLegacySymbols(value: Record<string, unknown>): Partial<FreeBackt
 }
 
 export function FreeStrategy() {
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('strategy')
   const [selectedId, setSelectedId] = useState<string>('')
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const templates = useQuery({ queryKey: ['free-strategy-templates'], queryFn: api.freeTemplates })
@@ -105,6 +108,7 @@ def on_bar(context, bars):
   }
 
   const loadSavedRun = async (jobId: string) => {
+    setWorkspaceView('backtests')
     setSelectedRunId(jobId)
     if (!jobId) return
     setError('')
@@ -134,7 +138,7 @@ def on_bar(context, bars):
       events.onmessage = event => {
         const payload = JSON.parse(event.data)
         if (payload.type === 'progress') setProgress(payload.message)
-        if (payload.type === 'result') { finished = true; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setRunning(false); void savedRuns.refetch(); events.close() }
+        if (payload.type === 'result') { finished = true; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setRunning(false); setWorkspaceView('backtests'); void savedRuns.refetch(); events.close() }
         if (payload.type === 'error') { finished = true; setError(payload.error); setRunning(false); events.close() }
       }
       events.onerror = () => { if (!finished) setError('回测连接中断，请查看任务日志'); setRunning(false); events.close() }
@@ -179,42 +183,25 @@ def on_bar(context, bars):
         <Code2 className="h-4 w-4 text-accent" />
         <div><div className="text-sm font-semibold">自由策略</div><div className="text-[11px] text-muted">独立 Python bar 回放 · 源码快照修订 {selected?.revision ?? '未保存'}</div></div>
       </div>
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
+      {workspaceView === 'strategy' ? <div className="flex flex-wrap items-center justify-end gap-1.5">
         <select className={INPUT} value="" onChange={e => loadTemplate(e.target.value)} aria-label="加载模板">
           <option value="">加载模板</option>{templateList.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
         </select>
         <button className="inline-flex items-center gap-1 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white" onClick={save}><Save className="h-3.5 w-3.5" />保存</button>
-      </div>
+      </div> : <div className="text-[11px] tabular-nums text-muted">共 {runs.length} 条回测记录</div>}
     </div>
 
-    <div className="grid min-h-[560px] shrink-0 grid-cols-[220px_minmax(0,1fr)_280px] gap-3 max-xl:min-h-[820px] max-xl:grid-cols-[180px_minmax(0,1fr)] max-md:min-h-0 max-md:grid-cols-1">
-      <div className="grid min-h-0 grid-rows-[minmax(160px,0.72fr)_minmax(220px,1.28fr)] gap-3 max-md:grid-rows-none">
-        <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-64">
+    <div className="flex shrink-0 border-b border-border" role="tablist" aria-label="自由策略工作区">
+      <button type="button" role="tab" aria-selected={workspaceView === 'strategy'} onClick={() => setWorkspaceView('strategy')} className={`inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-xs transition-colors ${workspaceView === 'strategy' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Code2 className="h-3.5 w-3.5" />策略开发</button>
+      <button type="button" role="tab" aria-selected={workspaceView === 'backtests'} onClick={() => setWorkspaceView('backtests')} className={`inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-xs transition-colors ${workspaceView === 'backtests' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><History className="h-3.5 w-3.5" />回测记录<span className="tabular-nums text-[10px]">{runs.length}</span></button>
+    </div>
+
+    {workspaceView === 'strategy' ? <div className="grid min-h-[560px] shrink-0 grid-cols-[220px_minmax(0,1fr)_280px] gap-3 max-xl:min-h-[820px] max-xl:grid-cols-[180px_minmax(0,1fr)] max-md:min-h-0 max-md:grid-cols-1">
+      <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-64">
           <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">策略列表</span><div className="flex items-center gap-1"><button className="text-muted hover:text-accent" title="新建策略" onClick={() => { setSelectedId(''); setName('我的自由策略'); setSource('ETF_POOL = ["510300.SH"]\n\ndef initialize(context):\n    context.set_universe(ETF_POOL)\n\ndef on_bar(context, bars):\n    pass'); setConfig(prev => ({ ...prev, strategy_id: '' })) }}><Plus className="h-3.5 w-3.5" /></button>{selectedId && <button className="text-muted hover:text-danger" title="删除策略" onClick={async () => { await api.deleteFreeStrategy(selectedId); setSelectedId(''); setConfig(prev => ({ ...prev, strategy_id: '' })); await strategies.refetch() }}><Trash2 className="h-3.5 w-3.5" /></button>}</div></div>
           <div className="space-y-1">{list.map(item => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full rounded px-2 py-2 text-left text-xs ${selectedId === item.id ? 'bg-accent/15 text-accent' : 'hover:bg-elevated'}`}><div className="truncate">{item.name}</div><div className="mt-1 text-[10px] text-muted">修订 {item.revision}</div></button>)}</div>
           {!list.length && <EmptyState icon={BookOpen} title="还没有策略" hint="从模板开始，保存后即可运行。" />}
-        </section>
-
-        <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-80">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium"><History className="h-3.5 w-3.5 text-accent" />回测记录</span>
-            <span className="text-[10px] tabular-nums text-muted">{runs.length} 条</span>
-          </div>
-          <div className="space-y-1.5">
-            {runs.map(run => {
-              const metadata = run.metadata ?? {}
-              const returnPct = Number(run.return_pct ?? 0)
-              return <button type="button" key={run.job_id} onClick={() => void loadSavedRun(run.job_id)} aria-label={`查看回测 ${run.job_id}`} className={`w-full rounded border px-2 py-2 text-left transition-colors ${selectedRunId === run.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
-                <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{String(metadata.strategy_name ?? run.job_id)}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
-                <div className="mt-1 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}</div>
-                <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{run.job_id}</span><span className="shrink-0">回撤 {Number(run.max_drawdown_pct ?? 0).toFixed(2)}% · {run.fills} 成交</span></div>
-              </button>
-            })}
-          </div>
-          {savedRuns.isLoading ? <div className="py-4 text-center text-[11px] text-muted">加载回测记录...</div> : null}
-          {!savedRuns.isLoading && !runs.length ? <EmptyState icon={History} title="还没有回测记录" hint="完成一次历史回测后会保存在这里。" /> : null}
-        </section>
-      </div>
+      </section>
 
       <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface max-md:h-[460px]">
         <div className="flex items-center gap-2 border-b border-border px-3 py-2"><input className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none" value={name} onChange={e => setName(e.target.value)} /><span className="text-[10px] text-muted">Python</span></div>
@@ -260,8 +247,31 @@ def on_bar(context, bars):
           </div>
         </div> : <div className="mt-2 text-[11px] text-muted">创建账户后可启动持久模拟盘。</div>}
       </section>
-    </div>
+    </div> : <div className="grid min-w-0 shrink-0 grid-cols-[300px_minmax(0,1fr)] items-start gap-3 max-lg:grid-cols-[250px_minmax(0,1fr)] max-md:grid-cols-1">
+      <section className="max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-80 max-md:min-h-0">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium"><History className="h-3.5 w-3.5 text-accent" />历史回测</span>
+          <span className="text-[10px] tabular-nums text-muted">{runs.length} 条</span>
+        </div>
+        <div className="space-y-1.5">
+          {runs.map(run => {
+            const metadata = run.metadata ?? {}
+            const returnPct = Number(run.return_pct ?? 0)
+            return <button type="button" key={run.job_id} onClick={() => void loadSavedRun(run.job_id)} aria-label={`查看回测 ${run.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${selectedRunId === run.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
+              <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{String(metadata.strategy_name ?? run.job_id)}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
+              <div className="mt-1.5 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}</div>
+              <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{run.job_id}</span><span className="shrink-0">回撤 {Number(run.max_drawdown_pct ?? 0).toFixed(2)}% · {run.fills} 成交</span></div>
+            </button>
+          })}
+        </div>
+        {savedRuns.isLoading ? <div className="py-4 text-center text-[11px] text-muted">加载回测记录...</div> : null}
+        {!savedRuns.isLoading && !runs.length ? <EmptyState icon={History} title="还没有回测记录" hint="返回策略开发，完成一次历史回测后会保存在这里。" /> : null}
+      </section>
 
-    {result && <FreeStrategyResult result={result} />}
+      <div className="min-w-0">
+        {error ? <div className="mb-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
+        {result ? <FreeStrategyResult result={result} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
+      </div>
+    </div>}
   </div>
 }
