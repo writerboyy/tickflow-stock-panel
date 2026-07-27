@@ -20,6 +20,7 @@ def initialize(context):
     initialize_five_fortunes(context)
 '''
 
+LEGACY_FIVE_FORTUNES_SHA256 = "622c46f2ffcb0919de6cf7e986caa9f95da6cabe3e985721829a5f3d9d2a0022"
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 
 
@@ -76,13 +77,20 @@ def on_bar(context, bars):
 ''',
     },
     "five_fortunes": {
-        "name": "五福策略（TickFlow 默认规则适配）",
+        "name": "五福策略",
         "config": {
             "timeframe": "1m",
             "asset_type": "etf",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0001,
+            "commission_pct": 0.0001,
+            "min_commission": 5,
+            "stamp_tax_pct": 0,
+            "slippage_bps": 1,
+            "price_tick": 0.001,
             "benchmark_symbol": "510300.SH",
             "settlement": "t1",
-            "fill_policy": "next_open",
+            "fill_policy": "close",
         },
         "source": FIVE_FORTUNES_SOURCE,
     },

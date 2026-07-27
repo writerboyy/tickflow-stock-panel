@@ -24,6 +24,8 @@ class FakeContext:
         self.universe = []
         self.history_requirements = {}
         self.market_history_requirements = {}
+        self.extra_history_requirements = set()
+        self.extra_rows = {}
         self.market_rows = {}
 
     def set_universe(self, symbols) -> None:
@@ -37,6 +39,12 @@ class FakeContext:
 
     def require_market_history(self, asset_type: str = "etf", timeframe: str = "1d", bars: int = 1) -> None:
         self.market_history_requirements[(asset_type, timeframe)] = bars
+
+    def require_extra_history(self, name: str) -> None:
+        self.extra_history_requirements.add(name)
+
+    def extra_history(self, name: str, symbol: str, count: int = 1, end_date=None):
+        return list(self.extra_rows.get((name, symbol), []))[-count:]
 
     def market_history_bars(self, symbol: str, count: int = 20, timeframe: str | None = None):
         return list(self.market_rows.get(symbol, []))[-count:]
@@ -82,7 +90,11 @@ def test_initialize_registers_available_etf_universe():
 
     assert context.universe == sorted({*five.WUFU_MINUTE_POOL, five.DEFENSIVE_ETF})
     assert context.history_requirements == {"1d": 61}
-    assert context.market_history_requirements == {("etf", "1d"): 61}
+    assert context.market_history_requirements == {
+        ("etf", "1d"): 61,
+        ("index", "1d"): 21,
+    }
+    assert context.extra_history_requirements == {"unit_net_value"}
 
 
 def test_historical_etf_names_preserve_original_dynamic_groups():
@@ -90,6 +102,20 @@ def test_historical_etf_names_preserve_original_dynamic_groups():
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588790.SH"]) is None
     assert five._dynamic_group("恒生创新药ETF华泰柏瑞") == "香港组:创药"
     assert five._dynamic_group("港股红利ETF") == "香港组:红利"
+    assert five._dynamic_group("科创芯片ETF南方") == "科创组:芯片"
+    assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588890.SH"]) == "科创组:芯"
+
+
+def test_reference_dynamic_pool_excludes_unavailable_fund():
+    context = FakeContext()
+    context.instruments = lambda _asset=None: [
+        {"symbol": "159814.SZ", "name": "创业大盘ETF西部利得", "has_minute": True},
+        {"symbol": "588220.SH", "name": "科创100ETF鹏华", "has_minute": True},
+    ]
+
+    _, _, groups, _ = five._market_catalog(context)
+
+    assert "159814.SZ" not in groups
 
 
 def test_laplace_smoothing_is_regime_specific():
@@ -97,14 +123,59 @@ def test_laplace_smoothing_is_regime_specific():
     context.now = datetime(2026, 7, 20, 13, 10)
     closes = [100 * (1.001 ** index) for index in range(70)]
     volumes = [1_000_000.0] * 69
+    context.extra_rows[("unit_net_value", "510300.SH")] = [{"date": "2026-07-19", "value": closes[-2]}]
 
-    normal = five._metric_for("510300.SH", closes, volumes, 550_000, context, "正常期")
-    weak = five._metric_for("510300.SH", closes, volumes, 550_000, context, "走弱期")
+    normal = five._metric_for("510300.SH", closes, volumes, 550_000, context, "正常期", "2026-07-19")
+    weak = five._metric_for("510300.SH", closes, volumes, 550_000, context, "走弱期", "2026-07-19")
 
     assert normal is not None and weak is not None
     assert normal["laplace_s"] == pytest.approx(0.06)
     assert weak["laplace_s"] == pytest.approx(0.12)
     assert weak["laplace_value"] > normal["laplace_value"]
+
+
+def test_history_is_aligned_to_previous_raw_close():
+    context = initialized_context()
+    context.market_rows["159667.SZ"] = [
+        SimpleNamespace(
+            date=datetime(2026, 7, day).date(),
+            close=close,
+            raw_close=close * 3,
+            volume=1_000,
+            amount=1_000,
+        )
+        for day, close in ((17, 0.45), (18, 0.46), (19, 0.47))
+    ]
+
+    rows = five._history_rows(context, "159667.SZ", 3)
+
+    assert [row["close"] for row in rows] == pytest.approx([1.35, 1.38, 1.41])
+
+
+def test_history_uses_exact_etf_split_ratio():
+    context = initialized_context()
+    context.market_rows["515000.SH"] = [
+        SimpleNamespace(
+            date=datetime(2025, 9, 5).date(),
+            close=1.835 / 1.994565,
+            raw_close=1.835,
+            volume=1_000,
+            amount=1_000,
+            split_ratio=1.0,
+        ),
+        SimpleNamespace(
+            date=datetime(2025, 9, 8).date(),
+            close=0.908,
+            raw_close=0.908,
+            volume=1_000,
+            amount=1_000,
+            split_ratio=2.0,
+        ),
+    ]
+
+    rows = five._history_rows(context, "515000.SH", 2)
+
+    assert [row["close"] for row in rows] == pytest.approx([1.835 / 2, 0.908])
 
 
 def test_weighted_momentum_matches_original_r_squared_weighting():
@@ -113,6 +184,35 @@ def test_weighted_momentum_matches_original_r_squared_weighting():
     assert score == pytest.approx(1.0092122547173843)
     assert annualized == pytest.approx(1.038545691888901)
     assert r2 == pytest.approx(0.9717552752848408)
+
+
+def test_momentum_upper_boundary_only_blocks_new_position():
+    context = initialized_context()
+    rows = [
+        {**metric("A", 4.997, variable_prices(1)), "upper_score": 5.001},
+        {**metric("B", 4.9, variable_prices(2)), "upper_score": 4.95},
+    ]
+    state = context.state["five_fortunes"]
+    state["all_metric_rows"] = rows
+
+    targets = five._choose_targets(context, rows, rows)
+
+    assert targets == ["B"]
+
+
+def test_momentum_filter_keeps_hard_upper_bound():
+    row = {
+        "score": 5.07,
+        "r2": 1.0,
+        "volume_ratio": 1.0,
+        "day_ratios": [1.0, 1.0, 1.0],
+        "passed_premium": True,
+        "close": 1.0,
+        "laplace_value": 0.9,
+        "laplace_slope": 0.01,
+    }
+
+    assert five._passes_filters(row, "正常期") is False
 
 
 def test_adjusted_correlation_matches_identical_price_paths():
@@ -180,14 +280,15 @@ def test_normal_regime_does_not_reduce_position_at_six_percent_drawdown():
     assert state["risk_actions"] == []
 
 
-def test_buy_targets_uses_full_available_strategy_exposure():
+def test_buy_targets_reserves_reference_commission_and_slippage():
     context = initialized_context()
     state = context.state["five_fortunes"]
     state["target"] = ["A"]
+    state["intraday"]["raw_close"]["A"] = 0.888
 
     five._buy_targets(context)
 
-    assert context.orders == [("percent", "A", 1.0)]
+    assert context.orders == [("quantity", "A", 1_125_900)]
 
 
 def test_four_consecutive_filter_fail_days_force_defensive(monkeypatch):
@@ -217,6 +318,45 @@ def test_candidate_pool_uses_regime_threshold():
     rows = [metric("A", 4.0, []), metric("B", 3.7, []), metric("C", 3.5, [])]
     assert [row["symbol"] for row in five._candidate_pool(rows, "正常期")] == ["A", "B"]
     assert [row["symbol"] for row in five._candidate_pool(rows, "走弱期")] == ["A"]
+
+
+def test_candidate_pool_keeps_reference_boundary_score():
+    rows = [metric("A", 4.9677263479, []), metric("B", 4.4206089384, [])]
+
+    assert [row["symbol"] for row in five._candidate_pool(rows, "震荡期")] == ["A", "B"]
+
+
+def test_rank_candidate_correlation_history_excludes_current_snapshot(monkeypatch):
+    context = FakeContext()
+    five.initialize(context)
+    state = context.state["five_fortunes"]
+    state["regime"] = "震荡期"
+    state["normal_liquidity_pool"] = ["A"]
+    state["intraday"] = {
+        "date": "2025-09-12",
+        "close": {"A": 999.0},
+        "volume": {"A": 1.0},
+    }
+    rows = [
+        {"date": f"2025-01-{index + 1:02d}", "close": float(index + 1), "volume": 1.0, "amount": 1.0}
+        for index in range(61)
+    ]
+    monkeypatch.setattr(five, "_history_rows", lambda *_args, **_kwargs: rows)
+    monkeypatch.setattr(
+        five,
+        "_metric_for",
+        lambda *_args, **_kwargs: {
+            "symbol": "A",
+            "score": 1.0,
+            "history": [],
+        },
+    )
+    monkeypatch.setattr(five, "_passes_filters", lambda *_args, **_kwargs: True)
+
+    ranked = five._rank_candidates(context)
+
+    assert ranked[0]["history"] == [float(value) for value in range(2, 62)]
+    assert 999.0 not in ranked[0]["history"]
 
 
 def test_liquidity_pool_uses_stricter_weak_regime_divisor():

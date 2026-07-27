@@ -100,6 +100,8 @@ def _prepare_market_reference(
         return {"enabled": False, "asset_type": None, "timeframe": None, "requested_bars": 0,
                 "rows": 0, "symbols": 0, "start": None, "end": None}
     records = engine.context.instruments(asset_type)
+    if not records:
+        records = _instrument_records(repo, asset_type, "1d", start, end)
     symbols = [item["symbol"] for item in records]
     get_batch = getattr(repo, "get_daily_asset_batch", None)
     if not symbols or not callable(get_batch):
@@ -111,6 +113,20 @@ def _prepare_market_reference(
     ]
     frame = get_batch(asset_type, symbols, load_start, end, columns)
     if frame.is_empty():
+        existing = engine._market_history_by_period.get("1d", {})
+        existing_bars = [bar for symbol in symbols for bar in existing.get(symbol, [])]
+        if existing_bars:
+            dates = [bar.timestamp.date() for bar in existing_bars]
+            return {
+                "enabled": True,
+                "asset_type": asset_type,
+                "timeframe": "1d",
+                "requested_bars": requested_bars,
+                "rows": len(existing_bars),
+                "symbols": len({bar.symbol for bar in existing_bars}),
+                "start": min(dates).isoformat(),
+                "end": max(dates).isoformat(),
+            }
         raise ValueError("全市场日线预热没有可用数据")
     bars = []
     for row in frame.iter_rows(named=True):
@@ -159,8 +175,9 @@ def _limit_pct(symbol: str, asset_type: str, name: str) -> float:
     return 0.10
 
 
-def _round_limit(value: float) -> float:
-    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def _round_limit(value: float, asset_type: str) -> float:
+    tick = Decimal("0.001") if asset_type == "etf" else Decimal("0.01")
+    return float(Decimal(str(value)).quantize(tick, rounding=ROUND_HALF_UP))
 
 
 def _split_ratio(previous_scale: float | None, current_scale: float, asset_type: str) -> float:
@@ -190,8 +207,8 @@ def _observe_daily_price(
     return {
         "scale": scale,
         "split_ratio": split_ratio,
-        "limit_up": _round_limit(reference * (1 + pct)) if reference is not None else None,
-        "limit_down": _round_limit(reference * (1 - pct)) if reference is not None else None,
+        "limit_up": _round_limit(reference * (1 + pct), asset_type) if reference is not None else None,
+        "limit_down": _round_limit(reference * (1 - pct), asset_type) if reference is not None else None,
     }
 
 
@@ -415,8 +432,20 @@ def _prepare_market_data(
     )
     load_start = start - timedelta(days=lookback_days)
     market_data = _load_market_data(repo, symbols, load_start, end, asset_type)
-    engine.market_history_metadata = _prepare_market_reference(
-        repo, engine, start, end, asset_type, market_data,
+    references = {
+        requested_asset: _prepare_market_reference(
+            repo, engine, start, end, requested_asset, market_data,
+        )
+        for requested_asset, period in engine.market_history_requirements
+        if period == "1d"
+    }
+    primary_reference = references.get(asset_type, {
+        "enabled": False, "asset_type": None, "timeframe": None,
+        "requested_bars": 0, "rows": 0, "symbols": 0, "start": None, "end": None,
+    })
+    engine.market_history_metadata = (
+        {**primary_reference, "assets": references}
+        if len(references) > 1 else primary_reference
     )
     if not any(start <= day <= end for _, day in market_data.daily):
         formal_market_data = _load_market_data(repo, symbols, start, end, asset_type)
@@ -488,8 +517,8 @@ def _scheduled_price_metadata(
     return {
         "scale": scale,
         "split_ratio": _split_ratio(previous_scale, scale, asset_type),
-        "limit_up": _round_limit(reference * (1 + pct)) if reference is not None else None,
-        "limit_down": _round_limit(reference * (1 - pct)) if reference is not None else None,
+        "limit_up": _round_limit(reference * (1 + pct), asset_type) if reference is not None else None,
+        "limit_down": _round_limit(reference * (1 - pct), asset_type) if reference is not None else None,
     }
 
 
@@ -809,6 +838,13 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         engine = FreeStrategyEngine(
             source, payload["timeframe"], config, instruments=instruments,
         )
+        engine.set_run_window(start, end)
+        fund_nav_data: dict[str, Any] = {}
+        if "unit_net_value" in engine.extra_history_requirements:
+            from .fund_nav import prepare_fund_nav_data
+
+            output.put({"type": "progress", "message": "准备 ETF 单位净值", "progress": 0.12})
+            fund_nav_data = prepare_fund_nav_data(repo, engine, start, end)
         output.put({
             "type": "progress",
             "message": "已识别定时执行模式" if engine.execution_mode == "scheduled" else "已识别完整回放模式",
@@ -924,14 +960,27 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 cursor += timedelta(days=1)
             if not days_with_bars:
                 raise ValueError("没有可用的分钟K历史数据，请先同步后重试")
-            missing = [symbol for symbol in requested_symbols if symbol not in symbols_seen]
+            get_minute_symbols = getattr(repo, "get_minute_symbols", None)
+            stored_symbols = (
+                set(get_minute_symbols(payload["asset_type"], start, end))
+                if callable(get_minute_symbols) else symbols_seen
+            )
+            missing = [symbol for symbol in requested_symbols if symbol not in stored_symbols]
             if missing:
                 raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
             engine.state = engine.context.state.copy()
             result = engine.result()
             trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
-        missing_symbols = [symbol for symbol in requested_symbols if symbol not in symbols_seen]
+        if payload["timeframe"] == "1d":
+            available_symbols = symbols_seen
+        else:
+            get_minute_symbols = getattr(repo, "get_minute_symbols", None)
+            available_symbols = (
+                set(get_minute_symbols(payload["asset_type"], start, end))
+                if callable(get_minute_symbols) else symbols_seen
+            )
+        missing_symbols = [symbol for symbol in requested_symbols if symbol not in available_symbols]
         minute_table = "kline_etf_minute" if payload["asset_type"] == "etf" else "kline_minute"
         result["metadata"] = {
             "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
@@ -944,6 +993,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,
+            "fund_nav": fund_nav_data,
             "execution_mode": engine.execution_mode,
             "scheduled_times": engine.scheduled_times,
             "callbacks_executed": engine.callbacks_executed,

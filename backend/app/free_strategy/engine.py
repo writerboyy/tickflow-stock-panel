@@ -8,7 +8,7 @@ import re
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time as datetime_time
+from datetime import date, datetime, time as datetime_time, timedelta
 from itertools import groupby
 from statistics import mean, pstdev
 from types import SimpleNamespace
@@ -24,8 +24,11 @@ class FreeStrategyConfig:
     initial_capital: float = 1_000_000.0
     fees_pct: float = 0.0002
     commission_pct: float | None = None
+    sell_commission_pct: float | None = None
+    min_commission: float = 0.0
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
+    price_tick: float | None = None
     lot_size: int = 100
     max_exposure_pct: float = 1.0
     settlement: str = "t1"
@@ -151,6 +154,7 @@ class Context:
         self._universe: list[str] = []
         self._history_requirements: dict[str, int] = {}
         self._market_history_requirements: dict[tuple[str, str], int] = {}
+        self._extra_history_requirements: set[str] = set()
 
     @property
     def universe(self) -> list[str]:
@@ -209,6 +213,16 @@ class Context:
     @property
     def market_history_requirements(self) -> dict[tuple[str, str], int]:
         return dict(self._market_history_requirements)
+
+    def require_extra_history(self, name: str) -> None:
+        value = str(name).strip().lower()
+        if re.fullmatch(r"[a-z][a-z0-9_]*", value) is None:
+            raise ValueError("额外历史数据名称必须为小写英文标识符")
+        self._extra_history_requirements.add(value)
+
+    @property
+    def extra_history_requirements(self) -> set[str]:
+        return set(self._extra_history_requirements)
 
     def instruments(self, asset_type: str | None = None) -> list[dict[str, Any]]:
         asset = str(asset_type).strip().lower() if asset_type else None
@@ -300,6 +314,45 @@ class Context:
         history = self._engine._history_by_period.get(timeframe or self.period, {})
         return list(history.get(symbol or "", [])[-count:])
 
+    def extra_history(
+        self,
+        name: str,
+        symbol: str,
+        count: int = 1,
+        end_date: date | datetime | str | None = None,
+    ) -> list[dict[str, Any]]:
+        if count <= 0 or self.now is None:
+            return []
+        normalized = str(symbol).strip().upper()
+        for source, target in {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}.items():
+            if normalized.endswith(source):
+                normalized = f"{normalized[:-len(source)]}{target}"
+                break
+        if isinstance(end_date, datetime):
+            requested_end = end_date.date()
+        elif isinstance(end_date, date):
+            requested_end = end_date
+        elif end_date is not None:
+            requested_end = date.fromisoformat(str(end_date))
+        else:
+            requested_end = self.now.date() - timedelta(days=1)
+        cutoff = min(requested_end, self.now.date() - timedelta(days=1))
+        values = self._engine.extra_history.get(name, {})
+        if normalized not in values and self._engine._extra_history_loader is not None:
+            load_start = self._engine.run_start or (cutoff - timedelta(days=365))
+            load_end = self._engine.run_end or cutoff
+            self._engine._extra_history_loader(name, [normalized], load_start, load_end)
+            values = self._engine.extra_history.get(name, {})
+        rows = sorted(
+            (day, value)
+            for day, value in values.get(normalized, {}).items()
+            if day <= cutoff
+        )
+        return [
+            {"date": day.isoformat(), "value": float(value)}
+            for day, value in rows[-count:]
+        ]
+
     def log(self, message: str, level: str = "INFO") -> None:
         self._engine.logs.append({"timestamp": self.now.isoformat() if self.now else "", "level": level, "message": str(message)})
 
@@ -355,6 +408,10 @@ class FreeStrategyEngine:
         }
         self.callbacks_executed = 0
         self.market_rows_consumed = 0
+        self.run_start: date | None = None
+        self.run_end: date | None = None
+        self.extra_history: dict[str, dict[str, dict[date, float]]] = {}
+        self._extra_history_loader: Callable[[str, list[str], date, date], None] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
@@ -385,6 +442,10 @@ class FreeStrategyEngine:
         return self.context.market_history_requirements
 
     @property
+    def extra_history_requirements(self) -> set[str]:
+        return self.context.extra_history_requirements
+
+    @property
     def scheduled_times(self) -> list[str]:
         return sorted({at for at, _, _ in self.context._scheduled})
 
@@ -397,6 +458,23 @@ class FreeStrategyEngine:
         loader: Callable[[str, int, str, datetime], list[Bar]] | None,
     ) -> None:
         self._history_loader = loader
+
+    def set_run_window(self, start: date, end: date) -> None:
+        self.run_start = start
+        self.run_end = end
+
+    def set_extra_history(
+        self,
+        name: str,
+        values: dict[str, dict[date, float]],
+    ) -> None:
+        self.extra_history.setdefault(name, {}).update(values)
+
+    def set_extra_history_loader(
+        self,
+        loader: Callable[[str, list[str], date, date], None] | None,
+    ) -> None:
+        self._extra_history_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
@@ -574,11 +652,19 @@ class FreeStrategyEngine:
             order.reason = "跌停，卖出未成交"
             return
         price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
+        if self.config.price_tick is not None:
+            tick = self.config.price_tick
+            price = math.floor(price / tick + 0.5 + 1e-10) * tick
         if side == "buy" and bar.limit_up is not None:
             price = min(price, bar.limit_up)
         elif side == "sell" and bar.limit_down is not None:
             price = max(price, bar.limit_down)
-        commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct
+        buy_commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct
+        commission_rate = (
+            self.config.sell_commission_pct
+            if side == "sell" and self.config.sell_commission_pct is not None
+            else buy_commission_rate
+        )
         lot = max(1, self.config.lot_size)
         qty = math.floor(qty / lot) * lot
         if side == "sell":
@@ -592,7 +678,7 @@ class FreeStrategyEngine:
                 self.account.equity(self._current_close_prices) * self.risk_config.max_symbol_exposure_pct
                 - current * raw_price,
             )
-            cash_gross = self.account.cash / (1 + commission_rate)
+            cash_gross = max(0.0, self.account.cash - self.config.min_commission) / (1 + commission_rate)
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
         if qty <= 0:
             if order.side == "target":
@@ -603,7 +689,8 @@ class FreeStrategyEngine:
                 order.reason = "数量不足、现金不足或 T+1 未结算"
             return
         gross = qty * price
-        fee = gross * commission_rate + (gross * self.config.stamp_tax_pct if side == "sell" and self.config.asset_type == "stock" else 0.0)
+        commission = max(self.config.min_commission, gross * commission_rate)
+        fee = commission + (gross * self.config.stamp_tax_pct if side == "sell" and self.config.asset_type == "stock" else 0.0)
         if side == "buy":
             self.account.cash -= gross + fee
             old = self.account.positions.get(order.symbol, 0.0)
@@ -763,6 +850,24 @@ class FreeStrategyEngine:
         self.context._sync(self._current_close_prices)
         self._run_callback("before_trading_start", bars_now)
 
+    def _run_scheduled_before(self, timestamp: datetime) -> None:
+        current = timestamp.strftime("%H:%M")
+        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
+            if done or at >= current:
+                continue
+            self.context.now = datetime.combine(timestamp.date(), datetime_time.fromisoformat(at))
+            self._run_scheduled_callback(callback, at)
+            self.context._scheduled[slot_index] = (at, callback, True)
+
+    def _run_scheduled_at(self, timestamp: datetime) -> None:
+        current = timestamp.strftime("%H:%M")
+        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
+            if done or at != current:
+                continue
+            self.context.now = timestamp
+            self._run_scheduled_callback(callback, at)
+            self.context._scheduled[slot_index] = (at, callback, True)
+
     def _accumulate_session_daily_bars(self, bars_now: BarsView) -> None:
         if self.timeframe == "1d":
             return
@@ -811,12 +916,14 @@ class FreeStrategyEngine:
         self.finish_session()
         timestamp = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=29)
         self._start_session(timestamp, BarsView())
+        self._run_scheduled_before(timestamp)
 
     def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""
         if self._active_session_date is None or self._session_finished:
             return False
-        timestamp = self._last_timestamp or datetime.now()
+        timestamp = self._last_timestamp or datetime.combine(self._active_session_date, datetime_time(15, 0))
+        self._run_scheduled_before(datetime.combine(self._active_session_date, datetime_time(23, 59)))
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
         for order in sorted(self._immediate, key=self._sell_first):
@@ -1004,6 +1111,7 @@ class FreeStrategyEngine:
                 self._start_session(premarket, BarsView())
             else:
                 self._apply_splits(bars_now, timestamp)
+            self._run_scheduled_before(timestamp)
             # next-open orders created on the previous callback are filled before this bar.
             self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
             due = [p for p in self.pending if p[1] <= timestamp and p[0].symbol in bars_now]
@@ -1026,10 +1134,7 @@ class FreeStrategyEngine:
                 if len(self.history[symbol]) > 5_000:
                     del self.history[symbol][:-5_000]
             self._run_callback("on_bar", bars_now)
-            for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-                if not done and timestamp.strftime("%H:%M") >= at:
-                    self._run_scheduled_callback(callback, at)
-                    self.context._scheduled[slot_index] = (at, callback, True)
+            self._run_scheduled_at(timestamp)
             for order in sorted(self._immediate, key=self._sell_first):
                 self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
             self._immediate.clear()
