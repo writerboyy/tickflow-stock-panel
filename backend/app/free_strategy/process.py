@@ -9,6 +9,7 @@ import shutil
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -786,6 +787,19 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
     try:
         from app.tickflow.repository import DataStore, KlineRepository
         output.put({"type": "progress", "message": "初始化策略并读取行情数据", "progress": 0.1})
+        source = str(payload["source"])
+        source_digest = sha256(source.encode("utf-8")).hexdigest()
+        expected_digest = payload.get("strategy_source_sha256")
+        if expected_digest is not None and expected_digest != source_digest:
+            raise ValueError("回测源码指纹与任务声明不一致")
+        if payload.get("run_dir"):
+            snapshot_path = Path(payload["run_dir"]) / "strategy.py"
+            if not snapshot_path.exists():
+                raise ValueError("回测源码快照不存在")
+            snapshot = snapshot_path.read_text(encoding="utf-8")
+            if sha256(snapshot.encode("utf-8")).hexdigest() != source_digest:
+                raise ValueError("回测源码快照与任务源码不一致")
+            source = snapshot
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
         config = FreeStrategyConfig(**payload["config"])
@@ -793,7 +807,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             repo, payload["asset_type"], payload["timeframe"], start, end,
         )
         engine = FreeStrategyEngine(
-            payload["source"], payload["timeframe"], config, instruments=instruments,
+            source, payload["timeframe"], config, instruments=instruments,
         )
         output.put({
             "type": "progress",
@@ -926,6 +940,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             "symbols": requested_symbols, "symbol_count": len(requested_symbols), "universe_source": universe_source,
             "data_days": len(result.get("daily_equity_curve", [])),
             "source_revision": payload.get("source_revision"),
+            "strategy_source_sha256": source_digest,
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,

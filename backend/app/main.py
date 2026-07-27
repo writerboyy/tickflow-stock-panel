@@ -53,6 +53,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("incomplete free strategy backtest cleanup failed: %s", e)
     try:
+        migrated = free_strategy.migrate_legacy_five_fortunes_strategies(store.data_dir)
+        if migrated:
+            logger.info("migrated %d legacy five-fortunes strategies", len(migrated))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("legacy five-fortunes strategy migration failed: %s", e)
+    try:
         free_strategy.recover_paper_accounts(store.data_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("free strategy paper recovery failed: %s", e)

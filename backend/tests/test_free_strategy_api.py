@@ -1,5 +1,6 @@
 import json
 import queue
+from hashlib import sha256
 from datetime import date
 from types import SimpleNamespace
 
@@ -7,8 +8,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import free_strategy
-from app.api.free_strategy import BacktestWrite, _job_payload, cleanup_incomplete_backtests, router
+from app.api.free_strategy import (
+    BacktestWrite,
+    _job_payload,
+    cleanup_incomplete_backtests,
+    migrate_legacy_five_fortunes_strategies,
+    router,
+)
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
+from app.free_strategy.templates import LEGACY_FIVE_FORTUNES_SOURCE, TEMPLATES
 
 
 def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
@@ -59,6 +67,69 @@ def test_job_payload_keeps_legacy_saved_universe_as_fallback(tmp_path):
     payload = _job_payload(BacktestWrite(strategy_id="legacy"), strategy, request)
 
     assert payload["symbols"] == ["510300.SH"]
+
+
+def test_legacy_five_fortunes_strategy_is_migrated_once(tmp_path):
+    store = FreeStrategyStore(tmp_path)
+    legacy = store.save(
+        None,
+        "五福策略",
+        LEGACY_FIVE_FORTUNES_SOURCE,
+        {"timeframe": "1m", "asset_type": "etf"},
+    )
+    customized = store.save(
+        None,
+        "自行修改的五福策略",
+        f"{LEGACY_FIVE_FORTUNES_SOURCE}\n# user customization\n",
+        {"timeframe": "1m", "asset_type": "etf"},
+    )
+
+    migrated = migrate_legacy_five_fortunes_strategies(tmp_path)
+    repeated = migrate_legacy_five_fortunes_strategies(tmp_path)
+
+    loaded = store.get(legacy["id"])
+    assert migrated == [legacy["id"]]
+    assert repeated == []
+    assert loaded["revision"] == 2
+    assert loaded["source"] == TEMPLATES["five_fortunes"]["source"]
+    assert (
+        tmp_path / "free_strategies" / legacy["id"] / "revisions" / "0001.py"
+    ).read_text(encoding="utf-8") == LEGACY_FIVE_FORTUNES_SOURCE
+    assert store.get(customized["id"])["revision"] == 1
+
+
+def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeypatch, tmp_path):
+    source = "def initialize(context):\n    context.set_universe(['X'])\n\ndef on_bar(context, bars):\n    pass\n"
+    strategy = FreeStrategyStore(tmp_path).save(None, "一致性策略", source, {})
+    captured: dict = {}
+
+    class FakeProcess:
+        def is_alive(self):
+            return True
+
+    def fake_start_process(payload):
+        captured.update(payload)
+        return FakeProcess(), queue.SimpleQueue()
+
+    monkeypatch.setattr(free_strategy, "start_process", fake_start_process)
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post("/api/free-strategies/backtest", json={"strategy_id": strategy["id"]})
+
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    try:
+        run_dir = tmp_path / "free_strategy_runs" / job_id
+        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+        digest = sha256(source.encode("utf-8")).hexdigest()
+        assert (run_dir / "strategy.py").read_text(encoding="utf-8") == source
+        assert manifest["strategy_source_sha256"] == digest
+        assert captured["strategy_source_sha256"] == digest
+    finally:
+        free_strategy._jobs.pop(job_id, None)
 
 
 def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):

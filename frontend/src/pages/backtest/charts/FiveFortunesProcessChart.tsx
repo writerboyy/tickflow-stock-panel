@@ -9,6 +9,7 @@ export interface FiveFortunesDailyReport {
   raw_regime?: string
   regime_changed?: boolean
   target: string[]
+  holdings?: string[]
   candidates: Array<{ symbol: string; score?: number }>
   filtered_count?: number
   candidate_count?: number
@@ -62,7 +63,7 @@ export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFort
         formatter: (params: any) => {
           const report = reports[params[0]?.dataIndex ?? 0]
           const activity = trades.get(report.date) ?? { buy: 0, sell: 0 }
-          return `<div>${report.date} · ${report.regime}</div><div>过滤后 ${report.filtered_count ?? 0} · 候选 ${report.candidate_count ?? report.candidates.length} · 流动性池 ${report.liquidity_pool_count ?? 0}</div><div>买入 ${activity.buy} · 卖出 ${activity.sell}</div>${report.regime_changed ? '<div>状态切换</div>' : ''}${report.risk_action ? `<div>风控 ${report.risk_action.action ?? ''}</div>` : ''}`
+          return `<div>${report.date} · ${report.regime}</div><div>过滤后 ${report.filtered_count ?? 0} · 候选 ${report.candidate_count ?? report.candidates.length} · 流动性池 ${report.liquidity_pool_count ?? 0}</div><div>目标 ${report.target.join(', ') || '空仓'}</div><div>实际持仓 ${report.holdings?.join(', ') || '空仓'}</div><div>实际成交 买入 ${activity.buy} · 卖出 ${activity.sell}</div>${report.regime_changed ? '<div>状态切换</div>' : ''}${report.risk_action ? `<div>风控 ${report.risk_action.action ?? ''}</div>` : ''}`
         },
       },
       series: [

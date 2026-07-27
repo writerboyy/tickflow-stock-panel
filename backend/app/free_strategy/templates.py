@@ -1,6 +1,28 @@
 """开箱即用的自由策略模板。"""
 from __future__ import annotations
 
+from pathlib import Path
+
+
+LEGACY_FIVE_FORTUNES_SOURCE = '''from app.free_strategy.five_fortunes import (
+    DEFENSIVE_ETF,
+    WUFU_MINUTE_POOL,
+    after_trading_end,
+    before_trading_start,
+    initialize as initialize_five_fortunes,
+    on_bar,
+)
+
+ETF_POOL = [*WUFU_MINUTE_POOL, DEFENSIVE_ETF]
+
+def initialize(context):
+    context.set_universe(ETF_POOL)
+    initialize_five_fortunes(context)
+'''
+
+FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
+
+
 TEMPLATES = {
     "dual_ma": {
         "name": "双均线模板",
@@ -62,20 +84,6 @@ def on_bar(context, bars):
             "settlement": "t1",
             "fill_policy": "next_open",
         },
-    "source": '''from app.free_strategy.five_fortunes import (
-    DEFENSIVE_ETF,
-    WUFU_MINUTE_POOL,
-    after_trading_end,
-    before_trading_start,
-    initialize as initialize_five_fortunes,
-    on_bar,
-)
-
-ETF_POOL = [*WUFU_MINUTE_POOL, DEFENSIVE_ETF]
-
-def initialize(context):
-    context.set_universe(ETF_POOL)
-    initialize_five_fortunes(context)
-''',
+        "source": FIVE_FORTUNES_SOURCE,
     },
 }

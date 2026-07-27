@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+from app.free_strategy import five_fortunes
 from app.free_strategy.five_fortunes import DEFENSIVE_ETF, REGIME_PROXIES
 from app.free_strategy.templates import TEMPLATES
 
@@ -202,6 +204,13 @@ def test_templates_define_universe_in_strategy_source(template_id):
     engine = FreeStrategyEngine(template["source"], timeframe=template.get("config", {}).get("timeframe", "1d"))
 
     assert engine.universe
+
+
+def test_five_fortunes_template_is_a_self_contained_source_snapshot():
+    source = TEMPLATES["five_fortunes"]["source"]
+
+    assert source == Path(five_fortunes.__file__).read_text(encoding="utf-8")
+    assert "from app.free_strategy.five_fortunes import" not in source
 
 
 def test_next_open_fill_and_t1_are_default():
@@ -689,6 +698,9 @@ from app.free_strategy.five_fortunes import after_trading_end, before_trading_st
     reports = result["state"]["five_fortunes"]["daily_reports"]
     assert reports
     assert reports[-1]["nav_filter"] == "skipped_no_data"
+    assert reports[-1]["holdings"] == [
+        symbol for symbol, quantity in result["positions"].items() if quantity > 0
+    ]
     assert result["daily_equity_curve"]
     assert result["performance"]["benchmark_return_pct"] > 0
 

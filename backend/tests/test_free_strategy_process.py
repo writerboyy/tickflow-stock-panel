@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 from datetime import datetime, time, timedelta
+from hashlib import sha256
 
 import polars as pl
 
@@ -259,6 +260,9 @@ def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
         "start": None,
         "end": None,
     }
+    assert event["result"]["metadata"]["strategy_source_sha256"] == sha256(
+        b"def on_bar(context, bars):\n    pass\n"
+    ).hexdigest()
 
 
 def test_backtest_reads_universe_from_strategy_source(monkeypatch, tmp_path):
@@ -351,6 +355,36 @@ def test_failed_backtest_removes_incomplete_run_directory(monkeypatch, tmp_path)
     while event["type"] == "progress":
         event = output.get()
     assert event["type"] == "error"
+    assert not run_dir.exists()
+
+
+def test_backtest_rejects_a_tampered_source_snapshot(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "tampered-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "strategy.py").write_text(
+        "def on_bar(context, bars):\n    context.log('tampered')\n",
+        encoding="utf-8",
+    )
+    source = "def on_bar(context, bars):\n    pass\n"
+    output: queue.SimpleQueue = queue.SimpleQueue()
+
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "run_dir": str(run_dir),
+        "source": source,
+        "strategy_source_sha256": sha256(source.encode("utf-8")).hexdigest(),
+        "symbols": ["X"],
+        "timeframe": "1d",
+        "asset_type": "etf",
+        "start": "2024-01-02",
+        "end": "2024-01-02",
+        "config": {"asset_type": "etf"},
+    }, output)
+
+    assert output.get()["type"] == "progress"
+    event = output.get()
+    assert event["type"] == "error"
+    assert "源码快照与任务源码不一致" in event["error"]
     assert not run_dir.exists()
 
 

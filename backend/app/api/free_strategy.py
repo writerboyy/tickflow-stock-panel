@@ -11,6 +11,7 @@ import shutil
 import threading
 import uuid
 from datetime import date, timedelta
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.config import settings
 from app.free_strategy.process import start_process
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
-from app.free_strategy.templates import TEMPLATES
+from app.free_strategy.templates import LEGACY_FIVE_FORTUNES_SOURCE, TEMPLATES
 from app.services import preferences
 
 router = APIRouter(prefix="/api/free-strategies", tags=["free-strategy"])
@@ -69,6 +70,25 @@ def cleanup_incomplete_backtests(data_dir: Path) -> None:
     for path in root.iterdir():
         if path.is_dir() and not (path / "result.json").exists():
             shutil.rmtree(path, ignore_errors=True)
+
+
+def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
+    """Replace untouched import wrappers with complete, reproducible source snapshots."""
+    store = FreeStrategyStore(data_dir)
+    migrated = []
+    replacement = TEMPLATES["five_fortunes"]["source"]
+    for summary in store.list():
+        strategy = store.get(str(summary["id"]))
+        if strategy["source"] != LEGACY_FIVE_FORTUNES_SOURCE:
+            continue
+        store.save(
+            strategy["id"],
+            strategy["name"],
+            replacement,
+            strategy.get("config", {}),
+        )
+        migrated.append(str(strategy["id"]))
+    return migrated
 
 
 class StrategyWrite(BaseModel):
@@ -275,9 +295,10 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
     config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end"})
     legacy_symbols = req.symbols or strategy.get("config", {}).get("symbols", [])
+    source_digest = sha256(strategy["source"].encode("utf-8")).hexdigest()
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
             "source": strategy["source"], "strategy_id": strategy.get("id"), "strategy_name": strategy.get("name"),
-            "source_revision": strategy.get("revision"), "symbols": legacy_symbols,
+            "source_revision": strategy.get("revision"), "strategy_source_sha256": source_digest, "symbols": legacy_symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
             "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
 
@@ -295,7 +316,7 @@ def create_backtest(req: BacktestWrite, request: Request):
     run_root.mkdir(parents=True, exist_ok=True)
     (run_root / "strategy.py").write_text(strategy["source"], encoding="utf-8")
     payload["run_dir"] = str(run_root)
-    (run_root / "manifest.json").write_text(json.dumps({"job_id": job_id, "strategy_id": req.strategy_id, "source_revision": strategy.get("revision"), "payload": {k: v for k, v in payload.items() if k != "source"}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (run_root / "manifest.json").write_text(json.dumps({"job_id": job_id, "strategy_id": req.strategy_id, "source_revision": strategy.get("revision"), "strategy_source_sha256": payload["strategy_source_sha256"], "payload": {k: v for k, v in payload.items() if k != "source"}}, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
         process, output = start_process(payload)
     except Exception:
