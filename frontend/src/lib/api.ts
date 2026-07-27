@@ -943,7 +943,7 @@ export interface StrategyAlertEvent {
   [key: string]: unknown
 }
 
-// ===== 自由策略 =====
+// ===== 量化策略 =====
 export interface FreeStrategySummary {
   id: string
   name: string
@@ -1010,6 +1010,7 @@ export interface FreeBacktestResult {
 
 export interface FreeBacktestRunSummary {
   job_id: string
+  name: string
   final_equity: number
   return_pct: number
   max_drawdown_pct: number
@@ -1028,12 +1029,18 @@ export const api = {
     request<FreeStrategySummary>('/api/free-strategies', { method: 'POST', body: JSON.stringify(payload) }),
   updateFreeStrategy: (id: string, payload: { name: string; source: string; config?: Record<string, any> }) =>
     request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  renameFreeStrategy: (id: string, name: string) =>
+    request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteFreeStrategy: (id: string) => request<{ ok: boolean }>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   startFreeBacktest: (payload: FreeBacktestConfig) =>
     request<{ job_id: string; status: string; source_revision: number }>('/api/free-strategies/backtest', { method: 'POST', body: JSON.stringify(payload) }),
   cancelFreeBacktest: (jobId: string) => request<{ ok: boolean }>(`/api/free-strategies/backtest/${jobId}/cancel`, { method: 'POST' }),
   freeBacktestRuns: () => request<{ runs: FreeBacktestRunSummary[] }>('/api/free-strategies/backtest'),
   freeBacktestResult: (jobId: string) => request<FreeBacktestResult>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`),
+  renameFreeBacktest: (jobId: string, name: string) =>
+    request<{ job_id: string; name: string }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteFreeBacktest: (jobId: string) =>
+    request<{ ok: boolean }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
   paperAccounts: () => request<{ accounts: Record<string, any>[] }>('/api/free-strategies/paper/accounts'),
   createPaperAccount: (payload: FreeBacktestConfig & { name: string }) =>
     request<Record<string, any>>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
@@ -1043,6 +1050,8 @@ export const api = {
   paperLogs: (id: string) => request<{ logs: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),
   paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop') =>
     request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
+  deletePaperAccount: (id: string) =>
+    request<{ ok: boolean }>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // ===== Auth (访问认证) =====
   authStatus: () =>
