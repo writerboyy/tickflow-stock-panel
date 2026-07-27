@@ -323,10 +323,6 @@ def before_trading_start(context) -> None:
     state["decision"] = {"date": context.now.date().isoformat(), "reason": "pending"}
 
 
-# 旧快照仍可导入，新策略使用标准生命周期名。
-on_session_start = before_trading_start
-
-
 def on_bar(context, bars) -> None:
     state = _state(context)
     intraday = state["intraday"]

@@ -291,17 +291,12 @@ class FreeStrategyEngine:
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
         exec(compile(source, "<free_strategy>", "exec"), namespace, namespace)
-        callback_names = {
-            "initialize": ("initialize",),
-            "before_trading_start": ("before_trading_start", "on_session_start"),
-            "on_bar": ("on_bar",),
-            "after_trading_end": ("after_trading_end", "on_session_end", "after_market_close"),
-        }
+        callback_names = ("initialize", "before_trading_start", "on_bar", "after_trading_end")
         self._callbacks = {
-            canonical: next((namespace[name] for name in names if callable(namespace.get(name))), None)
-            for canonical, names in callback_names.items()
+            name: namespace[name]
+            for name in callback_names
+            if callable(namespace.get(name))
         }
-        self._callbacks = {name: callback for name, callback in self._callbacks.items() if callback is not None}
         if "on_bar" not in self._callbacks:
             raise ValueError("策略必须定义 on_bar(context, bars)")
         if "initialize" in self._callbacks:

@@ -73,8 +73,8 @@ def variable_prices(offset: float = 0.0) -> list[float]:
     return values
 
 
-def test_standard_lifecycle_name_keeps_legacy_alias():
-    assert five.on_session_start is five.before_trading_start
+def test_standard_lifecycle_does_not_export_legacy_alias():
+    assert not hasattr(five, "on_session_start")
 
 
 def test_initialize_registers_available_etf_universe():

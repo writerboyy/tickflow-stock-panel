@@ -331,18 +331,18 @@ def after_trading_end(context):
     assert result["state"]["scheduled_close"] == 2
 
 
-def test_paper_session_end_runs_once_and_supports_session_aliases():
+def test_paper_session_end_runs_once_with_standard_lifecycle():
     source = """
 def initialize(context):
     context.state['events'] = []
 
-def on_session_start(context):
+def before_trading_start(context):
     context.state['events'].append('start')
 
 def on_bar(context, bars):
     context.state['events'].append('bar')
 
-def after_market_close(context):
+def after_trading_end(context):
     context.state['events'].append('after')
 """
     engine = FreeStrategyEngine(source, timeframe="1m")
@@ -357,9 +357,33 @@ def after_market_close(context):
     assert engine.state["events"] == ["start", "bar", "after", "start", "bar", "after"]
 
 
+def test_legacy_lifecycle_aliases_are_not_executed():
+    source = """
+def initialize(context):
+    context.state['events'] = []
+
+def on_session_start(context):
+    context.state['events'].append('legacy-start')
+
+def on_bar(context, bars):
+    context.state['events'].append('bar')
+
+def on_session_end(context):
+    context.state['events'].append('legacy-end')
+
+def after_market_close(context):
+    context.state['events'].append('legacy-after')
+"""
+    result = FreeStrategyEngine(source, timeframe="1m").run([
+        Bar("X", datetime(2024, 1, 2, 14, 59), 1, 1, 1, 1),
+    ])
+
+    assert result["state"]["events"] == ["bar"]
+
+
 def test_five_fortunes_runs_on_minute_bars_and_records_daily_candidates():
     source = """
-from app.free_strategy.five_fortunes import after_trading_end, initialize, on_bar, on_session_start
+from app.free_strategy.five_fortunes import after_trading_end, before_trading_start, initialize, on_bar
 """
     symbols = [*REGIME_PROXIES, "518880.SH", DEFENSIVE_ETF]
     bars = []
