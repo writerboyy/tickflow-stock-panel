@@ -36,6 +36,7 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
   { id: '/free-strategy', label: '量化策略', type: 'builtin', visible: true },
+  { id: '/paper-trading', label: '模拟盘', type: 'builtin', visible: true },
   { id: '/limit-ladder', label: '连板梯队', type: 'builtin', visible: true },
   { id: '/concept-analysis', label: '概念分析', type: 'builtin', visible: true },
   { id: '/industry-analysis', label: '行业分析', type: 'builtin', visible: true },
@@ -46,6 +47,14 @@ const BUILTIN_PAGES: NavEntry[] = [
   { id: '/monitor', label: '监控中心', type: 'builtin', visible: true },
   { id: '/data', label: '数据', type: 'builtin', visible: true },
 ]
+
+function withPaperTrading(order: string[]): string[] {
+  if (!order.length || order.includes('/paper-trading')) return order
+  const result = [...order]
+  const strategyIndex = result.indexOf('/free-strategy')
+  result.splice(strategyIndex >= 0 ? strategyIndex + 1 : result.length, 0, '/paper-trading')
+  return result
+}
 
 // ── Sortable row ──
 
@@ -170,7 +179,7 @@ export function SettingsMenuSettingsPanel() {
   }))
 
   const allEntries = useMemo(() => {
-    const saved = prefs?.nav_order ?? []
+    const saved = withPaperTrading(prefs?.nav_order ?? [])
     const entryMap = new Map<string, NavEntry>()
     for (const e of BUILTIN_PAGES) entryMap.set(e.id, e)
     for (const e of analysisEntries) entryMap.set(e.id, e)
@@ -197,7 +206,7 @@ export function SettingsMenuSettingsPanel() {
   // Local order state for optimistic drag updates
   const [localOrder, setLocalOrder] = useState<string[] | null>(null)
   const orderedEntries = useMemo(() => {
-    const order = localOrder ?? prefs?.nav_order ?? []
+    const order = withPaperTrading(localOrder ?? prefs?.nav_order ?? [])
     if (!order.length) return allEntries
     const byId = new Map(allEntries.map(e => [e.id, e]))
     const result: NavEntry[] = []

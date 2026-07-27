@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
-  CirclePause,
   CirclePlay,
   Code2,
   History,
@@ -14,6 +14,7 @@ import {
   Save,
   Square,
   Trash2,
+  WalletCards,
 } from 'lucide-react'
 import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
@@ -44,7 +45,7 @@ type WorkspaceView = 'strategy' | 'backtests'
 type EditorSnapshot = { name: string; source: string; config: FreeBacktestConfig }
 type EditorAction = { type: 'select'; id: string } | { type: 'new' } | { type: 'template'; id: string }
 type RenameTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
-type DeleteTarget = { type: 'strategy' | 'backtest' | 'paper'; id: string; name: string }
+type DeleteTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
 
 function executionModeLabel(value: unknown) {
   return value === 'scheduled' ? '定时执行' : value === 'full_bar' ? '完整回放' : ''
@@ -140,12 +141,12 @@ function ConfirmDialog({ title, description, confirmLabel, pending, error, dange
 }
 
 export function FreeStrategy() {
+  const navigate = useNavigate()
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('strategy')
   const [selectedId, setSelectedId] = useState('')
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const templates = useQuery({ queryKey: ['free-strategy-templates'], queryFn: api.freeTemplates })
   const savedRuns = useQuery({ queryKey: ['free-backtest-runs'], queryFn: api.freeBacktestRuns })
-  const paperAccounts = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts })
   const detail = useQuery({ queryKey: ['free-strategy', selectedId], queryFn: () => api.freeStrategy(selectedId), enabled: Boolean(selectedId) })
   const [name, setName] = useState('我的量化策略')
   const [source, setSource] = useState(DEFAULT_SOURCE)
@@ -159,7 +160,6 @@ export function FreeStrategy() {
   const [running, setRunning] = useState(false)
   const [saving, setSaving] = useState(false)
   const [selectedRunId, setSelectedRunId] = useState('')
-  const [selectedAccountId, setSelectedAccountId] = useState('')
   const [mobileRunDetail, setMobileRunDetail] = useState(false)
   const [pendingEditorAction, setPendingEditorAction] = useState<EditorAction | null>(null)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
@@ -172,28 +172,12 @@ export function FreeStrategy() {
   const sourceRef = useRef<EventSource | null>(null)
   const jobRef = useRef<string | null>(null)
   const didAutoSelectStrategy = useRef(false)
-  const didAutoSelectAccount = useRef(false)
 
   const list = strategies.data?.strategies ?? []
   const templateList = templates.data?.templates ?? []
   const runs = savedRuns.data?.runs ?? []
   const selected = list.find(item => item.id === selectedId)
   const selectedRun = runs.find(item => item.job_id === selectedRunId)
-  const accounts = paperAccounts.data?.accounts ?? []
-  const paperDetail = useQuery({
-    queryKey: ['free-paper-account', selectedAccountId],
-    queryFn: () => api.paperAccount(selectedAccountId),
-    enabled: Boolean(selectedAccountId),
-    refetchInterval: selectedAccountId ? 5_000 : false,
-  })
-  const account = selectedAccountId
-    ? (String(paperDetail.data?.id ?? '') === selectedAccountId
-        ? paperDetail.data
-        : accounts.find(item => String(item.id) === selectedAccountId)) ?? null
-    : null
-  const accountSnapshot = account?.account ?? account
-  const accountPositions = (accountSnapshot?.positions ?? {}) as Record<string, number>
-  const activePositions = Object.entries(accountPositions).filter(([, quantity]) => quantity > 0)
   const draft = useMemo<EditorSnapshot>(() => ({ name, source, config }), [name, source, config])
   const dirty = baseline === null || JSON.stringify(draft) !== JSON.stringify(baseline)
   const detailLoading = Boolean(selectedId) && (detail.isFetching || detail.data?.id !== selectedId)
@@ -206,13 +190,6 @@ export function FreeStrategy() {
       setSelectedId(first.id)
     }
   }, [strategies.data?.strategies])
-  useEffect(() => {
-    const first = paperAccounts.data?.accounts[0]
-    if (!didAutoSelectAccount.current && first) {
-      didAutoSelectAccount.current = true
-      setSelectedAccountId(String(first.id))
-    }
-  }, [paperAccounts.data?.accounts])
   useEffect(() => {
     const saved = detail.data
     if (!saved || saved.id !== selectedId) return
@@ -338,28 +315,9 @@ export function FreeStrategy() {
     sourceRef.current?.close(); setRunning(false); setProgress('回测已取消'); setProgressPct(null)
   }
 
-  const createPaper = async () => {
+  const createPaper = () => {
     if (!config.strategy_id) { setError('请先保存策略'); return }
-    setError('')
-    try {
-      const created = await api.createPaperAccount({ ...config, name: `${name} · 模拟盘` })
-      setSelectedAccountId(String(created.id))
-      await paperAccounts.refetch()
-      toast('模拟盘账户已创建', 'success')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  const paperAction = async (action: 'start' | 'pause' | 'resume' | 'stop') => {
-    if (!selectedAccountId) return
-    setError('')
-    try {
-      await api.paperAction(selectedAccountId, action)
-      await Promise.all([paperAccounts.refetch(), paperDetail.refetch()])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
+    navigate(`/paper-trading?create=1&strategy_id=${encodeURIComponent(config.strategy_id)}`)
   }
 
   const openRename = (target: RenameTarget) => {
@@ -419,19 +377,6 @@ export function FreeStrategy() {
         setMobileRunDetail(false)
         await savedRuns.refetch()
         toast('回测记录已删除', 'success')
-      } else {
-        const previousAccountId = selectedAccountId
-        setSelectedAccountId('')
-        try {
-          await api.deletePaperAccount(deleteTarget.id)
-        } catch (err) {
-          setSelectedAccountId(previousAccountId)
-          throw err
-        }
-        const next = accounts.find(item => String(item.id) !== deleteTarget.id)
-        if (next) setSelectedAccountId(String(next.id))
-        await paperAccounts.refetch()
-        toast('模拟盘账户已删除', 'success')
       }
       setDeleteTarget(null)
     } catch (err) {
@@ -495,23 +440,11 @@ export function FreeStrategy() {
         <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading} title={dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
         {progress ? <div className="mt-2 text-[11px] text-muted">{progress}</div> : null}
         <div className="my-4 border-t border-border" />
-        <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">模拟盘</span><div className="flex items-center gap-1"><button onClick={createPaper} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] hover:border-accent"><CirclePlay className="h-3 w-3" />创建账户</button>{account ? <IconButton title={account.status === 'stopped' ? '删除模拟盘账户' : '请先停止账户再删除'} danger disabled={account.status !== 'stopped'} onClick={() => openDelete({ type: 'paper', id: String(account.id), name: String(account.name ?? account.id) })}><Trash2 className="h-3.5 w-3.5" /></IconButton> : null}</div></div>
-        {accounts.length ? <select className={INPUT} value={selectedAccountId} onChange={event => setSelectedAccountId(event.target.value)} aria-label="模拟账户">{accounts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : null}
-        {account ? <div className="mt-2 rounded border border-border bg-elevated p-2.5 text-[11px]">
-          <div className="flex items-center justify-between gap-2"><span className="truncate font-medium">{account.name}</span><span className={account.status === 'running' ? 'text-success' : account.status === 'paused' ? 'text-warning' : 'text-muted'}>{account.status}</span></div>
-          {executionModeLabel(account.execution_mode) ? <div className="mt-1 text-[10px] text-muted">{executionModeLabel(account.execution_mode)}{Array.isArray(account.scheduled_times) && account.scheduled_times.length ? ` · ${account.scheduled_times.join('、')}` : ''}</div> : null}
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
-            <div><span className="text-muted">可用资金</span><div className="mt-0.5 tabular-nums">{Number(accountSnapshot?.cash ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</div></div>
-            <div><span className="text-muted">持仓标的</span><div className="mt-0.5 tabular-nums">{activePositions.length}</div></div>
-            <div className="col-span-2"><span className="text-muted">最新 bar</span><div className="mt-0.5 break-all font-mono text-[10px]">{account.last_bar || '尚未收到行情'}</div></div>
-          </div>
-          <div className="mt-2 max-h-24 overflow-y-auto border-y border-border py-1">
-            {activePositions.map(([symbol, quantity]) => <div key={symbol} className="flex justify-between py-1"><span className="font-mono">{symbol}</span><span className="tabular-nums">{quantity.toLocaleString('zh-CN')}</span></div>)}
-            {!activePositions.length ? <div className="py-1 text-muted">当前无持仓</div> : null}
-          </div>
-          {account.last_error ? <div className="mt-2 break-words text-danger">{account.last_error}</div> : null}
-          <div className="mt-2 flex gap-1"><button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={account.status === 'running'} onClick={() => void paperAction(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-40"><CirclePlay className="h-3.5 w-3.5" /></button><button type="button" title="暂停" disabled={account.status !== 'running'} onClick={() => void paperAction('pause')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-40"><CirclePause className="h-3.5 w-3.5" /></button><button type="button" title="停止" disabled={account.status === 'stopped'} onClick={() => void paperAction('stop')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-40"><Square className="h-3.5 w-3.5" /></button></div>
-        </div> : <div className="mt-2 text-[11px] text-muted">创建账户后可启动持久模拟盘。</div>}
+        <div className="flex items-start gap-2.5">
+          <WalletCards className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
+          <div className="min-w-0 flex-1"><div className="text-xs font-medium">模拟盘</div><div className="mt-1 text-[11px] leading-4 text-muted">账户、持仓、委托和运行日志已集中到独立工作台。</div></div>
+          <button type="button" onClick={createPaper} disabled={!config.strategy_id || dirty} className="shrink-0 rounded-btn border border-border px-2.5 py-1.5 text-[11px] hover:border-accent hover:text-accent disabled:opacity-40">创建模拟账户</button>
+        </div>
       </section>
     </div> : <div className="grid min-w-0 shrink-0 grid-cols-[300px_minmax(0,1fr)] items-start gap-3 max-lg:grid-cols-[250px_minmax(0,1fr)] max-md:grid-cols-1">
       <section className={`max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-[calc(100vh-180px)] max-md:min-h-0 ${mobileRunDetail ? 'max-md:hidden' : ''}`}>
@@ -554,7 +487,7 @@ export function FreeStrategy() {
     </div>}
 
     {renameTarget ? <RenameDialog target={renameTarget} value={renameValue} pending={renamePending} error={renameError} onValueChange={setRenameValue} onClose={() => { if (!renamePending) setRenameTarget(null) }} onConfirm={() => void renameSelected()} /> : null}
-    {deleteTarget ? <ConfirmDialog title={`删除「${deleteTarget.name}」？`} description={deleteTarget.type === 'strategy' ? '策略定义将被永久删除。如果存在关联回测或模拟盘账户，系统会阻止此操作。' : deleteTarget.type === 'backtest' ? '该回测的源码快照、运行配置和结果将被永久删除，不可恢复。' : '该模拟盘账户及其持仓、成交和日志将被永久删除，不可恢复。'} confirmLabel="确认删除" pending={deletePending} error={deleteError} onClose={() => { if (!deletePending) setDeleteTarget(null) }} onConfirm={() => void deleteSelected()} /> : null}
+    {deleteTarget ? <ConfirmDialog title={`删除「${deleteTarget.name}」？`} description={deleteTarget.type === 'strategy' ? '策略定义将被永久删除。如果存在关联回测或模拟盘账户，系统会阻止此操作。' : '该回测的源码快照、运行配置和结果将被永久删除，不可恢复。'} confirmLabel="确认删除" pending={deletePending} error={deleteError} onClose={() => { if (!deletePending) setDeleteTarget(null) }} onConfirm={() => void deleteSelected()} /> : null}
     {pendingEditorAction ? <ConfirmDialog title="放弃未保存的修改？" description="当前策略的名称、源码或运行设置已修改。继续后这些未保存内容将丢失。" confirmLabel="放弃修改" pending={false} danger={false} onClose={() => setPendingEditorAction(null)} onConfirm={() => { applyEditorAction(pendingEditorAction); setPendingEditorAction(null) }} /> : null}
   </div>
 }

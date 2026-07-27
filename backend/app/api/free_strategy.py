@@ -17,10 +17,11 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config import settings
 from app.free_strategy.process import start_process
+from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
 from app.free_strategy.templates import LEGACY_FIVE_FORTUNES_SOURCE, TEMPLATES
 from app.services import preferences
@@ -37,6 +38,10 @@ def _strategy_store(request: Request) -> FreeStrategyStore:
 
 def _paper_store(request: Request) -> PaperAccountStore:
     return PaperAccountStore(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir)
+
+
+def _paper_supervisor(request: Request) -> PaperTradingSupervisor | None:
+    return getattr(request.app.state, "paper_supervisor", None)
 
 
 def _run_root(request: Request) -> Path:
@@ -129,8 +134,23 @@ class BacktestWrite(BaseModel):
     benchmark_symbol: str = "510300.SH"
 
 
+class PaperRiskWrite(BaseModel):
+    max_symbol_exposure_pct: float = Field(default=1.0, gt=0, le=1.0)
+    daily_loss_pct: float = Field(default=0.10, gt=0, le=0.10)
+    max_drawdown_pct: float = Field(default=0.30, gt=0, le=0.30)
+    max_orders_per_minute: int = Field(default=60, ge=1, le=60)
+
+
 class PaperWrite(BacktestWrite):
     name: str = "量化策略模拟账户"
+    market_mode: Literal["bar_1m", "bar_1d", "poll_3s", "websocket"] | None = None
+    risk_config: PaperRiskWrite = Field(default_factory=PaperRiskWrite)
+
+    @model_validator(mode="after")
+    def normalize_market_mode(self):
+        self.market_mode = self.market_mode or ("bar_1m" if self.timeframe == "1m" else "bar_1d")
+        self.timeframe = "1m" if self.market_mode in {"bar_1m", "poll_3s", "websocket"} else "1d"
+        return self
 
 
 def _validate_payload(req: BacktestWrite, request: Request) -> None:
@@ -141,6 +161,19 @@ def _validate_payload(req: BacktestWrite, request: Request) -> None:
             raise HTTPException(status_code=403, detail="当前没有分钟K能力，无法运行该周期；请开通分钟K或配置自定义分钟数据源")
     if req.asset_type not in {"stock", "etf"}:
         raise HTTPException(status_code=400, detail="量化策略只支持股票或 ETF，单次任务不可混合")
+
+
+def _validate_paper_payload(req: PaperWrite, request: Request) -> None:
+    if req.market_mode not in MARKET_MODES:
+        raise HTTPException(status_code=400, detail="不支持的模拟盘行情模式")
+    if req.market_mode == "bar_1m":
+        _validate_payload(req, request)
+    if req.market_mode in {"poll_3s", "websocket"}:
+        quote_service = getattr(request.app.state, "quote_service", None)
+        if quote_service is None or not quote_service.is_realtime_allowed():
+            raise HTTPException(status_code=403, detail="当前套餐没有实时行情能力")
+        if req.market_mode == "poll_3s" and quote_service.get_min_interval() > 3:
+            raise HTTPException(status_code=403, detail=f"当前套餐最小行情间隔为 {quote_service.get_min_interval():g} 秒")
 
 
 @router.get("")
@@ -560,17 +593,51 @@ def list_paper_accounts(request: Request):
 
 @router.post("/paper/accounts")
 def create_paper_account(req: PaperWrite, request: Request):
-    _validate_payload(req, request)
+    _validate_paper_payload(req, request)
     strategy = _strategy_store(request).get(req.strategy_id)
     account_id = uuid.uuid4().hex[:12]
-    state = {"id": account_id, "name": req.name, "strategy_id": req.strategy_id, "source_revision": strategy.get("revision"),
-             "status": "stopped", "config": req.model_dump(), "cash": req.initial_capital, "positions": {}, "state": {}, "created_at": now_iso()}
+    payload = req.model_dump()
+    risk_config = payload.pop("risk_config")
+    state = {
+        "id": account_id,
+        "name": req.name,
+        "strategy_id": req.strategy_id,
+        "source_revision": strategy.get("revision"),
+        "source_hash": sha256(strategy["source"].encode("utf-8")).hexdigest(),
+        "market_mode": req.market_mode,
+        "risk_config": risk_config,
+        "risk_status": {"daily_loss_locked": False, "drawdown_locked": False, "reason": None},
+        "notification_channels": preferences.get_webhook_default_channels(),
+        "status": "stopped",
+        "config": payload,
+        "cash": req.initial_capital,
+        "equity": req.initial_capital,
+        "return_pct": 0.0,
+        "drawdown_pct": 0.0,
+        "positions": {},
+        "state": {},
+        "created_at": now_iso(),
+    }
     store = _paper_store(request)
     result = store.save(state)
     path = store._path(account_id)
     (path / "strategy.py").write_text(strategy["source"], encoding="utf-8")
     store.append_event(account_id, {"type": "created", "strategy_revision": strategy.get("revision")})
     return result
+
+
+@router.get("/paper/status")
+def paper_status(request: Request):
+    supervisor = _paper_supervisor(request)
+    if supervisor is not None:
+        return supervisor.status()
+    return {
+        "running_accounts": 0,
+        "mode_counts": {},
+        "poll_3s": {"active": False, "available": False, "min_interval_s": None, "interval_s": None, "actual_fetch_ms": None},
+        "websocket": {"status": "disconnected", "symbols": 0, "capacity": 100, "last_error": None},
+        "last_quote_at": None,
+    }
 
 
 @router.get("/paper/accounts/{account_id}")
@@ -590,8 +657,9 @@ def delete_paper_account(account_id: str, request: Request):
         state = store.get(account_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
-    process = _paper.get(account_id)
-    if state.get("status") != "stopped" or (process is not None and process.is_alive()):
+    supervisor = _paper_supervisor(request)
+    process_alive = supervisor.is_alive(account_id) if supervisor is not None else bool(_paper.get(account_id) and _paper[account_id].is_alive())
+    if state.get("status") != "stopped" or process_alive:
         raise HTTPException(status_code=409, detail="请先停止模拟盘账户再删除")
     _paper.pop(account_id, None)
     store.delete(account_id)
@@ -599,12 +667,22 @@ def delete_paper_account(account_id: str, request: Request):
 
 
 @router.post("/paper/accounts/{account_id}/{action}")
-def paper_action(account_id: str, action: Literal["start", "pause", "resume", "stop"], request: Request):
+def paper_action(account_id: str, action: Literal["start", "pause", "resume", "stop", "unlock-risk"], request: Request):
     store = _paper_store(request)
     try:
         state = store.get(account_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    supervisor = _paper_supervisor(request)
+    if supervisor is not None:
+        try:
+            if action in {"start", "resume"}:
+                return supervisor.start(account_id)
+            if action == "unlock-risk":
+                return supervisor.unlock_risk(account_id)
+            return supervisor.pause_or_stop(account_id, "paused" if action == "pause" else "stopped")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
     if action in {"start", "resume"}:
         process = _paper.get(account_id)
         if process is None or not process.is_alive():
@@ -622,6 +700,46 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
         state["status"] = "stopped"
     store.append_event(account_id, {"type": action})
     return store.save(state)
+
+
+@router.get("/paper/accounts/{account_id}/events")
+def paper_events(
+    account_id: str,
+    request: Request,
+    cursor: int | None = None,
+    limit: int = 100,
+    types: str | None = None,
+):
+    store = _paper_store(request)
+    try:
+        store.get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    event_types = {item.strip() for item in types.split(",") if item.strip()} if types else None
+    return store.events_page(account_id, cursor=cursor, limit=limit, event_types=event_types)
+
+
+@router.get("/paper/accounts/{account_id}/stream")
+async def paper_event_stream(account_id: str, request: Request, after: int = 0):
+    store = _paper_store(request)
+    try:
+        store.get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+
+    async def generate():
+        cursor = max(0, after)
+        while not await request.is_disconnected():
+            rows = [event for event in store.events(account_id, limit=500) if int(event.get("sequence", 0)) > cursor]
+            if rows:
+                for event in rows:
+                    cursor = max(cursor, int(event.get("sequence", 0)))
+                    yield f"id: {cursor}\nevent: paper\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            else:
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/paper/accounts/{account_id}/orders")

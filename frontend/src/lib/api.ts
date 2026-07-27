@@ -973,6 +973,101 @@ export interface FreeBacktestConfig {
   benchmark_symbol: string
 }
 
+export type PaperMarketMode = 'bar_1m' | 'bar_1d' | 'poll_3s' | 'websocket'
+
+export interface PaperRiskConfig {
+  max_symbol_exposure_pct: number
+  daily_loss_pct: number
+  max_drawdown_pct: number
+  max_orders_per_minute: number
+}
+
+export interface PaperAccount {
+  id: string
+  name: string
+  strategy_id: string
+  source_revision: number
+  source_hash: string
+  market_mode: PaperMarketMode | 'bar_5m' | 'bar_30m'
+  status: 'running' | 'paused' | 'stopped'
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
+  scheduled_times?: string[]
+  universe?: string[]
+  cash: number
+  equity?: number
+  return_pct?: number
+  drawdown_pct?: number
+  positions?: Record<string, number>
+  account?: {
+    cash: number
+    positions: Record<string, number>
+    avg_cost: Record<string, number>
+    orders: PaperOrder[]
+    fills: PaperFill[]
+    equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
+  }
+  risk_config: PaperRiskConfig
+  risk_status?: { daily_loss_locked?: boolean; drawdown_locked?: boolean; reason?: string | null; triggered_at?: string | null }
+  last_quote?: string
+  last_bar?: string
+  last_error?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PaperOrder {
+  id: string
+  symbol: string
+  side: string
+  quantity?: number | null
+  value?: number | null
+  submitted_at: string
+  status: string
+  reason?: string
+}
+
+export interface PaperFill {
+  order_id: string
+  symbol: string
+  side: string
+  quantity: number
+  price: number
+  value: number
+  fee: number
+  timestamp: string
+}
+
+export interface PaperEvent {
+  id: string
+  sequence: number
+  timestamp: string
+  type: string
+  symbol?: string
+  side?: string
+  status?: string
+  reason?: string
+  message?: string
+  price?: number
+  quantity?: number
+  value?: number
+  level?: string
+  [key: string]: unknown
+}
+
+export interface PaperStatus {
+  running_accounts: number
+  mode_counts: Record<string, number>
+  poll_3s: { active: boolean; available: boolean; min_interval_s: number | null; interval_s: number | null; actual_fetch_ms: number | null }
+  websocket: { status: string; symbols: number; capacity: number; last_error: string | null }
+  last_quote_at: string | null
+}
+
+export type CreatePaperAccount = FreeBacktestConfig & {
+  name: string
+  market_mode: PaperMarketMode
+  risk_config: PaperRiskConfig
+}
+
 export interface FreeBacktestResult {
   initial_capital: number
   final_equity: number
@@ -1041,15 +1136,22 @@ export const api = {
     request<{ job_id: string; name: string }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteFreeBacktest: (jobId: string) =>
     request<{ ok: boolean }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
-  paperAccounts: () => request<{ accounts: Record<string, any>[] }>('/api/free-strategies/paper/accounts'),
-  createPaperAccount: (payload: FreeBacktestConfig & { name: string }) =>
-    request<Record<string, any>>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
-  paperAccount: (id: string) => request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}`),
-  paperOrders: (id: string) => request<{ orders: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/orders`),
-  paperFills: (id: string) => request<{ fills: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/fills`),
-  paperLogs: (id: string) => request<{ logs: Record<string, any>[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),
-  paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop') =>
-    request<Record<string, any>>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
+  paperAccounts: () => request<{ accounts: PaperAccount[] }>('/api/free-strategies/paper/accounts'),
+  paperStatus: () => request<PaperStatus>('/api/free-strategies/paper/status'),
+  createPaperAccount: (payload: CreatePaperAccount) =>
+    request<PaperAccount>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  paperAccount: (id: string) => request<PaperAccount & { events?: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}`),
+  paperEvents: (id: string, cursor?: number, types?: string) => {
+    const query = new URLSearchParams({ limit: '100' })
+    if (cursor != null) query.set('cursor', String(cursor))
+    if (types) query.set('types', types)
+    return request<{ events: PaperEvent[]; next_cursor: number | null }>(`/api/free-strategies/paper/accounts/${id}/events?${query}`)
+  },
+  paperOrders: (id: string) => request<{ orders: PaperOrder[] }>(`/api/free-strategies/paper/accounts/${id}/orders`),
+  paperFills: (id: string) => request<{ fills: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/fills`),
+  paperLogs: (id: string) => request<{ logs: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),
+  paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop' | 'unlock-risk') =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
   deletePaperAccount: (id: string) =>
     request<{ ok: boolean }>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 

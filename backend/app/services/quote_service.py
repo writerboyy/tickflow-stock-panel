@@ -29,6 +29,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, time as dt_time
+from typing import Callable
 
 import polars as pl
 
@@ -170,6 +171,9 @@ class QuoteService:
         self._paused = False
         self._interval = self.DEFAULT_INTERVAL
         self._thread: threading.Thread | None = None
+        self._temporary_consumers = 0
+        self._temporary_original: tuple[bool, bool, float] | None = None
+        self._fetch_listeners: set[Callable[[], None]] = set()
         self._repo = None          # 延迟注入, 避免循环导入
         # SSE 订阅者集合: 每个 /stream 连接一个 QuoteSubscriber, 事件广播到所有订阅者
         self._subscribers: set[QuoteSubscriber] = set()
@@ -324,6 +328,63 @@ class QuoteService:
         """返回当前档位允许的最小间隔。"""
         return self._tier_min_interval()
 
+    def acquire_temporary_polling(self, interval: float) -> None:
+        """临时启用/加速轮询，不写入用户偏好。"""
+        requested = float(interval)
+        minimum = self.get_min_interval()
+        if requested < minimum:
+            raise ValueError(f"当前套餐最小行情间隔为 {minimum:g} 秒")
+        with self._lock:
+            if self._temporary_consumers == 0:
+                self._temporary_original = (self._running, self._enabled, self._interval)
+            self._temporary_consumers += 1
+            self._interval = min(self._interval, requested)
+            self._enabled = True
+            if not self._running:
+                self._running = True
+                self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+                self._thread.start()
+
+    def release_temporary_polling(self) -> None:
+        """释放临时行情租约，并恢复首个租约前的运行态。"""
+        thread = None
+        with self._lock:
+            if self._temporary_consumers <= 0:
+                return
+            self._temporary_consumers -= 1
+            if self._temporary_consumers:
+                return
+            original = self._temporary_original
+            self._temporary_original = None
+            if original is None:
+                return
+            was_running, was_enabled, original_interval = original
+            self._interval = original_interval
+            self._enabled = was_enabled
+            if not was_running:
+                self._running = False
+                thread = self._thread
+                self._thread = None
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=10)
+
+    def add_fetch_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._fetch_listeners.add(callback)
+
+    def remove_fetch_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._fetch_listeners.discard(callback)
+
+    def _notify_fetch_listeners(self) -> None:
+        with self._lock:
+            listeners = list(self._fetch_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                logger.exception("行情监听器执行失败")
+
     # ================================================================
     # SSE 订阅管理 — 每个 /stream 连接一个订阅者, 事件广播
     # ================================================================
@@ -437,13 +498,18 @@ class QuoteService:
             return pl.DataFrame(), None
         return self._repo.get_enriched_latest()
 
-    def get_quotes_compat(self) -> pl.DataFrame:
+    def get_quotes_compat(self, asset_type: str = "stock") -> pl.DataFrame:
         """兼容接口: 返回行情 DataFrame (用于盘中选股等需要 last_price/prev_close 的场景)。
 
         从 _enriched_cache 取 today 的数据, 只选行情基础列, 补上 last_price 别名。
         不返回指标列, 避免 JOIN live_agg 时列名冲突。
         """
-        df, _ = self.get_enriched_today()
+        if asset_type == "stock":
+            df, _ = self.get_enriched_today()
+        elif self._repo:
+            df, _ = self._repo.get_enriched_latest_asset(asset_type)
+        else:
+            df = pl.DataFrame()
         if df.is_empty():
             return df
 
@@ -486,6 +552,7 @@ class QuoteService:
             "realtime_allowed": mode != "none",
             "watchlist_symbol_count": len(preferences.get_realtime_watchlist_symbols()),
             "interval_s": self._interval,
+            "fetch_ms": round(self._fetch_ms, 0) if self._fetch_ms else None,
             "symbol_count": self._symbol_count,
             "index_symbol_count": self._index_symbol_count,
             "etf_symbol_count": self._etf_symbol_count,
@@ -510,6 +577,7 @@ class QuoteService:
 
     def _poll_loop(self) -> None:
         while self._running and self._enabled:
+            cycle_started = time.monotonic()
             try:
                 # 管道/数据修正运行期间临时暂停取数, 防止与管道写同一批 parquet 竞态。
                 # 线程继续存活 + 分片 sleep, resume() 后即时恢复, 无需重启线程。
@@ -532,10 +600,12 @@ class QuoteService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("行情轮询异常: %s", e)
 
-            waited = 0.0
-            while self._running and self._enabled and waited < self._interval:
-                time.sleep(0.5)
-                waited += 0.5
+            deadline = cycle_started + self._interval
+            while self._running and self._enabled:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.5, remaining))
 
     def _fetch_quotes(self, *, final: bool = False) -> bool:
         """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
@@ -547,7 +617,10 @@ class QuoteService:
                 self._fetch_watchlist_quotes()
             else:
                 self._fetch_full_market_quotes()
-            return self._fetched_at > before
+            updated = self._fetched_at > before
+        if updated:
+            self._notify_fetch_listeners()
+        return updated
 
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""

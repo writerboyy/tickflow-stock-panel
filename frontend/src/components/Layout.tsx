@@ -47,6 +47,7 @@ import {
   Moon,
   X,
   WifiOff,
+  WalletCards,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -73,6 +74,7 @@ const nav = [
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/free-strategy', label: '量化策略', icon: Code2 },
+  { to: '/paper-trading', label: '模拟盘', icon: WalletCards },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
@@ -386,7 +388,14 @@ export function Layout() {
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
 
   const allNav = [...nav, ...analysisNav]
-  const savedOrder = prefs?.nav_order ?? []
+  const savedOrder = (() => {
+    const saved = prefs?.nav_order ?? []
+    if (!saved.length || saved.includes('/paper-trading')) return saved
+    const result = [...saved]
+    const strategyIndex = result.indexOf('/free-strategy')
+    result.splice(strategyIndex >= 0 ? strategyIndex + 1 : result.length, 0, '/paper-trading')
+    return result
+  })()
 
   const navItems = savedOrder.length > 0
     ? (() => {

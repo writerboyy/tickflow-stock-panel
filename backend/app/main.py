@@ -58,10 +58,6 @@ async def lifespan(app: FastAPI):
             logger.info("migrated %d legacy five-fortunes strategies", len(migrated))
     except Exception as e:  # noqa: BLE001
         logger.warning("legacy five-fortunes strategy migration failed: %s", e)
-    try:
-        free_strategy.recover_paper_accounts(store.data_dir)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("free strategy paper recovery failed: %s", e)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
         repo.get_matrix_data_generation("stock")
@@ -98,6 +94,16 @@ async def lifespan(app: FastAPI):
     strategy_monitor = StrategyMonitorService()
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
+
+    try:
+        from app.free_strategy.paper import PaperTradingSupervisor
+
+        paper_supervisor = PaperTradingSupervisor(store.data_dir, qs, repo)
+        app.state.paper_supervisor = paper_supervisor
+        paper_supervisor.recover()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("free strategy paper recovery failed: %s", e)
+        app.state.paper_supervisor = None
 
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
@@ -263,6 +269,9 @@ async def lifespan(app: FastAPI):
     fsc = getattr(app.state, "financial_scheduler", None)
     if fsc:
         fsc.stop()
+    paper_supervisor = getattr(app.state, "paper_supervisor", None)
+    if paper_supervisor:
+        paper_supervisor.close()
     qs = getattr(app.state, "quote_service", None)
     if qs:
         qs.stop()
