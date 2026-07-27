@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import queue
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 
 import polars as pl
 
-from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
     _aligned_warmup_bars,
+    _load_scheduled_history,
     _prepare_market_data,
     _read_rows,
+    advance_scheduled_session,
     execute_backtest,
 )
 
@@ -319,3 +321,379 @@ def test_backtest_requires_universe_in_source_or_legacy_config(tmp_path):
 
     assert event["type"] == "error"
     assert "context.set_universe" in event["error"]
+
+
+def test_scheduled_backtest_queries_events_without_full_minute_replay(monkeypatch, tmp_path):
+    calls = {"range": 0, "snapshot": 0, "next": 0}
+
+    class FakeRepository:
+        def __init__(self, _store):
+            pass
+
+        def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
+            if symbol != "X":
+                return pl.DataFrame()
+            days = [datetime(2024, 1, 2).date(), datetime(2024, 1, 3).date()]
+            return pl.DataFrame([
+                daily_row(day, 10.0 + index)
+                for index, day in enumerate(days)
+                if start <= day <= end
+            ])
+
+        def get_minute_range(self, *_args):
+            calls["range"] += 1
+            raise AssertionError("scheduled mode must not read the full minute range")
+
+        def get_minute_snapshot(self, symbols, at, _asset_type):
+            calls["snapshot"] += 1
+            return pl.DataFrame({
+                "symbol": symbols,
+                "datetime": [at] * len(symbols),
+                "open": [10.0] * len(symbols),
+                "high": [10.0] * len(symbols),
+                "low": [10.0] * len(symbols),
+                "close": [10.0] * len(symbols),
+                "volume": [100.0] * len(symbols),
+                "amount": [1_000.0] * len(symbols),
+            })
+
+        def get_minute_next(self, _symbols, _after, _until, _asset_type):
+            calls["next"] += 1
+            return pl.DataFrame()
+
+    monkeypatch.setattr("app.tickflow.repository.DataStore", lambda path: path)
+    monkeypatch.setattr("app.tickflow.repository.KlineRepository", FakeRepository)
+    output: queue.SimpleQueue = queue.SimpleQueue()
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "source": """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.state['runs'] = context.state.get('runs', 0) + 1
+""",
+        "strategy_id": "scheduled-test",
+        "strategy_name": "定时测试",
+        "source_revision": 1,
+        "symbols": [],
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "start": "2024-01-02",
+        "end": "2024-01-03",
+        "config": {"asset_type": "etf"},
+        "data_provider": "tickflow",
+    }, output)
+
+    event = output.get()
+    progress_messages = []
+    while event["type"] == "progress":
+        progress_messages.append(event["message"])
+        event = output.get()
+
+    assert event["type"] == "result"
+    assert event["result"]["state"]["runs"] == 2
+    metadata = event["result"]["metadata"]
+    assert metadata["execution_mode"] == "scheduled"
+    assert metadata["scheduled_times"] == ["13:10"]
+    assert metadata["callbacks_executed"] == 2
+    assert metadata["market_rows_consumed"] < 20
+    assert calls["range"] == 0
+    assert calls["snapshot"] > 0
+    assert any("执行定时任务" in message for message in progress_messages)
+
+
+def test_scheduled_daily_intraday_requires_minute_data(monkeypatch, tmp_path):
+    class FakeRepository:
+        def __init__(self, _store):
+            pass
+
+        def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
+            if symbol != "X":
+                return pl.DataFrame()
+            day = datetime(2024, 1, 2).date()
+            return pl.DataFrame([daily_row(day, 10.0)]) if start <= day <= end else pl.DataFrame()
+
+        def get_minute_snapshot(self, _symbols, _at, _asset_type):
+            return pl.DataFrame()
+
+        def get_minute_next(self, _symbols, _after, _until, _asset_type):
+            return pl.DataFrame()
+
+    monkeypatch.setattr("app.tickflow.repository.DataStore", lambda path: path)
+    monkeypatch.setattr("app.tickflow.repository.KlineRepository", FakeRepository)
+    output: queue.SimpleQueue = queue.SimpleQueue()
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "source": """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(lambda ctx: None, '13:10')
+""",
+        "symbols": [],
+        "timeframe": "1d",
+        "asset_type": "etf",
+        "start": "2024-01-02",
+        "end": "2024-01-02",
+        "config": {"asset_type": "etf"},
+    }, output)
+
+    event = output.get()
+    while event["type"] == "progress":
+        event = output.get()
+
+    assert event["type"] == "error"
+    assert "分钟K" in event["error"]
+
+
+class ScheduledRepository:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def get_daily_asset(self, _asset_type, _symbol, _start, _end, _columns):
+        return pl.DataFrame()
+
+    def get_minute_snapshot(self, symbols, at, _asset_type):
+        visible = [row for row in self.rows if row["symbol"] in symbols and row["datetime"] <= at]
+        latest = {}
+        for row in visible:
+            latest[row["symbol"]] = row
+        return pl.DataFrame(list(latest.values())) if latest else pl.DataFrame()
+
+    def get_minute_next(self, symbols, after, until, _asset_type):
+        result = []
+        for symbol in symbols:
+            values = [
+                row for row in self.rows
+                if row["symbol"] == symbol and after < row["datetime"] <= until
+            ]
+            if values:
+                result.append(min(values, key=lambda row: row["datetime"]))
+        return pl.DataFrame(result) if result else pl.DataFrame()
+
+    def get_minute_range(self, symbols, start, end, _asset_type):
+        values = [
+            row for row in self.rows
+            if row["symbol"] in symbols and start <= row["datetime"].date() <= end
+        ]
+        return pl.DataFrame(values) if values else pl.DataFrame()
+
+
+def minute_row(symbol: str, timestamp: datetime, price: float) -> dict:
+    return {
+        "symbol": symbol,
+        "datetime": timestamp,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price,
+        "volume": 100.0,
+        "amount": price * 100,
+    }
+
+
+def scheduled_market(*symbols: str) -> MarketData:
+    previous = datetime(2024, 1, 1).date()
+    current = datetime(2024, 1, 2).date()
+    return MarketData(daily={
+        (symbol, day): daily_row(day, 10.0)
+        for symbol in symbols
+        for day in (previous, current)
+    })
+
+
+def test_scheduled_lunch_event_uses_latest_visible_bar_and_dynamic_universe():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '12:00')
+
+def before_trading_start(context):
+    context.set_universe(['Y'])
+
+def run(context):
+    context.state['visible'] = context.history('Y', count=1)[0]
+"""
+    rows = [
+        minute_row("X", datetime(2024, 1, 2, 11, 30), 10.0),
+        minute_row("Y", datetime(2024, 1, 2, 11, 29), 20.0),
+        minute_row("Y", datetime(2024, 1, 2, 13, 0), 30.0),
+    ]
+    repo = ScheduledRepository(rows)
+    market = scheduled_market("X", "Y")
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    engine.set_history_loader(lambda symbol, count, timeframe, cutoff: _load_scheduled_history(
+        repo, market, "etf", symbol, count, timeframe, cutoff,
+    ))
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 15, 0),
+        "etf",
+        "1m",
+        finalize=True,
+    )
+
+    assert engine.universe == ["Y"]
+    assert engine.context.state["visible"] == 20.0
+
+
+def test_scheduled_aggregated_history_never_reads_minutes_after_cutoff():
+    rows = [
+        minute_row("X", datetime(2024, 1, 2, 13, 10), 10.0),
+        minute_row("X", datetime(2024, 1, 2, 13, 11), 11.0),
+        minute_row("X", datetime(2024, 1, 2, 13, 12), 99.0),
+    ]
+    repo = ScheduledRepository(rows)
+    market = scheduled_market("X")
+    cutoff = datetime(2024, 1, 2, 13, 11)
+
+    for timeframe in ("5m", "30m"):
+        history = _load_scheduled_history(repo, market, "etf", "X", 10, timeframe, cutoff)
+        assert history[-1].close == 11.0
+        assert all(bar.timestamp <= cutoff for bar in history)
+
+
+def test_scheduled_next_open_preserves_t1_settlement():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(buy, '13:10')
+    context.schedule(sell, '13:12')
+
+def buy(context):
+    context.buy('X', quantity=100)
+
+def sell(context):
+    context.sell('X', quantity=100)
+"""
+    rows = [
+        minute_row("X", datetime(2024, 1, 2, 13, 10), 10.0),
+        minute_row("X", datetime(2024, 1, 2, 13, 11), 10.0),
+        minute_row("X", datetime(2024, 1, 2, 13, 12), 10.0),
+        minute_row("X", datetime(2024, 1, 2, 13, 13), 10.0),
+        minute_row("X", datetime(2024, 1, 2, 15, 0), 10.0),
+    ]
+    repo = ScheduledRepository(rows)
+    market = scheduled_market("X")
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            asset_type="etf",
+            fill_policy="next_open",
+            slippage_bps=0,
+        ),
+    )
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 15, 0),
+        "etf",
+        "1m",
+        finalize=True,
+    )
+
+    assert len(engine.account.fills) == 1
+    assert engine.account.fills[0].timestamp == "2024-01-02T13:11:00"
+    assert engine.account.orders[-1].status == "rejected"
+    assert "T+1" in engine.account.orders[-1].reason
+
+
+def test_scheduled_next_open_loads_order_symbol_outside_universe():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.buy('Y', quantity=100)
+"""
+    rows = [
+        minute_row("X", datetime(2024, 1, 2, 13, 10), 10.0),
+        minute_row("Y", datetime(2024, 1, 2, 13, 11), 20.0),
+    ]
+    class DynamicRepository(ScheduledRepository):
+        requested_daily: list[str] = []
+
+        def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
+            self.requested_daily.append(symbol)
+            if symbol != "Y":
+                return pl.DataFrame()
+            days = [datetime(2024, 1, 1).date(), datetime(2024, 1, 2).date()]
+            return pl.DataFrame([
+                daily_row(day, 20.0) for day in days if start <= day <= end
+            ])
+
+    repo = DynamicRepository(rows)
+    market = scheduled_market("X")
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="etf", slippage_bps=0),
+    )
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 15, 0),
+        "etf",
+        "1m",
+        finalize=True,
+    )
+
+    assert engine.account.fills[0].symbol == "Y"
+    assert engine.account.fills[0].timestamp == "2024-01-02T13:11:00"
+    assert "Y" in repo.requested_daily
+    assert ("Y", datetime(2024, 1, 2).date()) in market.daily
+
+
+def test_scheduled_daily_intraday_snapshot_fills_at_next_trading_day_open():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.buy('X', quantity=100)
+"""
+    rows = [
+        minute_row("X", datetime(2024, 1, 2, 13, 10), 10.0),
+        minute_row("X", datetime(2024, 1, 3, 13, 10), 11.0),
+    ]
+    repo = ScheduledRepository(rows)
+    days = [datetime(2024, 1, day).date() for day in (1, 2, 3)]
+    market = MarketData(daily={
+        ("X", day): daily_row(day, price)
+        for day, price in zip(days, (10.0, 10.0, 10.5))
+    })
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1d",
+        config=FreeStrategyConfig(asset_type="etf", slippage_bps=0),
+    )
+
+    for day in days[1:]:
+        advance_scheduled_session(
+            repo,
+            engine,
+            market,
+            day,
+            datetime.combine(day, time(15, 0)),
+            "etf",
+            "1d",
+            finalize=True,
+        )
+
+    assert engine.callbacks_executed == 2
+    assert engine.account.fills[0].timestamp == "2024-01-03T09:30:00"
+    assert engine.account.fills[0].price == 10.5

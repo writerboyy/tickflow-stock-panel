@@ -5,7 +5,7 @@ import json
 import logging
 import multiprocessing as mp
 import queue
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -425,7 +425,8 @@ def _prepare_market_data(
     if timeframe == "1d":
         prior_bars = _daily_bars(symbols, load_start, warmup_end, asset_type, market_data)
     else:
-        _prime_minute_market_data(repo, symbols, start, asset_type, market_data)
+        if engine.execution_mode == "full_bar":
+            _prime_minute_market_data(repo, symbols, start, asset_type, market_data)
         prior_bars = (
             _aligned_warmup_bars(symbols, load_start, warmup_end, market_data)
             if requested_bars else []
@@ -458,6 +459,328 @@ def _prepare_market_data(
     }
 
 
+def _scheduled_price_metadata(
+    market: MarketData,
+    symbol: str,
+    day: date,
+    asset_type: str,
+) -> dict[str, float | None]:
+    current = market.daily.get((symbol, day), {})
+    close = float(current.get("close") or 0)
+    raw_close = float(current.get("raw_close") or close or 0)
+    scale = raw_close / close if close > 0 and raw_close > 0 else 1.0
+    previous_rows = [
+        (row_day, row)
+        for (row_symbol, row_day), row in market.daily.items()
+        if row_symbol == symbol and row_day < day
+    ]
+    previous = max(previous_rows, key=lambda item: item[0])[1] if previous_rows else {}
+    previous_close = float(previous.get("close") or 0)
+    previous_raw_close = float(previous.get("raw_close") or previous_close or 0)
+    previous_scale = (
+        previous_raw_close / previous_close
+        if previous_close > 0 and previous_raw_close > 0 else None
+    )
+    reference = previous_close * scale if previous_close > 0 else None
+    pct = _limit_pct(symbol, asset_type, market.names.get(symbol, ""))
+    return {
+        "scale": scale,
+        "split_ratio": _split_ratio(previous_scale, scale, asset_type),
+        "limit_up": _round_limit(reference * (1 + pct)) if reference is not None else None,
+        "limit_down": _round_limit(reference * (1 - pct)) if reference is not None else None,
+    }
+
+
+def _scheduled_minute_bars(
+    frame: Any,
+    market: MarketData,
+    asset_type: str,
+) -> list[Bar]:
+    if frame.is_empty():
+        return []
+    rows: list[Bar] = []
+    for row in frame.sort(["datetime", "symbol"]).iter_rows(named=True):
+        symbol = str(row["symbol"])
+        timestamp = row["datetime"]
+        metadata = _scheduled_price_metadata(market, symbol, timestamp.date(), asset_type)
+        scale = float(metadata["scale"] or 1.0)
+        rows.append(Bar(
+            symbol=symbol,
+            timestamp=timestamp,
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=float(row.get("volume") or 0),
+            amount=float(row.get("amount") or 0),
+            raw_open=float(row["open"]) * scale,
+            raw_high=float(row["high"]) * scale,
+            raw_low=float(row["low"]) * scale,
+            raw_close=float(row["close"]) * scale,
+            limit_up=metadata["limit_up"],
+            limit_down=metadata["limit_down"],
+            split_ratio=float(metadata["split_ratio"] or 1.0),
+        ))
+    return rows
+
+
+def _scheduled_daily_bar(
+    market: MarketData,
+    symbol: str,
+    day: date,
+    asset_type: str,
+) -> Bar | None:
+    row = market.daily.get((symbol, day))
+    if row is None:
+        return None
+    metadata = _scheduled_price_metadata(market, symbol, day, asset_type)
+    scale = float(metadata["scale"] or 1.0)
+    return Bar(
+        symbol=symbol,
+        timestamp=datetime.combine(day, time(15, 0)),
+        open=float(row["open"]),
+        high=float(row["high"]),
+        low=float(row["low"]),
+        close=float(row["close"]),
+        volume=float(row.get("volume") or 0),
+        amount=float(row.get("amount") or 0),
+        raw_open=float(row["open"]) * scale,
+        raw_high=float(row.get("raw_high") or float(row["high"]) * scale),
+        raw_low=float(row.get("raw_low") or float(row["low"]) * scale),
+        raw_close=float(row.get("raw_close") or float(row["close"]) * scale),
+        tradable=float(row["open"]) > 0 and float(row["high"]) > 0,
+        suspended=float(row["open"]) == 0 and float(row["high"]) == 0,
+        limit_up=metadata["limit_up"],
+        limit_down=metadata["limit_down"],
+        split_ratio=float(metadata["split_ratio"] or 1.0),
+    )
+
+
+def _ensure_scheduled_market_data(
+    repo: Any,
+    market: MarketData,
+    symbols: list[str],
+    start: date,
+    end: date,
+    asset_type: str,
+) -> None:
+    known = {
+        symbol for symbol, day in market.daily
+        if start <= day <= end
+    }
+    missing = [symbol for symbol in symbols if symbol not in known]
+    if not missing:
+        return
+    loaded = _load_market_data(repo, missing, start, end, asset_type)
+    market.daily.update(loaded.daily)
+    market.names.update(loaded.names)
+
+
+def _scheduled_symbols(engine: FreeStrategyEngine) -> list[str]:
+    result: list[str] = []
+    for symbol in [
+        *engine.universe,
+        *engine.account.positions,
+        engine.config.benchmark_symbol,
+    ]:
+        if symbol and symbol not in result:
+            result.append(symbol)
+    return result
+
+
+def _scheduled_snapshot(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    market: MarketData,
+    timestamp: datetime,
+    asset_type: str,
+    timeframe: str,
+) -> list[Bar]:
+    symbols = _scheduled_symbols(engine)
+    _ensure_scheduled_market_data(
+        repo, market, symbols, timestamp.date() - timedelta(days=45), timestamp.date(), asset_type,
+    )
+    if timeframe == "1d" and timestamp.time() >= time(15, 0):
+        return [
+            bar for symbol in symbols
+            if (bar := _scheduled_daily_bar(market, symbol, timestamp.date(), asset_type)) is not None
+        ]
+
+    get_snapshot = getattr(repo, "get_minute_snapshot", None)
+    if callable(get_snapshot):
+        frame = get_snapshot(symbols, timestamp, asset_type)
+    else:
+        frame = repo.get_minute_range(symbols, timestamp.date(), timestamp.date(), asset_type)
+        if not frame.is_empty():
+            frame = (
+                frame.filter(pl.col("datetime") <= timestamp)
+                .sort(["symbol", "datetime"])
+                .group_by("symbol", maintain_order=True)
+                .tail(1)
+            )
+    bars = _scheduled_minute_bars(frame, market, asset_type)
+    if timeframe == "1d" and timestamp.time() < time(15, 0) and not bars:
+        raise ValueError("1d 定时策略的盘中任务需要分钟K能力和对应历史数据")
+
+    found = {bar.symbol for bar in bars}
+    for symbol in symbols:
+        if symbol in found:
+            continue
+        previous_days = [
+            row_day for row_symbol, row_day in market.daily
+            if row_symbol == symbol and row_day < timestamp.date()
+        ]
+        if not previous_days:
+            continue
+        previous = _scheduled_daily_bar(market, symbol, max(previous_days), asset_type)
+        if previous is not None:
+            bars.append(replace(
+                previous,
+                timestamp=timestamp,
+                tradable=False,
+                suspended=True,
+                split_ratio=1.0,
+            ))
+    return sorted(bars, key=lambda bar: (bar.timestamp, bar.symbol))
+
+
+def _load_scheduled_history(
+    repo: Any,
+    market: MarketData,
+    asset_type: str,
+    symbol: str,
+    count: int,
+    timeframe: str,
+    cutoff: datetime,
+) -> list[Bar]:
+    if count <= 0:
+        return []
+    if timeframe == "1d":
+        start = cutoff.date() - timedelta(days=count * 2 + 14)
+        _ensure_scheduled_market_data(repo, market, [symbol], start, cutoff.date(), asset_type)
+        include_today = cutoff.time() >= time(15, 0)
+        days = sorted(
+            row_day for row_symbol, row_day in market.daily
+            if row_symbol == symbol
+            and start <= row_day <= cutoff.date()
+            and (row_day < cutoff.date() or include_today)
+        )
+        return [
+            bar for day in days[-count:]
+            if (bar := _scheduled_daily_bar(market, symbol, day, asset_type)) is not None
+        ]
+    minutes = int(timeframe[:-1])
+    start = cutoff.date() - timedelta(days=max(7, count * minutes // 120 + 7))
+    frame = repo.get_minute_range([symbol], start, cutoff.date(), asset_type)
+    if frame.is_empty():
+        return []
+    frame = frame.filter(pl.col("datetime") <= cutoff)
+    bars = _scheduled_minute_bars(frame, market, asset_type)
+    return group_bars(bars, timeframe)[-count:]
+
+
+def _next_period_after(timestamp: datetime, timeframe: str) -> datetime:
+    if timeframe == "1m" or timeframe == "1d":
+        return timestamp
+    minutes = int(timeframe[:-1])
+    current = timestamp.time()
+    if current < time(9, 30):
+        boundary = timestamp.replace(hour=9, minute=30, second=0, microsecond=0)
+    elif time(11, 30) <= current < time(13, 0):
+        boundary = timestamp.replace(hour=13, minute=0, second=0, microsecond=0)
+    elif current >= time(15, 0):
+        boundary = timestamp
+    else:
+        session_hour, session_minute = (13, 0) if current >= time(13, 0) else (9, 30)
+        session = timestamp.replace(
+            hour=session_hour, minute=session_minute, second=0, microsecond=0,
+        )
+        elapsed = int((timestamp - session).total_seconds() // 60)
+        boundary = session + timedelta(minutes=(elapsed // minutes + 1) * minutes)
+    return boundary - timedelta(microseconds=1)
+
+
+def _process_scheduled_fills(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    market: MarketData,
+    until: datetime,
+    asset_type: str,
+    timeframe: str,
+) -> None:
+    due_groups: dict[datetime, list[str]] = {}
+    for order, due_at in engine.pending_orders:
+        due_groups.setdefault(due_at, [])
+        if order.symbol not in due_groups[due_at]:
+            due_groups[due_at].append(order.symbol)
+    pending_symbols = list(dict.fromkeys(
+        symbol for symbols in due_groups.values() for symbol in symbols
+    ))
+    _ensure_scheduled_market_data(
+        repo,
+        market,
+        pending_symbols,
+        min(due_groups, default=until).date() - timedelta(days=45),
+        until.date(),
+        asset_type,
+    )
+    for due_at, symbols in sorted(due_groups.items()):
+        if timeframe == "1d":
+            candidates: list[Bar] = []
+            for symbol in symbols:
+                days = sorted(
+                    row_day for row_symbol, row_day in market.daily
+                    if row_symbol == symbol and due_at.date() < row_day <= until.date()
+                )
+                if not days or until < datetime.combine(days[0], time(9, 30)):
+                    continue
+                bar = _scheduled_daily_bar(market, symbol, days[0], asset_type)
+                if bar is not None:
+                    candidates.append(replace(bar, timestamp=datetime.combine(days[0], time(9, 30))))
+        else:
+            get_next = getattr(repo, "get_minute_next", None)
+            if not callable(get_next):
+                continue
+            frame = get_next(symbols, _next_period_after(due_at, timeframe), until, asset_type)
+            candidates = _scheduled_minute_bars(frame, market, asset_type)
+        by_time: dict[datetime, list[Bar]] = {}
+        for bar in candidates:
+            by_time.setdefault(bar.timestamp, []).append(bar)
+        for timestamp, bars in sorted(by_time.items()):
+            engine.process_fill_event(timestamp, bars)
+
+
+def advance_scheduled_session(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    market: MarketData,
+    day: date,
+    cutoff: datetime,
+    asset_type: str,
+    timeframe: str,
+    *,
+    finalize: bool = False,
+) -> None:
+    engine.begin_session(day)
+    due_times = sorted({
+        at for at, _, done in engine.context._scheduled
+        if not done and datetime.combine(day, time.fromisoformat(at)) <= cutoff
+    })
+    for at in due_times:
+        timestamp = datetime.combine(day, time.fromisoformat(at))
+        _process_scheduled_fills(repo, engine, market, timestamp, asset_type, timeframe)
+        snapshot = _scheduled_snapshot(repo, engine, market, timestamp, asset_type, timeframe)
+        engine.run_scheduled_event(timestamp, snapshot)
+    _process_scheduled_fills(repo, engine, market, cutoff, asset_type, timeframe)
+    if finalize:
+        closing_time = max(cutoff, datetime.combine(day, time(15, 0)))
+        snapshot = _scheduled_snapshot(
+            repo, engine, market, closing_time, asset_type, timeframe,
+        )
+        engine.update_scheduled_market(closing_time, snapshot)
+        engine.finish_session()
+
+
 def execute_backtest(payload: dict[str, Any], output: Any) -> None:
     try:
         from app.tickflow.repository import DataStore, KlineRepository
@@ -471,6 +794,12 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         engine = FreeStrategyEngine(
             payload["source"], payload["timeframe"], config, instruments=instruments,
         )
+        output.put({
+            "type": "progress",
+            "message": "已识别定时执行模式" if engine.execution_mode == "scheduled" else "已识别完整回放模式",
+            "progress": 0.15,
+            "execution_mode": engine.execution_mode,
+        })
         symbols, universe_source = _resolve_symbols(engine, payload)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
@@ -483,7 +812,56 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         symbols_seen: set[str] = set()
         requested_symbols = list(symbols)
         trading_days = 0
-        if payload["timeframe"] == "1d":
+        if engine.execution_mode == "scheduled":
+            output.put({
+                "type": "progress",
+                "message": f"按交易日执行定时任务（{', '.join(engine.scheduled_times)}）",
+                "progress": 0.35,
+                "execution_mode": engine.execution_mode,
+            })
+            engine.set_history_loader(lambda symbol, count, timeframe, cutoff: _load_scheduled_history(
+                repo, market_data, payload["asset_type"], symbol, count, timeframe, cutoff,
+            ))
+            trading_dates = sorted({
+                day for symbol, day in market_data.daily
+                if symbol in symbols and start <= day <= end
+            })
+            if not trading_dates:
+                raise ValueError("回测区间没有可用的交易日行情")
+            last_schedule = max(time.fromisoformat(value) for value in engine.scheduled_times)
+            session_cutoff = max(last_schedule, time(15, 0))
+            for index, trading_day in enumerate(trading_dates, start=1):
+                advance_scheduled_session(
+                    repo,
+                    engine,
+                    market_data,
+                    trading_day,
+                    datetime.combine(trading_day, session_cutoff),
+                    payload["asset_type"],
+                    payload["timeframe"],
+                    finalize=True,
+                )
+                for symbol in engine.universe:
+                    if symbol not in requested_symbols:
+                        requested_symbols.append(symbol)
+                symbols_seen.update(engine._current_close_prices)
+                event_start = datetime.combine(trading_day, time.fromisoformat(engine.scheduled_times[0]))
+                event_end = datetime.combine(trading_day, session_cutoff)
+                first_bar = event_start if first_bar is None else min(first_bar, event_start)
+                last_bar = event_end
+                if index % 20 == 0:
+                    progress = min(0.9, 0.35 + 0.55 * index / len(trading_dates))
+                    output.put({
+                        "type": "progress",
+                        "message": f"已执行 {index} 个交易日的定时任务",
+                        "progress": progress,
+                        "execution_mode": engine.execution_mode,
+                    })
+            trading_days = len(trading_dates)
+            replayed_rows = engine.market_rows_consumed
+            engine.state = engine.context.state.copy()
+            result = engine.result()
+        elif payload["timeframe"] == "1d":
             bars = _read_rows(repo, symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
             output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
             replayed_rows = len(bars)
@@ -550,6 +928,10 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,
+            "execution_mode": engine.execution_mode,
+            "scheduled_times": engine.scheduled_times,
+            "callbacks_executed": engine.callbacks_executed,
+            "market_rows_consumed": engine.market_rows_consumed,
             "nav_filter": five_fortunes.get("nav_filter"),
             "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
             "liquidity_scope": five_fortunes.get("liquidity_scope"),
@@ -562,7 +944,11 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 "seen_symbols": sorted(symbols_seen),
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),
-                "storage": "kline_daily" if payload["timeframe"] == "1d" else minute_table,
+                "storage": (
+                    "event_snapshots"
+                    if engine.execution_mode == "scheduled"
+                    else "kline_daily" if payload["timeframe"] == "1d" else minute_table
+                ),
             },
         }
         if payload.get("run_dir"):

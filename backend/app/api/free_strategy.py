@@ -339,10 +339,12 @@ def _paper_loop(account_id: str, root: str) -> None:
     from app.free_strategy.process import (
         _instrument_records,
         _load_market_data,
+        _load_scheduled_history,
         _prepare_market_data,
         _prepare_market_reference,
         _read_rows,
         _resolve_symbols,
+        advance_scheduled_session,
     )
     from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
     from app.tickflow.repository import DataStore, KlineRepository
@@ -377,7 +379,15 @@ def _paper_loop(account_id: str, root: str) -> None:
         market_data, warmup_metadata = _prepare_market_data(
             repo, engine, symbols, today, today, asset_type, timeframe,
         )
+        if engine.execution_mode == "scheduled":
+            engine.set_history_loader(
+                lambda symbol, count, period, cutoff: _load_scheduled_history(
+                    repo, market_data, asset_type, symbol, count, period, cutoff,
+                )
+            )
         state["warmup"] = warmup_metadata
+        state["execution_mode"] = engine.execution_mode
+        state["scheduled_times"] = engine.scheduled_times
         state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         # Keep the supervisor alive and make the failure inspectable from the API.
@@ -396,42 +406,88 @@ def _paper_loop(account_id: str, root: str) -> None:
         path.write_text(json.dumps({"timestamp": now_iso(), "account_id": account_id}), encoding="utf-8")
         try:
             today = date.today()
-            if engine.market_history_requirements and engine._active_session_date != today:
-                engine.market_history_metadata = _prepare_market_reference(
-                    repo, engine, today, today, asset_type, market_data,
-                )
-                if today.weekday() < 5:
-                    engine.begin_session(today)
-                    symbols = engine.universe
-                    state["universe"] = symbols
-            if timeframe == "1d" and not any(
-                symbol_day == today for _, symbol_day in market_data.daily
-            ):
-                daily_update = _load_market_data(repo, symbols, today, today, asset_type)
-                market_data.daily.update(daily_update.daily)
-                market_data.names.update(daily_update.names)
-            try:
-                bars = _read_rows(
-                    repo, symbols, today, today, asset_type, timeframe,
-                    market_data=market_data,
-                )
-            except ValueError as exc:
-                # 盘前和盘中尚未有完整 bar 时保持账户运行，等下一轮数据同步即可。
-                if "没有可用" not in str(exc):
-                    raise
-                bars = []
-            fresh = [bar for bar in bars if bar.timestamp.isoformat() > (last_bar or "")]
             fill_count = len(engine.account.fills)
             log_count = len(engine.logs)
-            if fresh:
-                engine.run(fresh, finalize_session=False)
-                last_bar = fresh[-1].timestamp.isoformat()
-            # 分钟策略在最后一根收盘 bar 写入后执行；日线策略则在盘后同步到当天
-            # 日K后执行。状态落盘后同一交易日不会再次触发。
+            callback_count = engine.callbacks_executed
+            rows_consumed = engine.market_rows_consumed
             did_finish = False
-            if datetime.now().time() >= clock_time(15, 1):
-                did_finish = engine.finish_session()
-            if fresh or did_finish:
+            if engine.execution_mode == "scheduled":
+                if not any(
+                    symbol in symbols and symbol_day == today
+                    for symbol, symbol_day in market_data.daily
+                ):
+                    daily_update = _load_market_data(repo, symbols, today, today, asset_type)
+                    market_data.daily.update(daily_update.daily)
+                    market_data.names.update(daily_update.names)
+                trading_day = any(
+                    symbol in symbols and symbol_day == today
+                    for symbol, symbol_day in market_data.daily
+                )
+                if trading_day:
+                    now = datetime.now()
+                    was_finished = engine._session_finished
+                    session_end = max(
+                        clock_time(15, 1),
+                        max(clock_time.fromisoformat(value) for value in engine.scheduled_times),
+                    )
+                    advance_scheduled_session(
+                        repo,
+                        engine,
+                        market_data,
+                        today,
+                        now,
+                        asset_type,
+                        timeframe,
+                        finalize=now.time() >= session_end and not engine._session_finished,
+                    )
+                    symbols = engine.universe
+                    state["universe"] = symbols
+                    state["callbacks_executed"] = engine.callbacks_executed
+                    state["market_rows_consumed"] = engine.market_rows_consumed
+                    last_bar = (
+                        engine._last_timestamp.isoformat()
+                        if engine._last_timestamp is not None else last_bar
+                    )
+                    did_finish = not was_finished and engine._session_finished
+            else:
+                if engine.market_history_requirements and engine._active_session_date != today:
+                    engine.market_history_metadata = _prepare_market_reference(
+                        repo, engine, today, today, asset_type, market_data,
+                    )
+                    if today.weekday() < 5:
+                        engine.begin_session(today)
+                        symbols = engine.universe
+                        state["universe"] = symbols
+                if timeframe == "1d" and not any(
+                    symbol_day == today for _, symbol_day in market_data.daily
+                ):
+                    daily_update = _load_market_data(repo, symbols, today, today, asset_type)
+                    market_data.daily.update(daily_update.daily)
+                    market_data.names.update(daily_update.names)
+                try:
+                    bars = _read_rows(
+                        repo, symbols, today, today, asset_type, timeframe,
+                        market_data=market_data,
+                    )
+                except ValueError as exc:
+                    # 盘前和盘中尚未有完整 bar 时保持账户运行，等下一轮数据同步即可。
+                    if "没有可用" not in str(exc):
+                        raise
+                    bars = []
+                fresh = [bar for bar in bars if bar.timestamp.isoformat() > (last_bar or "")]
+                if fresh:
+                    engine.run(fresh, finalize_session=False)
+                    last_bar = fresh[-1].timestamp.isoformat()
+                if datetime.now().time() >= clock_time(15, 1):
+                    did_finish = engine.finish_session()
+            changed = (
+                len(engine.account.fills) != fill_count
+                or len(engine.logs) != log_count
+                or engine.callbacks_executed != callback_count
+                or engine.market_rows_consumed != rows_consumed
+                or did_finish
+            )
+            if changed:
                 checkpoint = engine.checkpoint()
                 state["checkpoint"] = checkpoint
                 state["account"] = checkpoint["account"]

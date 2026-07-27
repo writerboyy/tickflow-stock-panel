@@ -46,6 +46,10 @@ type EditorAction = { type: 'select'; id: string } | { type: 'new' } | { type: '
 type RenameTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
 type DeleteTarget = { type: 'strategy' | 'backtest' | 'paper'; id: string; name: string }
 
+function executionModeLabel(value: unknown) {
+  return value === 'scheduled' ? '定时执行' : value === 'full_bar' ? '完整回放' : ''
+}
+
 const DEFAULT_CONFIG: FreeBacktestConfig = {
   strategy_id: '', timeframe: '1d', asset_type: 'etf',
   start: `${new Date().getFullYear() - 3}-01-01`, end: new Date().toISOString().slice(0, 10),
@@ -150,6 +154,7 @@ export function FreeStrategy() {
   const [result, setResult] = useState<FreeBacktestResult | null>(null)
   const [progress, setProgress] = useState('')
   const [progressPct, setProgressPct] = useState<number | null>(null)
+  const [runningMode, setRunningMode] = useState('')
   const [error, setError] = useState('')
   const [running, setRunning] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -303,7 +308,7 @@ export function FreeStrategy() {
     }
     sourceRef.current?.close()
     jobRef.current = null
-    setResult(null); setError(''); setProgress('正在创建回测任务...'); setProgressPct(0); setRunning(true); setSelectedRunId(''); setWorkspaceView('backtests'); setMobileRunDetail(true)
+    setResult(null); setError(''); setProgress('正在创建回测任务...'); setProgressPct(0); setRunningMode(''); setRunning(true); setSelectedRunId(''); setWorkspaceView('backtests'); setMobileRunDetail(true)
     try {
       const job = await api.startFreeBacktest(config)
       jobRef.current = job.job_id
@@ -313,7 +318,7 @@ export function FreeStrategy() {
       let finished = false
       events.onmessage = event => {
         const payload = JSON.parse(event.data)
-        if (payload.type === 'progress') { setProgress(payload.message); setProgressPct(typeof payload.progress === 'number' ? payload.progress : null) }
+        if (payload.type === 'progress') { setProgress(payload.message); setProgressPct(typeof payload.progress === 'number' ? payload.progress : null); if (payload.execution_mode) setRunningMode(executionModeLabel(payload.execution_mode)) }
         if (payload.type === 'result') { finished = true; jobRef.current = null; setResult(payload.result); setSelectedRunId(job.job_id); setProgress('回测完成'); setProgressPct(1); setRunning(false); void savedRuns.refetch(); events.close() }
         if (payload.type === 'error') { finished = true; jobRef.current = null; setError(payload.error); setProgress('回测失败'); setProgressPct(null); setRunning(false); events.close() }
       }
@@ -438,7 +443,7 @@ export function FreeStrategy() {
     <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
       <div className="flex items-center gap-2">
         <Code2 className="h-4 w-4 text-accent" />
-        <div><div className="text-sm font-semibold">量化策略</div><div className="text-[11px] text-muted">独立 Python bar 回放{dirty && workspaceView === 'strategy' ? ' · 未保存' : ''}</div></div>
+        <div><div className="text-sm font-semibold">量化策略</div><div className="text-[11px] text-muted">Python 策略 · 自动识别完整回放或定时执行{dirty && workspaceView === 'strategy' ? ' · 未保存' : ''}</div></div>
       </div>
       {workspaceView === 'strategy' ? <div className="flex flex-wrap items-center justify-end gap-1.5">
         <select className={INPUT} value="" onChange={event => requestEditorAction({ type: 'template', id: event.target.value })} aria-label="加载模板">
@@ -490,8 +495,16 @@ export function FreeStrategy() {
         {accounts.length ? <select className={INPUT} value={selectedAccountId} onChange={event => setSelectedAccountId(event.target.value)} aria-label="模拟账户">{accounts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select> : null}
         {account ? <div className="mt-2 rounded border border-border bg-elevated p-2.5 text-[11px]">
           <div className="flex items-center justify-between gap-2"><span className="truncate font-medium">{account.name}</span><span className={account.status === 'running' ? 'text-success' : account.status === 'paused' ? 'text-warning' : 'text-muted'}>{account.status}</span></div>
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5"><div><span className="text-muted">可用资金</span><div className="mt-0.5 tabular-nums">{Number(accountSnapshot?.cash ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</div></div><div><span className="text-muted">持仓标的</span><div className="mt-0.5 tabular-nums">{activePositions.length}</div></div><div className="col-span-2"><span className="text-muted">最新 bar</span><div className="mt-0.5 break-all font-mono text-[10px]">{account.last_bar || '尚未收到行情'}</div></div></div>
-          <div className="mt-2 max-h-24 overflow-y-auto border-y border-border py-1">{activePositions.map(([symbol, quantity]) => <div key={symbol} className="flex justify-between py-1"><span className="font-mono">{symbol}</span><span className="tabular-nums">{quantity.toLocaleString('zh-CN')}</span></div>)}{!activePositions.length ? <div className="py-1 text-muted">当前无持仓</div> : null}</div>
+          {executionModeLabel(account.execution_mode) ? <div className="mt-1 text-[10px] text-muted">{executionModeLabel(account.execution_mode)}{Array.isArray(account.scheduled_times) && account.scheduled_times.length ? ` · ${account.scheduled_times.join('、')}` : ''}</div> : null}
+          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
+            <div><span className="text-muted">可用资金</span><div className="mt-0.5 tabular-nums">{Number(accountSnapshot?.cash ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}</div></div>
+            <div><span className="text-muted">持仓标的</span><div className="mt-0.5 tabular-nums">{activePositions.length}</div></div>
+            <div className="col-span-2"><span className="text-muted">最新 bar</span><div className="mt-0.5 break-all font-mono text-[10px]">{account.last_bar || '尚未收到行情'}</div></div>
+          </div>
+          <div className="mt-2 max-h-24 overflow-y-auto border-y border-border py-1">
+            {activePositions.map(([symbol, quantity]) => <div key={symbol} className="flex justify-between py-1"><span className="font-mono">{symbol}</span><span className="tabular-nums">{quantity.toLocaleString('zh-CN')}</span></div>)}
+            {!activePositions.length ? <div className="py-1 text-muted">当前无持仓</div> : null}
+          </div>
           {account.last_error ? <div className="mt-2 break-words text-danger">{account.last_error}</div> : null}
           <div className="mt-2 flex gap-1"><button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={account.status === 'running'} onClick={() => void paperAction(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-40"><CirclePlay className="h-3.5 w-3.5" /></button><button type="button" title="暂停" disabled={account.status !== 'running'} onClick={() => void paperAction('pause')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-40"><CirclePause className="h-3.5 w-3.5" /></button><button type="button" title="停止" disabled={account.status === 'stopped'} onClick={() => void paperAction('stop')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-40"><Square className="h-3.5 w-3.5" /></button></div>
         </div> : <div className="mt-2 text-[11px] text-muted">创建账户后可启动持久模拟盘。</div>}
@@ -500,8 +513,20 @@ export function FreeStrategy() {
       <section className={`max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-[calc(100vh-180px)] max-md:min-h-0 ${mobileRunDetail ? 'max-md:hidden' : ''}`}>
         <div className="mb-2 flex h-7 items-center justify-between gap-2"><span className="inline-flex items-center gap-1.5 text-xs font-medium"><History className="h-3.5 w-3.5 text-accent" />历史回测 <span className="font-normal tabular-nums text-muted">{runs.length}</span></span><div className="flex items-center gap-0.5">{selectedRun ? <><IconButton title="重命名回测记录" onClick={() => openRename({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除回测记录" danger onClick={() => openDelete({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Trash2 className="h-3.5 w-3.5" /></IconButton></> : null}</div></div>
         <div className="space-y-1.5">
-          {running ? <div className="rounded border border-accent bg-accent/10 px-2.5 py-2.5" aria-current="true"><div className="flex items-center justify-between gap-2 text-[11px]"><span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-accent"><LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" /><span className="truncate">{name}</span></span><span className="shrink-0 tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div><div className="mt-1.5 truncate text-[10px] text-muted">{progress}</div>{selectedRunId ? <div className="mt-1 truncate font-mono text-[10px] text-muted">{selectedRunId}</div> : null}</div> : null}
-          {runs.map(runItem => { const metadata = runItem.metadata ?? {}; const returnPct = Number(runItem.return_pct ?? 0); return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${selectedRunId === runItem.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}><div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{runItem.name}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div><div className="mt-1.5 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}</div><div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{runItem.job_id}</span><span className="shrink-0">回撤 {Number(runItem.max_drawdown_pct ?? 0).toFixed(2)}% · {runItem.fills} 成交</span></div></button> })}
+          {running ? <div className="rounded border border-accent bg-accent/10 px-2.5 py-2.5" aria-current="true">
+            <div className="flex items-center justify-between gap-2 text-[11px]"><span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-accent"><LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" /><span className="truncate">{name}</span></span><span className="shrink-0 tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div>
+            <div className="mt-1.5 truncate text-[10px] text-muted">{progress}</div>
+            {selectedRunId ? <div className="mt-1 truncate font-mono text-[10px] text-muted">{selectedRunId}</div> : null}
+          </div> : null}
+          {runs.map(runItem => {
+            const metadata = runItem.metadata ?? {}
+            const returnPct = Number(runItem.return_pct ?? 0)
+            return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${selectedRunId === runItem.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
+              <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{runItem.name}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
+              <div className="mt-1.5 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}{executionModeLabel(metadata.execution_mode) ? ` · ${executionModeLabel(metadata.execution_mode)}` : ''}</div>
+              <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{runItem.job_id}</span><span className="shrink-0">回撤 {Number(runItem.max_drawdown_pct ?? 0).toFixed(2)}% · {runItem.fills} 成交</span></div>
+            </button>
+          })}
         </div>
         {savedRuns.isLoading ? <div className="py-4 text-center text-[11px] text-muted">加载回测记录...</div> : null}
         {!savedRuns.isLoading && !runs.length ? <EmptyState icon={History} title="还没有回测记录" hint="返回策略开发，完成一次历史回测后会保存在这里。" /> : null}
@@ -510,7 +535,17 @@ export function FreeStrategy() {
       <div className={`min-w-0 ${mobileRunDetail ? '' : 'max-md:hidden'}`}>
         <button type="button" onClick={() => setMobileRunDetail(false)} className="mb-2 hidden h-8 items-center gap-1 text-xs text-muted hover:text-foreground max-md:inline-flex"><ArrowLeft className="h-3.5 w-3.5" />返回回测记录</button>
         {error ? <div className="mb-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
-        {running ? <section className="min-h-[420px] rounded-md border border-border bg-surface p-4" aria-live="polite"><div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4"><div><div className="inline-flex items-center gap-2 text-sm font-medium"><LoaderCircle className="h-4 w-4 animate-spin text-accent" />回测运行中</div><div className="mt-1 text-[11px] text-muted">{name} · {config.asset_type.toUpperCase()} {config.timeframe} · {config.start} 至 {config.end}</div></div><button type="button" onClick={cancel} className="inline-flex items-center gap-1.5 rounded-btn border border-border px-3 py-1.5 text-xs text-muted hover:border-danger hover:text-danger"><Square className="h-3.5 w-3.5" />停止</button></div><div className="mx-auto mt-16 max-w-xl"><div className="flex items-center justify-between gap-3 text-xs"><span>{progress}</span><span className="tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div><div className="mt-3 h-1.5 overflow-hidden rounded bg-elevated"><div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${Math.max(2, Math.round((progressPct ?? 0) * 100))}%` }} /></div><div className="mt-3 break-all font-mono text-[10px] text-muted">任务 {selectedRunId || '正在生成...'}</div></div></section> : result ? <FreeStrategyResult result={result} title={selectedRun?.name} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
+        {running ? <section className="min-h-[420px] rounded-md border border-border bg-surface p-4" aria-live="polite">
+          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
+            <div><div className="inline-flex items-center gap-2 text-sm font-medium"><LoaderCircle className="h-4 w-4 animate-spin text-accent" />回测运行中{runningMode ? ` · ${runningMode}` : ''}</div><div className="mt-1 text-[11px] text-muted">{name} · {config.asset_type.toUpperCase()} {config.timeframe} · {config.start} 至 {config.end}</div></div>
+            <button type="button" onClick={cancel} className="inline-flex items-center gap-1.5 rounded-btn border border-border px-3 py-1.5 text-xs text-muted hover:border-danger hover:text-danger"><Square className="h-3.5 w-3.5" />停止</button>
+          </div>
+          <div className="mx-auto mt-16 max-w-xl">
+            <div className="flex items-center justify-between gap-3 text-xs"><span>{progress}</span><span className="tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div>
+            <div className="mt-3 h-1.5 overflow-hidden rounded bg-elevated"><div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${Math.max(2, Math.round((progressPct ?? 0) * 100))}%` }} /></div>
+            <div className="mt-3 break-all font-mono text-[10px] text-muted">任务 {selectedRunId || '正在生成...'}</div>
+          </div>
+        </section> : result ? <FreeStrategyResult result={result} title={selectedRun?.name} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
       </div>
     </div>}
 
