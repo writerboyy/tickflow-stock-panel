@@ -54,6 +54,41 @@ def on_bar(context, bars):
     assert result["orders"] == []
 
 
+def test_history_warmup_must_be_explicitly_declared_by_strategy():
+    without_warmup = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+    with_warmup = FreeStrategyEngine("""
+def initialize(context):
+    context.require_history(timeframe='1d', bars=61)
+    context.require_history(timeframe='1d', bars=20)
+
+def on_bar(context, bars):
+    pass
+""")
+
+    assert without_warmup.history_requirements == {}
+    assert with_warmup.history_requirements == {"1d": 61}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ("timeframe='5m', bars=10", "只支持 1d"),
+        ("timeframe='1d', bars=0", "正整数"),
+    ],
+)
+def test_history_warmup_declaration_validates_arguments(arguments, message):
+    source = f"""
+def initialize(context):
+    context.require_history({arguments})
+
+def on_bar(context, bars):
+    pass
+"""
+
+    with pytest.raises(ValueError, match=message):
+        FreeStrategyEngine(source)
+
+
 def test_initialize_defines_universe_and_normalizes_joinquant_suffixes():
     source = """
 def initialize(context):
@@ -341,7 +376,7 @@ from app.free_strategy.five_fortunes import after_trading_end, before_trading_st
     result = engine.run(bars)
     state = result["state"]["five_fortunes"]
 
-    assert state["warmup_rows"] == len(warmup)
+    assert state["warmup_rows"] == 61 * len(symbols)
     assert state["all_metric_rows"]
 
 

@@ -22,12 +22,16 @@ class FakeContext:
         self.orders = []
         self.logs = []
         self.universe = []
+        self.history_requirements = {}
 
     def set_universe(self, symbols) -> None:
         self.universe = list(symbols)
 
     def schedule(self, callback, at) -> None:
         self.scheduled.append((callback, at))
+
+    def require_history(self, timeframe: str = "1d", bars: int = 1) -> None:
+        self.history_requirements[timeframe] = bars
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.logs.append((level, message))
@@ -69,6 +73,7 @@ def test_initialize_registers_available_etf_universe():
     context = initialized_context()
 
     assert context.universe == [*five.WUFU_MINUTE_POOL, five.DEFENSIVE_ETF]
+    assert context.history_requirements == {"1d": 61}
 
 
 def test_laplace_smoothing_is_regime_specific():

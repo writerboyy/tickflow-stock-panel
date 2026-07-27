@@ -18,7 +18,7 @@ from .engine import FreeStrategyConfig, FreeStrategyEngine
 
 logger = logging.getLogger(__name__)
 
-WARMUP_CALENDAR_DAYS = 450
+MARKET_METADATA_CALENDAR_DAYS = 30
 
 
 @dataclass
@@ -311,6 +311,64 @@ def _read_rows(
     return group_bars(minute_rows(), timeframe)
 
 
+def _prepare_market_data(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    symbols: list[str],
+    start: date,
+    end: date,
+    asset_type: str,
+    timeframe: str,
+) -> tuple[MarketData, dict[str, Any]]:
+    requested_bars = engine.history_requirements.get("1d", 0)
+    lookback_days = max(
+        MARKET_METADATA_CALENDAR_DAYS,
+        requested_bars * 2 + 14 if requested_bars else 0,
+    )
+    load_start = start - timedelta(days=lookback_days)
+    market_data = _load_market_data(repo, symbols, load_start, end, asset_type)
+    if not any(start <= day <= end for _, day in market_data.daily):
+        formal_market_data = _load_market_data(repo, symbols, start, end, asset_type)
+        market_data.daily.update(formal_market_data.daily)
+        market_data.names.update(formal_market_data.names)
+
+    warmup_end = start - timedelta(days=1)
+    if timeframe == "1d":
+        prior_bars = _daily_bars(symbols, load_start, warmup_end, asset_type, market_data)
+    else:
+        _prime_minute_market_data(repo, symbols, start, asset_type, market_data)
+        prior_bars = (
+            _aligned_warmup_bars(symbols, load_start, warmup_end, market_data)
+            if requested_bars else []
+        )
+
+    selected: list[Bar] = []
+    if requested_bars:
+        by_symbol: dict[str, list[Bar]] = {}
+        for bar in prior_bars:
+            by_symbol.setdefault(bar.symbol, []).append(bar)
+        selected = sorted(
+            (
+                bar
+                for symbol_bars in by_symbol.values()
+                for bar in symbol_bars[-requested_bars:]
+            ),
+            key=lambda bar: (bar.timestamp, bar.symbol),
+        )
+        engine.preload_history(selected, "1d")
+
+    dates = [bar.timestamp.date() for bar in selected]
+    return market_data, {
+        "enabled": bool(requested_bars),
+        "timeframe": "1d" if requested_bars else None,
+        "requested_bars": requested_bars,
+        "rows": len(selected),
+        "symbols": len({bar.symbol for bar in selected}),
+        "start": min(dates).isoformat() if dates else None,
+        "end": max(dates).isoformat() if dates else None,
+    }
+
+
 def execute_backtest(payload: dict[str, Any], output: Any) -> None:
     try:
         from app.tickflow.repository import DataStore, KlineRepository
@@ -322,23 +380,9 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         symbols, universe_source = _resolve_symbols(engine, payload)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
-        warmup_start = start - timedelta(days=WARMUP_CALENDAR_DAYS)
-        market_data = _load_market_data(repo, symbols, warmup_start, end, payload["asset_type"])
-        if not any(start <= day <= end for _, day in market_data.daily):
-            formal_market_data = _load_market_data(repo, symbols, start, end, payload["asset_type"])
-            market_data.daily.update(formal_market_data.daily)
-            market_data.names.update(formal_market_data.names)
-        if payload["timeframe"] != "1d":
-            _prime_minute_market_data(repo, symbols, start, payload["asset_type"], market_data)
-            warmup_bars = _aligned_warmup_bars(
-                symbols, warmup_start, start - timedelta(days=1), market_data,
-            )
-        else:
-            warmup_bars = _read_rows(
-                repo, symbols, warmup_start, start - timedelta(days=1),
-                payload["asset_type"], "1d", allow_empty=True, market_data=market_data,
-            )
-        warmup_rows = engine.preload_history(warmup_bars, "1d")
+        market_data, warmup_metadata = _prepare_market_data(
+            repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
+        )
         replayed_rows = 0
         first_bar: datetime | None = None
         last_bar: datetime | None = None
@@ -398,7 +442,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             "data_days": len(result.get("daily_equity_curve", [])),
             "source_revision": payload.get("source_revision"),
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
-            "warmup": {"timeframe": "1d", "rows": warmup_rows, "start": warmup_start.isoformat(), "end": (start - timedelta(days=1)).isoformat()},
+            "warmup": warmup_metadata,
             "nav_filter": five_fortunes.get("nav_filter"),
             "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
             "liquidity_scope": five_fortunes.get("liquidity_scope"),

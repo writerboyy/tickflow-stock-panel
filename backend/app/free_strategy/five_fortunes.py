@@ -44,6 +44,7 @@ def _state(context) -> dict[str, Any]:
 
 def initialize(context) -> None:
     context.set_universe([*WUFU_MINUTE_POOL, DEFENSIVE_ETF])
+    context.require_history(timeframe="1d", bars=61)
     context.state.setdefault("five_fortunes", {
         "daily": {},
         "intraday": {"date": None, "close": {}, "volume": {}, "amount": {}},
@@ -95,7 +96,7 @@ def before_trading_start(context) -> None:
         loaded = 0
         ready = 0
         for symbol in context.universe:
-            bars = context.history_bars(symbol, count=320, timeframe="1d")
+            bars = context.history_bars(symbol, count=61, timeframe="1d")
             if not bars:
                 continue
             state["daily"][symbol] = [

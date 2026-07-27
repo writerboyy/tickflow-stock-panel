@@ -254,10 +254,8 @@ def _paper_loop(account_id: str, root: str) -> None:
     import time
     from datetime import date, datetime, time as clock_time
     from app.free_strategy.process import (
-        WARMUP_CALENDAR_DAYS,
-        _aligned_warmup_bars,
         _load_market_data,
-        _prime_minute_market_data,
+        _prepare_market_data,
         _read_rows,
         _resolve_symbols,
     )
@@ -288,19 +286,10 @@ def _paper_loop(account_id: str, root: str) -> None:
             engine.account.restore(state.get("account", {}))
             engine.restore_runtime(state.get("runtime"))
         today = date.today()
-        warmup_start = today - timedelta(days=WARMUP_CALENDAR_DAYS)
-        market_data = _load_market_data(repo, symbols, warmup_start, today, asset_type)
-        if timeframe != "1d":
-            _prime_minute_market_data(repo, symbols, today, asset_type, market_data)
-            warmup_bars = _aligned_warmup_bars(
-                symbols, warmup_start, today - timedelta(days=1), market_data,
-            )
-        else:
-            warmup_bars = _read_rows(
-                repo, symbols, warmup_start, today - timedelta(days=1),
-                asset_type, "1d", allow_empty=True, market_data=market_data,
-            )
-        engine.preload_history(warmup_bars, "1d")
+        market_data, warmup_metadata = _prepare_market_data(
+            repo, engine, symbols, today, today, asset_type, timeframe,
+        )
+        state["warmup"] = warmup_metadata
         state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         # Keep the supervisor alive and make the failure inspectable from the API.

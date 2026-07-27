@@ -1,11 +1,43 @@
 from __future__ import annotations
 
 import queue
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 
-from app.free_strategy.process import MarketData, _aligned_warmup_bars, _read_rows, execute_backtest
+from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.process import (
+    MarketData,
+    _aligned_warmup_bars,
+    _prepare_market_data,
+    _read_rows,
+    execute_backtest,
+)
+
+
+class DailyRepository:
+    def __init__(self, rows: dict[str, list[dict]]) -> None:
+        self.rows = rows
+
+    def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
+        return pl.DataFrame([
+            row for row in self.rows[symbol] if start <= row["date"] <= end
+        ])
+
+
+def daily_row(day, price: float) -> dict:
+    return {
+        "date": day,
+        "open": price,
+        "high": price,
+        "low": price,
+        "close": price,
+        "raw_close": price,
+        "raw_high": price,
+        "raw_low": price,
+        "volume": 100.0,
+        "amount": price * 100,
+    }
 
 
 def test_minute_warmup_daily_prices_align_to_minute_adjustment_scale():
@@ -57,6 +89,65 @@ def test_minute_rows_derive_raw_prices_split_and_limits_from_daily_data():
     assert bars[-1].raw_close == 12
     assert bars[0].split_ratio == 2
     assert (bars[0].limit_up, bars[0].limit_down) == (11, 9)
+
+
+def test_market_preparation_does_not_inject_undeclared_history():
+    start = datetime(2024, 2, 1).date()
+    rows = {"X": [daily_row(start - timedelta(days=day), float(day)) for day in range(1, 11)]}
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+
+    market, warmup = _prepare_market_data(
+        DailyRepository(rows), engine, ["X"], start, start, "etf", "1d",
+    )
+
+    assert warmup == {
+        "enabled": False,
+        "timeframe": None,
+        "requested_bars": 0,
+        "rows": 0,
+        "symbols": 0,
+        "start": None,
+        "end": None,
+    }
+    assert engine.context.history_bars("X", count=100, timeframe="1d") == []
+    assert market.previous_adjusted_close["X"] == 1.0
+
+
+def test_market_preparation_injects_exact_declared_bars_per_symbol():
+    start = datetime(2024, 4, 1).date()
+    symbols = ["X", "Y"]
+    rows = {
+        symbol: [
+            daily_row(start - timedelta(days=offset), float(100 - offset))
+            for offset in range(70, 0, -1)
+        ] + [daily_row(start, 100.0)]
+        for symbol in symbols
+    }
+    engine = FreeStrategyEngine("""
+def initialize(context):
+    context.require_history(timeframe='1d', bars=61)
+
+def on_bar(context, bars):
+    pass
+""")
+
+    _, warmup = _prepare_market_data(
+        DailyRepository(rows), engine, symbols, start, start, "etf", "1d",
+    )
+
+    assert warmup == {
+        "enabled": True,
+        "timeframe": "1d",
+        "requested_bars": 61,
+        "rows": 122,
+        "symbols": 2,
+        "start": (start - timedelta(days=61)).isoformat(),
+        "end": (start - timedelta(days=1)).isoformat(),
+    }
+    assert all(
+        len(engine.context.history_bars(symbol, count=100, timeframe="1d")) == 61
+        for symbol in symbols
+    )
 
 
 def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
@@ -111,6 +202,15 @@ def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
         "missing_symbols": [],
         "configured_provider": "tickflow",
         "storage": "kline_etf_minute",
+    }
+    assert event["result"]["metadata"]["warmup"] == {
+        "enabled": False,
+        "timeframe": None,
+        "requested_bars": 0,
+        "rows": 0,
+        "symbols": 0,
+        "start": None,
+        "end": None,
     }
 
 

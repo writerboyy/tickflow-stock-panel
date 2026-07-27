@@ -113,6 +113,7 @@ class Context:
         self.account = self.portfolio
         self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
         self._universe: list[str] = []
+        self._history_requirements: dict[str, int] = {}
 
     @property
     def universe(self) -> list[str]:
@@ -134,6 +135,20 @@ class Context:
         if not normalized:
             raise ValueError("股票池不能为空")
         self._universe = normalized
+
+    @property
+    def history_requirements(self) -> dict[str, int]:
+        return dict(self._history_requirements)
+
+    def require_history(self, timeframe: str = "1d", bars: int = 1) -> None:
+        period = str(timeframe).strip().lower()
+        if period != "1d":
+            raise ValueError("预热历史目前只支持 1d 日线")
+        if isinstance(bars, bool) or not isinstance(bars, int) or bars <= 0:
+            raise ValueError("预热 bar 数量必须是正整数")
+        self._history_requirements[period] = max(
+            bars, self._history_requirements.get(period, 0),
+        )
 
     def _sync(self, prices: dict[str, float]) -> None:
         self.portfolio.cash = self._engine.account.cash
@@ -243,6 +258,10 @@ class FreeStrategyEngine:
     @property
     def universe(self) -> list[str]:
         return self.context.universe
+
+    @property
+    def history_requirements(self) -> dict[str, int]:
+        return self.context.history_requirements
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
