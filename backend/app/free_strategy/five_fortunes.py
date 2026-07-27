@@ -35,16 +35,107 @@ WUFU_ETF_POOL = [
 DEFENSIVE_ETF = "511880.SH"
 NO_TICKFLOW_MINUTE = ("161226.SZ", "164824.SZ", "501018.SH")
 WUFU_MINUTE_POOL = [symbol for symbol in WUFU_ETF_POOL if symbol not in NO_TICKFLOW_MINUTE]
+GLOBAL_ETF_POOL = [
+    "518880.SH", "501018.SH", "161226.SZ", "159985.SZ", "159980.SZ",
+    "513310.SH", "159518.SZ", "159509.SZ", "513100.SH", "513520.SH",
+    "513500.SH", "159502.SZ", "513400.SH", "513030.SH", "513290.SH",
+    "520830.SH", "159529.SZ", "164824.SZ", "513080.SH", "513730.SH",
+    "511380.SH", "511220.SH", "510050.SH", "563300.SH", "159928.SZ",
+    "510300.SH", "510500.SH", "512100.SH", "159915.SZ", "513180.SH",
+    "159920.SZ",
+]
 REGIME_PROXIES = ["510300.SH", "510500.SH", "159915.SZ", "512100.SH", "563300.SH", "510050.SH"]
+
+FUND_COMPANIES = (
+    "易方达", "广发", "华夏", "华安", "嘉实", "富国", "招商", "鹏华", "南方", "汇添富", "国泰", "平安",
+    "银华", "天弘", "建信", "工银", "华泰柏瑞", "博时", "景顺长城", "景顺", "华宝", "申万菱信", "万家", "中欧",
+    "兴证全球", "浙商", "诺安", "前海开源", "泰康", "泰达宏利", "农银汇理", "交银", "东方红", "财通", "华商",
+    "国联", "永赢", "金鹰", "德邦", "创金合信", "西部利得", "圆信永丰", "泓德", "汇安", "诺德", "恒生前海",
+    "华润元大", "大成", "海富通", "摩根", "华泰", "中信", "中银", "兴全", "国信", "长城", "中金", "浙商证券",
+    "东海", "东吴", "浦银安盛", "信达澳亚", "中加", "中航", "中融", "中邮", "中庚", "中信保诚", "中信建投",
+    "中银国际", "中银证券", "九泰", "交银施罗德", "光大保德信", "兴银", "农银", "国投瑞银", "国海富兰克林",
+    "国联安", "国金", "太平", "方正富邦", "民生加银", "汇丰晋信", "银河", "长信", "长安", "长盛", "长江证券", "鹏扬",
+)
+NOISE_WORDS = (
+    "6666", "8888", "9999", "A类", "AH", "B", "BS", "C", "C类", "CS", "DB", "E", "E类",
+    "ETF", "ETF基金", "ETF联接", "FG", "G60", "GF", "GT", "HGS", "LOF", "LOF基金", "LOF联接",
+    "SG", "SZ", "TF", "TK", "WJ", "YH", "ZS", "ZZ", "板块", "策略", "产业", "场内", "场外", "低波",
+    "基本面", "基金", "精选", "联接", "联接基金", "量化", "龙头", "民企", "民营", "国企", "央企", "智能",
+    "全指", "上市开放式", "指基", "指增", "指数", "指数A", "指数C", "指数ETF", "指数基金", "主题", "增强",
+    "上海", "黄", "30", "50", "100", "300", "500", "1000", "2000", "大", "新", "四川", "浙江", "湖北",
+)
+EXCLUDE_KEYWORDS = (
+    "300现金流", "800现金流", "全指现金", "现金全指", "自由现金流", "现金流",
+    "基准国债", "中银现金", "现金指数", "可转债", "政金债", "企业债", "公司债", "城投债",
+    "美元债", "科创债", "信用债", "利率债", "国开债", "短融", "转债", "双债", "国债", "地债",
+    "新综债", "城投", "科债", "货币", "现金", "快线", "快钱", "ESG", "MSCI", "A500", "A100", "A50",
+    "沪深", "中证", "上证", "深证", "深成", "深100", "1000", "2000", "800", "500", "300", "200", "180", "100", "50", "30", "MS", "债",
+)
+SPECIAL_GROUPS = (
+    ("香港组", ("恒生", "恒指", "港股通", "港股", "H股", "香港", "HKC", "HK", "HGS", "中概", "HS科技"),
+     ("恒生", "恒指", "港股通", "港股", "H股", "香港", "HKC", "HK", "HGS", "中概", "HS")),
+    ("科创组", ("科创", "科创板", "科综", "KC", "K C", "双创", "科创创业", "创创"),
+     ("科创", "科创板", "科综", "KC", "K C", "双创", "科创创业", "创创", "AAA")),
+    ("创业组", ("创业板", "创业", "创板", "创成长"), ("创业板", "创业", "创板", "创成长")),
+    ("美指组", ("标普", "纳指", "纳斯达克"), ("标普", "纳指", "纳斯达克")),
+)
 
 
 def _state(context) -> dict[str, Any]:
     return context.state["five_fortunes"]
 
 
+def _dynamic_group(name: str) -> str | None:
+    if any(keyword in name for keyword in EXCLUDE_KEYWORDS):
+        return None
+    group_name = "普通组"
+    remove_words: tuple[str, ...] = ()
+    for candidate_name, keywords, candidate_remove_words in SPECIAL_GROUPS:
+        if any(keyword in name for keyword in keywords):
+            group_name = candidate_name
+            remove_words = candidate_remove_words
+            break
+    cleaned = name
+    for word in sorted(FUND_COMPANIES, key=len, reverse=True):
+        cleaned = cleaned.replace(word, "")
+    for word in sorted(remove_words, key=len, reverse=True):
+        cleaned = cleaned.replace(word, "")
+    for word in sorted(NOISE_WORDS, key=len, reverse=True):
+        cleaned = cleaned.replace(word, "")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    return f"{group_name}:{cleaned[:2]}"
+
+
+def _market_catalog(context) -> tuple[list[str], dict[str, str], dict[str, str], set[str]]:
+    instruments = getattr(context, "instruments", lambda _asset=None: [])("etf")
+    if not instruments:
+        instruments = [
+            {"symbol": symbol, "name": symbol, "asset_type": "etf", "has_minute": True}
+            for symbol in [*WUFU_MINUTE_POOL, DEFENSIVE_ETF]
+        ]
+    names = {str(item["symbol"]): str(item.get("name") or item["symbol"]) for item in instruments}
+    minute_symbols = {
+        str(item["symbol"])
+        for item in instruments
+        if bool(item.get("has_minute", True))
+    }
+    dynamic_groups = {
+        symbol: group
+        for symbol, name in names.items()
+        if symbol in minute_symbols and (group := _dynamic_group(name)) is not None
+    }
+    return list(names), names, dynamic_groups, minute_symbols
+
+
 def initialize(context) -> None:
-    context.set_universe([*WUFU_MINUTE_POOL, DEFENSIVE_ETF])
+    market_symbols, instrument_names, dynamic_groups, minute_symbols = _market_catalog(context)
+    fixed_pool = [symbol for symbol in WUFU_ETF_POOL if symbol in minute_symbols]
+    global_pool = [symbol for symbol in GLOBAL_ETF_POOL if symbol in minute_symbols]
+    context.set_universe([*fixed_pool, DEFENSIVE_ETF])
     context.require_history(timeframe="1d", bars=61)
+    context.require_market_history(asset_type="etf", timeframe="1d", bars=61)
     context.state.setdefault("five_fortunes", {
         "daily": {},
         "intraday": {"date": None, "close": {}, "volume": {}, "amount": {}},
@@ -58,9 +149,21 @@ def initialize(context) -> None:
         "candidate_rows": [],
         "filtered_rows": [],
         "all_metric_rows": [],
-        "liquidity_pool": list(WUFU_MINUTE_POOL),
+        "liquidity_pool": list(fixed_pool),
+        "normal_liquidity_pool": list(fixed_pool),
+        "weak_liquidity_pool": list(global_pool),
+        "subscription_pool": list(fixed_pool),
         "liquidity_threshold": None,
+        "normal_liquidity_threshold": None,
+        "weak_liquidity_threshold": None,
         "liquidity_divisor": 20_000,
+        "fixed_pool": fixed_pool,
+        "global_pool": global_pool,
+        "dynamic_pool": [],
+        "dynamic_groups": dynamic_groups,
+        "instrument_names": instrument_names,
+        "market_symbols": market_symbols,
+        "market_instrument_count": len(market_symbols),
         "rank_streak": {},
         "rebuy_cooldown": {},
         "risk_mode": None,
@@ -74,8 +177,8 @@ def initialize(context) -> None:
         "correlation_decisions": [],
         "daily_reports": [],
         "nav_filter": "skipped_no_data",
-        "excluded_no_minute_symbols": list(NO_TICKFLOW_MINUTE),
-        "liquidity_scope": "configured_universe",
+        "excluded_no_minute_symbols": [symbol for symbol in WUFU_ETF_POOL if symbol not in minute_symbols],
+        "liquidity_scope": "all_market_etf",
         "warmup_rows": 0,
         "warmup_ready_symbols": 0,
         "warmup_required_days": 61,
@@ -86,7 +189,88 @@ def initialize(context) -> None:
     context.schedule(_buy_targets, "13:11")
     context.log(
         "五福 TickFlow 适配已初始化：ETF NAV/溢价过滤无数据，已跳过；"
-        "161226.SZ、164824.SZ、501018.SH 无 TickFlow 分钟K，未参与回测"
+        f"全市场ETF={len(market_symbols)}只，动态候选={len(dynamic_groups)}只，"
+        f"无分钟K的固定池标的={len([symbol for symbol in WUFU_ETF_POOL if symbol not in minute_symbols])}只"
+    )
+
+
+def _history_rows(context, symbol: str, count: int) -> list[dict[str, Any]]:
+    market_history = getattr(context, "market_history_bars", None)
+    bars = market_history(symbol, count=count, timeframe="1d") if callable(market_history) else []
+    if not bars:
+        bars = context.history_bars(symbol, count=count, timeframe="1d")
+    return [
+        {
+            "date": bar.date.isoformat(),
+            "close": float(bar.close),
+            "volume": float(bar.volume),
+            "amount": float(bar.amount),
+        }
+        for bar in bars
+    ]
+
+
+def _refresh_liquidity_pools(context) -> None:
+    state = _state(context)
+    amount_by_symbol: dict[str, float] = {}
+    market_days = [row["date"] for row in _history_rows(context, REGIME_PROXIES[0], 3)]
+    total_by_date = {day: 0.0 for day in market_days}
+    for symbol in state["market_symbols"]:
+        rows = [row for row in _history_rows(context, symbol, 5) if row["date"] in total_by_date]
+        if not rows:
+            continue
+        amount_by_symbol[symbol] = sum(float(row["amount"]) for row in rows) / 3
+        for row in rows:
+            day = str(row["date"])
+            total_by_date[day] += float(row["amount"])
+
+    if not amount_by_symbol or not total_by_date:
+        normal_pool = list(state["fixed_pool"])
+        weak_pool = list(state["global_pool"])
+        normal_threshold = weak_threshold = None
+        dynamic_pool: list[str] = []
+    else:
+        average_market_amount = sum(total_by_date.values()) / len(total_by_date)
+        normal_threshold = average_market_amount / 20_000
+        weak_threshold = average_market_amount / 3_000
+        filtered_fixed = [
+            symbol for symbol in state["fixed_pool"]
+            if amount_by_symbol.get(symbol, 0.0) > normal_threshold
+        ]
+        best_by_group: dict[str, tuple[str, float]] = {}
+        for symbol, group in state["dynamic_groups"].items():
+            amount = amount_by_symbol.get(symbol, 0.0)
+            if amount <= normal_threshold:
+                continue
+            current = best_by_group.get(group)
+            if current is None or amount > current[1]:
+                best_by_group[group] = (symbol, amount)
+        dynamic_pool = [
+            symbol
+            for symbol, _ in sorted(best_by_group.values(), key=lambda item: item[1], reverse=True)[:100]
+        ]
+        normal_pool = sorted(set(filtered_fixed) | set(dynamic_pool))
+        weak_pool = [
+            symbol for symbol in state["global_pool"]
+            if amount_by_symbol.get(symbol, 0.0) > weak_threshold
+        ]
+
+    state["dynamic_pool"] = dynamic_pool
+    state["normal_liquidity_pool"] = normal_pool
+    state["weak_liquidity_pool"] = weak_pool
+    state["normal_liquidity_threshold"] = normal_threshold
+    state["weak_liquidity_threshold"] = weak_threshold
+    regime = state.get("regime", "震荡期")
+    state["liquidity_pool"] = list(weak_pool if regime == "走弱期" else normal_pool)
+    state["liquidity_threshold"] = weak_threshold if regime == "走弱期" else normal_threshold
+    state["liquidity_divisor"] = 3_000 if regime == "走弱期" else 20_000
+    held = _held_symbols(context)
+    subscription = sorted(set(normal_pool) | set(weak_pool) | set(REGIME_PROXIES) | set(held) | {DEFENSIVE_ETF})
+    state["subscription_pool"] = subscription
+    context.set_universe(subscription)
+    context.log(
+        f"五福ETF池：全市场={len(state['market_symbols'])}，固定={len(state['fixed_pool'])}，"
+        f"动态={len(dynamic_pool)}，正常/震荡={len(normal_pool)}，走弱={len(weak_pool)}"
     )
 
 
@@ -96,20 +280,12 @@ def before_trading_start(context) -> None:
         loaded = 0
         ready = 0
         for symbol in context.universe:
-            bars = context.history_bars(symbol, count=61, timeframe="1d")
-            if not bars:
+            rows = _history_rows(context, symbol, 61)
+            if not rows:
                 continue
-            state["daily"][symbol] = [
-                {
-                    "date": bar.date.isoformat(),
-                    "close": float(bar.close),
-                    "volume": float(bar.volume),
-                    "amount": float(bar.amount),
-                }
-                for bar in bars
-            ]
-            loaded += len(bars)
-            ready += len(bars) >= 61
+            state["daily"][symbol] = rows
+            loaded += len(rows)
+            ready += len(rows) >= 61
         state["warmup_rows"] = loaded
         state["warmup_ready_symbols"] = ready
         level = "INFO" if ready == len(context.universe) else "WARNING"
@@ -119,6 +295,7 @@ def before_trading_start(context) -> None:
             "不足的标的将等待正式回测数据累积",
             level=level,
         )
+    _refresh_liquidity_pools(context)
     state["intraday"] = {"date": context.now.date().isoformat(), "close": {}, "volume": {}, "amount": {}}
     state["risk_mode"] = None
     state["position_scale"] = 1.0
@@ -180,12 +357,11 @@ def after_trading_end(context) -> None:
 
 def _morning_regime(context) -> None:
     state = _state(context)
-    daily = state["daily"]
     above_ma10 = 0
     below_ma20 = 0
     available = 0
     for symbol in REGIME_PROXIES:
-        closes = [row["close"] for row in daily.get(symbol, [])]
+        closes = [row["close"] for row in _history_rows(context, symbol, 20)]
         if len(closes) < 20:
             continue
         available += 1
@@ -222,6 +398,14 @@ def _morning_regime(context) -> None:
         state["regime_changed_today"] = True
         state["regime_pending"] = None
         state["regime_pending_days"] = 0
+    if state["regime"] == "走弱期":
+        state["liquidity_pool"] = list(state.get("weak_liquidity_pool", []))
+        state["liquidity_threshold"] = state.get("weak_liquidity_threshold")
+        state["liquidity_divisor"] = 3_000
+    else:
+        state["liquidity_pool"] = list(state.get("normal_liquidity_pool", []))
+        state["liquidity_threshold"] = state.get("normal_liquidity_threshold")
+        state["liquidity_divisor"] = 20_000
     context.log(
         f"五福状态：指标={raw}，生效={state['regime']}，"
         f"MA10上方={above_ma10}/{available}，MA20下方={below_ma20}/{available}"
@@ -361,13 +545,12 @@ def _minute_stop_loss(context, bars) -> None:
 
 def _rank_candidates(context) -> list[dict[str, Any]]:
     state = _state(context)
-    daily = state["daily"]
     intraday = state["intraday"]
     regime = state["regime"]
     rows = []
     liquidity_pool = _liquidity_pool(state, regime)
     for symbol in liquidity_pool:
-        history = daily.get(symbol, [])
+        history = _history_rows(context, symbol, 61)
         current = intraday["close"].get(symbol)
         if current is None or len(history) < 61:
             continue
@@ -452,36 +635,9 @@ def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
 
 
 def _liquidity_pool(state: dict[str, Any], regime: str) -> list[str]:
-    """按原策略近3个交日成交额构建当日可选池。
-
-    TickFlow 自由策略只回放本次配置的 ETF 池，因此全市场成交额分子以
-    配置池口径计算；口径会在结果元数据中显式记录。
-    """
-    divisor = 3_000 if regime == "走弱期" else 20_000
-    daily = state["daily"]
-    amount_by_symbol: dict[str, float] = {}
-    total_by_date: dict[str, float] = {}
-    for symbol in WUFU_MINUTE_POOL:
-        rows = daily.get(symbol, [])[-3:]
-        if len(rows) < 3:
-            continue
-        amount_by_symbol[symbol] = sum(float(row.get("amount", 0.0)) for row in rows) / 3
-        for row in rows:
-            day = str(row["date"])
-            total_by_date[day] = total_by_date.get(day, 0.0) + float(row.get("amount", 0.0))
-    if not amount_by_symbol or not total_by_date:
-        state["liquidity_pool"] = list(WUFU_MINUTE_POOL)
-        state["liquidity_threshold"] = None
-        state["liquidity_divisor"] = divisor
-        return state["liquidity_pool"]
-    latest_days = sorted(total_by_date)[-3:]
-    average_total = sum(total_by_date[day] for day in latest_days) / len(latest_days)
-    threshold = average_total / divisor
-    pool = [symbol for symbol in WUFU_MINUTE_POOL if amount_by_symbol.get(symbol, 0.0) > threshold]
-    state["liquidity_pool"] = pool
-    state["liquidity_threshold"] = threshold
-    state["liquidity_divisor"] = divisor
-    return pool
+    if regime == "走弱期":
+        return list(state.get("weak_liquidity_pool", []))
+    return list(state.get("normal_liquidity_pool", []))
 
 
 def _candidate_pool(filtered_rows: list[dict[str, Any]], regime: str) -> list[dict[str, Any]]:

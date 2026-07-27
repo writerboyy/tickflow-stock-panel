@@ -114,6 +114,7 @@ class Context:
         self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
         self._universe: list[str] = []
         self._history_requirements: dict[str, int] = {}
+        self._market_history_requirements: dict[tuple[str, str], int] = {}
 
     @property
     def universe(self) -> list[str]:
@@ -149,6 +150,52 @@ class Context:
         self._history_requirements[period] = max(
             bars, self._history_requirements.get(period, 0),
         )
+
+    def require_market_history(
+        self,
+        asset_type: str = "etf",
+        timeframe: str = "1d",
+        bars: int = 1,
+    ) -> None:
+        asset = str(asset_type).strip().lower()
+        period = str(timeframe).strip().lower()
+        if asset not in {"stock", "etf", "index"}:
+            raise ValueError("全市场历史的资产类型只支持 stock、etf 或 index")
+        if period != "1d":
+            raise ValueError("全市场历史目前只支持 1d 日线")
+        if isinstance(bars, bool) or not isinstance(bars, int) or bars <= 0:
+            raise ValueError("全市场预热 bar 数量必须是正整数")
+        key = (asset, period)
+        self._market_history_requirements[key] = max(
+            bars, self._market_history_requirements.get(key, 0),
+        )
+
+    @property
+    def market_history_requirements(self) -> dict[tuple[str, str], int]:
+        return dict(self._market_history_requirements)
+
+    def instruments(self, asset_type: str | None = None) -> list[dict[str, Any]]:
+        asset = str(asset_type).strip().lower() if asset_type else None
+        return [
+            dict(item)
+            for item in self._engine._instruments
+            if asset is None or item.get("asset_type") == asset
+        ]
+
+    def market_history_bars(
+        self,
+        symbol: str,
+        count: int = 20,
+        timeframe: str = "1d",
+    ) -> list[Bar]:
+        if count <= 0:
+            return []
+        history = self._engine._market_history_by_period.get(timeframe, {}).get(symbol, [])
+        cutoff = self.now
+        if cutoff is None:
+            return []
+        visible = [bar for bar in history if bar.timestamp < cutoff]
+        return list(visible[-count:])
 
     def _sync(self, prices: dict[str, float]) -> None:
         self.portfolio.cash = self._engine.account.cash
@@ -209,7 +256,8 @@ class Context:
 
 class FreeStrategyEngine:
     def __init__(self, source: str, timeframe: str = "1d", config: FreeStrategyConfig | None = None,
-                 state: dict[str, Any] | None = None) -> None:
+                 state: dict[str, Any] | None = None,
+                 instruments: Iterable[dict[str, Any]] | None = None) -> None:
         self.source = source
         self.timeframe = timeframe
         self.config = config or FreeStrategyConfig()
@@ -218,6 +266,10 @@ class FreeStrategyEngine:
         self.logs: list[dict[str, Any]] = []
         self.history: dict[str, list[Bar]] = {}
         self._history_by_period: dict[str, dict[str, list[Bar]]] = {timeframe: self.history}
+        self._market_history_by_period: dict[str, dict[str, list[Bar]]] = {}
+        self._market_dates: set[date] = set()
+        self.market_history_metadata: dict[str, Any] = {"enabled": False}
+        self._instruments = [dict(item) for item in (instruments or [])]
         self.pending: list[tuple[Order, datetime]] = []
         self._immediate: list[Order] = []
         self._bought_dates: dict[str, date] = {}
@@ -263,9 +315,30 @@ class FreeStrategyEngine:
     def history_requirements(self) -> dict[str, int]:
         return self.context.history_requirements
 
+    @property
+    def market_history_requirements(self) -> dict[tuple[str, str], int]:
+        return self.context.market_history_requirements
+
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
         history = self._history_by_period.setdefault(timeframe, {})
+        count = 0
+        for bar in sorted(bars, key=lambda item: (item.timestamp, item.symbol)):
+            values = history.setdefault(bar.symbol, [])
+            if values:
+                if values[-1].timestamp == bar.timestamp:
+                    values[-1] = bar
+                    continue
+                if values[-1].timestamp > bar.timestamp:
+                    continue
+            values.append(bar)
+            if len(values) > 5_000:
+                del values[:-5_000]
+            count += 1
+        return count
+
+    def preload_market_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
+        history = self._market_history_by_period.setdefault(timeframe, {})
         count = 0
         for bar in sorted(bars, key=lambda item: (item.timestamp, item.symbol)):
             values = history.setdefault(bar.symbol, [])
@@ -273,10 +346,12 @@ class FreeStrategyEngine:
                 values[-1] = bar
                 continue
             values.append(bar)
-            if len(values) > 5_000:
-                del values[:-5_000]
+            self._market_dates.add(bar.timestamp.date())
             count += 1
         return count
+
+    def has_market_date(self, day: date) -> bool:
+        return day in self._market_dates
 
     def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
         self._counter += 1
@@ -484,6 +559,14 @@ class FreeStrategyEngine:
                     self._bought_dates.pop(symbol, None)
         self.context._sync(self._current_close_prices)
         self._run_callback("before_trading_start", bars_now)
+
+    def begin_session(self, day: date) -> None:
+        """在读取当日行情前执行盘前回调，供策略动态设置当日订阅标的。"""
+        if self._active_session_date == day:
+            return
+        self.finish_session()
+        timestamp = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=29)
+        self._start_session(timestamp, BarsView())
 
     def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""

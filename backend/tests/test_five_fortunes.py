@@ -23,6 +23,8 @@ class FakeContext:
         self.logs = []
         self.universe = []
         self.history_requirements = {}
+        self.market_history_requirements = {}
+        self.market_rows = {}
 
     def set_universe(self, symbols) -> None:
         self.universe = list(symbols)
@@ -32,6 +34,12 @@ class FakeContext:
 
     def require_history(self, timeframe: str = "1d", bars: int = 1) -> None:
         self.history_requirements[timeframe] = bars
+
+    def require_market_history(self, asset_type: str = "etf", timeframe: str = "1d", bars: int = 1) -> None:
+        self.market_history_requirements[(asset_type, timeframe)] = bars
+
+    def market_history_bars(self, symbol: str, count: int = 20, timeframe: str | None = None):
+        return list(self.market_rows.get(symbol, []))[-count:]
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.logs.append((level, message))
@@ -72,8 +80,9 @@ def test_standard_lifecycle_name_keeps_legacy_alias():
 def test_initialize_registers_available_etf_universe():
     context = initialized_context()
 
-    assert context.universe == [*five.WUFU_MINUTE_POOL, five.DEFENSIVE_ETF]
+    assert context.universe == sorted({*five.WUFU_MINUTE_POOL, five.DEFENSIVE_ETF})
     assert context.history_requirements == {"1d": 61}
+    assert context.market_history_requirements == {("etf", "1d"): 61}
 
 
 def test_laplace_smoothing_is_regime_specific():
@@ -188,15 +197,15 @@ def test_candidate_pool_uses_regime_threshold():
 def test_liquidity_pool_uses_stricter_weak_regime_divisor():
     context = initialized_context()
     state = context.state["five_fortunes"]
-    high, low = five.WUFU_MINUTE_POOL[:2]
-    state["daily"] = {
-        high: [{"date": f"2026-07-{day}", "amount": 100_000_000.0} for day in (17, 18, 19)],
-        low: [{"date": f"2026-07-{day}", "amount": 1.0} for day in (17, 18, 19)],
+    high, low = "510300.SH", "159985.SZ"
+    context.market_rows = {
+        high: [SimpleNamespace(date=datetime(2026, 7, day).date(), close=1, volume=1, amount=100_000_000.0) for day in (17, 18, 19)],
+        low: [SimpleNamespace(date=datetime(2026, 7, day).date(), close=1, volume=1, amount=1.0) for day in (17, 18, 19)],
     }
 
+    five._refresh_liquidity_pools(context)
     pool = five._liquidity_pool(state, "走弱期")
 
     assert high in pool
     assert low not in pool
-    assert state["liquidity_divisor"] == 3_000
-    assert state["liquidity_threshold"] == pytest.approx((100_000_000.0 + 1.0) / 3_000)
+    assert state["weak_liquidity_threshold"] == pytest.approx((100_000_000.0 + 1.0) / 3_000)

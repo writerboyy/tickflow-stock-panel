@@ -150,6 +150,51 @@ def on_bar(context, bars):
     )
 
 
+def test_market_preparation_loads_declared_market_reference_in_one_batch():
+    class ReferenceRepository(DailyRepository):
+        def get_daily_asset_batch(self, _asset_type, symbols, start, end, _columns):
+            return pl.DataFrame([
+                {"symbol": symbol, **row}
+                for symbol in symbols
+                for row in self.rows[symbol]
+                if start <= row["date"] <= end
+            ])
+
+    start = datetime(2024, 4, 1).date()
+    rows = {
+        symbol: [daily_row(start - timedelta(days=1), price), daily_row(start, price + 1)]
+        for symbol, price in (("X", 10.0), ("Y", 20.0))
+    }
+    engine = FreeStrategyEngine("""
+def initialize(context):
+    context.set_universe(['X'])
+    context.require_market_history(asset_type='etf', timeframe='1d', bars=1)
+
+def on_bar(context, bars):
+    pass
+""", instruments=[
+        {"symbol": "X", "name": "X", "asset_type": "etf"},
+        {"symbol": "Y", "name": "Y", "asset_type": "etf"},
+    ])
+
+    _prepare_market_data(
+        ReferenceRepository(rows), engine, ["X"], start, start, "etf", "1d",
+    )
+    engine.begin_session(start)
+
+    assert engine.market_history_metadata == {
+        "enabled": True,
+        "asset_type": "etf",
+        "timeframe": "1d",
+        "requested_bars": 1,
+        "rows": 4,
+        "symbols": 2,
+        "start": (start - timedelta(days=1)).isoformat(),
+        "end": start.isoformat(),
+    }
+    assert [bar.close for bar in engine.context.market_history_bars("Y")] == [20.0]
+
+
 def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
     class FakeRepository:
         def __init__(self, _store):

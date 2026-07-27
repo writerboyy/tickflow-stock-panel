@@ -1266,9 +1266,64 @@ class KlineRepository:
             return self.get_etf_daily(symbol, start, end, columns)
         return pl.DataFrame()
 
+    def get_daily_asset_batch(
+        self,
+        asset_type: str,
+        symbols: list[str],
+        start: date,
+        end: date,
+        columns: list[str] | None = None,
+    ) -> pl.DataFrame:
+        """批量读取资产日K，供显式声明的全市场策略预热使用。"""
+        if not symbols:
+            return pl.DataFrame()
+        if asset_type == "stock":
+            return self.get_daily_batch(symbols, start, end, columns)
+        if asset_type not in {"etf", "index"}:
+            return pl.DataFrame()
+        pattern = self._etf_enriched_glob if asset_type == "etf" else self._index_enriched_glob
+        try:
+            frame = pl.scan_parquet(pattern)
+            available = set(frame.collect_schema().names())
+            selected = [name for name in (columns or available) if name in available]
+            if "symbol" not in selected:
+                selected.insert(0, "symbol")
+            return (
+                frame.filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("date") >= start)
+                    & (pl.col("date") <= end)
+                )
+                .select(selected)
+                .sort(["date", "symbol"])
+                .collect(streaming=True)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("批量%s日K查询失败: %s", asset_type, exc)
+            return pl.DataFrame()
+
     def _minute_glob_for(self, asset_type: str) -> str:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
+
+    def get_minute_symbols(
+        self,
+        asset_type: str = "stock",
+        start: date | None = None,
+        end: date | None = None,
+    ) -> set[str]:
+        """返回本地已有分钟K的标的集合。"""
+        try:
+            frame = pl.scan_parquet(self._minute_glob_for(asset_type))
+            if start is not None:
+                frame = frame.filter(pl.col("datetime").dt.date() >= start)
+            if end is not None:
+                frame = frame.filter(pl.col("datetime").dt.date() <= end)
+            values = frame.select(pl.col("symbol").unique()).collect(streaming=True)
+            return set(values["symbol"].cast(pl.Utf8).to_list())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("分钟K标的列表查询失败: %s", exc)
+            return set()
 
     def get_minute(
         self,

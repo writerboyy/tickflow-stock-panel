@@ -69,6 +69,35 @@ def on_bar(context, bars):
     assert with_warmup.history_requirements == {"1d": 61}
 
 
+def test_market_history_is_explicit_and_hides_future_bars():
+    source = """
+def initialize(context):
+    context.require_market_history(asset_type='etf', timeframe='1d', bars=61)
+
+def before_trading_start(context):
+    context.state['visible'] = [bar.close for bar in context.market_history_bars('X', count=10)]
+    context.state['name'] = context.instruments('etf')[0]['name']
+
+def on_bar(context, bars):
+    pass
+"""
+    engine = FreeStrategyEngine(
+        source,
+        instruments=[{"symbol": "X", "name": "测试ETF", "asset_type": "etf", "has_minute": True}],
+    )
+    engine.preload_market_history([
+        Bar("X", datetime(2024, 1, day, 15), day, day, day, day)
+        for day in (1, 2, 3)
+    ])
+
+    assert engine.market_history_requirements == {("etf", "1d"): 61}
+    assert engine.context.market_history_bars("X", count=10) == []
+
+    engine.begin_session(datetime(2024, 1, 2).date())
+
+    assert engine.context.state == {"visible": [1], "name": "测试ETF"}
+
+
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [

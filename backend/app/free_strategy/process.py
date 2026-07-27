@@ -29,6 +29,33 @@ class MarketData:
     previous_adjusted_close: dict[str, float] = field(default_factory=dict)
 
 
+def _instrument_records(
+    repo: Any,
+    asset_type: str,
+    timeframe: str,
+    start: date | None = None,
+    end: date | None = None,
+) -> list[dict[str, Any]]:
+    get_instruments = getattr(repo, "get_instruments_asset", None)
+    if not callable(get_instruments):
+        return []
+    frame = get_instruments(asset_type)
+    if frame.is_empty() or "symbol" not in frame.columns:
+        return []
+    minute_symbols: set[str] | None = None
+    get_minute_symbols = getattr(repo, "get_minute_symbols", None)
+    if timeframe != "1d" and callable(get_minute_symbols):
+        minute_symbols = get_minute_symbols(asset_type, start, end)
+    records = []
+    for raw in frame.iter_rows(named=True):
+        item = dict(raw)
+        item["symbol"] = str(item["symbol"])
+        item["asset_type"] = str(item.get("asset_type") or asset_type).lower()
+        item["has_minute"] = minute_symbols is None or item["symbol"] in minute_symbols
+        records.append(item)
+    return records
+
+
 def _load_market_data(
     repo: Any,
     symbols: list[str],
@@ -56,6 +83,65 @@ def _load_market_data(
                 for symbol, name in instruments.select("symbol", "name").iter_rows()
             }
     return market
+
+
+def _prepare_market_reference(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    start: date,
+    end: date,
+    asset_type: str,
+    market: MarketData,
+) -> dict[str, Any]:
+    requested_bars = engine.market_history_requirements.get((asset_type, "1d"), 0)
+    if not requested_bars:
+        return {"enabled": False, "asset_type": None, "timeframe": None, "requested_bars": 0,
+                "rows": 0, "symbols": 0, "start": None, "end": None}
+    records = engine.context.instruments(asset_type)
+    symbols = [item["symbol"] for item in records]
+    get_batch = getattr(repo, "get_daily_asset_batch", None)
+    if not symbols or not callable(get_batch):
+        raise ValueError("策略已声明全市场日线预热，但当前数据源不支持批量日K")
+    load_start = start - timedelta(days=requested_bars * 2 + 14)
+    columns = [
+        "symbol", "date", "open", "high", "low", "close", "volume", "amount",
+        "raw_close", "raw_high", "raw_low",
+    ]
+    frame = get_batch(asset_type, symbols, load_start, end, columns)
+    if frame.is_empty():
+        raise ValueError("全市场日线预热没有可用数据")
+    bars = []
+    for row in frame.iter_rows(named=True):
+        symbol = str(row["symbol"])
+        day = row["date"]
+        close = float(row["close"])
+        raw_close = float(row.get("raw_close") or close)
+        scale = raw_close / close if close > 0 else 1.0
+        market.daily[(symbol, day)] = dict(row)
+        bars.append(Bar(
+            symbol=symbol,
+            timestamp=datetime.combine(day, time(15, 0)),
+            open=float(row["open"]), high=float(row["high"]),
+            low=float(row["low"]), close=close,
+            volume=float(row.get("volume") or 0), amount=float(row.get("amount") or 0),
+            raw_open=float(row["open"]) * scale,
+            raw_high=float(row.get("raw_high") or float(row["high"]) * scale),
+            raw_low=float(row.get("raw_low") or float(row["low"]) * scale),
+            raw_close=raw_close,
+        ))
+    market.names.update({item["symbol"]: str(item.get("name") or "") for item in records})
+    engine.preload_market_history(bars, "1d")
+    dates = [bar.timestamp.date() for bar in bars]
+    return {
+        "enabled": True,
+        "asset_type": asset_type,
+        "timeframe": "1d",
+        "requested_bars": requested_bars,
+        "rows": len(bars),
+        "symbols": len({bar.symbol for bar in bars}),
+        "start": min(dates).isoformat() if dates else None,
+        "end": max(dates).isoformat() if dates else None,
+    }
 
 
 def _limit_pct(symbol: str, asset_type: str, name: str) -> float:
@@ -327,6 +413,9 @@ def _prepare_market_data(
     )
     load_start = start - timedelta(days=lookback_days)
     market_data = _load_market_data(repo, symbols, load_start, end, asset_type)
+    engine.market_history_metadata = _prepare_market_reference(
+        repo, engine, start, end, asset_type, market_data,
+    )
     if not any(start <= day <= end for _, day in market_data.daily):
         formal_market_data = _load_market_data(repo, symbols, start, end, asset_type)
         market_data.daily.update(formal_market_data.daily)
@@ -376,7 +465,12 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
         config = FreeStrategyConfig(**payload["config"])
-        engine = FreeStrategyEngine(payload["source"], payload["timeframe"], config)
+        instruments = _instrument_records(
+            repo, payload["asset_type"], payload["timeframe"], start, end,
+        )
+        engine = FreeStrategyEngine(
+            payload["source"], payload["timeframe"], config, instruments=instruments,
+        )
         symbols, universe_source = _resolve_symbols(engine, payload)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
@@ -387,6 +481,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         first_bar: datetime | None = None
         last_bar: datetime | None = None
         symbols_seen: set[str] = set()
+        requested_symbols = list(symbols)
         trading_days = 0
         if payload["timeframe"] == "1d":
             bars = _read_rows(repo, symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
@@ -404,8 +499,19 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             days_with_bars = 0
             while cursor <= end:
                 if cursor.weekday() < 5:
+                    session_symbols = symbols
+                    if engine.market_history_requirements:
+                        if not engine.has_market_date(cursor):
+                            cursor += timedelta(days=1)
+                            days_seen += 1
+                            continue
+                        engine.begin_session(cursor)
+                        session_symbols = engine.universe
+                        for symbol in session_symbols:
+                            if symbol not in requested_symbols:
+                                requested_symbols.append(symbol)
                     bars = _read_rows(
-                        repo, symbols, cursor, cursor,
+                        repo, session_symbols, cursor, cursor,
                         payload["asset_type"], payload["timeframe"], require_all_symbols=False, allow_empty=True,
                         market_data=market_data,
                     )
@@ -425,24 +531,25 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 cursor += timedelta(days=1)
             if not days_with_bars:
                 raise ValueError("没有可用的分钟K历史数据，请先同步后重试")
-            missing = [symbol for symbol in symbols if symbol not in symbols_seen]
+            missing = [symbol for symbol in requested_symbols if symbol not in symbols_seen]
             if missing:
                 raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
             engine.state = engine.context.state.copy()
             result = engine.result()
             trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
-        missing_symbols = [symbol for symbol in symbols if symbol not in symbols_seen]
+        missing_symbols = [symbol for symbol in requested_symbols if symbol not in symbols_seen]
         minute_table = "kline_etf_minute" if payload["asset_type"] == "etf" else "kline_minute"
         result["metadata"] = {
             "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
             "timeframe": payload["timeframe"], "asset_type": payload["asset_type"],
             "start": payload["start"], "end": payload["end"],
-            "symbols": symbols, "symbol_count": len(symbols), "universe_source": universe_source,
+            "symbols": requested_symbols, "symbol_count": len(requested_symbols), "universe_source": universe_source,
             "data_days": len(result.get("daily_equity_curve", [])),
             "source_revision": payload.get("source_revision"),
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
+            "market_history": engine.market_history_metadata,
             "nav_filter": five_fortunes.get("nav_filter"),
             "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
             "liquidity_scope": five_fortunes.get("liquidity_scope"),
@@ -451,7 +558,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 "first_bar": first_bar.isoformat() if first_bar else None,
                 "last_bar": last_bar.isoformat() if last_bar else None,
                 "trading_days": trading_days,
-                "requested_symbols": symbols,
+                "requested_symbols": requested_symbols,
                 "seen_symbols": sorted(symbols_seen),
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),

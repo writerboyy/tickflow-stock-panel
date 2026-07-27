@@ -254,8 +254,10 @@ def _paper_loop(account_id: str, root: str) -> None:
     import time
     from datetime import date, datetime, time as clock_time
     from app.free_strategy.process import (
+        _instrument_records,
         _load_market_data,
         _prepare_market_data,
+        _prepare_market_reference,
         _read_rows,
         _resolve_symbols,
     )
@@ -276,7 +278,10 @@ def _paper_loop(account_id: str, root: str) -> None:
         config.pop("name", None)
         engine_config = FreeStrategyConfig(asset_type=asset_type, **config)
         repo = KlineRepository(DataStore(Path(root).parent))
-        engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
+        instruments = _instrument_records(repo, asset_type, timeframe)
+        engine = FreeStrategyEngine(
+            source, timeframe, engine_config, state=state.get("state", {}), instruments=instruments,
+        )
         symbols, universe_source = _resolve_symbols(engine, {"symbols": legacy_symbols})
         state["universe"] = symbols
         state["universe_source"] = universe_source
@@ -308,6 +313,14 @@ def _paper_loop(account_id: str, root: str) -> None:
         path.write_text(json.dumps({"timestamp": now_iso(), "account_id": account_id}), encoding="utf-8")
         try:
             today = date.today()
+            if engine.market_history_requirements and engine._active_session_date != today:
+                engine.market_history_metadata = _prepare_market_reference(
+                    repo, engine, today, today, asset_type, market_data,
+                )
+                if today.weekday() < 5:
+                    engine.begin_session(today)
+                    symbols = engine.universe
+                    state["universe"] = symbols
             if timeframe == "1d" and not any(
                 symbol_day == today for _, symbol_day in market_data.daily
             ):
