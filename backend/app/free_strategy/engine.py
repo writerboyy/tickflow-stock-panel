@@ -657,11 +657,11 @@ class FreeStrategyEngine:
                 self.history.setdefault(symbol, []).append(bar)
                 if len(self.history[symbol]) > 5_000:
                     del self.history[symbol][:-5_000]
+            self._run_callback("on_bar", bars_now)
             for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
                 if not done and timestamp.strftime("%H:%M") >= at:
                     callback(self.context)
                     self.context._scheduled[slot_index] = (at, callback, True)
-            self._run_callback("on_bar", bars_now)
             for order in sorted(self._immediate, key=self._sell_first):
                 self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
             self._immediate.clear()

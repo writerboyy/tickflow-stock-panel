@@ -309,6 +309,7 @@ def initialize(context):
     context.state['events'] = []
     def midday(ctx):
         ctx.state['events'].append('scheduled')
+        ctx.state['scheduled_close'] = ctx.state['last_close']
     context.schedule(midday, '13:00')
 
 def before_trading_start(context):
@@ -316,16 +317,18 @@ def before_trading_start(context):
 
 def on_bar(context, bars):
     context.state['events'].append('bar')
+    context.state['last_close'] = bars['X'].close
 
 def after_trading_end(context):
     context.state['events'].append('after')
 """
     bars = [
         Bar("X", datetime(2024, 1, 1, 9, 30), 1, 1, 1, 1),
-        Bar("X", datetime(2024, 1, 1, 13, 0), 1, 1, 1, 1),
+        Bar("X", datetime(2024, 1, 1, 13, 0), 2, 2, 2, 2),
     ]
     result = FreeStrategyEngine(source, timeframe="1m").run(bars)
-    assert result["state"]["events"] == ["before", "bar", "scheduled", "bar", "after"]
+    assert result["state"]["events"] == ["before", "bar", "bar", "scheduled", "after"]
+    assert result["state"]["scheduled_close"] == 2
 
 
 def test_paper_session_end_runs_once_and_supports_session_aliases():
