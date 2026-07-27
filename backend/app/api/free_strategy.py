@@ -61,6 +61,16 @@ def recover_paper_accounts(data_dir: Path) -> None:
         _paper[state["id"]] = process
 
 
+def cleanup_incomplete_backtests(data_dir: Path) -> None:
+    """清理上次进程退出后没有结果文件的回测快照。"""
+    root = Path(data_dir) / "free_strategy_runs"
+    if not root.exists():
+        return
+    for path in root.iterdir():
+        if path.is_dir() and not (path / "result.json").exists():
+            shutil.rmtree(path, ignore_errors=True)
+
+
 class StrategyWrite(BaseModel):
     id: str | None = None
     name: str = Field(min_length=1, max_length=120)
@@ -166,7 +176,14 @@ def _read_run_manifest(path: Path) -> dict[str, Any]:
 
 def _active_backtest(job_id: str) -> bool:
     with _jobs_lock:
-        return job_id in _jobs
+        job = _jobs.get(job_id)
+        if job is None:
+            return False
+        is_alive = getattr(job[0], "is_alive", None)
+        if callable(is_alive) and not is_alive():
+            _jobs.pop(job_id, None)
+            return False
+        return True
 
 
 @router.get("/backtest/{job_id}")
@@ -198,7 +215,7 @@ def delete_backtest(job_id: str, request: Request):
     if _active_backtest(job_id):
         raise HTTPException(status_code=409, detail="运行中的回测不能删除，请先停止任务")
     path = _run_path(request, job_id)
-    if not (path / "result.json").exists():
+    if not path.is_dir():
         raise HTTPException(status_code=404, detail="回测结果不存在")
     shutil.rmtree(path)
     return {"ok": True}
@@ -279,7 +296,11 @@ def create_backtest(req: BacktestWrite, request: Request):
     (run_root / "strategy.py").write_text(strategy["source"], encoding="utf-8")
     payload["run_dir"] = str(run_root)
     (run_root / "manifest.json").write_text(json.dumps({"job_id": job_id, "strategy_id": req.strategy_id, "source_revision": strategy.get("revision"), "payload": {k: v for k, v in payload.items() if k != "source"}}, ensure_ascii=False, indent=2), encoding="utf-8")
-    process, output = start_process(payload)
+    try:
+        process, output = start_process(payload)
+    except Exception:
+        shutil.rmtree(run_root, ignore_errors=True)
+        raise
     with _jobs_lock:
         _jobs[job_id] = (process, output)
     return {"job_id": job_id, "status": "running", "source_revision": strategy.get("revision")}
@@ -308,6 +329,8 @@ async def stream_backtest(job_id: str, request: Request):
                         _jobs.pop(job_id, None)
                     return
             elif not process.is_alive():
+                with _jobs_lock:
+                    _jobs.pop(job_id, None)
                 yield f"data: {json.dumps({'type': 'error', 'error': '回测子进程异常退出'}, ensure_ascii=False)}\n\n"
                 return
             await asyncio.sleep(0.1)
@@ -316,9 +339,9 @@ async def stream_backtest(job_id: str, request: Request):
 
 
 @router.post("/backtest/{job_id}/cancel")
-def cancel_backtest(job_id: str):
+def cancel_backtest(job_id: str, request: Request):
     with _jobs_lock:
-        job = _jobs.get(job_id)
+        job = _jobs.pop(job_id, None)
     if job is None:
         raise HTTPException(status_code=404, detail="回测任务不存在")
     process, output = job
@@ -329,6 +352,7 @@ def cancel_backtest(job_id: str):
         output.put({"type": "cancelled", "message": "回测已取消"})
     except Exception:
         pass
+    shutil.rmtree(_run_path(request, job_id), ignore_errors=True)
     return {"ok": True}
 
 

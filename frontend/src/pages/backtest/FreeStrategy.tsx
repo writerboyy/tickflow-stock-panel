@@ -302,6 +302,10 @@ export function FreeStrategy() {
   }
 
   const run = async () => {
+    if (dirty) {
+      setError('请先保存当前修改，再运行历史回测')
+      return
+    }
     if (!config.strategy_id) {
       setError('请先保存策略，生成源码快照后再运行')
       return
@@ -488,7 +492,7 @@ export function FreeStrategy() {
           <label>结算<select className={INPUT} value={config.settlement} onChange={event => setConfig({ ...config, settlement: event.target.value as FreeBacktestConfig['settlement'] })}><option value="t1">T+1（默认）</option><option value="t0">T+0</option></select></label><label>成交<select className={INPUT} value={config.fill_policy} onChange={event => setConfig({ ...config, fill_policy: event.target.value as FreeBacktestConfig['fill_policy'] })}><option value="next_open">下一根开盘</option><option value="close">当前收盘</option></select></label>
         </div>
         {error ? <div className="mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
-        <div className="mt-3 flex gap-2"><button disabled={running} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
+        <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading} title={dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
         {progress ? <div className="mt-2 text-[11px] text-muted">{progress}</div> : null}
         <div className="my-4 border-t border-border" />
         <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">模拟盘</span><div className="flex items-center gap-1"><button onClick={createPaper} className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] hover:border-accent"><CirclePlay className="h-3 w-3" />创建账户</button>{account ? <IconButton title={account.status === 'stopped' ? '删除模拟盘账户' : '请先停止账户再删除'} danger disabled={account.status !== 'stopped'} onClick={() => openDelete({ type: 'paper', id: String(account.id), name: String(account.name ?? account.id) })}><Trash2 className="h-3.5 w-3.5" /></IconButton> : null}</div></div>

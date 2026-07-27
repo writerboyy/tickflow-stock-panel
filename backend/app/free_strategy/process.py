@@ -5,6 +5,7 @@ import json
 import logging
 import multiprocessing as mp
 import queue
+import shutil
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -957,6 +958,8 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         output.put({"type": "result", "result": result})
     except BaseException as exc:  # noqa: BLE001 - worker must report all script errors
         logger.exception("free strategy backtest failed")
+        if payload.get("run_dir"):
+            shutil.rmtree(Path(payload["run_dir"]), ignore_errors=True)
         output.put({"type": "error", "error": str(exc)})
 
 

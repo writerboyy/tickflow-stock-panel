@@ -54,6 +54,58 @@ def on_bar(context, bars):
     assert result["orders"] == []
 
 
+def test_before_trading_start_uses_previous_close_for_portfolio_value():
+    source = """
+def initialize(context):
+    context.state['before'] = []
+
+def before_trading_start(context):
+    context.state['before'].append((context.now.strftime('%H:%M'), context.portfolio.total_value))
+
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=10)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            lot_size=1,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 2, 15), 100, 100, 100, 100),
+    ])
+
+    assert result["state"]["before"] == [("09:29", 1_000), ("09:29", 1_000)]
+
+
+def test_intraday_backtest_adds_completed_sessions_to_daily_history():
+    source = """
+def initialize(context):
+    context.state['daily_seen'] = []
+
+def on_bar(context, bars):
+    context.state['daily_seen'].append(context.history('X', count=10, timeframe='1d'))
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    engine.preload_history([
+        Bar("X", datetime(2023, 12, 29, 15), 5, 5, 5, 5),
+    ], "1d")
+
+    engine.run([
+        Bar("X", datetime(2024, 1, 2, 9, 30), 8, 10, 8, 10),
+    ], return_result=False)
+    result = engine.run([
+        Bar("X", datetime(2024, 1, 3, 9, 30), 20, 20, 20, 20),
+    ])
+
+    assert result["state"]["daily_seen"] == [[5], [5, 10]]
+
+
 def test_history_warmup_must_be_explicitly_declared_by_strategy():
     without_warmup = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
     with_warmup = FreeStrategyEngine("""
@@ -264,6 +316,79 @@ def on_bar(context, bars):
 
     assert result["orders"][0]["status"] == "rejected"
     assert result["orders"][0]["reason"] == reason
+
+
+def test_buy_quantity_reserves_commission_before_filling():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            lot_size=1,
+            fees_pct=0.0002,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 2, 15), 100, 100, 100, 100),
+    ])
+
+    assert result["fills"][0]["quantity"] == 99
+    assert result["checkpoint"]["account"]["cash"] >= 0
+
+
+def test_slippage_fill_price_does_not_cross_price_limit():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=100_000,
+            fees_pct=0,
+            slippage_bps=50,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar(
+            "X", datetime(2024, 1, 2, 15), 9.99, 9.99, 9.99, 9.99,
+            raw_close=9.99, limit_up=10,
+        ),
+    ])
+
+    assert result["fills"][0]["price"] == 10
+
+
+def test_sell_slippage_fill_price_does_not_cross_price_limit():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    else:
+        context.sell('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=100_000,
+            fees_pct=0,
+            stamp_tax_pct=0,
+            slippage_bps=50,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar(
+            "X", datetime(2024, 1, 2, 15), 9.01, 9.01, 9.01, 9.01,
+            raw_close=9.01, limit_down=9,
+        ),
+    ])
+
+    assert result["fills"][-1]["price"] == 9
 
 
 def test_limit_down_rejects_sell_order():

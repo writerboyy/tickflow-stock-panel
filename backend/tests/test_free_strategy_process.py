@@ -323,6 +323,37 @@ def test_backtest_requires_universe_in_source_or_legacy_config(tmp_path):
     assert "context.set_universe" in event["error"]
 
 
+def test_failed_backtest_removes_incomplete_run_directory(monkeypatch, tmp_path):
+    class FakeRepository:
+        def __init__(self, _store):
+            pass
+
+    monkeypatch.setattr("app.tickflow.repository.DataStore", lambda path: path)
+    monkeypatch.setattr("app.tickflow.repository.KlineRepository", FakeRepository)
+    run_dir = tmp_path / "free_strategy_runs" / "failed-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    output: queue.SimpleQueue = queue.SimpleQueue()
+
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "run_dir": str(run_dir),
+        "source": "this is not valid Python!",
+        "symbols": ["X"],
+        "timeframe": "1d",
+        "asset_type": "etf",
+        "start": "2024-01-02",
+        "end": "2024-01-02",
+        "config": {"asset_type": "etf"},
+    }, output)
+
+    event = output.get()
+    while event["type"] == "progress":
+        event = output.get()
+    assert event["type"] == "error"
+    assert not run_dir.exists()
+
+
 def test_scheduled_backtest_queries_events_without_full_minute_replay(monkeypatch, tmp_path):
     calls = {"range": 0, "snapshot": 0, "next": 0}
 

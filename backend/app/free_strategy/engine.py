@@ -300,6 +300,7 @@ class FreeStrategyEngine:
         self._current_prices: dict[str, float] = {}
         self._current_close_prices: dict[str, float] = {}
         self._session_bars: dict[str, Bar] = {}
+        self._session_daily_bars: dict[str, dict[str, Any]] = {}
         self._applied_splits: dict[str, date] = {}
         self._benchmark_curve: list[dict[str, Any]] = []
         self._session_equity_snapshot: dict[str, Any] | None = None
@@ -444,6 +445,11 @@ class FreeStrategyEngine:
             order.reason = "跌停，卖出未成交"
             return
         price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
+        if side == "buy" and bar.limit_up is not None:
+            price = min(price, bar.limit_up)
+        elif side == "sell" and bar.limit_down is not None:
+            price = max(price, bar.limit_down)
+        commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct
         lot = max(1, self.config.lot_size)
         qty = math.floor(qty / lot) * lot
         if side == "sell":
@@ -451,9 +457,9 @@ class FreeStrategyEngine:
             available = self.account.available.get(order.symbol, 0.0 if bought_today else current)
             qty = min(qty, available)
         else:
-            gross = qty * price
             max_gross = self.account.equity(self._current_close_prices) * self.config.max_exposure_pct
-            qty = min(qty, math.floor(max(0.0, min(self.account.cash, max_gross)) / price / lot) * lot)
+            cash_gross = self.account.cash / (1 + commission_rate)
+            qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross)) / price / lot) * lot)
         if qty <= 0:
             if order.side == "target":
                 order.status = "skipped"
@@ -463,7 +469,6 @@ class FreeStrategyEngine:
                 order.reason = "数量不足、现金不足或 T+1 未结算"
             return
         gross = qty * price
-        commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct
         fee = gross * commission_rate + (gross * self.config.stamp_tax_pct if side == "sell" and self.config.asset_type == "stock" else 0.0)
         if side == "buy":
             self.account.cash -= gross + fee
@@ -600,6 +605,7 @@ class FreeStrategyEngine:
         self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
         self.context.now = timestamp
         self._session_bars = dict(bars_now)
+        self._session_daily_bars = {}
         self._session_equity_snapshot = None
         self._session_benchmark_close = None
         if self.config.settlement == "t1":
@@ -609,6 +615,47 @@ class FreeStrategyEngine:
                     self._bought_dates.pop(symbol, None)
         self.context._sync(self._current_close_prices)
         self._run_callback("before_trading_start", bars_now)
+
+    def _accumulate_session_daily_bars(self, bars_now: BarsView) -> None:
+        if self.timeframe == "1d":
+            return
+        for symbol, bar in bars_now.items():
+            previous = self._session_daily_bars.get(symbol)
+            if previous is None:
+                self._session_daily_bars[symbol] = {
+                    "symbol": symbol,
+                    "timestamp": bar.timestamp,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "amount": bar.amount,
+                    "raw_open": bar.execution_price("open"),
+                    "raw_high": bar.execution_price("high"),
+                    "raw_low": bar.execution_price("low"),
+                    "raw_close": bar.execution_price("close"),
+                    "tradable": bar.tradable,
+                    "suspended": bar.suspended,
+                    "limit_up": bar.limit_up,
+                    "limit_down": bar.limit_down,
+                    "split_ratio": bar.split_ratio,
+                }
+                continue
+            previous["timestamp"] = bar.timestamp
+            previous["high"] = max(previous["high"], bar.high)
+            previous["low"] = min(previous["low"], bar.low)
+            previous["close"] = bar.close
+            previous["volume"] += bar.volume
+            previous["amount"] += bar.amount
+            previous["raw_high"] = max(previous["raw_high"], bar.execution_price("high"))
+            previous["raw_low"] = min(previous["raw_low"], bar.execution_price("low"))
+            previous["raw_close"] = bar.execution_price("close")
+            previous["tradable"] = previous["tradable"] or bar.tradable
+            previous["suspended"] = previous["suspended"] and bar.suspended
+            previous["limit_up"] = bar.limit_up if bar.limit_up is not None else previous["limit_up"]
+            previous["limit_down"] = bar.limit_down if bar.limit_down is not None else previous["limit_down"]
+            previous["split_ratio"] = max(previous["split_ratio"], bar.split_ratio)
 
     def begin_session(self, day: date) -> None:
         """在读取当日行情前执行盘前回调，供策略动态设置当日订阅标的。"""
@@ -628,6 +675,8 @@ class FreeStrategyEngine:
         for order in sorted(self._immediate, key=self._sell_first):
             self._fill_order(order, self._session_bars.get(order.symbol), timestamp, "close")
         self._immediate.clear()
+        if self.timeframe != "1d":
+            self.preload_history((Bar(**values) for values in self._session_daily_bars.values()), "1d")
         if self._session_equity_snapshot is not None:
             position_values = {
                 symbol: quantity * self._current_close_prices.get(symbol, self.account.avg_cost.get(symbol, 0.0))
@@ -745,9 +794,8 @@ class FreeStrategyEngine:
             if self._active_session_date != timestamp.date():
                 self.finish_session(persist_state=return_result)
                 self._apply_splits(bars_now, timestamp)
-                self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
-                self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
-                self._start_session(timestamp, bars_now)
+                premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
+                self._start_session(premarket, BarsView())
             else:
                 self._apply_splits(bars_now, timestamp)
             # next-open orders created on the previous callback are filled before this bar.
@@ -765,6 +813,7 @@ class FreeStrategyEngine:
                 self._session_benchmark_close = benchmark.close
             self._last_bars = bars_now
             self._session_bars.update(bars_now)
+            self._accumulate_session_daily_bars(bars_now)
             self._last_timestamp = timestamp
             for symbol, bar in bars_now.items():
                 self.history.setdefault(symbol, []).append(bar)

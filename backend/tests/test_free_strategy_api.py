@@ -1,4 +1,5 @@
 import json
+import queue
 from datetime import date
 from types import SimpleNamespace
 
@@ -6,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api import free_strategy
-from app.api.free_strategy import BacktestWrite, _job_payload, router
+from app.api.free_strategy import BacktestWrite, _job_payload, cleanup_incomplete_backtests, router
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
 
 
@@ -151,6 +152,119 @@ def test_running_backtest_cannot_be_deleted(tmp_path):
 
     assert response.status_code == 409
     assert run_dir.exists()
+
+
+def test_inactive_incomplete_backtest_can_be_deleted(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "failed-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"job_id": "failed-run", "strategy_id": "strategy-1"}),
+        encoding="utf-8",
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.delete("/api/free-strategies/backtest/failed-run")
+
+    assert response.status_code == 200
+    assert not run_dir.exists()
+
+
+def test_startup_cleanup_removes_only_incomplete_backtests(tmp_path):
+    incomplete = tmp_path / "free_strategy_runs" / "incomplete"
+    completed = tmp_path / "free_strategy_runs" / "completed"
+    incomplete.mkdir(parents=True)
+    completed.mkdir(parents=True)
+    (incomplete / "manifest.json").write_text("{}", encoding="utf-8")
+    (completed / "result.json").write_text("{}", encoding="utf-8")
+
+    cleanup_incomplete_backtests(tmp_path)
+
+    assert not incomplete.exists()
+    assert completed.exists()
+
+
+def test_dead_worker_is_removed_from_active_jobs(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "dead-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    class DeadProcess:
+        def is_alive(self):
+            return False
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+    free_strategy._jobs["dead-run"] = (DeadProcess(), queue.SimpleQueue())
+    try:
+        response = client.get("/api/free-strategies/backtest/dead-run/stream")
+
+        assert response.status_code == 200
+        assert "回测子进程异常退出" in response.text
+        assert "dead-run" not in free_strategy._jobs
+        assert client.delete("/api/free-strategies/backtest/dead-run").status_code == 200
+    finally:
+        free_strategy._jobs.pop("dead-run", None)
+
+
+def test_delete_self_heals_dead_job_without_stream_consumer(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "dead-delete"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}", encoding="utf-8")
+
+    class DeadProcess:
+        def is_alive(self):
+            return False
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+    free_strategy._jobs["dead-delete"] = (DeadProcess(), queue.SimpleQueue())
+    try:
+        response = client.delete("/api/free-strategies/backtest/dead-delete")
+
+        assert response.status_code == 200
+        assert "dead-delete" not in free_strategy._jobs
+        assert not run_dir.exists()
+    finally:
+        free_strategy._jobs.pop("dead-delete", None)
+
+
+def test_cancelled_backtest_removes_job_and_incomplete_run(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "cancelled-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    class RunningProcess:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout):
+            assert timeout == 2
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+    free_strategy._jobs["cancelled-run"] = (RunningProcess(), queue.SimpleQueue())
+    try:
+        response = client.post("/api/free-strategies/backtest/cancelled-run/cancel")
+
+        assert response.status_code == 200
+        assert "cancelled-run" not in free_strategy._jobs
+        assert not run_dir.exists()
+    finally:
+        free_strategy._jobs.pop("cancelled-run", None)
 
 
 def test_strategy_delete_is_blocked_until_links_are_removed(tmp_path):

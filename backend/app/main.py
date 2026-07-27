@@ -49,8 +49,11 @@ async def lifespan(app: FastAPI):
     app.state.datastore = store
     app.state.repo = repo
     try:
-        from app.api.free_strategy import recover_paper_accounts
-        recover_paper_accounts(store.data_dir)
+        free_strategy.cleanup_incomplete_backtests(store.data_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("incomplete free strategy backtest cleanup failed: %s", e)
+    try:
+        free_strategy.recover_paper_accounts(store.data_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("free strategy paper recovery failed: %s", e)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
