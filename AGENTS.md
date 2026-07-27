@@ -72,6 +72,17 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Do not push commits or open a pull request unless the user explicitly asks.
 - If a commit cannot be created safely, explain the blocker instead of silently leaving verified code uncommitted.
 
+## 6. Parallel Development Workflow
+
+**When the user says development is parallel, isolate the task by default.**
+
+- Create a dedicated feature branch in a separate Git worktree from the target branch's latest committed HEAD.
+- Never carry, stash, revert, stage, or commit unrelated changes from the target worktree.
+- Verify and commit only the task's files on the feature branch.
+- Before merging back, update against the latest target branch and rerun the relevant checks.
+- Merge only when the target worktree is safe. If it is still dirty or the merge would overwrite parallel work, report the blocker instead of forcing the merge.
+- After a successful merge, remove the temporary worktree and delete the merged local feature branch. Do not push unless the user asks.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

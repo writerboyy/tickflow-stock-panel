@@ -53,6 +53,15 @@ class FreeStrategyStore:
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {**manifest, "source": source}
 
+    def rename(self, strategy_id: str, name: str) -> dict[str, Any]:
+        path = self._path(strategy_id)
+        manifest_path = path / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["name"] = name
+        manifest["updated_at"] = now_iso()
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {**manifest, "source": (path / "strategy.py").read_text(encoding="utf-8")}
+
     def delete(self, strategy_id: str) -> None:
         shutil.rmtree(self._path(strategy_id))
 
@@ -97,3 +106,6 @@ class PaperAccountStore:
             return []
         lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
         return [json.loads(line) for line in lines if line.strip()]
+
+    def delete(self, account_id: str) -> None:
+        shutil.rmtree(self._path(account_id))

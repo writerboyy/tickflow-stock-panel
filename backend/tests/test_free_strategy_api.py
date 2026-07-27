@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api import free_strategy
 from app.api.free_strategy import BacktestWrite, _job_payload, router
-from app.free_strategy.store import PaperAccountStore
+from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
 
 
 def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
@@ -81,6 +81,7 @@ def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):
     assert listing.status_code == 200
     assert listing.json()["runs"] == [{
         "job_id": "saved-run",
+        "name": "五福",
         "final_equity": 1_234_567.89,
         "return_pct": 23.45,
         "max_drawdown_pct": 6.78,
@@ -91,6 +92,111 @@ def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):
     saved = client.get("/api/free-strategies/backtest/saved-run")
     assert saved.status_code == 200
     assert saved.json() == result
+
+
+def test_strategy_rename_preserves_source_revision(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        None, "旧名称", "def on_bar(context, bars):\n    pass\n", {"timeframe": "1d"},
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.patch(f"/api/free-strategies/{strategy['id']}", json={"name": "  新名称  "})
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "新名称"
+    assert response.json()["revision"] == 1
+    loaded = FreeStrategyStore(tmp_path).get(strategy["id"])
+    assert loaded["revision"] == 1
+    assert loaded["source"] == strategy["source"]
+
+
+def test_legacy_backtest_can_be_renamed_and_deleted(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "legacy-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text(json.dumps({"metadata": {"strategy_name": "旧名"}}), encoding="utf-8")
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    renamed = client.patch("/api/free-strategies/backtest/legacy-run", json={"name": "实验 A"})
+
+    assert renamed.status_code == 200
+    assert renamed.json() == {"job_id": "legacy-run", "name": "实验 A"}
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["display_name"] == "实验 A"
+    assert client.get("/api/free-strategies/backtest").json()["runs"][0]["name"] == "实验 A"
+
+    deleted = client.delete("/api/free-strategies/backtest/legacy-run")
+    assert deleted.status_code == 200
+    assert not run_dir.exists()
+
+
+def test_running_backtest_cannot_be_deleted(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "running-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}", encoding="utf-8")
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+    free_strategy._jobs["running-run"] = (object(), object())
+    try:
+        response = client.delete("/api/free-strategies/backtest/running-run")
+    finally:
+        free_strategy._jobs.pop("running-run", None)
+
+    assert response.status_code == 409
+    assert run_dir.exists()
+
+
+def test_strategy_delete_is_blocked_until_links_are_removed(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        None, "有关联策略", "def on_bar(context, bars):\n    pass\n", {},
+    )
+    run_dir = tmp_path / "free_strategy_runs" / "linked-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "result.json").write_text("{}", encoding="utf-8")
+    (run_dir / "manifest.json").write_text(
+        json.dumps({"job_id": "linked-run", "strategy_id": strategy["id"]}), encoding="utf-8",
+    )
+    PaperAccountStore(tmp_path).save({
+        "id": "linked-paper", "name": "关联账户", "strategy_id": strategy["id"], "status": "stopped",
+    })
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    blocked = client.delete(f"/api/free-strategies/{strategy['id']}")
+    assert blocked.status_code == 409
+    assert "1 条回测记录" in blocked.json()["detail"]
+    assert "1 个模拟盘账户" in blocked.json()["detail"]
+
+    assert client.delete("/api/free-strategies/backtest/linked-run").status_code == 200
+    assert client.delete("/api/free-strategies/paper/accounts/linked-paper").status_code == 200
+    assert client.delete(f"/api/free-strategies/{strategy['id']}").status_code == 200
+
+
+def test_paper_account_must_be_stopped_before_delete(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper-active", "status": "paused"})
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    blocked = client.delete("/api/free-strategies/paper/accounts/paper-active")
+    assert blocked.status_code == 409
+    assert store._path("paper-active").exists()
+
+    store.save({"id": "paper-active", "status": "stopped"})
+    deleted = client.delete("/api/free-strategies/paper/accounts/paper-active")
+    assert deleted.status_code == 200
+    assert not store._path("paper-active").exists()
 
 
 def test_resume_restarts_missing_paper_process(monkeypatch, tmp_path):

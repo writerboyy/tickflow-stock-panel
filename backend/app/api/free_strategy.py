@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing as mp
+import shutil
 import threading
 import uuid
 from datetime import date, timedelta
@@ -15,7 +16,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import settings
 from app.free_strategy.process import start_process
@@ -67,6 +68,18 @@ class StrategyWrite(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class RenameWrite(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("名称不能为空")
+        return value
+
+
 class BacktestWrite(BaseModel):
     strategy_id: str
     symbols: list[str] = Field(default_factory=list)
@@ -87,7 +100,7 @@ class BacktestWrite(BaseModel):
 
 
 class PaperWrite(BacktestWrite):
-    name: str = "自由策略模拟账户"
+    name: str = "量化策略模拟账户"
 
 
 def _validate_payload(req: BacktestWrite, request: Request) -> None:
@@ -97,7 +110,7 @@ def _validate_payload(req: BacktestWrite, request: Request) -> None:
         if capabilities is not None and not capabilities.has(Cap.KLINE_MINUTE_BATCH):
             raise HTTPException(status_code=403, detail="当前没有分钟K能力，无法运行该周期；请开通分钟K或配置自定义分钟数据源")
     if req.asset_type not in {"stock", "etf"}:
-        raise HTTPException(status_code=400, detail="自由策略只支持股票或 ETF，单次任务不可混合")
+        raise HTTPException(status_code=400, detail="量化策略只支持股票或 ETF，单次任务不可混合")
 
 
 @router.get("")
@@ -126,15 +139,34 @@ def list_backtests(request: Request):
             run = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        metadata = run.get("metadata", {})
+        manifest = _read_run_manifest(path)
         result.append({
             "job_id": path.name,
+            "name": manifest.get("display_name") or metadata.get("strategy_name") or path.name,
             "final_equity": run.get("final_equity"),
             "return_pct": run.get("return_pct"),
             "max_drawdown_pct": run.get("max_drawdown_pct"),
             "fills": len(run.get("fills", [])),
-            "metadata": run.get("metadata", {}),
+            "metadata": metadata,
         })
     return {"runs": result}
+
+
+def _read_run_manifest(path: Path) -> dict[str, Any]:
+    manifest_path = path / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _active_backtest(job_id: str) -> bool:
+    with _jobs_lock:
+        return job_id in _jobs
 
 
 @router.get("/backtest/{job_id}")
@@ -148,12 +180,36 @@ def get_backtest_result(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail="回测结果文件损坏") from None
 
 
+@router.patch("/backtest/{job_id}")
+def rename_backtest(job_id: str, req: RenameWrite, request: Request):
+    if _active_backtest(job_id):
+        raise HTTPException(status_code=409, detail="运行中的回测不能重命名")
+    path = _run_path(request, job_id)
+    if not (path / "result.json").exists():
+        raise HTTPException(status_code=404, detail="回测结果不存在")
+    manifest = _read_run_manifest(path)
+    manifest.update({"job_id": job_id, "display_name": req.name, "updated_at": now_iso()})
+    (path / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"job_id": job_id, "name": req.name}
+
+
+@router.delete("/backtest/{job_id}")
+def delete_backtest(job_id: str, request: Request):
+    if _active_backtest(job_id):
+        raise HTTPException(status_code=409, detail="运行中的回测不能删除，请先停止任务")
+    path = _run_path(request, job_id)
+    if not (path / "result.json").exists():
+        raise HTTPException(status_code=404, detail="回测结果不存在")
+    shutil.rmtree(path)
+    return {"ok": True}
+
+
 @router.get("/{strategy_id}")
 def get_strategy(strategy_id: str, request: Request):
     try:
         return _strategy_store(request).get(strategy_id)
     except (FileNotFoundError, json.JSONDecodeError):
-        raise HTTPException(status_code=404, detail="自由策略不存在") from None
+        raise HTTPException(status_code=404, detail="量化策略不存在") from None
 
 
 @router.put("/{strategy_id}")
@@ -161,12 +217,39 @@ def update_strategy(strategy_id: str, req: StrategyWrite, request: Request):
     return _strategy_store(request).save(strategy_id, req.name, req.source, req.config)
 
 
+@router.patch("/{strategy_id}")
+def rename_strategy(strategy_id: str, req: RenameWrite, request: Request):
+    try:
+        return _strategy_store(request).rename(strategy_id, req.name)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raise HTTPException(status_code=404, detail="量化策略不存在") from None
+
+
+def _strategy_links(strategy_id: str, request: Request) -> tuple[int, int]:
+    backtests = sum(
+        1 for path in _run_root(request).glob("*")
+        if path.is_dir() and _read_run_manifest(path).get("strategy_id") == strategy_id
+    )
+    accounts = sum(1 for account in _paper_store(request).list() if account.get("strategy_id") == strategy_id)
+    return backtests, accounts
+
+
 @router.delete("/{strategy_id}")
 def delete_strategy(strategy_id: str, request: Request):
+    store = _strategy_store(request)
     try:
-        _strategy_store(request).delete(strategy_id)
+        store.get(strategy_id)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="自由策略不存在") from None
+        raise HTTPException(status_code=404, detail="量化策略不存在") from None
+    backtests, accounts = _strategy_links(strategy_id, request)
+    if backtests or accounts:
+        links = []
+        if backtests:
+            links.append(f"{backtests} 条回测记录")
+        if accounts:
+            links.append(f"{accounts} 个模拟盘账户")
+        raise HTTPException(status_code=409, detail=f"无法删除量化策略：仍关联{' 和 '.join(links)}，请先逐项删除")
+    store.delete(strategy_id)
     return {"ok": True}
 
 
@@ -188,7 +271,7 @@ def create_backtest(req: BacktestWrite, request: Request):
     try:
         strategy = _strategy_store(request).get(req.strategy_id)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="自由策略不存在") from None
+        raise HTTPException(status_code=404, detail="量化策略不存在") from None
     job_id = uuid.uuid4().hex[:12]
     payload = _job_payload(req, strategy, request)
     run_root = _run_path(request, job_id)
@@ -397,6 +480,21 @@ def get_paper_account(account_id: str, request: Request):
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
     result["events"] = _paper_store(request).events(account_id)
     return result
+
+
+@router.delete("/paper/accounts/{account_id}")
+def delete_paper_account(account_id: str, request: Request):
+    store = _paper_store(request)
+    try:
+        state = store.get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    process = _paper.get(account_id)
+    if state.get("status") != "stopped" or (process is not None and process.is_alive()):
+        raise HTTPException(status_code=409, detail="请先停止模拟盘账户再删除")
+    _paper.pop(account_id, None)
+    store.delete(account_id)
+    return {"ok": True}
 
 
 @router.post("/paper/accounts/{account_id}/{action}")
