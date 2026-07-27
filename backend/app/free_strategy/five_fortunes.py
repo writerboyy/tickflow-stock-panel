@@ -764,15 +764,26 @@ def _weighted_momentum(prices: list[float], lookback: int) -> tuple[float | None
     if len(prices) < lookback + 1 or any(price <= 0 for price in prices[-(lookback + 1):]):
         return None, None, None
     values = [math.log(price) for price in prices[-(lookback + 1):]]
-    weights = [(1 + index / lookback) ** 2 for index in range(len(values))]
-    total_weight = sum(weights)
-    x_mean = sum(index * weight for index, weight in enumerate(weights)) / total_weight
-    y_mean = sum(value * weight for value, weight in zip(values, weights)) / total_weight
-    var_x = sum(weight * (index - x_mean) ** 2 for index, weight in enumerate(weights))
-    slope = sum(weight * (index - x_mean) * (value - y_mean) for index, (value, weight) in enumerate(zip(values, weights))) / var_x
+    linear_weights = [1 + index / lookback for index in range(len(values))]
+    regression_weights = [weight**2 for weight in linear_weights]
+    total_weight = sum(regression_weights)
+    x_mean = sum(index * weight for index, weight in enumerate(regression_weights)) / total_weight
+    y_mean = sum(value * weight for value, weight in zip(values, regression_weights)) / total_weight
+    var_x = sum(weight * (index - x_mean) ** 2 for index, weight in enumerate(regression_weights))
+    slope = sum(
+        weight * (index - x_mean) * (value - y_mean)
+        for index, (value, weight) in enumerate(zip(values, regression_weights))
+    ) / var_x
     predicted = [y_mean + slope * (index - x_mean) for index in range(len(values))]
-    residual = sum(weight * (value - fit) ** 2 for value, fit, weight in zip(values, predicted, weights))
-    total = sum(weight * (value - y_mean) ** 2 for value, weight in zip(values, weights))
+    residual = sum(
+        weight * (value - fit) ** 2
+        for value, fit, weight in zip(values, predicted, linear_weights)
+    )
+    arithmetic_mean = sum(values) / len(values)
+    total = sum(
+        weight * (value - arithmetic_mean) ** 2
+        for value, weight in zip(values, linear_weights)
+    )
     r2 = 1 - residual / total if total else 0.0
     annualized = math.exp(slope * 250) - 1
     return annualized * r2, annualized, r2

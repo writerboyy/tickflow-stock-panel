@@ -100,6 +100,14 @@ def test_laplace_smoothing_is_regime_specific():
     assert weak["laplace_value"] > normal["laplace_value"]
 
 
+def test_weighted_momentum_matches_original_r_squared_weighting():
+    score, annualized, r2 = five._weighted_momentum(variable_prices(), 25)
+
+    assert score == pytest.approx(1.0092122547173843)
+    assert annualized == pytest.approx(1.038545691888901)
+    assert r2 == pytest.approx(0.9717552752848408)
+
+
 def test_adjusted_correlation_matches_identical_price_paths():
     prices = variable_prices()
     assert five._adjusted_correlation(prices, prices) == pytest.approx(1.0)
