@@ -43,6 +43,7 @@ def _state(context) -> dict[str, Any]:
 
 
 def initialize(context) -> None:
+    context.set_universe([*WUFU_MINUTE_POOL, DEFENSIVE_ETF])
     context.state.setdefault("five_fortunes", {
         "daily": {},
         "intraday": {"date": None, "close": {}, "volume": {}, "amount": {}},

@@ -15,6 +15,16 @@ from .engine import FreeStrategyConfig, FreeStrategyEngine
 logger = logging.getLogger(__name__)
 
 
+def _resolve_symbols(engine: FreeStrategyEngine, payload: dict[str, Any]) -> tuple[list[str], str]:
+    source_symbols = engine.universe
+    if source_symbols:
+        return source_symbols, "strategy_source"
+    legacy_symbols = [str(symbol).strip() for symbol in payload.get("symbols", []) if str(symbol).strip()]
+    if legacy_symbols:
+        return legacy_symbols, "legacy_config"
+    raise ValueError("策略源码未定义股票池，请在 initialize(context) 中调用 context.set_universe([...])")
+
+
 def _read_rows(
     repo: Any,
     symbols: list[str],
@@ -68,11 +78,12 @@ def _read_rows(
 def execute_backtest(payload: dict[str, Any], output: Any) -> None:
     try:
         from app.tickflow.repository import DataStore, KlineRepository
-        output.put({"type": "progress", "message": "读取行情数据", "progress": 0.1})
+        output.put({"type": "progress", "message": "初始化策略并读取行情数据", "progress": 0.1})
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
         config = FreeStrategyConfig(**payload["config"])
         engine = FreeStrategyEngine(payload["source"], payload["timeframe"], config)
+        symbols, universe_source = _resolve_symbols(engine, payload)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
         replayed_rows = 0
@@ -81,7 +92,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
         symbols_seen: set[str] = set()
         trading_days = 0
         if payload["timeframe"] == "1d":
-            bars = _read_rows(repo, payload["symbols"], start, end, payload["asset_type"], payload["timeframe"])
+            bars = _read_rows(repo, symbols, start, end, payload["asset_type"], payload["timeframe"])
             output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
             replayed_rows = len(bars)
             symbols_seen.update(bar.symbol for bar in bars)
@@ -97,7 +108,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             while cursor <= end:
                 if cursor.weekday() < 5:
                     bars = _read_rows(
-                        repo, payload["symbols"], cursor, cursor,
+                        repo, symbols, cursor, cursor,
                         payload["asset_type"], payload["timeframe"], require_all_symbols=False, allow_empty=True,
                     )
                     rows = list(bars)
@@ -116,20 +127,20 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 cursor += timedelta(days=1)
             if not days_with_bars:
                 raise ValueError("没有可用的分钟K历史数据，请先同步后重试")
-            missing = [symbol for symbol in payload["symbols"] if symbol not in symbols_seen]
+            missing = [symbol for symbol in symbols if symbol not in symbols_seen]
             if missing:
                 raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
             engine.state = engine.context.state.copy()
             result = engine.result()
             trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
-        missing_symbols = [symbol for symbol in payload["symbols"] if symbol not in symbols_seen]
+        missing_symbols = [symbol for symbol in symbols if symbol not in symbols_seen]
         minute_table = "kline_etf_minute" if payload["asset_type"] == "etf" else "kline_minute"
         result["metadata"] = {
             "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
             "timeframe": payload["timeframe"], "asset_type": payload["asset_type"],
             "start": payload["start"], "end": payload["end"],
-            "symbols": payload["symbols"], "symbol_count": len(payload["symbols"]),
+            "symbols": symbols, "symbol_count": len(symbols), "universe_source": universe_source,
             "data_days": len(result.get("daily_equity_curve", [])),
             "source_revision": payload.get("source_revision"),
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
@@ -141,7 +152,7 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
                 "first_bar": first_bar.isoformat() if first_bar else None,
                 "last_bar": last_bar.isoformat() if last_bar else None,
                 "trading_days": trading_days,
-                "requested_symbols": list(payload["symbols"]),
+                "requested_symbols": symbols,
                 "seen_symbols": sorted(symbols_seen),
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),

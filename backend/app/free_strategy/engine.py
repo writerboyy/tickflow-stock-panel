@@ -109,6 +109,28 @@ class Context:
         self.portfolio = SimpleNamespace(cash=engine.account.cash, positions={}, available_positions={}, avg_cost={}, total_value=engine.account.cash)
         self.account = self.portfolio
         self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
+        self._universe: list[str] = []
+
+    @property
+    def universe(self) -> list[str]:
+        return list(self._universe)
+
+    def set_universe(self, symbols: Iterable[str]) -> None:
+        if isinstance(symbols, (str, bytes)):
+            raise ValueError("股票池必须是标的代码列表")
+        suffixes = {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}
+        normalized: list[str] = []
+        for raw in symbols:
+            symbol = str(raw).strip().upper()
+            for source_suffix, target_suffix in suffixes.items():
+                if symbol.endswith(source_suffix):
+                    symbol = f"{symbol[:-len(source_suffix)]}{target_suffix}"
+                    break
+            if symbol and symbol not in normalized:
+                normalized.append(symbol)
+        if not normalized:
+            raise ValueError("股票池不能为空")
+        self._universe = normalized
 
     def _sync(self, prices: dict[str, float]) -> None:
         self.portfolio.cash = self._engine.account.cash
@@ -196,6 +218,10 @@ class FreeStrategyEngine:
             raise ValueError("策略必须定义 on_bar(context, bars)")
         if "initialize" in self._callbacks:
             self._callbacks["initialize"](self.context)
+
+    @property
+    def universe(self) -> list[str]:
+        return self.context.universe
 
     def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
         self._counter += 1

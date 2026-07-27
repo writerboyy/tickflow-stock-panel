@@ -69,7 +69,7 @@ class StrategyWrite(BaseModel):
 
 class BacktestWrite(BaseModel):
     strategy_id: str
-    symbols: list[str] = Field(min_length=1)
+    symbols: list[str] = Field(default_factory=list)
     timeframe: Literal["1d", "30m", "5m", "1m"] = "1d"
     start: date | None = None
     end: date | None = None
@@ -174,9 +174,10 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
     end = req.end or date.today()
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
     config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end"})
+    legacy_symbols = req.symbols or strategy.get("config", {}).get("symbols", [])
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
             "source": strategy["source"], "strategy_id": strategy.get("id"), "strategy_name": strategy.get("name"),
-            "source_revision": strategy.get("revision"), "symbols": req.symbols,
+            "source_revision": strategy.get("revision"), "symbols": legacy_symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
             "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
 
@@ -252,7 +253,7 @@ def _paper_loop(account_id: str, root: str) -> None:
     from dataclasses import asdict
     import time
     from datetime import date, datetime, time as clock_time
-    from app.free_strategy.process import _read_rows
+    from app.free_strategy.process import _read_rows, _resolve_symbols
     from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
     from app.tickflow.repository import DataStore, KlineRepository
     account_root = Path(root) / account_id
@@ -262,7 +263,7 @@ def _paper_loop(account_id: str, root: str) -> None:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         source = (account_root / "strategy.py").read_text(encoding="utf-8")
         config = dict(state.get("config", {}))
-        symbols = config.pop("symbols", [])
+        legacy_symbols = config.pop("symbols", [])
         timeframe = config.pop("timeframe", "1m")
         asset_type = config.pop("asset_type", "stock")
         config.pop("strategy_id", None)
@@ -271,16 +272,20 @@ def _paper_loop(account_id: str, root: str) -> None:
         engine_config = FreeStrategyConfig(asset_type=asset_type, **config)
         repo = KlineRepository(DataStore(Path(root).parent))
         engine = FreeStrategyEngine(source, timeframe, engine_config, state=state.get("state", {}))
+        symbols, universe_source = _resolve_symbols(engine, {"symbols": legacy_symbols})
+        state["universe"] = symbols
+        state["universe_source"] = universe_source
         if state.get("checkpoint"):
             engine.restore_checkpoint(state["checkpoint"])
         else:
             engine.account.restore(state.get("account", {}))
             engine.restore_runtime(state.get("runtime"))
-    except Exception:
+        state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
         # Keep the supervisor alive and make the failure inspectable from the API.
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"id": account_id}
         state["status"] = "paused"
-        state["last_error"] = "模拟账户初始化失败"
+        state["last_error"] = f"模拟账户初始化失败: {exc}"
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
         return
     last_bar = state.get("last_bar")

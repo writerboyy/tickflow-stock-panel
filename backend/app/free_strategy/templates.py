@@ -1,12 +1,13 @@
 """开箱即用的自由策略模板。"""
 from __future__ import annotations
 
-from .five_fortunes import DEFENSIVE_ETF, WUFU_MINUTE_POOL
-
 TEMPLATES = {
     "dual_ma": {
         "name": "双均线模板",
-    "source": '''def initialize(context):
+        "source": '''ETF_POOL = ["510300.SH"]
+
+def initialize(context):
+    context.set_universe(ETF_POOL)
     context.state.setdefault("closes", {})
     context.log("双均线策略初始化")
 
@@ -26,7 +27,10 @@ def after_trading_end(context):
     },
     "etf_rotation": {
         "name": "状态化 ETF 轮动模板",
-        "source": '''def initialize(context):
+        "source": '''ETF_POOL = ["510300.SH", "510500.SH", "159915.SZ", "518880.SH", "511880.SH"]
+
+def initialize(context):
+    context.set_universe(ETF_POOL)
     context.state.setdefault("history", {})
     context.state.setdefault("cooldown", 0)
     context.state.setdefault("regime", "neutral")
@@ -52,7 +56,6 @@ def on_bar(context, bars):
     "five_fortunes": {
         "name": "五福策略（TickFlow 默认规则适配）",
         "config": {
-            "symbols": [*WUFU_MINUTE_POOL, DEFENSIVE_ETF],
             "timeframe": "1m",
             "asset_type": "etf",
             "benchmark_symbol": "510300.SH",
@@ -60,11 +63,19 @@ def on_bar(context, bars):
             "fill_policy": "next_open",
         },
     "source": '''from app.free_strategy.five_fortunes import (
+    DEFENSIVE_ETF,
+    WUFU_MINUTE_POOL,
     after_trading_end,
     before_trading_start,
-    initialize,
+    initialize as initialize_five_fortunes,
     on_bar,
 )
+
+ETF_POOL = [*WUFU_MINUTE_POOL, DEFENSIVE_ETF]
+
+def initialize(context):
+    context.set_universe(ETF_POOL)
+    initialize_five_fortunes(context)
 ''',
     },
 }

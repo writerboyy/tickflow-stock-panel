@@ -956,7 +956,7 @@ export interface FreeStrategySummary {
 
 export interface FreeBacktestConfig {
   strategy_id: string
-  symbols: string[]
+  symbols?: string[]
   timeframe: '1d' | '30m' | '5m' | '1m'
   start?: string
   end?: string

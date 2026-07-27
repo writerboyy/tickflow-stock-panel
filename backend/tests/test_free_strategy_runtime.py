@@ -5,6 +5,7 @@ import pytest
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.five_fortunes import DEFENSIVE_ETF, REGIME_PROXIES
+from app.free_strategy.templates import TEMPLATES
 
 
 def test_minute_aggregation_respects_lunch_boundary():
@@ -17,6 +18,40 @@ def test_minute_aggregation_respects_lunch_boundary():
     assert [(bar.timestamp.hour, bar.timestamp.minute, bar.open, bar.close) for bar in result] == [
         (11, 25, 1, 3), (13, 0, 4, 5)
     ]
+
+
+def test_initialize_defines_universe_and_normalizes_joinquant_suffixes():
+    source = """
+def initialize(context):
+    context.set_universe(['510300.XSHG', '159915.XSHE', '510300.SH'])
+
+def on_bar(context, bars):
+    pass
+"""
+    engine = FreeStrategyEngine(source)
+
+    assert engine.universe == ["510300.SH", "159915.SZ"]
+
+
+def test_set_universe_rejects_a_symbol_string():
+    source = """
+def initialize(context):
+    context.set_universe('510300.SH')
+
+def on_bar(context, bars):
+    pass
+"""
+    with pytest.raises(ValueError, match="标的代码列表"):
+        FreeStrategyEngine(source)
+
+
+@pytest.mark.parametrize("template_id", ["dual_ma", "etf_rotation", "five_fortunes"])
+def test_templates_define_universe_in_strategy_source(template_id):
+    template = TEMPLATES[template_id]
+
+    engine = FreeStrategyEngine(template["source"], timeframe=template.get("config", {}).get("timeframe", "1d"))
+
+    assert engine.universe
 
 
 def test_next_open_fill_and_t1_are_default():

@@ -21,6 +21,10 @@ class FakeContext:
         self.scheduled = []
         self.orders = []
         self.logs = []
+        self.universe = []
+
+    def set_universe(self, symbols) -> None:
+        self.universe = list(symbols)
 
     def schedule(self, callback, at) -> None:
         self.scheduled.append((callback, at))
@@ -56,6 +60,12 @@ def variable_prices(offset: float = 0.0) -> list[float]:
 
 def test_standard_lifecycle_name_keeps_legacy_alias():
     assert five.on_session_start is five.before_trading_start
+
+
+def test_initialize_registers_available_etf_universe():
+    context = initialized_context()
+
+    assert context.universe == [*five.WUFU_MINUTE_POOL, five.DEFENSIVE_ETF]
 
 
 def test_laplace_smoothing_is_regime_specific():

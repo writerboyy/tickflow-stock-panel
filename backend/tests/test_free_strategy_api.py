@@ -32,6 +32,34 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
     assert payload["strategy_name"] == "五福"
 
 
+def test_backtest_request_can_leave_universe_to_strategy_source(tmp_path):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        datastore=SimpleNamespace(data_dir=tmp_path),
+    )))
+    strategy = {"id": "source-pool", "name": "源码股票池", "source": "def on_bar(context, bars): pass", "revision": 1}
+
+    payload = _job_payload(BacktestWrite(strategy_id="source-pool"), strategy, request)
+
+    assert payload["symbols"] == []
+
+
+def test_job_payload_keeps_legacy_saved_universe_as_fallback(tmp_path):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        datastore=SimpleNamespace(data_dir=tmp_path),
+    )))
+    strategy = {
+        "id": "legacy",
+        "name": "旧策略",
+        "source": "def on_bar(context, bars): pass",
+        "revision": 1,
+        "config": {"symbols": ["510300.SH"]},
+    }
+
+    payload = _job_payload(BacktestWrite(strategy_id="legacy"), strategy, request)
+
+    assert payload["symbols"] == ["510300.SH"]
+
+
 def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):
     run_dir = tmp_path / "free_strategy_runs" / "saved-run"
     run_dir.mkdir(parents=True)

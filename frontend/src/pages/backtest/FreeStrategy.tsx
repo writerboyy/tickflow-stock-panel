@@ -1,17 +1,23 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, BookOpen, CirclePause, CirclePlay, Code2, Plus, Save, Square, Trash2 } from 'lucide-react'
+import { AlertTriangle, BookOpen, CirclePause, CirclePlay, Code2, History, Plus, Save, Square, Trash2 } from 'lucide-react'
 import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
 import { FreeStrategyResult } from './FreeStrategyResult'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const DEFAULT_CONFIG: FreeBacktestConfig = {
-  strategy_id: '', symbols: ['510300.SH'], timeframe: '1d', asset_type: 'etf',
+  strategy_id: '', timeframe: '1d', asset_type: 'etf',
   start: `${new Date().getFullYear() - 3}-01-01`, end: new Date().toISOString().slice(0, 10),
   initial_capital: 1_000_000, fees_pct: 0.0002, commission_pct: null, stamp_tax_pct: 0.001,
   slippage_bps: 5, lot_size: 100, max_exposure_pct: 1, settlement: 't1', fill_policy: 'next_open',
   benchmark_symbol: '510300.SH',
+}
+
+function withoutLegacySymbols(value: Record<string, unknown>): Partial<FreeBacktestConfig> {
+  const normalized = { ...value }
+  delete normalized.symbols
+  return normalized as Partial<FreeBacktestConfig>
 }
 
 export function FreeStrategy() {
@@ -22,7 +28,10 @@ export function FreeStrategy() {
   const paperAccounts = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts })
   const detail = useQuery({ queryKey: ['free-strategy', selectedId], queryFn: () => api.freeStrategy(selectedId), enabled: Boolean(selectedId) })
   const [name, setName] = useState('我的自由策略')
-  const [source, setSource] = useState(`def initialize(context):
+  const [source, setSource] = useState(`ETF_POOL = ["510300.SH"]
+
+def initialize(context):
+    context.set_universe(ETF_POOL)
     context.log("策略初始化")
 
 def on_bar(context, bars):
@@ -42,6 +51,7 @@ def on_bar(context, bars):
 
   const list = strategies.data?.strategies ?? []
   const templateList = templates.data?.templates ?? []
+  const runs = savedRuns.data?.runs ?? []
   const selected = list.find(item => item.id === selectedId)
   const accounts = paperAccounts.data?.accounts ?? []
   const paperDetail = useQuery({
@@ -71,7 +81,7 @@ def on_bar(context, bars):
     if (selected) {
       setName(selected.name)
       setSource(detail.data?.source ?? '')
-      setConfig(prev => ({ ...prev, ...(selected.config ?? {}), strategy_id: selected.id }))
+      setConfig(prev => ({ ...prev, ...withoutLegacySymbols(selected.config ?? {}), strategy_id: selected.id }))
     }
   }, [selected, detail.data])
 
@@ -91,7 +101,7 @@ def on_bar(context, bars):
     setName(template.name)
     setSource(template.source)
     setSelectedId('')
-    setConfig(prev => ({ ...prev, ...(template.config ?? {}), strategy_id: '' }))
+    setConfig(prev => ({ ...prev, ...withoutLegacySymbols(template.config ?? {}), strategy_id: '' }))
   }
 
   const loadSavedRun = async (jobId: string) => {
@@ -116,7 +126,7 @@ def on_bar(context, bars):
     sourceRef.current?.close()
     setResult(null); setError(''); setProgress('准备回测'); setRunning(true)
     try {
-      const job = await api.startFreeBacktest({ ...config, symbols: config.symbols.filter(Boolean) })
+      const job = await api.startFreeBacktest(config)
       jobRef.current = job.job_id
       const events = new EventSource(`/api/free-strategies/backtest/${job.job_id}/stream`)
       sourceRef.current = events
@@ -170,9 +180,6 @@ def on_bar(context, bars):
         <div><div className="text-sm font-semibold">自由策略</div><div className="text-[11px] text-muted">独立 Python bar 回放 · 源码快照修订 {selected?.revision ?? '未保存'}</div></div>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-1.5">
-        <select className={INPUT} value={selectedRunId} onChange={e => void loadSavedRun(e.target.value)} aria-label="已保存回测">
-          <option value="">已保存回测</option>{(savedRuns.data?.runs ?? []).map(run => <option value={run.job_id} key={run.job_id}>{run.job_id} · {run.return_pct >= 0 ? '+' : ''}{run.return_pct.toFixed(2)}%</option>)}
-        </select>
         <select className={INPUT} value="" onChange={e => loadTemplate(e.target.value)} aria-label="加载模板">
           <option value="">加载模板</option>{templateList.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
         </select>
@@ -181,11 +188,33 @@ def on_bar(context, bars):
     </div>
 
     <div className="grid min-h-[560px] shrink-0 grid-cols-[220px_minmax(0,1fr)_280px] gap-3 max-xl:min-h-[820px] max-xl:grid-cols-[180px_minmax(0,1fr)] max-md:min-h-0 max-md:grid-cols-1">
-      <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5">
-        <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">策略列表</span><div className="flex items-center gap-1"><button className="text-muted hover:text-accent" title="新建策略" onClick={() => { setSelectedId(''); setName('我的自由策略'); setSource('def on_bar(context, bars):\n    pass'); setConfig(prev => ({ ...prev, strategy_id: '' })) }}><Plus className="h-3.5 w-3.5" /></button>{selectedId && <button className="text-muted hover:text-danger" title="删除策略" onClick={async () => { await api.deleteFreeStrategy(selectedId); setSelectedId(''); setConfig(prev => ({ ...prev, strategy_id: '' })); await strategies.refetch() }}><Trash2 className="h-3.5 w-3.5" /></button>}</div></div>
-        <div className="space-y-1">{list.map(item => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full rounded px-2 py-2 text-left text-xs ${selectedId === item.id ? 'bg-accent/15 text-accent' : 'hover:bg-elevated'}`}><div className="truncate">{item.name}</div><div className="mt-1 text-[10px] text-muted">修订 {item.revision}</div></button>)}</div>
-        {!list.length && <EmptyState icon={BookOpen} title="还没有策略" hint="从模板开始，保存后即可运行。" />}
-      </section>
+      <div className="grid min-h-0 grid-rows-[minmax(160px,0.72fr)_minmax(220px,1.28fr)] gap-3 max-md:grid-rows-none">
+        <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-64">
+          <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">策略列表</span><div className="flex items-center gap-1"><button className="text-muted hover:text-accent" title="新建策略" onClick={() => { setSelectedId(''); setName('我的自由策略'); setSource('ETF_POOL = ["510300.SH"]\n\ndef initialize(context):\n    context.set_universe(ETF_POOL)\n\ndef on_bar(context, bars):\n    pass'); setConfig(prev => ({ ...prev, strategy_id: '' })) }}><Plus className="h-3.5 w-3.5" /></button>{selectedId && <button className="text-muted hover:text-danger" title="删除策略" onClick={async () => { await api.deleteFreeStrategy(selectedId); setSelectedId(''); setConfig(prev => ({ ...prev, strategy_id: '' })); await strategies.refetch() }}><Trash2 className="h-3.5 w-3.5" /></button>}</div></div>
+          <div className="space-y-1">{list.map(item => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full rounded px-2 py-2 text-left text-xs ${selectedId === item.id ? 'bg-accent/15 text-accent' : 'hover:bg-elevated'}`}><div className="truncate">{item.name}</div><div className="mt-1 text-[10px] text-muted">修订 {item.revision}</div></button>)}</div>
+          {!list.length && <EmptyState icon={BookOpen} title="还没有策略" hint="从模板开始，保存后即可运行。" />}
+        </section>
+
+        <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-80">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium"><History className="h-3.5 w-3.5 text-accent" />回测记录</span>
+            <span className="text-[10px] tabular-nums text-muted">{runs.length} 条</span>
+          </div>
+          <div className="space-y-1.5">
+            {runs.map(run => {
+              const metadata = run.metadata ?? {}
+              const returnPct = Number(run.return_pct ?? 0)
+              return <button type="button" key={run.job_id} onClick={() => void loadSavedRun(run.job_id)} aria-label={`查看回测 ${run.job_id}`} className={`w-full rounded border px-2 py-2 text-left transition-colors ${selectedRunId === run.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
+                <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{String(metadata.strategy_name ?? run.job_id)}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
+                <div className="mt-1 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}</div>
+                <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{run.job_id}</span><span className="shrink-0">回撤 {Number(run.max_drawdown_pct ?? 0).toFixed(2)}% · {run.fills} 成交</span></div>
+              </button>
+            })}
+          </div>
+          {savedRuns.isLoading ? <div className="py-4 text-center text-[11px] text-muted">加载回测记录...</div> : null}
+          {!savedRuns.isLoading && !runs.length ? <EmptyState icon={History} title="还没有回测记录" hint="完成一次历史回测后会保存在这里。" /> : null}
+        </section>
+      </div>
 
       <section className="flex min-h-0 flex-col overflow-hidden rounded-md border border-border bg-surface max-md:h-[460px]">
         <div className="flex items-center gap-2 border-b border-border px-3 py-2"><input className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none" value={name} onChange={e => setName(e.target.value)} /><span className="text-[10px] text-muted">Python</span></div>
@@ -198,7 +227,6 @@ def on_bar(context, bars):
         <div className="grid grid-cols-2 gap-2 text-[11px]">
           <label>资产<select className={INPUT} value={config.asset_type} onChange={e => setConfig({ ...config, asset_type: e.target.value as any })}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
           <label>周期<select className={INPUT} value={config.timeframe} onChange={e => setConfig({ ...config, timeframe: e.target.value as any })}><option value="1d">1d</option><option value="30m">30m</option><option value="5m">5m</option><option value="1m">1m</option></select></label>
-          <label className="col-span-2">股票池<input className={INPUT} value={config.symbols.join(',')} onChange={e => setConfig({ ...config, symbols: e.target.value.split(',').map(v => v.trim()).filter(Boolean) })} /></label>
           <label className="col-span-2">基准<input className={INPUT} value={config.benchmark_symbol} onChange={e => setConfig({ ...config, benchmark_symbol: e.target.value.trim() })} /></label>
           <label>开始<input type="date" className={INPUT} value={config.start} onChange={e => setConfig({ ...config, start: e.target.value })} /></label><label>结束<input type="date" className={INPUT} value={config.end} onChange={e => setConfig({ ...config, end: e.target.value })} /></label>
           <label>初始资金<input type="number" className={INPUT} value={config.initial_capital} onChange={e => setConfig({ ...config, initial_capital: Number(e.target.value) })} /></label><label>最小单位<input type="number" className={INPUT} value={config.lot_size} onChange={e => setConfig({ ...config, lot_size: Number(e.target.value) })} /></label>
