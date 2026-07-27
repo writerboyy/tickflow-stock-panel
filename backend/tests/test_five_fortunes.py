@@ -180,6 +180,16 @@ def test_normal_regime_does_not_reduce_position_at_six_percent_drawdown():
     assert state["risk_actions"] == []
 
 
+def test_buy_targets_uses_full_available_strategy_exposure():
+    context = initialized_context()
+    state = context.state["five_fortunes"]
+    state["target"] = ["A"]
+
+    five._buy_targets(context)
+
+    assert context.orders == [("percent", "A", 1.0)]
+
+
 def test_four_consecutive_filter_fail_days_force_defensive(monkeypatch):
     context = initialized_context()
     context.portfolio.positions = {"A": 100.0}

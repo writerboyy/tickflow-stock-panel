@@ -481,7 +481,7 @@ def _buy_targets(context) -> None:
     targets = state.get("target", [])
     if not targets:
         return
-    allocation = min(0.95, max(0.0, float(state.get("position_scale", 1.0)) * 0.95)) / len(targets)
+    allocation = min(1.0, max(0.0, float(state.get("position_scale", 1.0)))) / len(targets)
     held = set(_held_symbols(context))
     submitted = []
     for symbol in targets:
