@@ -6,7 +6,11 @@ import pytest
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy import five_fortunes
-from app.free_strategy.five_fortunes import DEFENSIVE_ETF, REGIME_PROXIES
+from app.free_strategy.five_fortunes import (
+    DEFENSIVE_ETF,
+    REGIME_FALLBACK_PROXIES,
+    REGIME_PROXIES,
+)
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -211,6 +215,68 @@ def test_five_fortunes_template_is_a_self_contained_source_snapshot():
 
     assert source == Path(five_fortunes.__file__).read_text(encoding="utf-8")
     assert "from app.free_strategy.five_fortunes import" not in source
+    assert "from jqdata import" not in source
+
+
+def test_native_extra_history_is_lazy_and_never_exposes_current_day():
+    source = '''
+def initialize(context):
+    context.set_universe(["510300.SH"])
+    context.require_extra_history("unit_net_value")
+
+def on_bar(context, bars):
+    context.state["nav"] = context.extra_history(
+        "unit_net_value", "510300.SH", count=2,
+    )
+'''
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+    )
+    engine.set_run_window(datetime(2025, 7, 1).date(), datetime(2025, 7, 24).date())
+    calls = []
+
+    def load(info, symbols, start, end):
+        calls.append((info, symbols, start, end))
+        engine.set_extra_history(info, {
+            "510300.SH": {
+                datetime(2025, 7, 23).date(): 0.7,
+                datetime(2025, 7, 24).date(): 0.8,
+            },
+        })
+
+    engine.set_extra_history_loader(load)
+    result = engine.run([
+        Bar("510300.SH", datetime(2025, 7, 24, 9, 30), 10, 10, 10, 10),
+    ])
+
+    assert calls == [(
+        "unit_net_value",
+        ["510300.SH"],
+        datetime(2025, 7, 1).date(),
+        datetime(2025, 7, 24).date(),
+    )]
+    assert engine.extra_history_requirements == {"unit_net_value"}
+    assert result["state"]["nav"] == [{"date": "2025-07-23", "value": 0.7}]
+
+
+def test_five_fortunes_template_uses_reference_backtest_parameters():
+    config = TEMPLATES["five_fortunes"]["config"]
+
+    assert config == {
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "initial_capital": 100_000,
+        "fees_pct": 0.0001,
+        "commission_pct": 0.0001,
+        "min_commission": 5,
+        "stamp_tax_pct": 0,
+        "slippage_bps": 1,
+        "price_tick": 0.001,
+        "benchmark_symbol": "510300.SH",
+        "settlement": "t1",
+        "fill_policy": "close",
+    }
 
 
 def test_next_open_fill_and_t1_are_default():
@@ -683,7 +749,7 @@ def test_five_fortunes_runs_on_minute_bars_and_records_daily_candidates():
     source = """
 from app.free_strategy.five_fortunes import after_trading_end, before_trading_start, initialize, on_bar
 """
-    symbols = [*REGIME_PROXIES, "518880.SH", DEFENSIVE_ETF]
+    symbols = [*REGIME_PROXIES, "510300.SH", "518880.SH", DEFENSIVE_ETF]
     bars = []
     for day in range(1, 67):
         for hour, minute in ((9, 30), (9, 40), (10, 31), (13, 10), (13, 11), (15, 0)):
@@ -697,7 +763,7 @@ from app.free_strategy.five_fortunes import after_trading_end, before_trading_st
     ).run(iter(bars))
     reports = result["state"]["five_fortunes"]["daily_reports"]
     assert reports
-    assert reports[-1]["nav_filter"] == "skipped_no_data"
+    assert reports[-1]["nav_filter"] == "unit_net_value"
     assert reports[-1]["holdings"] == [
         symbol for symbol, quantity in result["positions"].items() if quantity > 0
     ]
@@ -709,7 +775,7 @@ def test_five_fortunes_uses_daily_warmup_on_first_backtest_day():
     source = """
 from app.free_strategy.five_fortunes import after_trading_end, before_trading_start, initialize, on_bar
 """
-    symbols = [*REGIME_PROXIES, "518880.SH", DEFENSIVE_ETF]
+    symbols = [*REGIME_FALLBACK_PROXIES, "518880.SH", DEFENSIVE_ETF]
     engine = FreeStrategyEngine(
         source,
         timeframe="1m",
@@ -723,6 +789,15 @@ from app.free_strategy.five_fortunes import after_trading_end, before_trading_st
             price = (1 + index * 0.01) * (1.002 ** offset)
             warmup.append(Bar(symbol, timestamp, price, price, price, price, 100, price * 100))
     engine.preload_history(warmup, "1d")
+    regime_warmup = []
+    for offset in range(65):
+        timestamp = start + timedelta(days=offset)
+        for index, symbol in enumerate(REGIME_PROXIES):
+            price = (1 + index * 0.01) * (1.002 ** offset)
+            regime_warmup.append(
+                Bar(symbol, timestamp, price, price, price, price, 100, price * 100)
+            )
+    engine.preload_market_history(regime_warmup, "1d")
     current_day = start + timedelta(days=66)
     bars = []
     for hour, minute in ((9, 30), (9, 40), (10, 31), (13, 10), (13, 11), (15, 0)):

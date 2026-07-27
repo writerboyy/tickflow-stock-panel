@@ -1,9 +1,4 @@
-"""五福 ETF 策略的 TickFlow 自由策略适配。
-
-聚宽原版依赖指数、ETF NAV 与行业分类数据。本实现保留其交易核心：全 ETF
-池、三状态、加权动量、成交量与趋势过滤、相关性守卫、防频换、午盘卖买分离、
-分钟止损和组合回撤风控。TickFlow 尚未提供 ETF NAV，溢价过滤按原计划显式跳过。
-"""
+"""五福 ETF 策略的 TickFlow 原生实现。"""
 from __future__ import annotations
 
 import math
@@ -35,6 +30,11 @@ WUFU_ETF_POOL = [
 DEFENSIVE_ETF = "511880.SH"
 NO_TICKFLOW_MINUTE = ("161226.SZ", "164824.SZ", "501018.SH")
 WUFU_MINUTE_POOL = [symbol for symbol in WUFU_ETF_POOL if symbol not in NO_TICKFLOW_MINUTE]
+WUFU_DYNAMIC_POOL_EXCLUSIONS = {"159814.SZ"}
+CANDIDATE_SCORE_RATIO = 0.89
+CANDIDATE_SCORE_EPSILON = 0.001
+ETF_PRICE_TICK = 0.001
+MOMENTUM_SCORE_MAX = 5.0
 WUFU_GROUP_NAME_OVERRIDES = {
     "161226.SZ": "国投白银LOF",
     "513000.SH": "225ETF",
@@ -62,7 +62,13 @@ GLOBAL_ETF_POOL = [
     "510300.SH", "510500.SH", "512100.SH", "159915.SZ", "513180.SH",
     "159920.SZ",
 ]
-REGIME_PROXIES = ["510300.SH", "510500.SH", "159915.SZ", "512100.SH", "563300.SH", "510050.SH"]
+REGIME_PROXIES = [
+    "000300.SH", "399101.SZ", "399006.SZ", "000510.SH", "000852.SH", "399303.SZ",
+]
+REGIME_FALLBACK_PROXIES = [
+    "510300.SH", "510500.SH", "159915.SZ", "512100.SH", "563300.SH", "510050.SH",
+]
+LIQUIDITY_CALENDAR_SYMBOL = "510300.SH"
 
 FUND_COMPANIES = (
     "易方达", "广发", "华夏", "华安", "嘉实", "富国", "招商", "鹏华", "南方", "汇添富", "国泰", "平安",
@@ -143,7 +149,7 @@ def _market_catalog(context) -> tuple[list[str], dict[str, str], dict[str, str],
     dynamic_groups = {
         symbol: group
         for symbol, name in names.items()
-        if symbol in minute_symbols
+        if symbol in minute_symbols and symbol not in WUFU_DYNAMIC_POOL_EXCLUSIONS
         and (group := _dynamic_group(WUFU_GROUP_NAME_OVERRIDES.get(symbol, name))) is not None
     }
     return list(names), names, dynamic_groups, minute_symbols
@@ -156,9 +162,11 @@ def initialize(context) -> None:
     context.set_universe([*fixed_pool, DEFENSIVE_ETF])
     context.require_history(timeframe="1d", bars=61)
     context.require_market_history(asset_type="etf", timeframe="1d", bars=61)
+    context.require_market_history(asset_type="index", timeframe="1d", bars=21)
+    context.require_extra_history("unit_net_value")
     context.state.setdefault("five_fortunes", {
         "daily": {},
-        "intraday": {"date": None, "close": {}, "volume": {}, "amount": {}},
+        "intraday": {"date": None, "close": {}, "raw_close": {}, "volume": {}, "amount": {}},
         "regime": "震荡期",
         "raw_regime": "震荡期",
         "regime_pending": None,
@@ -180,6 +188,7 @@ def initialize(context) -> None:
         "fixed_pool": fixed_pool,
         "global_pool": global_pool,
         "dynamic_pool": [],
+        "dynamic_pool_ready": False,
         "dynamic_groups": dynamic_groups,
         "instrument_names": instrument_names,
         "market_symbols": market_symbols,
@@ -196,7 +205,7 @@ def initialize(context) -> None:
         "decision": {},
         "correlation_decisions": [],
         "daily_reports": [],
-        "nav_filter": "skipped_no_data",
+        "nav_filter": "unit_net_value",
         "excluded_no_minute_symbols": [symbol for symbol in WUFU_ETF_POOL if symbol not in minute_symbols],
         "liquidity_scope": "all_market_etf",
         "warmup_rows": 0,
@@ -208,7 +217,7 @@ def initialize(context) -> None:
     context.schedule(_prepare_and_sell, "13:10")
     context.schedule(_buy_targets, "13:11")
     context.log(
-        "五福 TickFlow 适配已初始化：ETF NAV/溢价过滤无数据，已跳过；"
+        "五福原生策略已初始化：启用 ETF 净值与溢价过滤；"
         f"全市场ETF={len(market_symbols)}只，动态候选={len(dynamic_groups)}只，"
         f"无分钟K的固定池标的={len([symbol for symbol in WUFU_ETF_POOL if symbol not in minute_symbols])}只"
     )
@@ -219,21 +228,47 @@ def _history_rows(context, symbol: str, count: int) -> list[dict[str, Any]]:
     bars = market_history(symbol, count=count, timeframe="1d") if callable(market_history) else []
     if not bars:
         bars = context.history_bars(symbol, count=count, timeframe="1d")
+    if not bars:
+        return []
+
+    def raw_close(bar) -> float:
+        execution_price = getattr(bar, "execution_price", None)
+        return float(
+            execution_price("close")
+            if callable(execution_price)
+            else getattr(bar, "raw_close", None) or bar.close
+        )
+
+    scales = [raw_close(bar) / float(bar.close) if float(bar.close) > 0 else 1.0 for bar in bars]
+    aligned_closes = [0.0] * len(bars)
+    correction = 1.0
+    latest_scale = scales[-1]
+    for index in range(len(bars) - 1, -1, -1):
+        if index < len(bars) - 1:
+            observed_ratio = scales[index] / scales[index + 1] if scales[index + 1] > 0 else 1.0
+            split_ratio = float(getattr(bars[index + 1], "split_ratio", 1.0) or 1.0)
+            if split_ratio <= 1:
+                nearest = round(observed_ratio)
+                if nearest >= 2 and abs(observed_ratio - nearest) / nearest <= 0.02:
+                    split_ratio = float(nearest)
+            if split_ratio > 1:
+                correction *= observed_ratio / split_ratio
+        aligned_closes[index] = float(bars[index].close) * latest_scale * correction
     return [
         {
             "date": bar.date.isoformat(),
-            "close": float(bar.close),
+            "close": aligned_closes[index],
             "volume": float(bar.volume),
             "amount": float(bar.amount),
         }
-        for bar in bars
+        for index, bar in enumerate(bars)
     ]
 
 
 def _refresh_liquidity_pools(context) -> None:
     state = _state(context)
     amount_by_symbol: dict[str, float] = {}
-    market_days = [row["date"] for row in _history_rows(context, REGIME_PROXIES[0], 3)]
+    market_days = [row["date"] for row in _history_rows(context, LIQUIDITY_CALENDAR_SYMBOL, 3)]
     total_by_date = {day: 0.0 for day in market_days}
     for symbol in state["market_symbols"]:
         rows = [row for row in _history_rows(context, symbol, 5) if row["date"] in total_by_date]
@@ -269,7 +304,10 @@ def _refresh_liquidity_pools(context) -> None:
             symbol
             for symbol, _ in sorted(best_by_group.values(), key=lambda item: item[1], reverse=True)[:100]
         ]
-        normal_pool = sorted(set(filtered_fixed) | set(dynamic_pool))
+        normal_pool = sorted(
+            set(filtered_fixed)
+            | (set(dynamic_pool) if state.get("dynamic_pool_ready") else set())
+        )
         weak_pool = [
             symbol for symbol in state["global_pool"]
             if amount_by_symbol.get(symbol, 0.0) > weak_threshold
@@ -285,7 +323,7 @@ def _refresh_liquidity_pools(context) -> None:
     state["liquidity_threshold"] = weak_threshold if regime == "走弱期" else normal_threshold
     state["liquidity_divisor"] = 3_000 if regime == "走弱期" else 20_000
     held = _held_symbols(context)
-    subscription = sorted(set(normal_pool) | set(weak_pool) | set(REGIME_PROXIES) | set(held) | {DEFENSIVE_ETF})
+    subscription = sorted(set(normal_pool) | set(weak_pool) | set(held) | {DEFENSIVE_ETF})
     state["subscription_pool"] = subscription
     context.set_universe(subscription)
     context.log(
@@ -316,7 +354,13 @@ def before_trading_start(context) -> None:
             level=level,
         )
     _refresh_liquidity_pools(context)
-    state["intraday"] = {"date": context.now.date().isoformat(), "close": {}, "volume": {}, "amount": {}}
+    state["intraday"] = {
+        "date": context.now.date().isoformat(),
+        "close": {},
+        "raw_close": {},
+        "volume": {},
+        "amount": {},
+    }
     state["risk_mode"] = None
     state["position_scale"] = 1.0
     state["regime_changed_today"] = False
@@ -328,10 +372,12 @@ def on_bar(context, bars) -> None:
     intraday = state["intraday"]
     day = context.now.date().isoformat()
     if intraday.get("date") != day:
-        intraday = {"date": day, "close": {}, "volume": {}, "amount": {}}
+        intraday = {"date": day, "close": {}, "raw_close": {}, "volume": {}, "amount": {}}
         state["intraday"] = intraday
     for symbol, bar in bars.items():
-        intraday["close"][symbol] = bar.close
+        raw_close = bar.execution_price("close")
+        intraday["close"][symbol] = raw_close
+        intraday["raw_close"][symbol] = raw_close
         intraday["volume"][symbol] = float(intraday["volume"].get(symbol, 0.0)) + bar.volume
         intraday["amount"][symbol] = float(intraday["amount"].get(symbol, 0.0)) + bar.amount
     _minute_stop_loss(context, bars)
@@ -363,6 +409,7 @@ def after_trading_end(context) -> None:
             state["rebuy_cooldown"][symbol] = remaining - 1
     report = _daily_report(context)
     state["daily_reports"].append(report)
+    state["dynamic_pool_ready"] = True
     if len(state["daily_reports"]) > 320:
         del state["daily_reports"][:-320]
     context.log(
@@ -373,18 +420,26 @@ def after_trading_end(context) -> None:
 
 def _morning_regime(context) -> None:
     state = _state(context)
-    above_ma10 = 0
-    below_ma20 = 0
-    available = 0
-    for symbol in REGIME_PROXIES:
-        closes = [row["close"] for row in _history_rows(context, symbol, 20)]
-        if len(closes) < 20:
-            continue
-        available += 1
-        if closes[-1] > sum(closes[-10:]) / 10:
-            above_ma10 += 1
-        if closes[-1] < sum(closes[-20:]) / 20:
-            below_ma20 += 1
+    def breadth(symbols: list[str]) -> tuple[int, int, int]:
+        above_ma10 = 0
+        below_ma20 = 0
+        available = 0
+        for symbol in symbols:
+            closes = [row["close"] for row in _history_rows(context, symbol, 20)]
+            if len(closes) < 20:
+                continue
+            available += 1
+            if closes[-1] > sum(closes[-10:]) / 10:
+                above_ma10 += 1
+            if closes[-1] < sum(closes[-20:]) / 20:
+                below_ma20 += 1
+        return above_ma10, below_ma20, available
+
+    above_ma10, below_ma20, available = breadth(REGIME_PROXIES)
+    regime_source = "index"
+    if available != len(REGIME_PROXIES):
+        above_ma10, below_ma20, available = breadth(REGIME_FALLBACK_PROXIES)
+        regime_source = "etf_fallback"
     raw = "震荡期"
     if available == len(REGIME_PROXIES):
         if below_ma20 >= 4:
@@ -424,7 +479,7 @@ def _morning_regime(context) -> None:
         state["liquidity_divisor"] = 20_000
     context.log(
         f"五福状态：指标={raw}，生效={state['regime']}，"
-        f"MA10上方={above_ma10}/{available}，MA20下方={below_ma20}/{available}"
+        f"MA10上方={above_ma10}/{available}，MA20下方={below_ma20}/{available}，数据源={regime_source}"
     )
 
 
@@ -477,16 +532,26 @@ def _buy_targets(context) -> None:
     targets = state.get("target", [])
     if not targets:
         return
-    allocation = min(1.0, max(0.0, float(state.get("position_scale", 1.0)))) / len(targets)
+    scale = min(1.0, max(0.0, float(state.get("position_scale", 1.0))))
+    available_cash = float(context.portfolio.cash) * scale
     held = set(_held_symbols(context))
     submitted = []
-    for symbol in targets:
-        if symbol in held and state.get("position_scale", 1.0) >= 1.0:
+    targets_to_buy = [symbol for symbol in targets if symbol not in held]
+    for index, symbol in enumerate(targets_to_buy):
+        raw_price = state["intraday"].get("raw_close", {}).get(symbol)
+        if raw_price is None or raw_price <= 0:
             continue
-        context.order_target_percent(symbol, allocation)
+        remaining = len(targets_to_buy) - index
+        target_value = math.floor(available_cash / remaining)
+        estimated_price = float(raw_price) * (1 + 0.0001 + 0.0001)
+        target_quantity = math.floor(target_value / estimated_price / 100) * 100
+        if target_quantity <= 0:
+            continue
+        context.order_target(symbol, target_quantity)
+        available_cash -= target_value
         submitted.append(symbol)
     if submitted:
-        context.log(f"五福 13:11：买入目标={','.join(submitted)}，单标的目标仓位={allocation:.0%}")
+        context.log(f"五福 13:11：买入目标={','.join(submitted)}，仓位系数={scale:.0%}")
     else:
         context.log(f"五福 13:11：当前持仓已是目标 {','.join(targets)}，不重复调仓")
 
@@ -573,11 +638,15 @@ def _rank_candidates(context) -> list[dict[str, Any]]:
         closes = [row["close"] for row in history] + [float(current)]
         volumes = [row["volume"] for row in history]
         metric = _metric_for(
-            symbol, closes, volumes,
+            symbol, closes[-46:], volumes[-45:],
             float(intraday["volume"].get(symbol, 0.0)), context, regime,
+            history[-1]["date"],
         )
         if metric is None:
             continue
+        # Correlation in the source strategy is calculated through the previous
+        # trading day, so the current 13:10 snapshot must not enter this series.
+        metric["history"] = [float(row["close"]) for row in history[-60:]]
         metric["regime"] = regime
         rows.append(metric)
     state["all_metric_rows"] = rows
@@ -596,11 +665,13 @@ def _metric_for(
     today_volume: float,
     context,
     regime: str,
+    nav_date: str,
 ) -> dict[str, Any] | None:
     score, annualized, r2 = _weighted_momentum(closes, 25)
     short_score, _, _ = _weighted_momentum(closes, 21)
     if score is None or short_score is None:
         return None
+    upper_score, _, _ = _weighted_momentum([*closes[:-1], closes[-1] + ETF_PRICE_TICK], 25)
     current = closes[-1]
     ma10 = sum(closes[-10:]) / 10
     volume_ratio = _projected_volume_ratio(volumes, today_volume, context)
@@ -608,9 +679,16 @@ def _metric_for(
     laplace_value, laplace_slope = _laplace(closes, laplace_s)
     gaussian_value, gaussian_slope = _gaussian(closes)
     day_ratios = [closes[-index] / closes[-index - 1] for index in range(1, 4)]
+    nav_rows = context.extra_history(
+        "unit_net_value", symbol, count=1, end_date=nav_date,
+    )
+    nav = nav_rows[-1]["value"] if nav_rows else None
+    premium_rate = (closes[-2] - nav) / nav * 100 if nav is not None and nav > 0 else None
+    premium_limit = 8.0 if regime == "走弱期" else (10.0 if regime == "震荡期" else 30.0)
     return {
         "symbol": symbol,
         "score": score,
+        "upper_score": upper_score,
         "annualized_return": annualized,
         "r2": r2,
         "short_score": short_score,
@@ -623,12 +701,15 @@ def _metric_for(
         "laplace_s": laplace_s,
         "gaussian_value": gaussian_value,
         "gaussian_slope": gaussian_slope,
+        "premium_rate": premium_rate,
+        "premium_limit": premium_limit,
+        "passed_premium": premium_rate is not None and premium_rate <= premium_limit,
         "history": closes[-61:],
     }
 
 
 def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
-    if not (0 < metric["score"] <= 5):
+    if not (0 < metric["score"] <= MOMENTUM_SCORE_MAX):
         return False
     if regime != "走弱期" and metric["r2"] <= (0.39 if regime == "正常期" else 0.4):
         return False
@@ -637,6 +718,8 @@ def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
     if metric["volume_ratio"] is None or metric["volume_ratio"] >= 1.9:
         return False
     if min(metric["day_ratios"]) < 0.97:
+        return False
+    if not metric["passed_premium"]:
         return False
     if regime == "正常期" and not (metric["close"] > metric["laplace_value"] and metric["laplace_slope"] > 0.0022):
         return False
@@ -660,9 +743,12 @@ def _candidate_pool(filtered_rows: list[dict[str, Any]], regime: str) -> list[di
     top = filtered_rows[:10]
     if not top:
         return []
-    ratio = 1.0 if regime == "走弱期" else 0.9
+    ratio = 1.0 if regime == "走弱期" else CANDIDATE_SCORE_RATIO
     threshold = float(top[0]["score"]) * ratio
-    return [row for row in top if float(row["score"]) >= threshold]
+    return [
+        row for row in top
+        if float(row["score"]) + CANDIDATE_SCORE_EPSILON >= threshold
+    ]
 
 
 def _choose_targets(
@@ -682,10 +768,18 @@ def _choose_targets(
         state["decision"]["reason"] = "no_candidate_defensive"
         return [DEFENSIVE_ETF] if _has_price(state, DEFENSIVE_ETF) else []
     held = _held_symbols(context)
-    top = rows[0]["symbol"]
+    current = held[0] if held else None
+    entry_rows = [
+        row for row in rows
+        if row["symbol"] == current
+        or float(row["score"]) > 5
+        or float(row.get("upper_score") or row["score"]) <= 5
+    ]
+    if not entry_rows:
+        entry_rows = rows
+    top = entry_rows[0]["symbol"]
     target = top
     if held:
-        current = held[0]
         eligible = {row["symbol"] for row in rows}
         ranked = filtered_rows or rows
         rank = next((index + 1 for index, row in enumerate(ranked) if row["symbol"] == current), None)
@@ -704,13 +798,13 @@ def _choose_targets(
                 target = current
                 state["decision"]["reason"] = "regime_change_hold"
             else:
-                target = _low_correlation_target(context, current, rows) or current
+                target = _low_correlation_target(context, current, entry_rows) or current
                 state["decision"]["reason"] = "low_correlation_switch" if target != current else "high_correlation_hold"
         if target != current:
             target = _apply_correlation_hold_guard(context, current, target) or current
         state["decision"].update({"held": current, "held_rank": rank})
     if state["rebuy_cooldown"].get(target, 0) > 0:
-        fallback = next((row["symbol"] for row in rows if state["rebuy_cooldown"].get(row["symbol"], 0) <= 0), None)
+        fallback = next((row["symbol"] for row in entry_rows if state["rebuy_cooldown"].get(row["symbol"], 0) <= 0), None)
         target = fallback or (current if held else DEFENSIVE_ETF)
         state["decision"]["reason"] = "rebuy_cooldown_fallback"
     return [target]
@@ -870,7 +964,7 @@ def _daily_report(context) -> dict[str, Any]:
     state = _state(context)
     candidate_keys = (
         "symbol", "score", "r2", "short_score", "volume_ratio", "close",
-        "laplace_s", "laplace_slope", "gaussian_slope",
+        "laplace_s", "laplace_slope", "gaussian_slope", "premium_rate",
     )
     candidates = [{key: row[key] for key in candidate_keys} for row in state["candidate_rows"]]
     filter_rejections: dict[str, int] = {}
@@ -897,13 +991,13 @@ def _daily_report(context) -> dict[str, Any]:
         "equity": float(context.portfolio.total_value),
         "cash": float(context.portfolio.cash),
         "position_scale": float(state.get("position_scale", 1.0)),
-        "nav_filter": "skipped_no_data",
+        "nav_filter": state["nav_filter"],
     }
 
 
 def _filter_failures(metric: dict[str, Any], regime: str) -> list[str]:
     failures = []
-    if not (0 < metric["score"] <= 5):
+    if not (0 < metric["score"] <= MOMENTUM_SCORE_MAX):
         failures.append("momentum")
     if regime != "走弱期" and metric["r2"] <= (0.39 if regime == "正常期" else 0.4):
         failures.append("r2")
@@ -913,6 +1007,8 @@ def _filter_failures(metric: dict[str, Any], regime: str) -> list[str]:
         failures.append("volume")
     if min(metric["day_ratios"]) < 0.97:
         failures.append("loss")
+    if not metric["passed_premium"]:
+        failures.append("premium")
     if regime == "正常期" and not (metric["close"] > metric["laplace_value"] and metric["laplace_slope"] > 0.0022):
         failures.append("laplace")
     if regime == "走弱期" and not (metric["close"] > metric["laplace_value"] and metric["laplace_slope"] > 0.001):

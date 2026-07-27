@@ -22,7 +22,11 @@ from pydantic import BaseModel, Field, field_validator
 from app.config import settings
 from app.free_strategy.process import start_process
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
-from app.free_strategy.templates import LEGACY_FIVE_FORTUNES_SOURCE, TEMPLATES
+from app.free_strategy.templates import (
+    LEGACY_FIVE_FORTUNES_SHA256,
+    LEGACY_FIVE_FORTUNES_SOURCE,
+    TEMPLATES,
+)
 from app.services import preferences
 
 router = APIRouter(prefix="/api/free-strategies", tags=["free-strategy"])
@@ -79,7 +83,11 @@ def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
     replacement = TEMPLATES["five_fortunes"]["source"]
     for summary in store.list():
         strategy = store.get(str(summary["id"]))
-        if strategy["source"] != LEGACY_FIVE_FORTUNES_SOURCE:
+        source = str(strategy["source"])
+        if (
+            source != LEGACY_FIVE_FORTUNES_SOURCE
+            and sha256(source.encode("utf-8")).hexdigest() != LEGACY_FIVE_FORTUNES_SHA256
+        ):
             continue
         store.save(
             strategy["id"],
@@ -120,8 +128,10 @@ class BacktestWrite(BaseModel):
     initial_capital: float = Field(default=1_000_000, gt=0)
     fees_pct: float = Field(default=0.0002, ge=0)
     commission_pct: float | None = Field(default=None, ge=0)
+    min_commission: float = Field(default=0, ge=0)
     stamp_tax_pct: float = Field(default=0.001, ge=0)
     slippage_bps: float = Field(default=5, ge=0)
+    price_tick: float | None = Field(default=None, gt=0)
     lot_size: int = Field(default=100, ge=1)
     max_exposure_pct: float = Field(default=1.0, gt=0, le=1)
     settlement: Literal["t1", "t0"] = "t1"
