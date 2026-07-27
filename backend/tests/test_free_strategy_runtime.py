@@ -331,6 +331,170 @@ def after_trading_end(context):
     assert result["state"]["scheduled_close"] == 2
 
 
+def test_schedule_only_strategy_detects_mode_and_runs_each_callback_once_per_day():
+    source = """
+def initialize(context):
+    context.state['events'] = []
+    context.schedule(lambda ctx: ctx.state['events'].append(ctx.now.isoformat()), '13:10')
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+
+    assert engine.execution_mode == "scheduled"
+    assert engine.scheduled_times == ["13:10"]
+
+    for day in (2, 3):
+        timestamp = datetime(2024, 1, day, 13, 10)
+        bar = Bar("X", timestamp, 10, 10, 10, 10)
+        engine.run_scheduled_event(timestamp, [bar])
+        engine.run_scheduled_event(timestamp, [bar])
+        engine.finish_session()
+
+    assert engine.context.state["events"] == [
+        "2024-01-02T13:10:00",
+        "2024-01-03T13:10:00",
+    ]
+    assert engine.callbacks_executed == 2
+    assert engine.market_rows_consumed == 4
+
+
+def test_execution_mode_validation_and_strict_schedule_time():
+    with pytest.raises(ValueError, match="on_bar.*context.schedule"):
+        FreeStrategyEngine("def initialize(context):\n    pass\n")
+
+    with pytest.raises(ValueError, match="HH:MM"):
+        FreeStrategyEngine("""
+def initialize(context):
+    context.schedule(lambda ctx: None, '9:30')
+""")
+
+    with pytest.raises(ValueError, match="HH:MM"):
+        FreeStrategyEngine("""
+from datetime import time
+
+def initialize(context):
+    context.schedule(lambda ctx: None, time(9, 30, 1))
+""")
+
+    deduplicated = FreeStrategyEngine("""
+def task(context):
+    pass
+
+def initialize(context):
+    context.schedule(task, '09:30')
+    context.schedule(task, '09:30')
+""")
+    assert deduplicated.scheduled_times == ["09:30"]
+    assert len(deduplicated.context._scheduled) == 1
+
+    mixed = FreeStrategyEngine("""
+def initialize(context):
+    context.schedule(lambda ctx: None, '13:10')
+
+def on_bar(context, bars):
+    pass
+""")
+    assert mixed.execution_mode == "full_bar"
+    assert mixed.scheduled_times == ["13:10"]
+
+
+def test_scheduled_history_is_loaded_at_logical_time_without_future_bars():
+    source = """
+def initialize(context):
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.state['history'] = [bar.close for bar in context.history_bars('X', 10)]
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    calls = []
+
+    def load_history(symbol, count, timeframe, cutoff):
+        calls.append((symbol, count, timeframe, cutoff))
+        return [
+            Bar("X", datetime(2024, 1, 2, 13, 9), 9, 9, 9, 9),
+            Bar("X", datetime(2024, 1, 2, 13, 11), 11, 11, 11, 11),
+        ]
+
+    engine.set_history_loader(load_history)
+    engine.run_scheduled_event(
+        datetime(2024, 1, 2, 13, 10),
+        [Bar("X", datetime(2024, 1, 2, 13, 10), 10, 10, 10, 10)],
+    )
+
+    assert engine.context.state["history"] == [9]
+    assert calls == [("X", 10, "1m", datetime(2024, 1, 2, 13, 10))]
+
+
+def test_scheduled_close_and_next_open_use_event_market_without_on_bar():
+    source = """
+def initialize(context):
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.buy('X', quantity=100)
+"""
+    timestamp = datetime(2024, 1, 2, 13, 10)
+    snapshot = Bar("X", timestamp, 10, 10, 10, 10)
+
+    close_engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
+    )
+    close_engine.run_scheduled_event(timestamp, [snapshot])
+    assert close_engine.account.fills[0].timestamp == timestamp.isoformat()
+    assert close_engine.account.fills[0].price == 10
+
+    next_engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(fill_policy="next_open", slippage_bps=0),
+    )
+    next_engine.run_scheduled_event(timestamp, [snapshot])
+    assert next_engine.account.fills == []
+    next_engine.process_fill_event(
+        datetime(2024, 1, 2, 13, 11),
+        [Bar("X", datetime(2024, 1, 2, 13, 11), 11, 11, 11, 11)],
+    )
+    assert next_engine.account.fills[0].timestamp == "2024-01-02T13:11:00"
+    assert next_engine.account.fills[0].price == 11
+
+    for blocked in (
+        Bar("X", timestamp, 11, 11, 11, 11, limit_up=11),
+        Bar("X", timestamp, 10, 10, 10, 10, tradable=False, suspended=True),
+    ):
+        blocked_engine = FreeStrategyEngine(
+            source,
+            timeframe="1m",
+            config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
+        )
+        blocked_engine.run_scheduled_event(timestamp, [blocked])
+        assert blocked_engine.account.fills == []
+        assert blocked_engine.account.orders[0].status == "rejected"
+
+
+def test_scheduled_checkpoint_restores_completed_callbacks():
+    source = """
+def initialize(context):
+    context.state.setdefault('runs', 0)
+    context.schedule(run, '13:10')
+
+def run(context):
+    context.state['runs'] += 1
+"""
+    timestamp = datetime(2024, 1, 2, 13, 10)
+    bar = Bar("X", timestamp, 10, 10, 10, 10)
+    initial = FreeStrategyEngine(source, timeframe="1m")
+    initial.run_scheduled_event(timestamp, [bar])
+
+    resumed = FreeStrategyEngine(source, timeframe="1m")
+    resumed.restore_checkpoint(initial.checkpoint())
+    resumed.run_scheduled_event(timestamp, [bar])
+
+    assert resumed.context.state["runs"] == 1
+    assert resumed.callbacks_executed == 1
+
+
 def test_paper_session_end_runs_once_with_standard_lifecycle():
     source = """
 def initialize(context):

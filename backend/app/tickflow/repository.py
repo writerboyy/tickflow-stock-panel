@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -1393,6 +1393,75 @@ class KlineRepository:
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("分钟K范围查询失败: %s", e)
+            return pl.DataFrame()
+
+    def get_minute_snapshot(
+        self,
+        symbols: list[str],
+        at: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """读取每个标的在指定时点之前最近的一根分钟K。"""
+        if not symbols:
+            return pl.DataFrame()
+        try:
+            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            available = set(lf.collect_schema().names())
+            columns = [
+                name for name in
+                ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+                if name in available
+            ]
+            return (
+                lf.select(columns)
+                .filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("datetime").dt.date() == at.date())
+                    & (pl.col("datetime") <= at)
+                )
+                .sort(["symbol", "datetime"])
+                .group_by("symbol", maintain_order=True)
+                .tail(1)
+                .sort(["datetime", "symbol"])
+                .collect(streaming=True)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("分钟K时点快照查询失败: %s", exc)
+            return pl.DataFrame()
+
+    def get_minute_next(
+        self,
+        symbols: list[str],
+        after: datetime,
+        until: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """读取每个标的在 ``after`` 之后、``until`` 之前的第一根分钟K。"""
+        if not symbols or until <= after:
+            return pl.DataFrame()
+        try:
+            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            available = set(lf.collect_schema().names())
+            columns = [
+                name for name in
+                ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+                if name in available
+            ]
+            return (
+                lf.select(columns)
+                .filter(
+                    pl.col("symbol").is_in(symbols)
+                    & (pl.col("datetime") > after)
+                    & (pl.col("datetime") <= until)
+                )
+                .sort(["symbol", "datetime"])
+                .group_by("symbol", maintain_order=True)
+                .head(1)
+                .sort(["datetime", "symbol"])
+                .collect(streaming=True)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("下一根分钟K查询失败: %s", exc)
             return pl.DataFrame()
 
     def get_minute_by_dates(
