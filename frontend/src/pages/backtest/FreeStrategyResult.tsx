@@ -31,6 +31,19 @@ const DECISION_LABELS: Record<string, string> = {
   drawdown_defensive: '回撤转防御',
 }
 
+const SIDE_LABELS: Record<string, string> = {
+  buy: '买入',
+  sell: '卖出',
+  target: '目标仓位',
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  filled: '已成交',
+  rejected: '已拒绝',
+  skipped: '已跳过',
+  pending: '待成交',
+}
+
 function number(value: unknown, digits = 2) {
   return typeof value === 'number' && Number.isFinite(value)
     ? value.toLocaleString('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits })
@@ -39,6 +52,28 @@ function number(value: unknown, digits = 2) {
 
 function percent(value: unknown, digits = 2) {
   return typeof value === 'number' && Number.isFinite(value) ? `${number(value, digits)}%` : '—'
+}
+
+function dateTime(value: unknown) {
+  return typeof value === 'string' && value ? value.replace('T', ' ') : '—'
+}
+
+function side(value: unknown) {
+  const key = String(value ?? '')
+  return (SIDE_LABELS[key] ?? key) || '—'
+}
+
+function status(value: unknown) {
+  const key = String(value ?? '')
+  return (STATUS_LABELS[key] ?? key) || '—'
+}
+
+function statusTone(value: unknown) {
+  return value === 'filled' ? 'text-success' : value === 'rejected' ? 'text-danger' : 'text-warning'
+}
+
+function sideTone(value: unknown) {
+  return value === 'buy' ? 'text-success' : value === 'sell' ? 'text-danger' : 'text-foreground'
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone?: 'positive' | 'negative' }) {
@@ -87,8 +122,49 @@ function PerformanceView({ result }: { result: FreeBacktestResult }) {
 function OrdersView({ result }: { result: FreeBacktestResult }) {
   const transactions = result.transactions ?? result.orders
   return <div className="space-y-5">
-    <div><div className="mb-2 text-xs font-medium">订单事务 <span className="font-normal text-muted">{transactions.length}</span></div><TableWrap><table className="w-full min-w-[980px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">提交时间</th><th>标的</th><th>委托</th><th>成交方向</th><th>成交数量</th><th>均价</th><th>费用</th><th>状态</th><th>原因</th></tr></thead><tbody>{transactions.map((row, index) => <tr key={String(row.transaction_id ?? row.id ?? index)} className="border-t border-border"><td className="whitespace-nowrap py-2">{String(row.submitted_at ?? '')}</td><td className="font-mono">{String(row.symbol ?? '')}</td><td>{String(row.requested_side ?? row.side ?? '')}</td><td>{String(row.executed_side ?? '—')}</td><td className="tabular-nums">{number(row.filled_quantity, 0)}</td><td className="tabular-nums">{number(row.average_fill_price, 4)}</td><td className="tabular-nums">{number(row.fee, 2)}</td><td><span className={row.status === 'filled' ? 'text-success' : row.status === 'rejected' ? 'text-danger' : 'text-warning'}>{String(row.status ?? '')}</span></td><td className="max-w-64 truncate" title={String(row.reason ?? '')}>{String(row.reason || '—')}</td></tr>)}</tbody></table></TableWrap></div>
-    <div><div className="mb-2 text-xs font-medium">成交与归因 <span className="font-normal text-muted">{result.fills.length}</span></div><TableWrap><table className="w-full min-w-[860px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">成交时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>成交额</th><th>费用</th><th>已实现盈亏</th><th>收益率</th></tr></thead><tbody>{result.fills.map((fill, index) => { const attribution = result.attribution?.[index]; const pnl = Number(attribution?.realized_pnl ?? 0); return <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="whitespace-nowrap py-2">{fill.timestamp}</td><td className="font-mono">{fill.symbol}</td><td className={fill.side === 'buy' ? 'text-success' : 'text-danger'}>{fill.side}</td><td>{number(fill.quantity, 0)}</td><td>{number(fill.price, 4)}</td><td>{number(fill.value, 2)}</td><td>{number(fill.fee, 2)}</td><td className={pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : ''}>{number(pnl, 2)}</td><td>{percent(attribution?.realized_return_pct)}</td></tr> })}</tbody></table></TableWrap></div>
+    <div>
+      <div className="mb-2 text-xs font-medium">订单事务 <span className="font-normal text-muted">{transactions.length}</span></div>
+      <div className="divide-y divide-border border-y border-border md:hidden">
+        {transactions.map((row, index) => <article key={String(row.transaction_id ?? row.id ?? index)} className="py-3 [contain-intrinsic-size:0_132px] [content-visibility:auto]">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 text-[10px] tabular-nums text-muted"><span>提交</span><div className="mt-0.5 text-foreground">{dateTime(row.submitted_at)}</div></div>
+            <span className={`shrink-0 text-[11px] font-medium ${statusTone(row.status)}`}>{status(row.status)}</span>
+          </div>
+          <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-[11px]">
+            <span className="truncate font-mono text-xs font-medium">{String(row.symbol ?? '—')}</span>
+            <span className="shrink-0 text-muted">{side(row.requested_side ?? row.side)} <span className="px-1">→</span> <span className={sideTone(row.executed_side)}>{side(row.executed_side)}</span></span>
+          </div>
+          <dl className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
+            <div><dt className="text-muted">成交数量</dt><dd className="mt-0.5 tabular-nums">{number(row.filled_quantity, 0)}</dd></div>
+            <div><dt className="text-muted">成交均价</dt><dd className="mt-0.5 tabular-nums">{number(row.average_fill_price, 4)}</dd></div>
+            <div><dt className="text-muted">费用</dt><dd className="mt-0.5 tabular-nums">{number(row.fee, 2)}</dd></div>
+          </dl>
+          {row.reason ? <div className="mt-2 break-words text-[10px] text-danger">{String(row.reason)}</div> : null}
+        </article>)}
+      </div>
+      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[980px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">提交时间</th><th>标的</th><th>委托</th><th>成交方向</th><th>成交数量</th><th>均价</th><th>费用</th><th>状态</th><th>原因</th></tr></thead><tbody>{transactions.map((row, index) => <tr key={String(row.transaction_id ?? row.id ?? index)} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(row.submitted_at)}</td><td className="font-mono">{String(row.symbol ?? '')}</td><td>{side(row.requested_side ?? row.side)}</td><td className={sideTone(row.executed_side)}>{side(row.executed_side)}</td><td className="tabular-nums">{number(row.filled_quantity, 0)}</td><td className="tabular-nums">{number(row.average_fill_price, 4)}</td><td className="tabular-nums">{number(row.fee, 2)}</td><td><span className={statusTone(row.status)}>{status(row.status)}</span></td><td className="max-w-64 truncate" title={String(row.reason ?? '')}>{String(row.reason || '—')}</td></tr>)}</tbody></table></TableWrap></div>
+    </div>
+    <div>
+      <div className="mb-2 text-xs font-medium">成交与归因 <span className="font-normal text-muted">{result.fills.length}</span></div>
+      <div className="divide-y divide-border border-y border-border md:hidden">
+        {result.fills.map((fill, index) => { const attribution = result.attribution?.[index]; const pnl = Number(attribution?.realized_pnl ?? 0); return <article key={`${fill.order_id}-${index}`} className="py-3 [contain-intrinsic-size:0_124px] [content-visibility:auto]">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 text-[10px] tabular-nums text-muted"><span>成交</span><div className="mt-0.5 text-foreground">{dateTime(fill.timestamp)}</div></div>
+            <span className={`shrink-0 text-[11px] font-medium ${sideTone(fill.side)}`}>{side(fill.side)}</span>
+          </div>
+          <div className="mt-2 font-mono text-xs font-medium">{String(fill.symbol ?? '—')}</div>
+          <dl className="mt-2 grid grid-cols-3 gap-x-2 gap-y-2 text-[10px]">
+            <div><dt className="text-muted">数量</dt><dd className="mt-0.5 tabular-nums">{number(fill.quantity, 0)}</dd></div>
+            <div><dt className="text-muted">价格</dt><dd className="mt-0.5 tabular-nums">{number(fill.price, 4)}</dd></div>
+            <div><dt className="text-muted">成交额</dt><dd className="mt-0.5 tabular-nums">{number(fill.value, 2)}</dd></div>
+            <div><dt className="text-muted">费用</dt><dd className="mt-0.5 tabular-nums">{number(fill.fee, 2)}</dd></div>
+            <div><dt className="text-muted">已实现盈亏</dt><dd className={`mt-0.5 tabular-nums ${pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : ''}`}>{number(pnl, 2)}</dd></div>
+            <div><dt className="text-muted">收益率</dt><dd className="mt-0.5 tabular-nums">{percent(attribution?.realized_return_pct)}</dd></div>
+          </dl>
+        </article> })}
+      </div>
+      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[860px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">成交时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>成交额</th><th>费用</th><th>已实现盈亏</th><th>收益率</th></tr></thead><tbody>{result.fills.map((fill, index) => { const attribution = result.attribution?.[index]; const pnl = Number(attribution?.realized_pnl ?? 0); return <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(fill.timestamp)}</td><td className="font-mono">{fill.symbol}</td><td className={sideTone(fill.side)}>{side(fill.side)}</td><td>{number(fill.quantity, 0)}</td><td>{number(fill.price, 4)}</td><td>{number(fill.value, 2)}</td><td>{number(fill.fee, 2)}</td><td className={pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : ''}>{number(pnl, 2)}</td><td>{percent(attribution?.realized_return_pct)}</td></tr> })}</tbody></table></TableWrap></div>
+    </div>
   </div>
 }
 
