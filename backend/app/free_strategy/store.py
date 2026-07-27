@@ -1,9 +1,11 @@
 """自由策略和模拟账户的 JSON 文件存储。"""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,19 @@ from typing import Any
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class FreeStrategyStore:
@@ -67,6 +82,9 @@ class FreeStrategyStore:
 
 
 class PaperAccountStore:
+    _locks: dict[str, threading.Lock] = {}
+    _locks_guard = threading.Lock()
+
     def __init__(self, data_dir: Path):
         self.root = Path(data_dir) / "paper_accounts"
         self.root.mkdir(parents=True, exist_ok=True)
@@ -90,22 +108,75 @@ class PaperAccountStore:
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
         path = self._path(str(state["id"]))
         path.mkdir(parents=True, exist_ok=True)
-        state = {**state, "updated_at": now_iso()}
-        (path / "state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        state = {"schema_version": 2, **state, "updated_at": now_iso()}
+        _atomic_json_write(path / "state.json", state)
         return state
+
+    @classmethod
+    def _account_lock(cls, account_id: str) -> threading.Lock:
+        with cls._locks_guard:
+            return cls._locks.setdefault(account_id, threading.Lock())
 
     def append_event(self, account_id: str, event: dict[str, Any]) -> None:
         path = self._path(account_id)
         path.mkdir(parents=True, exist_ok=True)
-        with (path / "ledger.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"timestamp": now_iso(), **event}, ensure_ascii=False) + "\n")
+        ledger = path / "ledger.jsonl"
+        with self._account_lock(account_id):
+            with ledger.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    handle.seek(0)
+                    lines = handle.read().splitlines()
+                    last = next((line for line in reversed(lines) if line.strip()), "")
+                    try:
+                        sequence = int(json.loads(last).get("sequence", 0)) + 1 if last else 1
+                    except (ValueError, json.JSONDecodeError):
+                        sequence = len(lines) + 1
+                    payload = {
+                        "id": str(event.get("id") or uuid.uuid4().hex),
+                        "timestamp": now_iso(),
+                        **event,
+                        "sequence": sequence,
+                    }
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def events(self, account_id: str, limit: int = 500) -> list[dict[str, Any]]:
         path = self._path(account_id) / "ledger.jsonl"
         if not path.exists():
             return []
         lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
-        return [json.loads(line) for line in lines if line.strip()]
+        result = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                result.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return result
+
+    def events_page(
+        self,
+        account_id: str,
+        *,
+        cursor: int | None = None,
+        limit: int = 100,
+        event_types: set[str] | None = None,
+    ) -> dict[str, Any]:
+        rows = self.events(account_id, limit=100_000)
+        if event_types:
+            rows = [row for row in rows if row.get("type") in event_types]
+        if cursor is not None:
+            rows = [row for row in rows if int(row.get("sequence", 0)) < cursor]
+        page = rows[-max(1, min(limit, 500)):]
+        page.reverse()
+        next_cursor = int(page[-1].get("sequence", 0)) if len(page) == max(1, min(limit, 500)) else None
+        return {"events": page, "next_cursor": next_cursor}
 
     def delete(self, account_id: str) -> None:
         shutil.rmtree(self._path(account_id))

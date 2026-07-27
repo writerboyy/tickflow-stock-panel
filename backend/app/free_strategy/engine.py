@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time as datetime_time, timedelta
 from itertools import groupby
@@ -35,6 +36,31 @@ class FreeStrategyConfig:
     asset_type: str = "stock"
     benchmark_symbol: str = "510300.SH"
     callback_timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class Quote:
+    symbol: str
+    timestamp: datetime
+    last_price: float
+    prev_close: float | None = None
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    volume: float = 0.0
+    amount: float = 0.0
+    name: str | None = None
+    limit_up: float | None = None
+    limit_down: float | None = None
+    suspended: bool = False
+
+
+@dataclass(slots=True)
+class RiskConfig:
+    max_symbol_exposure_pct: float = 1.0
+    daily_loss_pct: float = 0.10
+    max_drawdown_pct: float = 0.30
+    max_orders_per_minute: int = 60
 
 
 @dataclass(slots=True)
@@ -105,6 +131,15 @@ class BarsView(dict):
             return self[name]
         except KeyError as exc:
             raise AttributeError(name) from exc
+
+
+class QuotesView(dict):
+    """只读的 ``symbol -> Quote`` 策略视图。"""
+
+    def _readonly(self, *_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("quotes 是只读映射")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _readonly
 
 
 class Context:
@@ -327,10 +362,12 @@ class Context:
 class FreeStrategyEngine:
     def __init__(self, source: str, timeframe: str = "1d", config: FreeStrategyConfig | None = None,
                  state: dict[str, Any] | None = None,
-                 instruments: Iterable[dict[str, Any]] | None = None) -> None:
+                 instruments: Iterable[dict[str, Any]] | None = None,
+                 risk_config: RiskConfig | None = None) -> None:
         self.source = source
         self.timeframe = timeframe
         self.config = config or FreeStrategyConfig()
+        self.risk_config = risk_config or RiskConfig()
         self.account = Account(self.config)
         self.state = state or {}
         self.logs: list[dict[str, Any]] = []
@@ -359,6 +396,16 @@ class FreeStrategyEngine:
         self._session_equity_snapshot: dict[str, Any] | None = None
         self._session_benchmark_close: float | None = None
         self._next_timestamp = datetime.now()
+        self._order_times: deque[datetime] = deque()
+        self._risk_peak_equity = float(self.config.initial_capital)
+        self._risk_day: date | None = None
+        self._risk_day_start_equity = float(self.config.initial_capital)
+        self._risk_status: dict[str, Any] = {
+            "daily_loss_locked": False,
+            "drawdown_locked": False,
+            "reason": None,
+            "triggered_at": None,
+        }
         self.callbacks_executed = 0
         self.market_rows_consumed = 0
         self.run_start: date | None = None
@@ -370,7 +417,7 @@ class FreeStrategyEngine:
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
         exec(compile(source, "<free_strategy>", "exec"), namespace, namespace)
-        callback_names = ("initialize", "before_trading_start", "on_bar", "after_trading_end")
+        callback_names = ("initialize", "before_trading_start", "on_bar", "on_quote", "after_trading_end")
         self._callbacks = {
             name: namespace[name]
             for name in callback_names
@@ -378,9 +425,9 @@ class FreeStrategyEngine:
         }
         if "initialize" in self._callbacks:
             self._callbacks["initialize"](self.context)
-        if "on_bar" not in self._callbacks and not self.context._scheduled:
-            raise ValueError("策略必须定义 on_bar(context, bars) 或通过 context.schedule 注册定时任务")
-        self.execution_mode = "full_bar" if "on_bar" in self._callbacks else "scheduled"
+        if "on_bar" not in self._callbacks and "on_quote" not in self._callbacks and not self.context._scheduled:
+            raise ValueError("策略必须定义 on_bar(context, bars)、on_quote(context, quotes) 或通过 context.schedule 注册定时任务")
+        self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
 
     @property
     def universe(self) -> list[str]:
@@ -447,6 +494,15 @@ class FreeStrategyEngine:
             count += 1
         return count
 
+    def preload_quote_snapshot(self, quotes: Iterable[Quote]) -> int:
+        """更新重连快照估值，不触发策略回调或成交。"""
+        values = list(quotes)
+        prices = {quote.symbol: float(quote.last_price) for quote in values}
+        self._current_prices.update(prices)
+        self._current_close_prices.update(prices)
+        self.context._sync(self._current_close_prices)
+        return len(values)
+
     def preload_market_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         history = self._market_history_by_period.setdefault(timeframe, {})
         count = 0
@@ -467,10 +523,83 @@ class FreeStrategyEngine:
         self._counter += 1
         order = Order(id=f"o{self._counter}", symbol=symbol, side=side, submitted_at=self.context.now.isoformat() if self.context.now else "", **kwargs)
         self.account.orders.append(order)
+        if self._reject_for_risk(order):
+            return
         if self.config.fill_policy in {"close", "current_close"}:
             self._immediate.append(order)
         else:
             self.pending.append((order, self._next_timestamp))
+
+    def _order_increases_risk(self, order: Order) -> bool:
+        if order.side == "buy":
+            return True
+        if order.side == "sell":
+            return False
+        current = self.account.positions.get(order.symbol, 0.0)
+        price = max(self._current_close_prices.get(order.symbol, 0.0), 0.01)
+        target = order.target_quantity
+        if target is None and order.target_value is not None:
+            target = order.target_value / price
+        if target is None and order.target_percent is not None:
+            target = self.account.equity(self._current_close_prices) * order.target_percent / price
+        return (target or 0.0) > current
+
+    def _reject_for_risk(self, order: Order) -> bool:
+        now = self.context.now or datetime.now()
+        cutoff = now.timestamp() - 60
+        while self._order_times and self._order_times[0].timestamp() <= cutoff:
+            self._order_times.popleft()
+        increases_risk = self._order_increases_risk(order)
+        if increases_risk and len(self._order_times) >= self.risk_config.max_orders_per_minute:
+            order.status = "rejected"
+            order.reason = "统一风控：每分钟委托数已达上限"
+            return True
+        self._order_times.append(now)
+        if increases_risk and (
+            self._risk_status["daily_loss_locked"] or self._risk_status["drawdown_locked"]
+        ):
+            order.status = "rejected"
+            order.reason = f"统一风控：{self._risk_status['reason'] or '账户已锁定'}"
+            return True
+        return False
+
+    @property
+    def risk_status(self) -> dict[str, Any]:
+        return dict(self._risk_status)
+
+    def unlock_drawdown_risk(self) -> None:
+        self._risk_status["drawdown_locked"] = False
+        if not self._risk_status["daily_loss_locked"]:
+            self._risk_status["reason"] = None
+            self._risk_status["triggered_at"] = None
+
+    def _update_risk(self, timestamp: datetime) -> None:
+        equity = self.account.equity(self._current_close_prices)
+        if self._risk_day != timestamp.date():
+            self._risk_day = timestamp.date()
+            self._risk_day_start_equity = equity
+            self._risk_status["daily_loss_locked"] = False
+            if not self._risk_status["drawdown_locked"]:
+                self._risk_status["reason"] = None
+                self._risk_status["triggered_at"] = None
+        self._risk_peak_equity = max(self._risk_peak_equity, equity)
+        daily_loss = (self._risk_day_start_equity - equity) / self._risk_day_start_equity if self._risk_day_start_equity else 0.0
+        drawdown = (self._risk_peak_equity - equity) / self._risk_peak_equity if self._risk_peak_equity else 0.0
+        reason = None
+        if daily_loss >= self.risk_config.daily_loss_pct:
+            self._risk_status["daily_loss_locked"] = True
+            reason = "日亏损达到限制"
+        if drawdown >= self.risk_config.max_drawdown_pct:
+            self._risk_status["drawdown_locked"] = True
+            reason = "最大回撤达到限制"
+        if reason:
+            self._risk_status["reason"] = reason
+            self._risk_status["triggered_at"] = timestamp.isoformat()
+            for order, _ in self.pending:
+                if self._order_increases_risk(order):
+                    order.status = "cancelled"
+                    order.reason = f"统一风控：{reason}"
+            self.pending = [item for item in self.pending if item[0].status == "pending"]
 
     def _sell_first(self, item: tuple[Order, datetime] | Order) -> int:
         order = item[0] if isinstance(item, tuple) else item
@@ -544,8 +673,13 @@ class FreeStrategyEngine:
             qty = min(qty, available)
         else:
             max_gross = self.account.equity(self._current_close_prices) * self.config.max_exposure_pct
+            symbol_gross = max(
+                0.0,
+                self.account.equity(self._current_close_prices) * self.risk_config.max_symbol_exposure_pct
+                - current * raw_price,
+            )
             cash_gross = max(0.0, self.account.cash - self.config.min_commission) / (1 + commission_rate)
-            qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross)) / price / lot) * lot)
+            qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
         if qty <= 0:
             if order.side == "target":
                 order.status = "skipped"
@@ -662,6 +796,13 @@ class FreeStrategyEngine:
                 for order, due_at in self.pending
             ],
             "order_counter": self._counter,
+            "risk": {
+                "status": self.risk_status,
+                "peak_equity": self._risk_peak_equity,
+                "day": self._risk_day.isoformat() if self._risk_day else None,
+                "day_start_equity": self._risk_day_start_equity,
+                "order_times": [value.isoformat() for value in self._order_times],
+            },
         }
 
     def restore_checkpoint(self, raw: dict[str, Any]) -> None:
@@ -685,6 +826,12 @@ class FreeStrategyEngine:
             if item.get("order_id") in orders_by_id
         ]
         self._counter = int(raw.get("order_counter", len(self.account.orders)))
+        risk = raw.get("risk", {})
+        self._risk_status.update(risk.get("status", {}))
+        self._risk_peak_equity = float(risk.get("peak_equity", self._risk_peak_equity))
+        self._risk_day = date.fromisoformat(risk["day"]) if risk.get("day") else None
+        self._risk_day_start_equity = float(risk.get("day_start_equity", self._risk_day_start_equity))
+        self._order_times = deque(datetime.fromisoformat(value) for value in risk.get("order_times", []))
 
     def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:
         self._active_session_date = timestamp.date()
@@ -823,6 +970,65 @@ class FreeStrategyEngine:
             "cash": self.account.cash,
             "positions": dict(self.account.positions),
         }
+        self._update_risk(timestamp)
+
+    @staticmethod
+    def _quote_bar(quote: Quote) -> Bar:
+        price = float(quote.last_price)
+        return Bar(
+            symbol=quote.symbol,
+            timestamp=quote.timestamp,
+            open=float(quote.open if quote.open is not None else price),
+            high=float(quote.high if quote.high is not None else price),
+            low=float(quote.low if quote.low is not None else price),
+            close=price,
+            volume=float(quote.volume),
+            amount=float(quote.amount),
+            raw_open=price,
+            raw_high=price,
+            raw_low=price,
+            raw_close=price,
+            tradable=not quote.suspended and price > 0,
+            suspended=quote.suspended,
+            limit_up=quote.limit_up,
+            limit_down=quote.limit_down,
+        )
+
+    def process_quotes(self, quotes: Iterable[Quote]) -> None:
+        """处理一批实时报价；挂单先用本次报价成交，再执行策略回调。"""
+        values = list(quotes)
+        if not values:
+            return
+        timestamp = max(quote.timestamp for quote in values)
+        quote_view = QuotesView({quote.symbol: quote for quote in values})
+        bars_now = BarsView({quote.symbol: self._quote_bar(quote) for quote in values})
+        if self._active_session_date != timestamp.date():
+            self.finish_session()
+            premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
+            self._start_session(premarket, BarsView())
+        self._next_timestamp = timestamp
+        self._update_market(timestamp, bars_now)
+        due = [item for item in self.pending if item[0].symbol in bars_now]
+        self.pending = [item for item in self.pending if item[0].symbol not in bars_now]
+        for order, _ in sorted(due, key=self._sell_first):
+            self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
+        callback = self._callbacks.get("on_quote")
+        if callback is not None:
+            started = time.monotonic()
+            callback(self.context, quote_view)
+            if time.monotonic() - started > self.config.callback_timeout_seconds:
+                raise TimeoutError(f"on_quote 回调超过 {self.config.callback_timeout_seconds:g} 秒")
+            self.callbacks_executed += 1
+        current_time = timestamp.strftime("%H:%M")
+        for slot_index, (at, scheduled, done) in enumerate(self.context._scheduled):
+            if not done and current_time >= at:
+                self._run_scheduled_callback(scheduled, at)
+                self.context._scheduled[slot_index] = (at, scheduled, True)
+        for order in sorted(self._immediate, key=self._sell_first):
+            self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
+        self._immediate.clear()
+        self.context._sync(self._current_close_prices)
+        self.state = copy.deepcopy(self.context.state)
 
     def update_scheduled_market(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
         values = list(bars)
