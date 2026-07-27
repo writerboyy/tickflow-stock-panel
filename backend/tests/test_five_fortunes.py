@@ -85,6 +85,12 @@ def test_initialize_registers_available_etf_universe():
     assert context.market_history_requirements == {("etf", "1d"): 61}
 
 
+def test_historical_etf_names_preserve_original_dynamic_groups():
+    assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["520500.SH"]) == "香港组:药"
+    assert five._dynamic_group("恒生创新药ETF华泰柏瑞") == "香港组:创药"
+    assert five._dynamic_group("港股红利ETF") == "香港组:红利"
+
+
 def test_laplace_smoothing_is_regime_specific():
     context = initialized_context()
     context.now = datetime(2026, 7, 20, 13, 10)

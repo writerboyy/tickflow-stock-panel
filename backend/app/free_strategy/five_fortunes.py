@@ -35,6 +35,23 @@ WUFU_ETF_POOL = [
 DEFENSIVE_ETF = "511880.SH"
 NO_TICKFLOW_MINUTE = ("161226.SZ", "164824.SZ", "501018.SH")
 WUFU_MINUTE_POOL = [symbol for symbol in WUFU_ETF_POOL if symbol not in NO_TICKFLOW_MINUTE]
+WUFU_GROUP_NAME_OVERRIDES = {
+    "161226.SZ": "国投白银LOF",
+    "513000.SH": "225ETF",
+    "513350.SH": "油气ETF",
+    "515030.SH": "新汽车",
+    "516190.SH": "文娱ETF",
+    "520500.SH": "恒生新药",
+    "561100.SH": "电子龙头",
+    "561980.SH": "芯片设备",
+    "588710.SH": "科半导体",
+    "588760.SH": "AI科创",
+    "588830.SH": "科创新能",
+    "588890.SH": "科创芯",
+    "588990.SH": "科芯片",
+    "589720.SH": "科创新药",
+    "589800.SH": "科创综合",
+}
 GLOBAL_ETF_POOL = [
     "518880.SH", "501018.SH", "161226.SZ", "159985.SZ", "159980.SZ",
     "513310.SH", "159518.SZ", "159509.SZ", "513100.SH", "513520.SH",
@@ -72,10 +89,11 @@ EXCLUDE_KEYWORDS = (
     "沪深", "中证", "上证", "深证", "深成", "深100", "1000", "2000", "800", "500", "300", "200", "180", "100", "50", "30", "MS", "债",
 )
 SPECIAL_GROUPS = (
-    ("香港组", ("恒生", "恒指", "港股通", "港股", "H股", "香港", "HKC", "HK", "HGS", "中概", "HS科技"),
-     ("恒生", "恒指", "港股通", "港股", "H股", "香港", "HKC", "HK", "HGS", "中概", "HS")),
+    ("香港组", ("恒生", "恒指", "港股通", "港股", "H股", "香港", "港", "HKC", "HK", "HGS", "H", "中概", "HS科技"),
+     ("恒生", "恒指", "港股通", "港股", "H股", "香港", "港", "HKC", "HK", "HGS", "H", "中概", "HS")),
     ("科创组", ("科创", "科创板", "科综", "KC", "K C", "双创", "科创创业", "创创"),
-     ("科创", "科创板", "科综", "KC", "K C", "双创", "科创创业", "创创", "AAA")),
+     ("科创", "科创板", "科综", "KC", "K C", "双创", "科创创业", "创创",
+      "债券", "债汇", "债指", "债沪", "债易", "债基", "债兴", "债摩", "债", "AAA")),
     ("创业组", ("创业板", "创业", "创板", "创成长"), ("创业板", "创业", "创板", "创成长")),
     ("美指组", ("标普", "纳指", "纳斯达克"), ("标普", "纳指", "纳斯达克")),
 )
@@ -124,7 +142,8 @@ def _market_catalog(context) -> tuple[list[str], dict[str, str], dict[str, str],
     dynamic_groups = {
         symbol: group
         for symbol, name in names.items()
-        if symbol in minute_symbols and (group := _dynamic_group(name)) is not None
+        if symbol in minute_symbols
+        and (group := _dynamic_group(WUFU_GROUP_NAME_OVERRIDES.get(symbol, name))) is not None
     }
     return list(names), names, dynamic_groups, minute_symbols
 
