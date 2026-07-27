@@ -5,7 +5,7 @@ import copy
 import logging
 import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from itertools import groupby
 from statistics import mean, pstdev
@@ -69,12 +69,14 @@ class Account:
         self.avg_cost: dict[str, float] = {}
         self.orders: list[Order] = []
         self.fills: list[Fill] = []
+        self.corporate_actions: list[dict[str, Any]] = []
         self.equity_curve: list[dict[str, Any]] = []
 
     def snapshot(self) -> dict[str, Any]:
         return {"cash": self.cash, "positions": self.positions, "available": self.available,
                 "avg_cost": self.avg_cost, "orders": [asdict(v) for v in self.orders],
-                "fills": [asdict(v) for v in self.fills], "equity_curve": self.equity_curve}
+                "fills": [asdict(v) for v in self.fills],
+                "corporate_actions": self.corporate_actions, "equity_curve": self.equity_curve}
 
     def restore(self, raw: dict[str, Any]) -> None:
         self.cash = float(raw.get("cash", self.cash))
@@ -83,6 +85,7 @@ class Account:
         self.avg_cost = {k: float(v) for k, v in raw.get("avg_cost", {}).items()}
         self.orders = [Order(**item) for item in raw.get("orders", [])]
         self.fills = [Fill(**item) for item in raw.get("fills", [])]
+        self.corporate_actions = list(raw.get("corporate_actions", []))
         self.equity_curve = list(raw.get("equity_curve", []))
 
     def equity(self, prices: dict[str, float]) -> float:
@@ -162,11 +165,26 @@ class Context:
     def order_target_percent(self, symbol: str, percent: float) -> None:
         self._engine.submit_order("target", symbol, target_percent=percent)
 
-    def history(self, symbol: str | None = None, count: int = 20, field: str = "close") -> Any:
-        values = self._engine.history.get(symbol or "", [])[-count:]
+    def history(
+        self,
+        symbol: str | None = None,
+        count: int = 20,
+        field: str = "close",
+        timeframe: str | None = None,
+    ) -> Any:
+        values = self.history_bars(symbol, count=count, timeframe=timeframe)
         if field == "close":
             return [item.close for item in values]
         return [getattr(item, field) for item in values]
+
+    def history_bars(
+        self,
+        symbol: str | None = None,
+        count: int = 20,
+        timeframe: str | None = None,
+    ) -> list[Bar]:
+        history = self._engine._history_by_period.get(timeframe or self.period, {})
+        return list(history.get(symbol or "", [])[-count:])
 
     def log(self, message: str, level: str = "INFO") -> None:
         self._engine.logs.append({"timestamp": self.now.isoformat() if self.now else "", "level": level, "message": str(message)})
@@ -184,6 +202,7 @@ class FreeStrategyEngine:
         self.state = state or {}
         self.logs: list[dict[str, Any]] = []
         self.history: dict[str, list[Bar]] = {}
+        self._history_by_period: dict[str, dict[str, list[Bar]]] = {timeframe: self.history}
         self.pending: list[tuple[Order, datetime]] = []
         self._immediate: list[Order] = []
         self._bought_dates: dict[str, date] = {}
@@ -195,6 +214,8 @@ class FreeStrategyEngine:
         self._last_timestamp: datetime | None = None
         self._current_prices: dict[str, float] = {}
         self._current_close_prices: dict[str, float] = {}
+        self._session_bars: dict[str, Bar] = {}
+        self._applied_splits: dict[str, date] = {}
         self._benchmark_curve: list[dict[str, Any]] = []
         self._session_equity_snapshot: dict[str, Any] | None = None
         self._session_benchmark_close: float | None = None
@@ -223,6 +244,21 @@ class FreeStrategyEngine:
     def universe(self) -> list[str]:
         return self.context.universe
 
+    def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
+        """注入只读历史，不触发生命周期、下单或资金变动。"""
+        history = self._history_by_period.setdefault(timeframe, {})
+        count = 0
+        for bar in sorted(bars, key=lambda item: (item.timestamp, item.symbol)):
+            values = history.setdefault(bar.symbol, [])
+            if values and values[-1].timestamp == bar.timestamp:
+                values[-1] = bar
+                continue
+            values.append(bar)
+            if len(values) > 5_000:
+                del values[:-5_000]
+            count += 1
+        return count
+
     def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
         self._counter += 1
         order = Order(id=f"o{self._counter}", symbol=symbol, side=side, submitted_at=self.context.now.isoformat() if self.context.now else "", **kwargs)
@@ -244,28 +280,45 @@ class FreeStrategyEngine:
             return 0 if target is not None and target < current else 1
         return 1
 
-    def _fill_order(self, order: Order, raw_price: float | None, timestamp: datetime | None) -> None:
-        if raw_price is None or raw_price <= 0:
+    def _fill_order(self, order: Order, bar: Bar | None, timestamp: datetime | None, field: str) -> None:
+        if bar is None:
+            order.status = "rejected"
+            order.reason = "证券停牌或无可交易行情"
+            return
+        raw_price = bar.execution_price(field)
+        if raw_price <= 0:
             order.status = "rejected"
             order.reason = "缺少可成交价格"
             return
-        price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if order.side == "buy" else -1))
         current = self.account.positions.get(order.symbol, 0.0)
         target = None
         if order.side == "target":
             target = order.target_quantity
             if target is None and order.target_value is not None:
-                target = order.target_value / price
+                target = order.target_value / raw_price
             if target is None and order.target_percent is not None:
-                target = self.account.equity(self._current_prices) * order.target_percent / price
+                target = self.account.equity(self._current_close_prices) * order.target_percent / raw_price
             side = "buy" if (target or 0) > current else "sell"
             qty = abs((target or 0) - current)
         else:
             side = order.side
             qty = order.quantity
             if qty is None and order.value is not None:
-                qty = order.value / price
+                qty = order.value / raw_price
             qty = qty or 0
+        if bar.suspended or not bar.tradable:
+            order.status = "rejected"
+            order.reason = "证券停牌或不可交易"
+            return
+        if side == "buy" and bar.limit_up is not None and raw_price >= bar.limit_up - 0.005:
+            order.status = "rejected"
+            order.reason = "涨停，买入未成交"
+            return
+        if side == "sell" and bar.limit_down is not None and raw_price <= bar.limit_down + 0.005:
+            order.status = "rejected"
+            order.reason = "跌停，卖出未成交"
+            return
+        price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
         lot = max(1, self.config.lot_size)
         qty = math.floor(qty / lot) * lot
         if side == "sell":
@@ -274,7 +327,7 @@ class FreeStrategyEngine:
             qty = min(qty, available)
         else:
             gross = qty * price
-            max_gross = self.account.equity(self._current_prices) * self.config.max_exposure_pct
+            max_gross = self.account.equity(self._current_close_prices) * self.config.max_exposure_pct
             qty = min(qty, math.floor(max(0.0, min(self.account.cash, max_gross)) / price / lot) * lot)
         if qty <= 0:
             if order.side == "target":
@@ -301,8 +354,34 @@ class FreeStrategyEngine:
             self.account.positions[order.symbol] = max(0.0, current - qty)
             self.account.available[order.symbol] = max(0.0, self.account.available.get(order.symbol, current) - qty)
         order.status = "filled"
-        order.status = "filled"
         self.account.fills.append(Fill(order.id, order.symbol, side, qty, price, gross, fee, timestamp.isoformat() if timestamp else ""))
+
+    def _apply_splits(self, bars: BarsView, timestamp: datetime) -> None:
+        for symbol, bar in bars.items():
+            ratio = float(bar.split_ratio)
+            if ratio <= 0 or math.isclose(ratio, 1.0, rel_tol=0.0, abs_tol=1e-9):
+                continue
+            if self._applied_splits.get(symbol) == timestamp.date():
+                continue
+            self._applied_splits[symbol] = timestamp.date()
+            quantity = self.account.positions.get(symbol, 0.0)
+            if quantity <= 0:
+                continue
+            self.account.positions[symbol] = quantity * ratio
+            self.account.available[symbol] = self.account.available.get(symbol, 0.0) * ratio
+            if symbol in self.account.avg_cost:
+                self.account.avg_cost[symbol] /= ratio
+            self.account.corporate_actions.append({
+                "timestamp": timestamp.isoformat(),
+                "symbol": symbol,
+                "type": "split",
+                "ratio": ratio,
+            })
+            self.logs.append({
+                "timestamp": timestamp.isoformat(),
+                "level": "INFO",
+                "message": f"{symbol} ETF拆分生效：持仓数量按 {ratio:g} 倍调整",
+            })
 
     def _run_callback(self, name: str, bars: BarsView) -> None:
         callback = self._callbacks.get(name)
@@ -341,6 +420,7 @@ class FreeStrategyEngine:
             "runtime": self.runtime_snapshot(),
             "benchmark_curve": self._benchmark_curve,
             "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
+            "applied_splits": {symbol: value.isoformat() for symbol, value in self._applied_splits.items()},
             "pending_orders": [
                 {"order_id": order.id, "due_at": due_at.isoformat()}
                 for order, due_at in self.pending
@@ -358,6 +438,10 @@ class FreeStrategyEngine:
             symbol: date.fromisoformat(value)
             for symbol, value in raw.get("bought_dates", {}).items()
         }
+        self._applied_splits = {
+            symbol: date.fromisoformat(value)
+            for symbol, value in raw.get("applied_splits", {}).items()
+        }
         orders_by_id = {order.id: order for order in self.account.orders}
         self.pending = [
             (orders_by_id[item["order_id"]], datetime.fromisoformat(item["due_at"]))
@@ -371,13 +455,16 @@ class FreeStrategyEngine:
         self._session_finished = False
         self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
         self.context.now = timestamp
-        self.context._sync({symbol: bar.close for symbol, bar in bars_now.items()})
-        self._run_callback("before_trading_start", bars_now)
+        self._session_bars = dict(bars_now)
+        self._session_equity_snapshot = None
+        self._session_benchmark_close = None
         if self.config.settlement == "t1":
             for symbol, bought_date in list(self._bought_dates.items()):
                 if bought_date < timestamp.date():
                     self.account.available[symbol] = self.account.positions.get(symbol, 0.0)
                     self._bought_dates.pop(symbol, None)
+        self.context._sync(self._current_close_prices)
+        self._run_callback("before_trading_start", bars_now)
 
     def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""
@@ -387,7 +474,7 @@ class FreeStrategyEngine:
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
         for order in sorted(self._immediate, key=self._sell_first):
-            self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
+            self._fill_order(order, self._session_bars.get(order.symbol), timestamp, "close")
         self._immediate.clear()
         if self._session_equity_snapshot is not None:
             position_values = {
@@ -442,21 +529,27 @@ class FreeStrategyEngine:
             bars_now = BarsView({bar.symbol: bar for bar in rows_at_time})
             if self._active_session_date != timestamp.date():
                 self.finish_session(persist_state=return_result)
+                self._apply_splits(bars_now, timestamp)
+                self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
+                self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
                 self._start_session(timestamp, bars_now)
+            else:
+                self._apply_splits(bars_now, timestamp)
             # next-open orders created on the previous callback are filled before this bar.
-            self._current_prices = {s: b.open for s, b in bars_now.items()}
-            due = [p for p in self.pending if p[1] <= timestamp]
-            self.pending = [p for p in self.pending if p[1] > timestamp]
+            self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
+            due = [p for p in self.pending if p[1] <= timestamp and p[0].symbol in bars_now]
+            self.pending = [p for p in self.pending if p[1] > timestamp or p[0].symbol not in bars_now]
             for order, _ in sorted(due, key=self._sell_first):
-                self._fill_order(order, self._current_prices.get(order.symbol), timestamp)
+                self._fill_order(order, bars_now.get(order.symbol), timestamp, "open")
             self.context.now = timestamp
-            self.context._sync({s: b.close for s, b in bars_now.items()})
+            self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
+            self.context._sync(self._current_close_prices)
             self._current_bar = next(iter(bars_now.values()), None)
-            self._current_close_prices = {s: b.close for s, b in bars_now.items()}
             benchmark = bars_now.get(self.config.benchmark_symbol)
             if benchmark is not None:
                 self._session_benchmark_close = benchmark.close
             self._last_bars = bars_now
+            self._session_bars.update(bars_now)
             self._last_timestamp = timestamp
             for symbol, bar in bars_now.items():
                 self.history.setdefault(symbol, []).append(bar)
@@ -468,10 +561,9 @@ class FreeStrategyEngine:
                     self.context._scheduled[slot_index] = (at, callback, True)
             self._run_callback("on_bar", bars_now)
             for order in sorted(self._immediate, key=self._sell_first):
-                self._fill_order(order, self._current_close_prices.get(order.symbol), timestamp)
+                self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
             self._immediate.clear()
-            prices = {s: b.close for s, b in bars_now.items()}
-            self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
+            self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(self._current_close_prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
         if handled and finalize_session:
             self.finish_session(persist_state=return_result)
         if return_result:
@@ -527,7 +619,21 @@ class FreeStrategyEngine:
         rows: list[dict[str, Any]] = []
         realized_trades: list[float] = []
         cumulative_realized = 0.0
-        for fill in self.account.fills:
+        events = [
+            (fill.timestamp, 1, "fill", fill)
+            for fill in self.account.fills
+        ] + [
+            (str(action["timestamp"]), 0, "action", action)
+            for action in self.account.corporate_actions
+        ]
+        for _, _, event_type, event in sorted(events, key=lambda item: (item[0], item[1])):
+            if event_type == "action":
+                action = event
+                if action.get("type") == "split":
+                    held, cost = positions.get(str(action["symbol"]), (0.0, 0.0))
+                    positions[str(action["symbol"])] = (held * float(action["ratio"]), cost)
+                continue
+            fill = event
             held, cost = positions.get(fill.symbol, (0.0, 0.0))
             cost_basis = 0.0
             realized_pnl = 0.0
@@ -709,5 +815,6 @@ class FreeStrategyEngine:
                 "benchmark_symbol": self.config.benchmark_symbol,
                 "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
+                "corporate_actions": self.account.corporate_actions,
                 "positions": self.account.positions, "logs": self.logs, "state": self.state,
                 "checkpoint": self.checkpoint()}

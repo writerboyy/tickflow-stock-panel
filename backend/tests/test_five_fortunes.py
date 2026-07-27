@@ -32,6 +32,9 @@ class FakeContext:
     def log(self, message: str, level: str = "INFO") -> None:
         self.logs.append((level, message))
 
+    def history_bars(self, _symbol: str, count: int = 20, timeframe: str | None = None):
+        return []
+
     def order_target_percent(self, symbol: str, percent: float) -> None:
         self.orders.append(("percent", symbol, percent))
 

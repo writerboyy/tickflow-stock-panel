@@ -253,7 +253,14 @@ def _paper_loop(account_id: str, root: str) -> None:
     from dataclasses import asdict
     import time
     from datetime import date, datetime, time as clock_time
-    from app.free_strategy.process import _read_rows, _resolve_symbols
+    from app.free_strategy.process import (
+        WARMUP_CALENDAR_DAYS,
+        _aligned_warmup_bars,
+        _load_market_data,
+        _prime_minute_market_data,
+        _read_rows,
+        _resolve_symbols,
+    )
     from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
     from app.tickflow.repository import DataStore, KlineRepository
     account_root = Path(root) / account_id
@@ -280,6 +287,20 @@ def _paper_loop(account_id: str, root: str) -> None:
         else:
             engine.account.restore(state.get("account", {}))
             engine.restore_runtime(state.get("runtime"))
+        today = date.today()
+        warmup_start = today - timedelta(days=WARMUP_CALENDAR_DAYS)
+        market_data = _load_market_data(repo, symbols, warmup_start, today, asset_type)
+        if timeframe != "1d":
+            _prime_minute_market_data(repo, symbols, today, asset_type, market_data)
+            warmup_bars = _aligned_warmup_bars(
+                symbols, warmup_start, today - timedelta(days=1), market_data,
+            )
+        else:
+            warmup_bars = _read_rows(
+                repo, symbols, warmup_start, today - timedelta(days=1),
+                asset_type, "1d", allow_empty=True, market_data=market_data,
+            )
+        engine.preload_history(warmup_bars, "1d")
         state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
         # Keep the supervisor alive and make the failure inspectable from the API.
@@ -298,8 +319,17 @@ def _paper_loop(account_id: str, root: str) -> None:
         path.write_text(json.dumps({"timestamp": now_iso(), "account_id": account_id}), encoding="utf-8")
         try:
             today = date.today()
+            if timeframe == "1d" and not any(
+                symbol_day == today for _, symbol_day in market_data.daily
+            ):
+                daily_update = _load_market_data(repo, symbols, today, today, asset_type)
+                market_data.daily.update(daily_update.daily)
+                market_data.names.update(daily_update.names)
             try:
-                bars = _read_rows(repo, symbols, today, today, asset_type, timeframe)
+                bars = _read_rows(
+                    repo, symbols, today, today, asset_type, timeframe,
+                    market_data=market_data,
+                )
             except ValueError as exc:
                 # 盘前和盘中尚未有完整 bar 时保持账户运行，等下一轮数据同步即可。
                 if "没有可用" not in str(exc):

@@ -16,16 +16,34 @@ class Bar:
     close: float
     volume: float = 0.0
     amount: float = 0.0
+    raw_open: float | None = None
+    raw_high: float | None = None
+    raw_low: float | None = None
+    raw_close: float | None = None
+    tradable: bool = True
+    suspended: bool = False
+    limit_up: float | None = None
+    limit_down: float | None = None
+    split_ratio: float = 1.0
 
     @property
     def date(self) -> date:
         return self.timestamp.date()
+
+    def execution_price(self, field: str) -> float:
+        raw_value = getattr(self, f"raw_{field}")
+        return float(raw_value if raw_value is not None else getattr(self, field))
 
     def as_dict(self) -> dict[str, object]:
         return {
             "symbol": self.symbol, "datetime": self.timestamp.isoformat(),
             "date": self.date.isoformat(), "open": self.open, "high": self.high,
             "low": self.low, "close": self.close, "volume": self.volume, "amount": self.amount,
+            "raw_open": self.raw_open, "raw_high": self.raw_high,
+            "raw_low": self.raw_low, "raw_close": self.raw_close,
+            "tradable": self.tradable, "suspended": self.suspended,
+            "limit_up": self.limit_up, "limit_down": self.limit_down,
+            "split_ratio": self.split_ratio,
         }
 
 
@@ -62,11 +80,21 @@ def aggregate_minute_bars(rows: Iterable[Bar], minutes: int) -> list[Bar]:
     result: list[Bar] = []
     for (symbol, anchor), values in sorted(buckets.items(), key=lambda item: item[0][1]):
         values.sort(key=lambda b: b.timestamp)
+        raw_opens = [value.execution_price("open") for value in values]
+        raw_highs = [value.execution_price("high") for value in values]
+        raw_lows = [value.execution_price("low") for value in values]
+        raw_closes = [value.execution_price("close") for value in values]
         result.append(Bar(
             symbol=symbol, timestamp=anchor, open=values[0].open,
             high=max(v.high for v in values), low=min(v.low for v in values),
             close=values[-1].close, volume=sum(v.volume for v in values),
             amount=sum(v.amount for v in values),
+            raw_open=raw_opens[0], raw_high=max(raw_highs), raw_low=min(raw_lows),
+            raw_close=raw_closes[-1], tradable=any(v.tradable for v in values),
+            suspended=all(v.suspended for v in values),
+            limit_up=next((v.limit_up for v in reversed(values) if v.limit_up is not None), None),
+            limit_down=next((v.limit_down for v in reversed(values) if v.limit_down is not None), None),
+            split_ratio=max(v.split_ratio for v in values),
         ))
     return result
 
@@ -107,5 +135,14 @@ def rows_to_bars(rows: Iterable[Mapping[str, object]]) -> list[Bar]:
             open=float(row["open"]), high=float(row["high"]), low=float(row["low"]),
             close=float(row["close"]), volume=float(row.get("volume") or 0),
             amount=float(row.get("amount") or 0),
+            raw_open=float(row["raw_open"]) if row.get("raw_open") is not None else None,
+            raw_high=float(row["raw_high"]) if row.get("raw_high") is not None else None,
+            raw_low=float(row["raw_low"]) if row.get("raw_low") is not None else None,
+            raw_close=float(row["raw_close"]) if row.get("raw_close") is not None else None,
+            tradable=bool(row.get("tradable", True)),
+            suspended=bool(row.get("suspended", False)),
+            limit_up=float(row["limit_up"]) if row.get("limit_up") is not None else None,
+            limit_down=float(row["limit_down"]) if row.get("limit_down") is not None else None,
+            split_ratio=float(row.get("split_ratio") or 1.0),
         ))
     return result

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -18,6 +18,40 @@ def test_minute_aggregation_respects_lunch_boundary():
     assert [(bar.timestamp.hour, bar.timestamp.minute, bar.open, bar.close) for bar in result] == [
         (11, 25, 1, 3), (13, 0, 4, 5)
     ]
+
+
+def test_minute_aggregation_preserves_raw_prices_and_market_state():
+    rows = [
+        Bar("X", datetime(2024, 1, 2, 9, 30), 5, 6, 4, 5.5, raw_open=10, raw_high=12, raw_low=8, raw_close=11, limit_up=12, limit_down=8, split_ratio=2),
+        Bar("X", datetime(2024, 1, 2, 9, 31), 5.5, 6.5, 5, 6, raw_open=11, raw_high=13, raw_low=10, raw_close=12, limit_up=12, limit_down=8, split_ratio=2),
+    ]
+
+    result = aggregate_minute_bars(rows, 5)[0]
+
+    assert (result.raw_open, result.raw_high, result.raw_low, result.raw_close) == (10, 13, 8, 12)
+    assert (result.limit_up, result.limit_down, result.split_ratio) == (12, 8, 2)
+
+
+def test_daily_warmup_is_visible_without_running_callbacks_or_orders():
+    source = """
+def initialize(context):
+    context.state['callbacks'] = 0
+
+def on_bar(context, bars):
+    context.state['callbacks'] += 1
+    context.state['warmup'] = context.history('X', count=3, timeframe='1d')
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    warmup = [
+        Bar("X", datetime(2024, 1, day, 15), day, day, day, day)
+        for day in (1, 2, 3)
+    ]
+
+    assert engine.preload_history(warmup, "1d") == 3
+    result = engine.run([Bar("X", datetime(2024, 1, 4, 9, 30), 4, 4, 4, 4)])
+
+    assert result["state"] == {"callbacks": 1, "warmup": [1, 2, 3]}
+    assert result["orders"] == []
 
 
 def test_initialize_defines_universe_and_normalizes_joinquant_suffixes():
@@ -66,6 +100,126 @@ def on_bar(context, bars):
     result = FreeStrategyEngine(source, config=FreeStrategyConfig(lot_size=100)).run(bars)
     assert [round(fill["price"], 4) for fill in result["fills"]] == [11.0055, 11.994]
     assert result["positions"] == {"X": 0.0}
+
+
+def test_strategy_uses_adjusted_bar_but_fill_and_equity_use_raw_price():
+    source = """
+def on_bar(context, bars):
+    context.state.setdefault('seen', []).append(bars['X'].close)
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+"""
+    bars = [
+        Bar("X", datetime(2024, 1, 1, 15), 5, 5, 5, 5, raw_open=10, raw_high=10, raw_low=10, raw_close=10),
+        Bar("X", datetime(2024, 1, 2, 9, 30), 6, 6, 6, 6, raw_open=12, raw_high=12, raw_low=12, raw_close=12),
+    ]
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(initial_capital=10_000, fees_pct=0, slippage_bps=0),
+    ).run(bars)
+
+    assert result["state"]["seen"] == [5, 6]
+    assert result["fills"][0]["price"] == 12
+    assert result["final_equity"] == 10_000
+
+
+def test_etf_split_adjusts_position_once_and_survives_checkpoint_restore():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000, asset_type="etf", fill_policy="close",
+        fees_pct=0, slippage_bps=0,
+    )
+    engine = FreeStrategyEngine(source, timeframe="1m", config=config)
+    engine.run([Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=20)], finalize_session=False)
+    first_split_bar = Bar(
+        "X", datetime(2024, 1, 2, 9, 30), 10, 10, 10, 10,
+        raw_open=10, raw_high=10, raw_low=10, raw_close=10, split_ratio=2,
+    )
+    result = engine.run([first_split_bar])
+
+    assert result["positions"] == {"X": 200.0}
+    assert result["checkpoint"]["account"]["avg_cost"]["X"] == 10
+    assert result["final_equity"] == 10_000
+
+    resumed = FreeStrategyEngine(source, timeframe="1m", config=config)
+    resumed.restore_checkpoint(result["checkpoint"])
+    repeated = resumed.run([Bar(
+        "X", datetime(2024, 1, 2, 10), 10, 10, 10, 10,
+        raw_open=10, raw_high=10, raw_low=10, raw_close=10, split_ratio=2,
+    )])
+    assert repeated["positions"] == {"X": 200.0}
+
+
+def test_etf_split_keeps_realized_attribution_cost_basis_continuous():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    elif context.now.day == 3:
+        context.sell('X', quantity=context.portfolio.positions['X'])
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000, asset_type="etf", fill_policy="close",
+            fees_pct=0, slippage_bps=0,
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=20),
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10, raw_close=10, split_ratio=2),
+        Bar("X", datetime(2024, 1, 3, 15), 11, 11, 11, 11, raw_close=11),
+    ])
+
+    sell = [row for row in result["attribution"] if row["side"] == "sell"][0]
+    assert sell["cost_basis"] == 2_000
+    assert sell["realized_pnl"] == 200
+
+
+@pytest.mark.parametrize(
+    ("bar", "reason"),
+    [
+        (Bar("X", datetime(2024, 1, 1, 15), 11, 11, 11, 11, raw_close=11, limit_up=11), "涨停，买入未成交"),
+        (Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10, tradable=False, suspended=True), "证券停牌或不可交易"),
+    ],
+)
+def test_market_state_rejects_unfillable_buy_orders(bar, reason):
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
+    ).run([bar])
+
+    assert result["orders"][0]["status"] == "rejected"
+    assert result["orders"][0]["reason"] == reason
+
+
+def test_limit_down_rejects_sell_order():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    else:
+        context.sell('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(fill_policy="close", fees_pct=0, slippage_bps=0),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 2, 15), 9, 9, 9, 9, raw_close=9, limit_down=9),
+    ])
+
+    assert result["orders"][-1]["status"] == "rejected"
+    assert result["orders"][-1]["reason"] == "跌停，卖出未成交"
 
 
 def test_t0_can_sell_on_same_day():
@@ -157,6 +311,38 @@ from app.free_strategy.five_fortunes import after_trading_end, initialize, on_ba
     assert reports[-1]["nav_filter"] == "skipped_no_data"
     assert result["daily_equity_curve"]
     assert result["performance"]["benchmark_return_pct"] > 0
+
+
+def test_five_fortunes_uses_daily_warmup_on_first_backtest_day():
+    source = """
+from app.free_strategy.five_fortunes import after_trading_end, before_trading_start, initialize, on_bar
+"""
+    symbols = [*REGIME_PROXIES, "518880.SH", DEFENSIVE_ETF]
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="etf", benchmark_symbol="510300.SH"),
+    )
+    start = datetime(2024, 1, 1, 15)
+    warmup = []
+    for offset in range(65):
+        timestamp = start + timedelta(days=offset)
+        for index, symbol in enumerate(symbols):
+            price = (1 + index * 0.01) * (1.002 ** offset)
+            warmup.append(Bar(symbol, timestamp, price, price, price, price, 100, price * 100))
+    engine.preload_history(warmup, "1d")
+    current_day = start + timedelta(days=66)
+    bars = []
+    for hour, minute in ((9, 30), (9, 40), (10, 31), (13, 10), (13, 11), (15, 0)):
+        for index, symbol in enumerate(symbols):
+            price = (1 + index * 0.01) * (1.002 ** 66)
+            bars.append(Bar(symbol, current_day.replace(hour=hour, minute=minute), price, price, price, price, 1, price))
+
+    result = engine.run(bars)
+    state = result["state"]["five_fortunes"]
+
+    assert state["warmup_rows"] == len(warmup)
+    assert state["all_metric_rows"]
 
 
 def test_checkpoint_restores_account_curve_and_strategy_state():

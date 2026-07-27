@@ -5,7 +5,58 @@ from datetime import datetime
 
 import polars as pl
 
-from app.free_strategy.process import execute_backtest
+from app.free_strategy.process import MarketData, _aligned_warmup_bars, _read_rows, execute_backtest
+
+
+def test_minute_warmup_daily_prices_align_to_minute_adjustment_scale():
+    market = MarketData(
+        daily={
+            ("X", datetime(2024, 1, 1).date()): {
+                "open": 19.0, "high": 21.0, "low": 18.0, "close": 10.0,
+                "raw_close": 20.0, "raw_high": 21.0, "raw_low": 18.0,
+                "volume": 100.0, "amount": 2_000.0,
+            },
+            ("X", datetime(2024, 1, 2).date()): {
+                "open": 10.5, "high": 11.5, "low": 10.0, "close": 11.0,
+                "raw_close": 22.0, "raw_high": 23.0, "raw_low": 20.0,
+                "volume": 100.0, "amount": 2_200.0,
+            },
+        },
+        previous_scale={"X": 4.0},
+    )
+
+    bars = _aligned_warmup_bars(
+        ["X"], datetime(2024, 1, 1).date(), datetime(2024, 1, 2).date(), market,
+    )
+
+    assert [bar.close for bar in bars] == [5.0, 5.5]
+
+
+def test_minute_rows_derive_raw_prices_split_and_limits_from_daily_data():
+    class FakeRepository:
+        def get_minute_range(self, _symbols, _start, _end, _asset_type):
+            return pl.DataFrame({
+                "symbol": ["X", "X"],
+                "datetime": [datetime(2024, 1, 2, 9, 30), datetime(2024, 1, 2, 15)],
+                "open": [5.0, 5.5], "high": [5.5, 6.0], "low": [5.0, 5.5],
+                "close": [5.5, 6.0], "volume": [100.0, 100.0], "amount": [550.0, 600.0],
+            })
+
+    market = MarketData(
+        daily={("X", datetime(2024, 1, 2).date()): {"raw_close": 12.0}},
+        previous_scale={"X": 4.0},
+        previous_adjusted_close={"X": 5.0},
+    )
+
+    bars = list(_read_rows(
+        FakeRepository(), ["X"], datetime(2024, 1, 2).date(), datetime(2024, 1, 2).date(),
+        "etf", "1m", market_data=market,
+    ))
+
+    assert bars[0].raw_open == 10
+    assert bars[-1].raw_close == 12
+    assert bars[0].split_ratio == 2
+    assert (bars[0].limit_up, bars[0].limit_down) == (11, 9)
 
 
 def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
@@ -99,7 +150,7 @@ def test_backtest_reads_universe_from_strategy_source(monkeypatch, tmp_path):
         event = output.get()
 
     assert event["type"] == "result"
-    assert requested == [["510300.SH"]]
+    assert requested == [["510300.SH"], ["510300.SH"]]
     assert event["result"]["metadata"]["universe_source"] == "strategy_source"
     assert event["result"]["metadata"]["symbols"] == ["510300.SH"]
 

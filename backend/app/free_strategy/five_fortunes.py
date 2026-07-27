@@ -75,6 +75,9 @@ def initialize(context) -> None:
         "nav_filter": "skipped_no_data",
         "excluded_no_minute_symbols": list(NO_TICKFLOW_MINUTE),
         "liquidity_scope": "configured_universe",
+        "warmup_rows": 0,
+        "warmup_ready_symbols": 0,
+        "warmup_required_days": 61,
     })
     context.schedule(_morning_regime, "09:40")
     context.schedule(_risk_monitor, "10:31")
@@ -88,6 +91,33 @@ def initialize(context) -> None:
 
 def before_trading_start(context) -> None:
     state = _state(context)
+    if not state["daily"]:
+        loaded = 0
+        ready = 0
+        for symbol in context.universe:
+            bars = context.history_bars(symbol, count=320, timeframe="1d")
+            if not bars:
+                continue
+            state["daily"][symbol] = [
+                {
+                    "date": bar.date.isoformat(),
+                    "close": float(bar.close),
+                    "volume": float(bar.volume),
+                    "amount": float(bar.amount),
+                }
+                for bar in bars
+            ]
+            loaded += len(bars)
+            ready += len(bars) >= 61
+        state["warmup_rows"] = loaded
+        state["warmup_ready_symbols"] = ready
+        level = "INFO" if ready == len(context.universe) else "WARNING"
+        context.log(
+            f"五福日线预热：载入 {loaded} 根日K，"
+            f"{ready}/{len(context.universe)} 只标的满足 61 根要求；"
+            "不足的标的将等待正式回测数据累积",
+            level=level,
+        )
     state["intraday"] = {"date": context.now.date().isoformat(), "close": {}, "volume": {}, "amount": {}}
     state["risk_mode"] = None
     state["position_scale"] = 1.0
@@ -247,9 +277,17 @@ def _buy_targets(context) -> None:
     if not targets:
         return
     allocation = min(0.95, max(0.0, float(state.get("position_scale", 1.0)) * 0.95)) / len(targets)
+    held = set(_held_symbols(context))
+    submitted = []
     for symbol in targets:
+        if symbol in held and state.get("position_scale", 1.0) >= 1.0:
+            continue
         context.order_target_percent(symbol, allocation)
-    context.log(f"五福 13:11：买入目标={','.join(targets)}，单标的目标仓位={allocation:.0%}")
+        submitted.append(symbol)
+    if submitted:
+        context.log(f"五福 13:11：买入目标={','.join(submitted)}，单标的目标仓位={allocation:.0%}")
+    else:
+        context.log(f"五福 13:11：当前持仓已是目标 {','.join(targets)}，不重复调仓")
 
 
 def _risk_monitor(context) -> None:
@@ -311,12 +349,13 @@ def _minute_stop_loss(context, bars) -> None:
     for symbol in _held_symbols(context):
         bar = bars.get(symbol)
         cost = context.portfolio.avg_cost.get(symbol, 0.0)
-        if bar is None or cost <= 0 or bar.close >= cost * threshold:
+        current = bar.execution_price("close") if bar is not None else None
+        if current is None or cost <= 0 or current >= cost * threshold:
             continue
         context.order_target_percent(symbol, 0.0)
         # 当日盘中+随后2个交易日均禁止买回；日终会先递减一次。
         state["rebuy_cooldown"][symbol] = 3
-        context.log(f"五福止损：{symbol} 现价{bar.close:.4f} < 成本{cost:.4f}×{threshold:.0%}，冷却2日")
+        context.log(f"五福止损：{symbol} 现价{current:.4f} < 成本{cost:.4f}×{threshold:.0%}，冷却2日")
 
 
 def _rank_candidates(context) -> list[dict[str, Any]]:
