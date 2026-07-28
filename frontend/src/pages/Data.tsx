@@ -486,6 +486,10 @@ export function Data() {
             tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('etf')}
             auto={etfAuto || etfMinuteAuto}
+            active={activeCard === 'etf'}
+            done={doneStages.has('etf')}
+            skipped={skippedCards.has('etf')}
+            stagePct={activeCard === 'etf' ? (job.data?.stage_pct ?? 0) : 0}
             subLabel="维表 · 日K · 指标 · 分钟K"
             fieldTabs={[
               { label: '维表', table: 'etf_instruments' },
