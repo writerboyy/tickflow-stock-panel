@@ -511,3 +511,39 @@ def test_paper_detail_uses_persisted_curve_without_private_continuation_fields(t
     assert "continuation" not in payload
     assert "checkpoint" not in payload
     assert "state" not in payload
+
+
+def test_running_paper_account_can_be_renamed(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper-rename",
+        "name": "原名称",
+        "status": "running",
+        "config": {"name": "原名称"},
+    })
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.patch(
+        "/api/free-strategies/paper/accounts/paper-rename",
+        json={"name": "  五福实盘模拟  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "五福实盘模拟"
+    assert store.get("paper-rename")["config"]["name"] == "五福实盘模拟"
+    assert store.events("paper-rename")[-1]["type"] == "renamed"
+
+
+def test_paper_account_name_must_be_1_to_40_characters(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper-rename", "name": "原名称", "status": "stopped"})
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    assert client.patch("/api/free-strategies/paper/accounts/paper-rename", json={"name": "   "}).status_code == 422
+    assert client.patch("/api/free-strategies/paper/accounts/paper-rename", json={"name": "x" * 41}).status_code == 422

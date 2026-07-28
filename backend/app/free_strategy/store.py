@@ -243,6 +243,24 @@ class PaperAccountStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+    def append_event_once(self, account_id: str, event: dict[str, Any]) -> bool:
+        event_id = str(event.get("id") or "").strip()
+        if not event_id:
+            raise ValueError("幂等事件必须提供 id")
+        ledger = self._path(account_id) / "ledger.jsonl"
+        with self._account_lock(account_id):
+            if ledger.exists():
+                for line in ledger.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        if str(json.loads(line).get("id") or "") == event_id:
+                            return False
+                    except json.JSONDecodeError:
+                        continue
+        self.append_event(account_id, event)
+        return True
+
     def events(self, account_id: str, limit: int = 500) -> list[dict[str, Any]]:
         path = self._path(account_id) / "ledger.jsonl"
         if not path.exists():

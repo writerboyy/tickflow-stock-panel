@@ -250,6 +250,26 @@ class Context:
         visible = [bar for bar in history if bar.timestamp < cutoff]
         return list(visible[-count:])
 
+    def market_history_batch(
+        self,
+        symbols: Iterable[str],
+        count: int = 20,
+        timeframe: str = "1d",
+    ) -> dict[str, list[Bar]]:
+        if count <= 0 or self.now is None:
+            return {}
+        if self._engine._market_history_loader is not None:
+            self._engine._market_history_loader(self.now)
+        history = self._engine._market_history_by_period.get(timeframe, {})
+        result: dict[str, list[Bar]] = {}
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol).strip().upper()
+            if not symbol:
+                continue
+            visible = [bar for bar in history.get(symbol, []) if bar.timestamp < self.now]
+            result[symbol] = list(visible[-count:])
+        return result
+
     def _sync(self, prices: dict[str, float]) -> None:
         self.portfolio.cash = self._engine.account.cash
         self.portfolio.positions = dict(self._engine.account.positions)
@@ -359,6 +379,25 @@ class Context:
     def log(self, message: str, level: str = "INFO") -> None:
         self._engine.logs.append({"timestamp": self.now.isoformat() if self.now else "", "level": level, "message": str(message)})
 
+    def emit_signal(
+        self,
+        signal_type: str,
+        payload: dict[str, Any],
+        *,
+        event_id: str | None = None,
+    ) -> None:
+        normalized = str(signal_type).strip()
+        if not normalized:
+            raise ValueError("信号类型不能为空")
+        if not isinstance(payload, dict):
+            raise ValueError("信号内容必须是字典")
+        self._engine._signals.append({
+            "id": str(event_id or f"{normalized}:{len(self._engine._signals) + 1}"),
+            "timestamp": self.now.isoformat() if self.now else "",
+            "signal_type": normalized,
+            "payload": copy.deepcopy(payload),
+        })
+
     info = log
 
 
@@ -374,6 +413,7 @@ class FreeStrategyEngine:
         self.account = Account(self.config)
         self.state = state or {}
         self.logs: list[dict[str, Any]] = []
+        self._signals: list[dict[str, Any]] = []
         self.history: dict[str, list[Bar]] = {}
         self._history_by_period: dict[str, dict[str, list[Bar]]] = {timeframe: self.history}
         self._market_history_by_period: dict[str, dict[str, list[Bar]]] = {}
@@ -456,6 +496,15 @@ class FreeStrategyEngine:
     @property
     def pending_orders(self) -> list[tuple[Order, datetime]]:
         return list(self.pending)
+
+    @property
+    def signals(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._signals)
+
+    def drain_signals(self) -> list[dict[str, Any]]:
+        rows = self.signals
+        self._signals.clear()
+        return rows
 
     def set_history_loader(
         self,

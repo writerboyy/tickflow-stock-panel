@@ -1370,6 +1370,9 @@ class KlineRepository:
         start: date,
         end: date,
         asset_type: str = "stock",
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
     ) -> pl.DataFrame:
         """多 symbol × 日期范围的分钟K查询 (分钟K精确回测用)。
 
@@ -1382,13 +1385,18 @@ class KlineRepository:
             lf = pl.scan_parquet(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
+            predicate = (
+                pl.col("symbol").is_in(symbols)
+                & (pl.col("datetime").dt.date() >= start)
+                & (pl.col("datetime").dt.date() <= end)
+            )
+            if after is not None:
+                predicate &= pl.col("datetime") > after
+            if until is not None:
+                predicate &= pl.col("datetime") <= until
             return (
                 lf.select(select_cols)
-                .filter(
-                    pl.col("symbol").is_in(symbols)
-                    & (pl.col("datetime").dt.date() >= start)
-                    & (pl.col("datetime").dt.date() <= end)
-                )
+                .filter(predicate)
                 .sort(["datetime", "symbol"])
                 .collect(streaming=True)
             )

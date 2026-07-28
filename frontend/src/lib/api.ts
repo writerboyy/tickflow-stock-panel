@@ -988,6 +988,18 @@ export interface PaperRiskConfig {
   max_orders_per_minute: number
 }
 
+export interface PaperSyncState {
+  phase: 'idle' | 'catching_up' | 'live' | 'error'
+  from?: string | null
+  target?: string | null
+  through?: string | null
+  processed_days?: number
+  total_days?: number
+  missing_symbols?: string[]
+  error?: string | null
+  updated_at?: string
+}
+
 export interface PaperAccount {
   id: string
   name: string
@@ -996,6 +1008,7 @@ export interface PaperAccount {
   source_hash: string
   market_mode: PaperMarketMode | 'bar_5m' | 'bar_30m'
   status: 'running' | 'paused' | 'stopped'
+  sync?: PaperSyncState
   execution_mode?: 'full_bar' | 'scheduled' | 'quote'
   scheduled_times?: string[]
   universe?: string[]
@@ -1065,6 +1078,16 @@ export interface PaperEvent {
   quantity?: number
   value?: number
   level?: string
+  signal_type?: string
+  strategy?: string
+  trading_date?: string
+  decision?: 'rebalance' | 'hold' | 'empty'
+  regime?: string
+  raw_regime?: string
+  target_symbols?: string[]
+  holding_symbols?: string[]
+  candidates?: { symbol: string; score?: number | null }[]
+  reason_code?: string
   [key: string]: unknown
 }
 
@@ -1155,6 +1178,8 @@ export const api = {
   createPaperAccount: (payload: CreatePaperAccount) =>
     request<PaperAccount>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   paperAccount: (id: string) => request<PaperAccount & { events?: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}`),
+  renamePaperAccount: (id: string, name: string) =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   paperEvents: (id: string, cursor?: number, types?: string) => {
     const query = new URLSearchParams({ limit: '100' })
     if (cursor != null) query.set('cursor', String(cursor))

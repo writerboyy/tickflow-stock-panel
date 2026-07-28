@@ -346,6 +346,15 @@ def test_checkpoint_is_versioned_and_events_are_cursor_paginated(tmp_path):
     assert len({row["id"] for row in store.events("paper")}) == 5
 
 
+def test_paper_event_id_is_appended_once(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "stopped"})
+
+    assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is True
+    assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is False
+    assert [row["id"] for row in store.events("paper")] == ["decision:2026-07-28"]
+
+
 def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({"id": "paper", "status": "stopped"})
