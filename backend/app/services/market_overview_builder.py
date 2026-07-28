@@ -93,7 +93,8 @@ def _quote_status(quote_service) -> dict:
 
 def _index_quotes(repo, quote_service, as_of: date | None = None) -> list[dict]:
     rows: list[dict] = []
-    if quote_service and as_of is None:
+    has_fresh = getattr(quote_service, "has_fresh_index_quotes", lambda: True) if quote_service else None
+    if quote_service and as_of is None and has_fresh():
         df = quote_service.get_index_quotes(list(CORE_INDEX_SYMBOLS))
         if not df.is_empty():
             rows = df.to_dicts()

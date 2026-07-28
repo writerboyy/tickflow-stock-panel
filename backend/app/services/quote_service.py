@@ -535,6 +535,23 @@ class QuoteService:
             return df.filter(pl.col("symbol").is_in(symbols))
         return df
 
+    def has_fresh_index_quotes(self) -> bool:
+        """指数缓存是否来自当前仍有效的一轮实时行情。"""
+        with self._lock:
+            has_cache = self._index_quotes_cache is not None and not self._index_quotes_cache.is_empty()
+            fetch_time = self._fetch_time
+        if not has_cache or not fetch_time:
+            return False
+
+        phase = self._market_phase()
+        if self._should_poll_for_phase(phase):
+            age_s = time.perf_counter() - fetch_time
+            return age_s <= max(self._interval * 2, 30.0)
+        final_key = self._final_sync_key(phase)
+        if final_key:
+            return final_key in self._final_sync_done
+        return False
+
     def status(self) -> dict:
         """返回行情服务状态。"""
         from app.services import preferences

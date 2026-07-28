@@ -276,6 +276,7 @@ export interface IndexQuote {
   volume?: number | null
   amount?: number | null
   timestamp?: number | null
+  source?: string | null
   [key: string]: any
 }
 
@@ -1317,7 +1318,7 @@ export const api = {
     ),
   intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
   indexQuotes: (symbols?: string[]) =>
-    request<{ rows: IndexQuote[]; count: number }>(
+    request<{ rows: IndexQuote[]; count: number; source?: string }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
   updateRealtimeMonitorConfig: (cfg: {

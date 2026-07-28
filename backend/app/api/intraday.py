@@ -105,7 +105,11 @@ def index_quotes(
     if not qs:
         rows = _fallback_index_quotes_from_daily(request, symbol_list)
         return {"rows": rows, "count": len(rows), "source": "index_daily"}
-    df = qs.get_index_quotes(symbol_list)
+    has_fresh = getattr(qs, "has_fresh_index_quotes", lambda: True)
+    df = qs.get_index_quotes(symbol_list) if has_fresh() else None
+    if df is None:
+        rows = _fallback_index_quotes_from_daily(request, symbol_list)
+        return {"rows": rows, "count": len(rows), "source": "index_daily"}
     rows = df.to_dicts() if not df.is_empty() else []
     if not rows:
         rows = _fallback_index_quotes_from_daily(request, symbol_list)

@@ -428,7 +428,9 @@ export function Layout() {
     await toggleQuote.mutateAsync(enabled)
     // 仅在交易时段立即获取一次行情
     if (enabled && isTrading) {
-      api.intradayRefresh().catch(() => {})
+      api.intradayRefresh()
+        .then(() => qc.invalidateQueries({ queryKey: QK.indexQuotes }))
+        .catch(() => {})
     }
   }
 
