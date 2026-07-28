@@ -86,7 +86,8 @@ def on_bar(context, bars):
             "commission_pct": 0.0001,
             "min_commission": 5,
             "stamp_tax_pct": 0,
-            "slippage_bps": 1,
+            # PriceRelatedSlippage(0.0001) is a full spread; each side pays half.
+            "slippage_bps": 0.5,
             "price_tick": 0.001,
             "benchmark_symbol": "510300.SH",
             "settlement": "t1",

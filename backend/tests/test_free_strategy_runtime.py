@@ -271,12 +271,40 @@ def test_five_fortunes_template_uses_reference_backtest_parameters():
         "commission_pct": 0.0001,
         "min_commission": 5,
         "stamp_tax_pct": 0,
-        "slippage_bps": 1,
+        "slippage_bps": 0.5,
         "price_tick": 0.001,
         "benchmark_symbol": "510300.SH",
         "settlement": "t1",
         "fill_policy": "close",
     }
+
+
+def test_five_fortunes_template_matches_reference_slippage_fills():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 10:
+        context.buy('511880.SH', quantity=1500)
+    else:
+        context.sell('511880.SH', quantity=1500)
+"""
+    template = TEMPLATES["five_fortunes"]["config"]
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=1_000_000,
+            fees_pct=0,
+            stamp_tax_pct=0,
+            slippage_bps=template["slippage_bps"],
+            price_tick=template["price_tick"],
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("511880.SH", datetime(2025, 10, 10, 13, 11), 100.964, 100.964, 100.964, 100.964),
+        Bar("511880.SH", datetime(2025, 10, 13, 13, 10), 100.967, 100.967, 100.967, 100.967),
+    ])
+
+    assert [fill["price"] for fill in result["fills"]] == pytest.approx([100.969, 100.962])
 
 
 def test_next_open_fill_and_t1_are_default():
