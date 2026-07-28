@@ -10,6 +10,7 @@ import {
   FileText,
   Gauge,
   ListOrdered,
+  Pencil,
   Plus,
   Radio,
   RefreshCw,
@@ -59,11 +60,39 @@ function statusClass(value: PaperAccount['status']) {
   return value === 'running' ? 'text-success' : value === 'paused' ? 'text-warning' : 'text-muted'
 }
 
+function syncLabel(account: PaperAccount) {
+  const phase = account.sync?.phase
+  if (phase === 'catching_up') {
+    const done = account.sync?.processed_days ?? 0
+    const total = account.sync?.total_days ?? 0
+    return total > 0 ? `补齐中 ${done}/${total}` : '补齐中'
+  }
+  if (phase === 'error') return '同步失败'
+  if (phase === 'live') return '已追平'
+  return statusLabel(account.status)
+}
+
+function syncClass(account: PaperAccount) {
+  if (account.sync?.phase === 'catching_up') return 'text-warning'
+  if (account.sync?.phase === 'error') return 'text-danger'
+  if (account.sync?.phase === 'live') return 'text-success'
+  return statusClass(account.status)
+}
+
+function returnClass(value?: number) {
+  return Number(value ?? 0) >= 0 ? 'text-bull' : 'text-bear'
+}
+
 function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
   const symbol = event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : ''
   if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${symbol} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
   if (event.type === 'rejected') return `${symbol || '委托'}：${event.reason ?? '已拒绝'}`
   if (event.type === 'risk') return String(event.reason ?? '风控锁定')
+  if (event.type === 'signal') {
+    const label = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
+    const targets = (event.target_symbols ?? []).map(item => formatInstrumentLabel(item, symbolNames[item])).join('、') || '空仓'
+    return `${label} · ${event.regime ?? '—'} · 目标 ${targets} · ${event.reason ?? '已完成当日决策'}`
+  }
   return String(event.message ?? event.reason ?? event.type)
 }
 
@@ -119,13 +148,66 @@ function ReturnChart({ account }: { account: PaperAccount }) {
   </div>
 }
 
+function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instrumentLabel: (symbol: unknown) => string }) {
+  if (!event) return <div className="grid min-h-52 place-items-center px-5 text-center text-xs text-muted">等待首个结构化策略决策</div>
+  const decisionLabel = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
+  const decisionTone = event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
+  const targets = event.target_symbols ?? []
+  const holdings = event.holding_symbols ?? []
+  return <div className="space-y-3 px-4 py-3 text-xs">
+    <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{decisionLabel}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
+      <span className="text-muted">市场状态</span><span>{event.regime ?? '—'}{event.raw_regime && event.raw_regime !== event.regime ? ` · 原始 ${event.raw_regime}` : ''}</span>
+      <span className="text-muted">目标标的</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
+      <span className="text-muted">当前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
+      <span className="text-muted">决策原因</span><span className="leading-5">{event.reason ?? '—'}</span>
+    </div>
+    {event.candidates?.length ? <div className="border-t border-border pt-2 text-[10px] text-muted">候选 {event.candidates.slice(0, 3).map(item => instrumentLabel(item.symbol)).join('、')}</div> : null}
+  </div>
+}
+
+function RenameAccountDialog({ account, onClose, onSaved }: { account: PaperAccount; onClose: () => void; onSaved: () => Promise<unknown> }) {
+  const [name, setName] = useState(account.name)
+  const [pending, setPending] = useState(false)
+  const submit = async () => {
+    const normalized = name.trim()
+    if (!normalized || normalized.length > 40) return
+    setPending(true)
+    try {
+      await api.renamePaperAccount(account.id, normalized)
+      await onSaved()
+      toast('模拟名称已修改', 'success')
+      onClose()
+    } catch {
+      return
+    } finally {
+      setPending(false)
+    }
+  }
+  return <Modal labelledBy="rename-paper-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl">
+    <form onSubmit={event => { event.preventDefault(); void submit() }}>
+      <div className="border-b border-border px-4 py-3"><h2 id="rename-paper-title" className="text-sm font-semibold">修改模拟名称</h2></div>
+      <div className="p-4"><label className="text-xs text-muted">名称<input autoFocus className={`${INPUT} mt-1.5 text-foreground`} maxLength={40} value={name} onChange={event => setName(event.target.value)} /></label><div className="mt-1 text-right text-[10px] text-muted">{name.trim().length}/40</div></div>
+      <div className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={pending} onClick={onClose} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted">取消</button><button type="submit" disabled={pending || !name.trim() || name.trim().length > 40} className="rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40">{pending ? '保存中...' : '保存'}</button></div>
+    </form>
+  </Modal>
+}
+
+function UniverseDialog({ account, instrumentLabel, onClose }: { account: PaperAccount; instrumentLabel: (symbol: unknown) => string; onClose: () => void }) {
+  const symbols = account.universe ?? []
+  return <Modal labelledBy="paper-universe-title" onClose={onClose} panelClassName="w-[92vw] max-w-lg rounded-card border border-border bg-surface shadow-xl">
+    <div className="border-b border-border px-4 py-3"><div className="flex items-center justify-between"><h2 id="paper-universe-title" className="text-sm font-semibold">当前订阅池</h2><span className="font-mono text-xs text-muted">{symbols.length}</span></div></div>
+    <div className="grid max-h-[60vh] grid-cols-2 gap-x-4 overflow-y-auto p-4 text-xs max-sm:grid-cols-1">{symbols.map(symbol => <div key={symbol} className="border-b border-border py-2 font-mono">{instrumentLabel(symbol)}</div>)}</div>
+  </Modal>
+}
+
 function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: string; onClose: () => void; onCreated: (account: PaperAccount) => void }) {
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const paperStatus = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus })
   const list = strategies.data?.strategies ?? []
   const initialStrategy = strategyId || list[0]?.id || ''
   const [form, setForm] = useState<CreatePaperAccount>({
-    name: '量化策略模拟账户',
+    name: '量化策略 · 模拟',
     strategy_id: initialStrategy,
     symbols: [],
     timeframe: '1d',
@@ -157,7 +239,7 @@ function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: s
     const saved = selected.config ?? {}
     setForm(current => ({
       ...current,
-      name: current.name === '量化策略模拟账户' ? `${selected.name} · 模拟盘` : current.name,
+      name: current.name === '量化策略 · 模拟' ? `${selected.name} · 模拟` : current.name,
       asset_type: saved.asset_type === 'stock' ? 'stock' : 'etf',
       initial_capital: Number(saved.initial_capital ?? current.initial_capital),
       benchmark_symbol: String(saved.benchmark_symbol ?? current.benchmark_symbol),
@@ -185,7 +267,7 @@ function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: s
     <form onSubmit={event => { event.preventDefault(); void submit() }}>
       <div className="border-b border-border px-4 py-3"><h2 id="create-paper-title" className="text-sm font-semibold">创建模拟账户</h2></div>
       <div className="grid max-h-[72vh] grid-cols-2 gap-3 overflow-y-auto p-4 text-xs max-sm:grid-cols-1">
-        <label className="col-span-2 max-sm:col-span-1">账户名称<input className={`${INPUT} mt-1`} maxLength={120} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></label>
+        <label className="col-span-2 max-sm:col-span-1">账户名称<input className={`${INPUT} mt-1`} maxLength={40} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></label>
         <label>策略<select className={`${INPUT} mt-1`} value={form.strategy_id} onChange={event => setForm({ ...form, strategy_id: event.target.value })}>{list.map(item => <option key={item.id} value={item.id}>{item.name} · r{item.revision}</option>)}</select></label>
         <label>行情模式<select className={`${INPUT} mt-1`} value={form.market_mode} onChange={event => setForm({ ...form, market_mode: event.target.value as PaperMarketMode })}><option value="bar_1m">1分钟K线</option><option value="bar_1d">日K</option><option value="poll_3s" disabled={paperStatus.data?.poll_3s.available === false}>3秒行情{paperStatus.data?.poll_3s.available === false ? `（套餐最低 ${paperStatus.data.poll_3s.min_interval_s} 秒）` : ''}</option><option value="websocket">WebSocket</option></select></label>
         <label>资产<select className={`${INPUT} mt-1`} value={form.asset_type} onChange={event => setForm({ ...form, asset_type: event.target.value as 'stock' | 'etf' })}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
@@ -211,6 +293,8 @@ export function PaperTrading() {
   const [showCreate, setShowCreate] = useState(searchParams.get('create') === '1')
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
+  const [renameTarget, setRenameTarget] = useState<PaperAccount | null>(null)
+  const [showUniverse, setShowUniverse] = useState(false)
   const notifiedSequence = useRef(0)
   const accountsQuery = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts, refetchInterval: 10_000 })
   const statusQuery = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus, refetchInterval: 3_000 })
@@ -294,25 +378,26 @@ export function PaperTrading() {
   const positions = Object.entries(snapshot?.positions ?? account?.positions ?? {}).filter(([, quantity]) => quantity > 0)
   const orders = snapshot?.orders ?? []
   const fills = snapshot?.fills ?? []
-  const signalEvents = events.filter(event => ['order', 'rejected', 'risk'].includes(event.type))
-  const logEvents = events.filter(event => ['log', 'error', 'market_gap', 'start', 'pause', 'stop'].includes(event.type))
+  const signalEvents = events.filter(event => ['signal', 'order', 'rejected', 'risk'].includes(event.type))
+  const latestDecision = events.find(event => event.type === 'signal' && event.signal_type === 'daily_decision')
+  const logEvents = events.filter(event => ['log', 'error', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
   const status = statusQuery.data
 
   return <div className="flex h-full min-h-0 flex-col max-md:fixed max-md:inset-0 max-md:z-[10000] max-md:bg-base">
-    <PageHeader title="模拟盘" subtitle={`${status?.running_accounts ?? 0} 个账户运行中`} right={<button type="button" onClick={() => setShowCreate(true)} className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white"><Plus className="h-3.5 w-3.5" />创建账户</button>} />
-    <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)] max-md:grid-cols-1">
-      <aside className={`min-h-0 overflow-y-auto border-r border-border p-2.5 max-md:border-b max-md:border-r-0 ${account ? 'max-md:max-h-44' : ''}`}>
-        <div className="space-y-1.5">
-          {accounts.map(item => <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full rounded border px-2.5 py-2.5 text-left ${selectedId === item.id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/50 hover:bg-elevated'}`}>
-            <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{item.name}</span><span className={`shrink-0 text-[10px] ${statusClass(item.status)}`}>{statusLabel(item.status)}</span></div>
-            <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-muted"><span>{MODE_LABEL[item.market_mode] ?? item.market_mode}</span><span className="tabular-nums">{Number(item.return_pct ?? 0) >= 0 ? '+' : ''}{Number(item.return_pct ?? 0).toFixed(2)}%</span></div>
+    <PageHeader title="模拟" subtitle={`${status?.running_accounts ?? 0} 个账户运行中`} right={<button type="button" onClick={() => setShowCreate(true)} className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white"><Plus className="h-3.5 w-3.5" />创建账户</button>} />
+    <div className="grid min-h-0 flex-1 grid-cols-[228px_minmax(0,1fr)] max-xl:grid-cols-1">
+      <aside className={`min-h-0 overflow-y-auto border-r border-border p-2 max-xl:max-h-36 max-xl:border-b max-xl:border-r-0 ${account ? 'max-md:max-h-40' : ''}`}>
+        <div className="space-y-1 max-xl:grid max-xl:grid-cols-2 max-xl:gap-1 max-xl:space-y-0 max-sm:grid-cols-1">
+          {accounts.map(item => <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full border-l-2 px-2.5 py-2 text-left transition-colors ${selectedId === item.id ? 'border-l-accent bg-accent/8' : 'border-l-transparent hover:bg-elevated'}`}>
+            <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{item.name}</span><span className={`shrink-0 text-[10px] ${syncClass(item)}`}>{syncLabel(item)}</span></div>
+            <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted"><span className="truncate">{MODE_LABEL[item.market_mode] ?? item.market_mode} · {formatTime(item.sync?.through ?? item.last_bar ?? item.updated_at)}</span><span className={`shrink-0 tabular-nums ${returnClass(item.return_pct)}`}>{Number(item.return_pct ?? 0) >= 0 ? '+' : ''}{Number(item.return_pct ?? 0).toFixed(2)}%</span></div>
           </button>)}
           {!accounts.length && !accountsQuery.isLoading ? <div className="py-10 text-center text-xs text-muted">暂无模拟账户</div> : null}
         </div>
       </aside>
       {!account ? <EmptyState icon={WalletCards} title="选择或创建模拟账户" /> : <main className="min-h-0 overflow-y-auto">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-          <div className="min-w-0"><div className="flex items-center gap-2"><h2 className="truncate text-sm font-semibold">{account.name}</h2><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span></div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : 'K线驱动'}</span></div></div>
+          <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{account.status === 'running' ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
           <div className="flex items-center gap-1">
             <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
             <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
@@ -326,36 +411,44 @@ export function PaperTrading() {
         {(account.risk_status?.daily_loss_locked || account.risk_status?.drawdown_locked) ? <div className="mx-4 mt-3 flex items-center gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"><ShieldAlert className="h-4 w-4" /><span className="flex-1">{account.risk_status.reason ?? '风控锁定'}</span>{account.risk_status.drawdown_locked ? <button type="button" onClick={() => void action('unlock-risk')} className="rounded border border-warning/50 px-2 py-1 text-[11px]">确认恢复</button> : null}</div> : null}
 
         <section className="grid grid-cols-4 border-b border-border max-lg:grid-cols-2">
-          {[['总资产', MONEY.format(account.equity ?? snapshot?.cash ?? account.cash), Activity], ['可用现金', MONEY.format(snapshot?.cash ?? account.cash), WalletCards], ['累计收益', `${Number(account.return_pct ?? 0) >= 0 ? '+' : ''}${Number(account.return_pct ?? 0).toFixed(2)}%`, Gauge], ['当前回撤', `${Number(account.drawdown_pct ?? 0).toFixed(2)}%`, ShieldAlert]].map(([label, value, Icon], index) => <div key={String(label)} className={`px-4 py-3 ${index < 3 ? 'border-r border-border max-lg:odd:border-r' : ''} max-lg:border-b`}><div className="flex items-center gap-1.5 text-[10px] text-muted"><Icon className="h-3.5 w-3.5" />{label as string}</div><div className="mt-1.5 font-mono text-[16px] tabular-nums">{value as string}</div></div>)}
+          {[
+            ['总资产', MONEY.format(account.equity ?? snapshot?.cash ?? account.cash), Activity, ''],
+            ['可用现金', MONEY.format(snapshot?.cash ?? account.cash), WalletCards, ''],
+            ['累计收益', `${Number(account.return_pct ?? 0) >= 0 ? '+' : ''}${Number(account.return_pct ?? 0).toFixed(2)}%`, Gauge, returnClass(account.return_pct)],
+            ['当前回撤', Number(account.drawdown_pct ?? 0) > 0 ? `-${Number(account.drawdown_pct).toFixed(2)}%` : '0.00%', ShieldAlert, Number(account.drawdown_pct ?? 0) > 0 ? 'text-bear' : ''],
+          ].map(([label, value, Icon, tone], index) => <div key={String(label)} className={`px-4 py-3 ${index < 3 ? 'border-r border-border max-lg:odd:border-r' : ''} max-lg:border-b`}><div className="flex items-center gap-1.5 text-[10px] text-muted"><Icon className="h-3.5 w-3.5" />{label as string}</div><div className={`mt-1.5 font-mono text-[16px] tabular-nums ${tone as string}`}>{value as string}</div></div>)}
         </section>
 
-        <section className="grid grid-cols-[minmax(0,1fr)_260px] border-b border-border max-lg:grid-cols-1">
+        <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
           <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart account={account} /></div>
-          <div className="p-3 text-[11px]">
-            <div className="mb-3 font-medium">行情状态</div>
-            <div className="space-y-2 text-muted">
-              <div className="flex items-center justify-between gap-2"><span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />最后行情</span><span className="truncate font-mono text-[10px] text-foreground">{formatTime(account.last_quote ?? account.last_bar ?? status?.last_quote_at ?? undefined)}</span></div>
-              <div className="flex items-center justify-between"><span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />轮询耗时</span><span className="font-mono text-foreground">{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span></div>
-              <div className="flex items-center justify-between"><span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />WebSocket</span><span className="text-foreground">{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span></div>
-              <div className="flex items-center justify-between" title="策略当前监听的标的数量，由每个策略独立维护"><span className="inline-flex items-center gap-1.5"><Radio className="h-3.5 w-3.5" />当前订阅池</span><span className="font-mono text-foreground">{account.universe?.length ?? 0}</span></div>
-            </div>
-          </div>
+          <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} /></div>
+        </section>
+
+        <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
+          <span className={`inline-flex items-center gap-1.5 ${syncClass(account)}`}><Activity className="h-3.5 w-3.5" />{syncLabel(account)}</span>
+          <span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />已处理至 <span className="font-mono text-foreground">{formatTime(account.sync?.through ?? account.last_quote ?? account.last_bar)}</span></span>
+          {account.sync?.phase === 'catching_up' ? <span className="font-mono text-warning">目标 {formatTime(account.sync.target ?? undefined)}</span> : null}
+          {account.market_mode === 'poll_3s' ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span> : null}
+          {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span> : null}
+          <button type="button" onClick={() => setShowUniverse(true)} title="查看该策略独立维护的订阅标的" className="inline-flex items-center gap-1.5 text-muted hover:text-foreground"><Radio className="h-3.5 w-3.5" />当前订阅池 <span className="font-mono text-foreground">{account.universe?.length ?? 0}</span></button>
         </section>
 
         <div className="flex border-b border-border px-3 pt-2">
-          {([['positions', '持仓', WalletCards], ['signals', '信号', Activity], ['orders', '委托', ListOrdered], ['fills', '成交', Gauge], ['logs', '日志', FileText]] as const).map(([value, label, Icon]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
+          {([['positions', '持仓', WalletCards, positions.length], ['signals', '信号', Activity, signalEvents.length], ['orders', '委托', ListOrdered, orders.length], ['fills', '成交', Gauge, fills.length], ['logs', '日志', FileText, logEvents.length]] as const).map(([value, label, Icon, count]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}<span className="font-mono text-[9px] opacity-70">{count}</span></button>)}
         </div>
         <section className="min-h-56 overflow-x-auto p-3">
           {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{Number(snapshot?.avg_cost?.[symbol] ?? 0).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{MONEY.format(quantity * Number(snapshot?.avg_cost?.[symbol] ?? 0))}</td></tr>)}</tbody></table> : null}
           {tab === 'signals' ? <EventRows rows={signalEvents} symbolNames={symbolNames} /> : null}
-          {tab === 'orders' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 font-medium">状态</th><th className="px-2 py-2 font-medium">原因</th></tr></thead><tbody>{orders.slice().reverse().map(order => <tr key={order.id} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(order.submitted_at)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(order.symbol)}</td><td className="px-2 py-2.5">{order.side}</td><td className="px-2 py-2.5 text-right font-mono">{order.quantity ?? '—'}</td><td className="px-2 py-2.5">{order.status}</td><td className="px-2 py-2.5 text-muted">{order.reason || '—'}</td></tr>)}</tbody></table> : null}
-          {tab === 'fills' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">价格</th><th className="px-2 py-2 text-right font-medium">费用</th></tr></thead><tbody>{fills.slice().reverse().map((fill, index) => <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(fill.timestamp)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(fill.symbol)}</td><td className="px-2 py-2.5">{fill.side}</td><td className="px-2 py-2.5 text-right font-mono">{fill.quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{fill.price.toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{fill.fee.toFixed(2)}</td></tr>)}</tbody></table> : null}
+          {tab === 'orders' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 font-medium">状态</th><th className="px-2 py-2 font-medium">原因</th></tr></thead><tbody>{orders.slice().reverse().map(order => <tr key={order.id} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(order.submitted_at)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(order.symbol)}</td><td className={`px-2 py-2.5 ${order.side === 'buy' ? 'text-bull' : 'text-bear'}`}>{order.side === 'buy' ? '买入' : '卖出'}</td><td className="px-2 py-2.5 text-right font-mono">{order.quantity ?? '—'}</td><td className="px-2 py-2.5">{order.status}</td><td className="px-2 py-2.5 text-muted">{order.reason || '—'}</td></tr>)}</tbody></table> : null}
+          {tab === 'fills' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">价格</th><th className="px-2 py-2 text-right font-medium">费用</th></tr></thead><tbody>{fills.slice().reverse().map((fill, index) => <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(fill.timestamp)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(fill.symbol)}</td><td className={`px-2 py-2.5 ${fill.side === 'buy' ? 'text-bull' : 'text-bear'}`}>{fill.side === 'buy' ? '买入' : '卖出'}</td><td className="px-2 py-2.5 text-right font-mono">{fill.quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{fill.price.toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{fill.fee.toFixed(2)}</td></tr>)}</tbody></table> : null}
           {tab === 'logs' ? <EventRows rows={logEvents} symbolNames={symbolNames} /> : null}
           {((tab === 'positions' && !positions.length) || (tab === 'signals' && !signalEvents.length) || (tab === 'orders' && !orders.length) || (tab === 'fills' && !fills.length) || (tab === 'logs' && !logEvents.length)) ? <div className="py-12 text-center text-xs text-muted">暂无记录</div> : null}
         </section>
       </main>}
     </div>
     {showCreate ? <CreateAccountDialog strategyId={searchParams.get('strategy_id') ?? ''} onClose={() => { setShowCreate(false); setSearchParams({}) }} onCreated={created => { setShowCreate(false); setSearchParams({}); setSelectedId(created.id); void accountsQuery.refetch() }} /> : null}
+    {renameTarget ? <RenameAccountDialog account={renameTarget} onClose={() => setRenameTarget(null)} onSaved={() => Promise.all([accountsQuery.refetch(), detailQuery.refetch()])} /> : null}
+    {showUniverse && account ? <UniverseDialog account={account} instrumentLabel={instrumentLabel} onClose={() => setShowUniverse(false)} /> : null}
     {deleteTarget ? <Modal labelledBy="delete-paper-title" onClose={() => setDeleteTarget(null)} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl"><div className="p-4"><h2 id="delete-paper-title" className="text-sm font-semibold">删除「{deleteTarget.name}」？</h2><div className="mt-2 text-xs text-muted">账户 checkpoint 与事件流水将被删除。</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setDeleteTarget(null)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted">取消</button><button type="button" disabled={pendingAction === 'delete'} onClick={() => void remove()} className="rounded-btn bg-danger px-3 py-1.5 text-xs font-medium text-white">确认删除</button></div></div></Modal> : null}
   </div>
 }

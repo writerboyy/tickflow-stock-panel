@@ -27,6 +27,8 @@ class FakeContext:
         self.extra_history_requirements = set()
         self.extra_rows = {}
         self.market_rows = {}
+        self.signals = []
+        self.market_batch_calls = 0
 
     def set_universe(self, symbols) -> None:
         self.universe = list(symbols)
@@ -48,6 +50,13 @@ class FakeContext:
 
     def market_history_bars(self, symbol: str, count: int = 20, timeframe: str | None = None):
         return list(self.market_rows.get(symbol, []))[-count:]
+
+    def market_history_batch(self, symbols, count: int = 20, timeframe: str | None = None):
+        self.market_batch_calls += 1
+        return {symbol: list(self.market_rows.get(symbol, []))[-count:] for symbol in symbols}
+
+    def emit_signal(self, signal_type: str, payload: dict, *, event_id: str | None = None):
+        self.signals.append({"id": event_id, "signal_type": signal_type, **payload})
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.logs.append((level, message))
@@ -373,6 +382,24 @@ def test_limit_up_holding_is_not_sold_or_replaced(monkeypatch):
     five._buy_targets(context)
 
     assert context.orders == []
+    assert context.signals[-1]["decision"] == "rebalance"
+
+
+def test_no_trade_decision_is_emitted_as_structured_signal(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 28, 13, 10)
+    monkeypatch.setattr(five, "_rank_candidates", lambda _context: [])
+    monkeypatch.setattr(five, "_candidate_pool", lambda *_args: [])
+    monkeypatch.setattr(five, "_choose_targets", lambda *_args: [])
+
+    five._prepare_and_sell(context)
+
+    signal = context.signals[-1]
+    assert signal["id"] == "five_fortunes:2026-07-28:decision"
+    assert signal["signal_type"] == "daily_decision"
+    assert signal["decision"] == "empty"
+    assert signal["target_symbols"] == []
+    assert signal["reason"]
 
 
 def test_four_consecutive_filter_fail_days_force_defensive(monkeypatch):

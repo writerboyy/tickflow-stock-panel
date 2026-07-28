@@ -205,15 +205,35 @@ class PaperRiskWrite(BaseModel):
 
 
 class PaperWrite(BacktestWrite):
-    name: str = "量化策略模拟账户"
+    name: str = Field(default="量化策略 · 模拟", min_length=1, max_length=40)
     market_mode: Literal["bar_1m", "bar_1d", "poll_3s", "websocket"] | None = None
     risk_config: PaperRiskWrite = Field(default_factory=PaperRiskWrite)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: Any) -> str:
+        name = str(value).strip()
+        if not name:
+            raise ValueError("模拟名称不能为空")
+        return name
 
     @model_validator(mode="after")
     def normalize_market_mode(self):
         self.market_mode = self.market_mode or ("bar_1m" if self.timeframe == "1m" else "bar_1d")
         self.timeframe = "1m" if self.market_mode in {"bar_1m", "poll_3s", "websocket"} else "1d"
         return self
+
+
+class PaperRenameWrite(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def normalize_name(cls, value: Any) -> str:
+        name = str(value).strip()
+        if not name:
+            raise ValueError("模拟名称不能为空")
+        return name
 
 
 def _validate_payload(req: BacktestWrite, request: Request) -> None:
@@ -672,6 +692,16 @@ def create_paper_account(req: PaperWrite, request: Request):
         "risk_status": {"daily_loss_locked": False, "drawdown_locked": False, "reason": None},
         "notification_channels": preferences.get_webhook_default_channels(),
         "status": "stopped",
+        "sync": {
+            "phase": "idle",
+            "from": None,
+            "target": None,
+            "through": None,
+            "processed_days": 0,
+            "total_days": 0,
+            "missing_symbols": [],
+            "updated_at": now_iso(),
+        },
         "config": payload,
         "cash": req.initial_capital,
         "equity": req.initial_capital,
@@ -719,6 +749,28 @@ def get_paper_account(account_id: str, request: Request):
     result["account"] = account
     result["events"] = store.events(account_id)
     return result
+
+
+@router.patch("/paper/accounts/{account_id}")
+def rename_paper_account(account_id: str, req: PaperRenameWrite, request: Request):
+    store = _paper_store(request)
+    try:
+        state = store.get(account_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="模拟账户不存在") from None
+    previous = str(state.get("name") or "")
+    state["name"] = req.name
+    config = dict(state.get("config", {}))
+    config["name"] = req.name
+    state["config"] = config
+    saved = store.save(state)
+    if previous != req.name:
+        store.append_event(account_id, {
+            "type": "renamed",
+            "previous_name": previous,
+            "name": req.name,
+        })
+    return _public_paper_state(saved)
 
 
 @router.delete("/paper/accounts/{account_id}")

@@ -33,6 +33,17 @@ WUFU_DYNAMIC_POOL_EXCLUSIONS = {"159814.SZ"}
 CANDIDATE_SCORE_RATIO = 0.9
 ETF_PRICE_TICK = 0.001
 MOMENTUM_SCORE_MAX = 5.0
+DECISION_REASON_LABELS = {
+    "ranked_target": "选择综合排名最高的候选标的",
+    "no_candidate_defensive": "无合格候选，切换防御标的",
+    "anti_churn_hold": "排名变化未满足连续确认，继续持有",
+    "regime_change_hold": "市场状态刚切换，暂不调仓",
+    "low_correlation_switch": "候选标的与当前持仓相关性较低，执行切换",
+    "high_correlation_hold": "候选标的与当前持仓高度相关，继续持有",
+    "high_pair_overlay": "高相关组合保护生效，继续持有",
+    "correlation_hold_guard": "相关性换仓保护生效，继续持有",
+    "four_day_filter_fail_defensive": "连续四个交易日未通过筛选，切换防御标的",
+}
 WUFU_GROUP_NAME_OVERRIDES = {
     "161226.SZ": "国投白银LOF",
     "513000.SH": "225ETF",
@@ -231,6 +242,24 @@ def _history_rows(context, symbol: str, count: int) -> list[dict[str, Any]]:
     bars = market_history(symbol, count=count, timeframe="1d") if callable(market_history) else []
     if not bars:
         bars = context.history_bars(symbol, count=count, timeframe="1d")
+    return _bars_to_history_rows(bars)
+
+
+def _history_rows_batch(context, symbols: list[str], count: int) -> dict[str, list[dict[str, Any]]]:
+    loader = getattr(context, "market_history_batch", None)
+    if not callable(loader):
+        return {symbol: _history_rows(context, symbol, count) for symbol in symbols}
+    history = loader(symbols, count=count, timeframe="1d")
+    return {
+        symbol: _bars_to_history_rows(
+            history.get(symbol)
+            or context.history_bars(symbol, count=count, timeframe="1d")
+        )
+        for symbol in symbols
+    }
+
+
+def _bars_to_history_rows(bars) -> list[dict[str, Any]]:
     if not bars:
         return []
 
@@ -271,10 +300,15 @@ def _history_rows(context, symbol: str, count: int) -> list[dict[str, Any]]:
 def _refresh_liquidity_pools(context) -> None:
     state = _state(context)
     amount_by_symbol: dict[str, float] = {}
-    market_days = [row["date"] for row in _history_rows(context, LIQUIDITY_CALENDAR_SYMBOL, 3)]
+    history = _history_rows_batch(
+        context,
+        list(dict.fromkeys([LIQUIDITY_CALENDAR_SYMBOL, *state["market_symbols"]])),
+        5,
+    )
+    market_days = [row["date"] for row in history.get(LIQUIDITY_CALENDAR_SYMBOL, [])[-3:]]
     total_by_date = {day: 0.0 for day in market_days}
     for symbol in state["market_symbols"]:
-        rows = [row for row in _history_rows(context, symbol, 5) if row["date"] in total_by_date]
+        rows = [row for row in history.get(symbol, []) if row["date"] in total_by_date]
         if not rows:
             continue
         amount_by_symbol[symbol] = sum(float(row["amount"]) for row in rows) / 3
@@ -340,8 +374,9 @@ def before_trading_start(context) -> None:
     if not state["daily"]:
         loaded = 0
         ready = 0
+        history = _history_rows_batch(context, context.universe, 61)
         for symbol in context.universe:
-            rows = _history_rows(context, symbol, 61)
+            rows = history.get(symbol, [])
             if not rows:
                 continue
             state["daily"][symbol] = rows
@@ -536,6 +571,31 @@ def _prepare_and_sell(context) -> None:
     for symbol in held:
         if symbol not in targets and _can_trade(state, symbol):
             context.order_target_percent(symbol, 0.0)
+    reason_code = str(state["decision"].get("reason") or "ranked_target")
+    decision_type = (
+        "empty" if not targets and not held
+        else "hold" if targets == held
+        else "rebalance"
+    )
+    context.emit_signal(
+        "daily_decision",
+        {
+            "strategy": "five_fortunes",
+            "trading_date": day,
+            "decision": decision_type,
+            "regime": state["regime"],
+            "raw_regime": state.get("raw_regime"),
+            "target_symbols": list(targets),
+            "holding_symbols": list(held),
+            "candidates": [
+                {"symbol": row["symbol"], "score": row.get("score")}
+                for row in candidate_rows[:10]
+            ],
+            "reason_code": reason_code,
+            "reason": DECISION_REASON_LABELS.get(reason_code, reason_code),
+        },
+        event_id=f"five_fortunes:{day}:decision",
+    )
     context.log(
         f"五福 13:10：状态={state['regime']}，过筛={len(filtered_rows)}，候选={len(candidate_rows)}，"
         f"目标={','.join(targets) or '空仓'}，卖出={','.join(symbol for symbol in held if symbol not in targets) or '无'}"

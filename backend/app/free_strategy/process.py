@@ -359,6 +359,8 @@ def _read_rows(
     require_all_symbols: bool = True,
     allow_empty: bool = False,
     market_data: MarketData | None = None,
+    after: datetime | None = None,
+    until: datetime | None = None,
 ) -> Iterable[Bar]:
     if timeframe == "1d":
         if market_data is not None:
@@ -377,7 +379,12 @@ def _read_rows(
         if not rows:
             raise ValueError("没有可用的日K数据，请先同步历史行情")
         return rows
-    frame = repo.get_minute_range(symbols, start, end, asset_type)
+    window = {}
+    if after is not None:
+        window["after"] = after
+    if until is not None:
+        window["until"] = until
+    frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
     if not frame.is_empty():
         frame = frame.drop_nulls(["open", "high", "low", "close"])
     if frame.is_empty():

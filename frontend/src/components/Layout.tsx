@@ -74,7 +74,7 @@ const nav = [
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/free-strategy', label: '量化策略', icon: Code2 },
-  { to: '/paper-trading', label: '模拟盘', icon: WalletCards },
+  { to: '/paper-trading', label: '模拟', icon: WalletCards },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
