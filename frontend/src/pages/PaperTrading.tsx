@@ -17,7 +17,6 @@ import {
   Trash2,
   WalletCards,
   Wifi,
-  X,
 } from 'lucide-react'
 import type { EChartsOption } from 'echarts'
 import { api, type CreatePaperAccount, type PaperAccount, type PaperEvent, type PaperFill, type PaperMarketMode, type PaperOrder } from '@/lib/api'
@@ -44,6 +43,7 @@ const MODE_LABEL: Record<string, string> = {
 }
 
 type DetailTab = 'positions' | 'decisions' | 'trades' | 'logs'
+type EquityPoint = NonNullable<PaperAccount['account']>['equity_curve'][number]
 
 const DEFAULT_RISK = {
   max_symbol_exposure_pct: 1,
@@ -142,9 +142,8 @@ function orderStatusClass(status: string) {
   return 'text-muted'
 }
 
-function ReturnChart({ account }: { account: PaperAccount }) {
+function ReturnChart({ rows }: { rows: EquityPoint[] }) {
   const theme = useChartTheme()
-  const rows = useMemo(() => account.account?.equity_curve ?? [], [account.account?.equity_curve])
   const option = useMemo<EChartsOption | null>(() => {
     if (!rows.length) return null
     const returns = rows.map(row => (Number(row.nav) - 1) * 100)
@@ -186,7 +185,7 @@ function ReturnChart({ account }: { account: PaperAccount }) {
 }
 
 function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instrumentLabel: (symbol: unknown) => string }) {
-  if (!event) return <div className="grid min-h-52 place-items-center px-5 text-center text-xs text-muted">等待首个结构化策略决策</div>
+  if (!event) return <div className="grid min-h-52 place-items-center px-5 text-center text-xs text-muted">当日暂无策略决策</div>
   const decisionLabel = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
   const decisionTone = event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
   const targets = event.target_symbols ?? []
@@ -329,7 +328,7 @@ export function PaperTrading() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [selectedId, setSelectedId] = useState('')
   const [tab, setTab] = useState<DetailTab>('positions')
-  const [decisionDate, setDecisionDate] = useState('')
+  const [selectedDate, setSelectedDate] = useState('')
   const [showCreate, setShowCreate] = useState(searchParams.get('create') === '1')
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
@@ -372,7 +371,7 @@ export function PaperTrading() {
   }, [accounts, selectedId])
 
   useEffect(() => {
-    setDecisionDate('')
+    setSelectedDate('')
   }, [selectedId])
 
   useEffect(() => {
@@ -424,17 +423,29 @@ export function PaperTrading() {
     }
   }
 
-  const snapshot = account?.account
-  const positions = Object.entries(snapshot?.positions ?? account?.positions ?? {}).filter(([, quantity]) => quantity > 0)
-  const fills = snapshot?.fills ?? []
-  const orders = snapshot?.orders ?? []
+  const accountState = account?.account
+  const equityRows = accountState?.equity_curve ?? []
+  const availableDates = [...new Set(equityRows.map(row => row.timestamp.slice(0, 10)))].sort()
+  const latestDate = availableDates.at(-1) ?? ''
+  const activeDate = availableDates.includes(selectedDate) ? selectedDate : latestDate
+  const selectedSnapshot = equityRows.filter(row => row.timestamp.slice(0, 10) === activeDate).at(-1)
+  const visibleEquityRows = activeDate ? equityRows.filter(row => row.timestamp.slice(0, 10) <= activeDate) : equityRows
+  const isLatestDate = activeDate === latestDate
+  const positions = Object.entries(selectedSnapshot?.positions ?? (isLatestDate ? account?.positions : {}) ?? {}).filter(([, quantity]) => quantity > 0)
+  const fills = (accountState?.fills ?? []).filter(fill => fill.timestamp.slice(0, 10) === activeDate)
+  const orders = (accountState?.orders ?? []).filter(order => order.submitted_at.slice(0, 10) === activeDate)
   const decisionEvents = signalsQuery.data?.signals ?? []
-  const decisionDates = decisionEvents.map(eventTradingDate).filter(Boolean).sort()
-  const visibleDecisionEvents = decisionDate
-    ? decisionEvents.filter(event => eventTradingDate(event) === decisionDate)
-    : decisionEvents
-  const latestDecision = decisionEvents.find(event => event.signal_type === 'daily_decision')
-  const logEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
+  const visibleDecisionEvents = decisionEvents.filter(event => eventTradingDate(event) === activeDate)
+  const latestDecision = visibleDecisionEvents.find(event => event.signal_type === 'daily_decision')
+  const logEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type) && eventTradingDate(event) === activeDate)
+  const selectedReturn = selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : Number(account?.return_pct ?? 0)
+  const selectedDrawdown = Number(selectedSnapshot?.drawdown_pct ?? account?.drawdown_pct ?? 0)
+  const selectTradingDate = (value: string) => {
+    const resolved = availableDates.includes(value)
+      ? value
+      : availableDates.filter(date => date <= value).at(-1) ?? availableDates[0] ?? ''
+    setSelectedDate(resolved)
+  }
   const status = statusQuery.data
 
   return <div className="flex h-full min-h-0 flex-col max-md:fixed max-md:inset-0 max-md:z-[10000] max-md:bg-base">
@@ -452,12 +463,15 @@ export function PaperTrading() {
       {!account ? <EmptyState icon={WalletCards} title="选择或创建模拟账户" /> : <main className="min-h-0 overflow-y-auto">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
           <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{syncLabel(account) ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
-          <div className="flex items-center gap-1">
-            <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
-            <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
-            <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Square className="h-4 w-4" /></button>
-            <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>
-            <button type="button" title={account.status === 'stopped' ? '删除' : '请先停止账户'} disabled={Boolean(pendingAction) || account.status !== 'stopped'} onClick={() => setDeleteTarget(account)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Trash2 className="h-4 w-4" /></button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <DatePicker value={activeDate} onChange={selectTradingDate} min={availableDates[0]} max={latestDate} align="right" />
+            <div className="flex items-center gap-1">
+              <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
+              <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
+              <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Square className="h-4 w-4" /></button>
+              <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>
+              <button type="button" title={account.status === 'stopped' ? '删除' : '请先停止账户'} disabled={Boolean(pendingAction) || account.status !== 'stopped'} onClick={() => setDeleteTarget(account)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Trash2 className="h-4 w-4" /></button>
+            </div>
           </div>
         </div>
 
@@ -466,15 +480,15 @@ export function PaperTrading() {
 
         <section className="grid grid-cols-4 border-b border-border max-lg:grid-cols-2">
           {[
-            ['总资产', MONEY.format(account.equity ?? snapshot?.cash ?? account.cash), Activity, ''],
-            ['可用现金', MONEY.format(snapshot?.cash ?? account.cash), WalletCards, ''],
-            ['累计收益', `${Number(account.return_pct ?? 0) >= 0 ? '+' : ''}${Number(account.return_pct ?? 0).toFixed(2)}%`, Gauge, returnClass(account.return_pct)],
-            ['当前回撤', Number(account.drawdown_pct ?? 0) > 0 ? `-${Number(account.drawdown_pct).toFixed(2)}%` : '0.00%', ShieldAlert, Number(account.drawdown_pct ?? 0) > 0 ? 'text-bear' : ''],
+            ['总资产', MONEY.format(selectedSnapshot?.equity ?? account.equity ?? account.cash), Activity, ''],
+            ['可用现金', MONEY.format(selectedSnapshot?.cash ?? account.cash), WalletCards, ''],
+            ['累计收益', `${selectedReturn >= 0 ? '+' : ''}${selectedReturn.toFixed(2)}%`, Gauge, returnClass(selectedReturn)],
+            ['当前回撤', selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%', ShieldAlert, selectedDrawdown > 0 ? 'text-bear' : ''],
           ].map(([label, value, Icon, tone], index) => <div key={String(label)} className={`px-4 py-3 ${index < 3 ? 'border-r border-border max-lg:odd:border-r' : ''} max-lg:border-b`}><div className="flex items-center gap-1.5 text-[10px] text-muted"><Icon className="h-3.5 w-3.5" />{label as string}</div><div className={`mt-1.5 font-mono text-[16px] tabular-nums ${tone as string}`}>{value as string}</div></div>)}
         </section>
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
-          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart account={account} /></div>
+          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart rows={visibleEquityRows} /></div>
           <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} /></div>
         </section>
 
@@ -486,20 +500,13 @@ export function PaperTrading() {
         </section> : null}
 
         <div className="flex border-b border-border px-3 pt-2">
-          {([['positions', '持仓', WalletCards, positions.length], ['decisions', '决策', Activity, decisionEvents.length], ['trades', '交易', ListOrdered, orders.length], ['logs', '日志', FileText, logEvents.length]] as const).map(([value, label, Icon, count]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}<span className="font-mono text-[9px] opacity-70">{count}</span></button>)}
+          {([['positions', '持仓', WalletCards, positions.length], ['decisions', '决策', Activity, visibleDecisionEvents.length], ['trades', '交易', ListOrdered, orders.length], ['logs', '日志', FileText, logEvents.length]] as const).map(([value, label, Icon, count]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}<span className="font-mono text-[9px] opacity-70">{count}</span></button>)}
         </div>
         <section className="min-h-56 overflow-x-auto p-3">
-          {tab === 'decisions' ? <div className="mb-3 flex flex-wrap items-end justify-between gap-2 border-b border-border px-2 pb-3">
-            <div>
-              <label className="mb-1 block text-[10px] text-muted">交易日</label>
-              <div className="flex items-center gap-1.5">
-                <DatePicker value={decisionDate} onChange={setDecisionDate} min={decisionDates[0]} max={decisionDates.at(-1)} placeholder="全部日期" align="left" />
-                {decisionDate ? <button type="button" title="查看全部日期" aria-label="查看全部日期" onClick={() => setDecisionDate('')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:text-foreground"><X className="h-3.5 w-3.5" /></button> : null}
-              </div>
-            </div>
-            <span className="text-[10px] text-muted">{decisionDate ? `${decisionDate} · ${visibleDecisionEvents.length} 条` : `全部 ${decisionEvents.length} 条`}</span>
-          </div> : null}
-          {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{Number(snapshot?.avg_cost?.[symbol] ?? 0).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{MONEY.format(quantity * Number(snapshot?.avg_cost?.[symbol] ?? 0))}</td></tr>)}</tbody></table> : null}
+          {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => {
+            const averageCost = isLatestDate ? accountState?.avg_cost?.[symbol] : undefined
+            return <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{averageCost == null ? '—' : Number(averageCost).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{averageCost == null ? '—' : MONEY.format(quantity * Number(averageCost))}</td></tr>
+          })}</tbody></table> : null}
           {tab === 'decisions' ? <EventRows rows={visibleDecisionEvents} symbolNames={symbolNames} /> : null}
           {tab === 'trades' ? <TradeTable orders={orders} fills={fills} instrumentLabel={instrumentLabel} /> : null}
           {tab === 'logs' ? <EventRows rows={logEvents} symbolNames={symbolNames} /> : null}
