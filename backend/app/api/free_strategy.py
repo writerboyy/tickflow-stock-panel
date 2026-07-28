@@ -24,8 +24,8 @@ from app.free_strategy.process import start_process
 from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
 from app.free_strategy.templates import (
-    LEGACY_FIVE_FORTUNES_SHA256,
     LEGACY_FIVE_FORTUNES_SOURCE,
+    MANAGED_FIVE_FORTUNES_SHA256,
     TEMPLATES,
 )
 from app.services import preferences
@@ -81,8 +81,35 @@ def cleanup_incomplete_backtests(data_dir: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+_LEGACY_FIVE_FORTUNES_CONFIG = {
+    "timeframe": "1m",
+    "asset_type": "etf",
+    "initial_capital": 1_000_000,
+    "fees_pct": 0.0002,
+    "commission_pct": None,
+    "min_commission": 0,
+    "stamp_tax_pct": 0.001,
+    "slippage_bps": 5,
+    "price_tick": None,
+    "lot_size": 100,
+    "max_exposure_pct": 1,
+    "settlement": "t1",
+    "fill_policy": "next_open",
+    "benchmark_symbol": "510300.SH",
+}
+
+
+def _migrate_five_fortunes_config(config: dict[str, Any]) -> dict[str, Any]:
+    if any(
+        key in config and config[key] != value
+        for key, value in _LEGACY_FIVE_FORTUNES_CONFIG.items()
+    ):
+        return config
+    return {**config, **TEMPLATES["five_fortunes"]["config"]}
+
+
 def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
-    """Replace untouched import wrappers with complete, reproducible source snapshots."""
+    """Upgrade untouched managed Five Fortunes snapshots and legacy defaults."""
     store = FreeStrategyStore(data_dir)
     migrated = []
     replacement = TEMPLATES["five_fortunes"]["source"]
@@ -91,14 +118,14 @@ def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
         source = str(strategy["source"])
         if (
             source != LEGACY_FIVE_FORTUNES_SOURCE
-            and sha256(source.encode("utf-8")).hexdigest() != LEGACY_FIVE_FORTUNES_SHA256
+            and sha256(source.encode("utf-8")).hexdigest() not in MANAGED_FIVE_FORTUNES_SHA256
         ):
             continue
         store.save(
             strategy["id"],
             strategy["name"],
             replacement,
-            strategy.get("config", {}),
+            _migrate_five_fortunes_config(strategy.get("config", {})),
         )
         migrated.append(str(strategy["id"]))
     return migrated

@@ -92,10 +92,55 @@ def test_legacy_five_fortunes_strategy_is_migrated_once(tmp_path):
     assert repeated == []
     assert loaded["revision"] == 2
     assert loaded["source"] == TEMPLATES["five_fortunes"]["source"]
+    assert loaded["config"] == TEMPLATES["five_fortunes"]["config"]
     assert (
         tmp_path / "free_strategies" / legacy["id"] / "revisions" / "0001.py"
     ).read_text(encoding="utf-8") == LEGACY_FIVE_FORTUNES_SOURCE
     assert store.get(customized["id"])["revision"] == 1
+
+
+def test_managed_five_fortunes_snapshot_migrates_only_legacy_default_config(monkeypatch, tmp_path):
+    source = "# managed five fortunes snapshot\n"
+    monkeypatch.setattr(
+        free_strategy,
+        "MANAGED_FIVE_FORTUNES_SHA256",
+        frozenset({sha256(source.encode("utf-8")).hexdigest()}),
+    )
+    store = FreeStrategyStore(tmp_path)
+    legacy = store.save(None, "旧五福", source, {
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "start": "2025-07-24",
+        "end": "2026-07-24",
+        "initial_capital": 1_000_000,
+        "fees_pct": 0.0002,
+        "commission_pct": None,
+        "stamp_tax_pct": 0.001,
+        "slippage_bps": 5,
+        "lot_size": 100,
+        "max_exposure_pct": 1,
+        "settlement": "t1",
+        "fill_policy": "next_open",
+        "benchmark_symbol": "510300.SH",
+    })
+    customized = store.save(None, "改过参数的五福", source, {
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "initial_capital": 500_000,
+    })
+
+    migrated = migrate_legacy_five_fortunes_strategies(tmp_path)
+
+    assert set(migrated) == {legacy["id"], customized["id"]}
+    migrated_config = store.get(legacy["id"])["config"]
+    assert migrated_config["start"] == "2025-07-24"
+    assert migrated_config["end"] == "2026-07-24"
+    assert migrated_config["initial_capital"] == 100_000
+    assert migrated_config["commission_pct"] == 0.0001
+    assert migrated_config["slippage_bps"] == 0.5
+    assert migrated_config["price_tick"] == 0.001
+    assert migrated_config["fill_policy"] == "close"
+    assert store.get(customized["id"])["config"]["initial_capital"] == 500_000
 
 
 def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeypatch, tmp_path):

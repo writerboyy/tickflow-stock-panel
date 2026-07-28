@@ -21,6 +21,13 @@ def initialize(context):
 '''
 
 LEGACY_FIVE_FORTUNES_SHA256 = "622c46f2ffcb0919de6cf7e986caa9f95da6cabe3e985721829a5f3d9d2a0022"
+MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
+    LEGACY_FIVE_FORTUNES_SHA256,
+    "6804de0afc67510410d8ae7c149d3278fb3890cbe606148788e5b6f7fb4c27fa",
+    "a281121c543f923f7bccbe4869821ee114f8cfc4f3093631fc6a4af22a946d38",
+    "ea7370773f12ed6e19fc707c0065271557aa9c64a4f9db208206838a3894f99a",
+    "098dd281478b43527ecf706f2f140a19b21f4e7b9e2c6744d8120fcf64279380",
+})
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 
 

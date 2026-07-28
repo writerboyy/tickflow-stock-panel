@@ -114,6 +114,8 @@ def test_historical_etf_names_preserve_original_dynamic_groups():
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["520500.SH"]) == "香港组:药"
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588020.SH"]) is None
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588790.SH"]) is None
+    assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["516080.SH"]) == "普通组:创医"
+    assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["589680.SH"]) == "科创组:综Z"
     assert five._dynamic_group("恒生创新药ETF华泰柏瑞") == "香港组:创药"
     assert five._dynamic_group("港股红利ETF") == "香港组:红利"
     assert five._dynamic_group("科创芯片ETF南方") == "科创组:芯片"
@@ -315,18 +317,18 @@ def test_weak_regime_noop_defensive_action_keeps_peak_equity():
     assert state["risk_actions"] == []
 
 
-def test_drawdown_clear_action_does_not_reenter_on_same_day():
-    context = initialized_context(equity=91.0)
+def test_drawdown_clear_action_can_enter_a_different_target_same_day():
+    context = initialized_context()
     context.now = datetime(2026, 7, 20, 13, 11)
     state = context.state["five_fortunes"]
     state["risk_action_date"] = context.now.date().isoformat()
-    state["risk_mode"] = "defensive"
-    state["target"] = [five.DEFENSIVE_ETF]
-    state["intraday"]["raw_close"][five.DEFENSIVE_ETF] = 100.0
+    state["rebuy_cooldown"]["SOLD"] = 3
+    state["target"] = ["NEW"]
+    state["intraday"]["raw_close"]["NEW"] = 1.0
 
     five._buy_targets(context)
 
-    assert context.orders == []
+    assert context.orders == [("quantity", "NEW", 999_800)]
 
 
 def test_buy_targets_reserves_reference_commission_and_slippage():

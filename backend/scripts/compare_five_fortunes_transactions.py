@@ -39,12 +39,18 @@ def _displayed(actual: Any, expected: Decimal) -> Decimal:
     return Decimal(str(actual)).quantize(quantum, rounding=ROUND_HALF_UP)
 
 
-def read_expected(path: Path) -> list[ExpectedFill]:
+def _read_reference_text(path: Path) -> str:
+    if path.suffix.lower() == ".csv":
+        return path.read_text(encoding="gb18030")
     with zipfile.ZipFile(path) as archive:
         names = [name for name in archive.namelist() if name.lower().endswith(".csv")]
         if len(names) != 1:
             raise ValueError(f"成交压缩包必须且只能包含一个 CSV，实际为 {len(names)} 个")
-        text = archive.read(names[0]).decode("gb18030")
+        return archive.read(names[0]).decode("gb18030")
+
+
+def read_expected(path: Path) -> list[ExpectedFill]:
+    text = _read_reference_text(path)
     result = []
     for row in csv.DictReader(io.StringIO(text)):
         match = _SYMBOL_PATTERN.search(row["标的"])
@@ -94,7 +100,7 @@ def compare(result_path: Path, reference_path: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("result", type=Path, help="TickFlow result.json")
-    parser.add_argument("reference", type=Path, help="聚宽 transaction.zip")
+    parser.add_argument("reference", type=Path, help="聚宽 transaction.zip 或 transaction.csv")
     parser.add_argument("--max-differences", type=int, default=30)
     args = parser.parse_args()
     differences = compare(args.result, args.reference)

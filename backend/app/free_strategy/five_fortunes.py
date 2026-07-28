@@ -39,6 +39,7 @@ WUFU_GROUP_NAME_OVERRIDES = {
     "513350.SH": "油气ETF",
     "515030.SH": "新汽车",
     "516190.SH": "文娱ETF",
+    "516080.SH": "创新医药",
     "520500.SH": "恒生新药",
     "561100.SH": "电子龙头",
     "561980.SH": "芯片设备",
@@ -49,6 +50,7 @@ WUFU_GROUP_NAME_OVERRIDES = {
     "588830.SH": "科创新能",
     "588890.SH": "科创芯",
     "588990.SH": "科芯片",
+    "589680.SH": "科创综Z",
     "589720.SH": "科创新药",
     "589800.SH": "科创综合",
 }
@@ -197,7 +199,6 @@ def initialize(context) -> None:
         "market_instrument_count": len(market_symbols),
         "rank_streak": {},
         "rebuy_cooldown": {},
-        "risk_mode": None,
         "position_scale": 1.0,
         "peak_equity": context.portfolio.total_value,
         "risk_action_date": None,
@@ -368,7 +369,6 @@ def before_trading_start(context) -> None:
         "suspended": {},
         "tradable": {},
     }
-    state["risk_mode"] = None
     state["position_scale"] = 1.0
     state["regime_changed_today"] = False
     state["decision"] = {"date": context.now.date().isoformat(), "reason": "pending"}
@@ -544,10 +544,6 @@ def _prepare_and_sell(context) -> None:
 
 def _buy_targets(context) -> None:
     state = _state(context)
-    day = context.now.date().isoformat()
-    if state.get("risk_action_date") == day and state.get("risk_mode") in {"flat", "defensive"}:
-        context.log("五福 13:11：组合回撤清仓当日不再开仓")
-        return
     targets = state.get("target", [])
     if not targets:
         return
@@ -600,8 +596,6 @@ def _risk_monitor(context) -> None:
     sellable = [symbol for symbol in held if _can_trade(state, symbol)]
     if drawdown >= flat_threshold and sellable:
         action = "flat"
-        state["risk_mode"] = "flat"
-        state["target"] = []
         for symbol in sellable:
             context.order_target_percent(symbol, 0.0)
             state["rebuy_cooldown"][symbol] = max(3, int(state["rebuy_cooldown"].get(symbol, 0)))
@@ -610,8 +604,6 @@ def _risk_monitor(context) -> None:
         sell_symbols = [symbol for symbol in sellable if symbol != DEFENSIVE_ETF]
         if sell_symbols:
             action = "defensive"
-            state["risk_mode"] = "defensive"
-            state["target"] = [DEFENSIVE_ETF]
             for symbol in sell_symbols:
                 context.order_target_percent(symbol, 0.0)
                 state["rebuy_cooldown"][symbol] = max(3, int(state["rebuy_cooldown"].get(symbol, 0)))
@@ -809,12 +801,6 @@ def _choose_targets(
 ) -> list[str]:
     state = _state(context)
     state["decision"].setdefault("reason", "ranked_target")
-    if state.get("risk_mode") == "flat":
-        state["decision"]["reason"] = "drawdown_flat"
-        return []
-    if state.get("risk_mode") == "defensive":
-        state["decision"]["reason"] = "drawdown_defensive"
-        return [DEFENSIVE_ETF]
     if not rows:
         state["decision"]["reason"] = "no_candidate_defensive"
         return [DEFENSIVE_ETF] if _has_price(state, DEFENSIVE_ETF) else []
