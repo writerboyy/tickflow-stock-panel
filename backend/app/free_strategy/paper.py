@@ -653,9 +653,19 @@ def _append_engine_events(
     before_risk: dict[str, Any],
     notify: Any = None,
 ) -> None:
+    fills_by_order = {
+        fill.order_id: fill
+        for fill in engine.account.fills
+    }
     for order in engine.account.orders[before_orders:]:
         event_type = "rejected" if order.status == "rejected" else "order"
-        event = {"type": event_type, **asdict(order)}
+        fill = fills_by_order.get(order.id)
+        event = {
+            "type": event_type,
+            "timestamp": order.submitted_at,
+            **asdict(order),
+            "executed_side": fill.side if fill is not None else None,
+        }
         if store.append_event_once(account_id, event) and notify is not None:
             notify(event)
     for fill in engine.account.fills[before_fills:]:

@@ -1046,6 +1046,7 @@ export interface PaperOrder {
   id: string
   symbol: string
   side: string
+  executed_side?: 'buy' | 'sell' | null
   quantity?: number | null
   value?: number | null
   submitted_at: string
@@ -1071,6 +1072,8 @@ export interface PaperEvent {
   type: string
   symbol?: string
   side?: string
+  executed_side?: 'buy' | 'sell' | null
+  submitted_at?: string
   status?: string
   reason?: string
   message?: string

@@ -3,13 +3,20 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
 from app.free_strategy.bars import Bar
-from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
-from app.free_strategy.paper import MarketDataHub, PaperTradingSupervisor, _catch_up_bars, _equity_snapshot
+from app.free_strategy.engine import Fill, FreeStrategyConfig, FreeStrategyEngine, Order, Quote, RiskConfig
+from app.free_strategy.paper import (
+    MarketDataHub,
+    PaperTradingSupervisor,
+    _append_engine_events,
+    _catch_up_bars,
+    _equity_snapshot,
+)
 from app.free_strategy.store import PaperAccountStore
 from app.services.quote_service import QuoteService
 
@@ -410,6 +417,49 @@ def test_paper_event_id_is_appended_once(tmp_path):
     assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is True
     assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is False
     assert [row["id"] for row in store.events("paper")] == ["decision:2026-07-28"]
+
+
+def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "stopped"})
+    order = Order(
+        id="o1",
+        symbol="159920.SZ",
+        side="target",
+        target_quantity=100,
+        submitted_at="2026-07-28T13:11:00",
+        status="filled",
+    )
+    fill = Fill(
+        order_id="o1",
+        symbol="159920.SZ",
+        side="buy",
+        quantity=100,
+        price=1.49,
+        value=149,
+        fee=0.01,
+        timestamp="2026-07-28T13:11:00",
+    )
+    engine = SimpleNamespace(
+        account=SimpleNamespace(orders=[order], fills=[fill]),
+        logs=[],
+        risk_status={},
+        drain_signals=lambda: [],
+    )
+
+    _append_engine_events(
+        store,
+        "paper",
+        engine,
+        before_orders=0,
+        before_fills=0,
+        before_logs=0,
+        before_risk={},
+    )
+
+    event = next(row for row in store.events("paper") if row["type"] == "order")
+    assert event["timestamp"] == "2026-07-28T13:11:00"
+    assert event["executed_side"] == "buy"
 
 
 def test_up_to_date_restart_preserves_live_sync_state(monkeypatch, tmp_path):

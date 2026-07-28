@@ -56,6 +56,23 @@ def _public_paper_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _paper_account_view(account: dict[str, Any]) -> dict[str, Any]:
+    result = dict(account)
+    fills_by_order = {
+        str(fill.get("order_id")): fill
+        for fill in account.get("fills", [])
+        if fill.get("order_id")
+    }
+    result["orders"] = [
+        {
+            **order,
+            "executed_side": fills_by_order.get(str(order.get("id")), {}).get("side"),
+        }
+        for order in account.get("orders", [])
+    ]
+    return result
+
+
 def _legacy_paper_curve(state: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     initial = float(state.get("config", {}).get("initial_capital") or 1)
     peak = initial
@@ -746,7 +763,7 @@ def get_paper_account(account_id: str, request: Request):
     if not curve and account.get("equity_curve"):
         curve = _legacy_paper_curve(state, account["equity_curve"])
     account["equity_curve"] = curve
-    result["account"] = account
+    result["account"] = _paper_account_view(account)
     result["events"] = store.events(account_id)
     return result
 
@@ -876,7 +893,7 @@ def paper_orders(account_id: str, request: Request):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
     account = state.get("account") or state.get("checkpoint", {}).get("account", {})
-    return {"orders": account.get("orders", [])}
+    return {"orders": _paper_account_view(account)["orders"]}
 
 
 @router.get("/paper/accounts/{account_id}/fills")

@@ -463,7 +463,10 @@ def test_paper_orders_and_fills_are_separate(tmp_path):
     store.save({
         "id": "paper-1",
         "status": "paused",
-        "account": {"orders": [{"id": "o1", "status": "filled"}]},
+        "account": {
+            "orders": [{"id": "o1", "status": "filled"}],
+            "fills": [{"order_id": "o1", "side": "buy"}],
+        },
     })
     store.append_event("paper-1", {"type": "fill", "order_id": "o1", "symbol": "510300.SH"})
 
@@ -473,7 +476,7 @@ def test_paper_orders_and_fills_are_separate(tmp_path):
     client = TestClient(app)
 
     assert client.get("/api/free-strategies/paper/accounts/paper-1/orders").json() == {
-        "orders": [{"id": "o1", "status": "filled"}],
+        "orders": [{"id": "o1", "status": "filled", "executed_side": "buy"}],
     }
     fills = client.get("/api/free-strategies/paper/accounts/paper-1/fills").json()["fills"]
     assert fills[0]["type"] == "fill"
