@@ -40,7 +40,14 @@ def save(updates: dict) -> dict:
 
 
 def get_realtime_quotes_enabled() -> bool:
-    return load().get("realtime_quotes_enabled", False)
+    data = load()
+    if "realtime_quotes_enabled" in data:
+        return bool(data["realtime_quotes_enabled"])
+    try:
+        from app.services.quote_service import QuoteService
+        return QuoteService.is_realtime_allowed()
+    except Exception:
+        return False
 
 
 def get_indices_nav_pinned() -> bool:

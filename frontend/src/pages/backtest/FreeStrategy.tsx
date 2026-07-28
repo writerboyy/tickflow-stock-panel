@@ -458,7 +458,7 @@ export function FreeStrategy() {
           {runs.map(runItem => {
             const metadata = runItem.metadata ?? {}
             const returnPct = Number(runItem.return_pct ?? 0)
-            return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${selectedRunId === runItem.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
+            return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${!running && selectedRunId === runItem.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
               <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{runItem.name}</span><span className={`shrink-0 tabular-nums ${returnPct >= 0 ? 'text-success' : 'text-danger'}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
               <div className="mt-1.5 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}{executionModeLabel(metadata.execution_mode) ? ` · ${executionModeLabel(metadata.execution_mode)}` : ''}</div>
               <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{runItem.job_id}</span><span className="shrink-0">回撤 {Number(runItem.max_drawdown_pct ?? 0).toFixed(2)}% · {runItem.fills} 成交</span></div>
