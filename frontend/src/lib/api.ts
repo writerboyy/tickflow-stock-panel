@@ -1049,6 +1049,9 @@ export interface PaperOrder {
   executed_side?: 'buy' | 'sell' | null
   quantity?: number | null
   value?: number | null
+  target_quantity?: number | null
+  target_value?: number | null
+  target_percent?: number | null
   submitted_at: string
   status: string
   reason?: string
