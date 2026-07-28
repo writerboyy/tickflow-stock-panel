@@ -3,6 +3,9 @@ import type { EChartsOption } from 'echarts'
 import { useChartTheme } from '@/lib/theme'
 import { useECharts } from './useECharts'
 
+const BULL_COLOR = '#f04438'
+const BEAR_COLOR = '#12b76a'
+
 export interface FiveFortunesDailyReport {
   date: string
   regime: string
@@ -73,8 +76,8 @@ export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFort
         { name: '过滤后', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: reports.map(report => report.filtered_count ?? 0), symbol: 'none', lineStyle: { color: '#2563eb', width: 1.4 }, itemStyle: { color: '#2563eb' } },
         { name: '候选', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: reports.map(report => report.candidate_count ?? report.candidates.length), symbol: 'none', lineStyle: { color: '#7c3aed', width: 1.2 }, itemStyle: { color: '#7c3aed' } },
         { name: '流动性池', type: 'line', xAxisIndex: 1, yAxisIndex: 1, data: reports.map(report => report.liquidity_pool_count ?? 0), symbol: 'none', lineStyle: { color: '#64748b', width: 1, type: 'dashed' }, itemStyle: { color: '#64748b' } },
-        { name: '买入', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, stack: 'trade', data: dates.map(day => trades.get(day)?.buy ?? 0), itemStyle: { color: '#16a34a' }, barMaxWidth: 8 },
-        { name: '卖出', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, stack: 'trade', data: dates.map(day => -(trades.get(day)?.sell ?? 0)), itemStyle: { color: '#dc2626' }, barMaxWidth: 8 },
+        { name: '买入', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, stack: 'trade', data: dates.map(day => trades.get(day)?.buy ?? 0), itemStyle: { color: BULL_COLOR }, barMaxWidth: 8 },
+        { name: '卖出', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, stack: 'trade', data: dates.map(day => -(trades.get(day)?.sell ?? 0)), itemStyle: { color: BEAR_COLOR }, barMaxWidth: 8 },
       ],
     } as any
   }, [ct, fills, reports])
@@ -86,7 +89,7 @@ export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFort
       <span className="inline-flex items-center gap-1"><i className="h-2 w-2 bg-amber-600" />震荡期</span>
       <span className="inline-flex items-center gap-1"><i className="h-2 w-2 bg-red-600" />走弱期</span>
       <span className="text-blue-600">过滤后</span><span className="text-violet-600">候选</span><span>流动性池</span>
-      <span className="text-success">买入</span><span className="text-danger">卖出</span>
+      <span className="text-bull">买入</span><span className="text-bear">卖出</span>
     </div>
     <div ref={chartRef} className="h-[300px] sm:h-[340px]" />
   </div>

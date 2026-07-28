@@ -593,6 +593,10 @@ export function Layout() {
                 </button>
               </div>
               <button
+                type="button"
+                role="switch"
+                aria-checked={realtimeEnabled}
+                aria-label="实时行情"
                 onClick={() => handleToggle(!realtimeEnabled)}
                 disabled={toggleQuote.isPending || isPaused}
                 title={isPaused ? '数据同步运行中，实时行情已临时暂停' : undefined}

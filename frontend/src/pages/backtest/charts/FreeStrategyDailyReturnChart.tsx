@@ -4,6 +4,9 @@ import type { FreeBacktestResult } from '@/lib/api'
 import { useChartTheme } from '@/lib/theme'
 import { useECharts } from './useECharts'
 
+const BULL_COLOR = '#f04438'
+const BEAR_COLOR = '#12b76a'
+
 export function FreeStrategyDailyReturnChart({ result }: { result: FreeBacktestResult }) {
   const ct = useChartTheme()
   const option = useMemo<EChartsOption | null>(() => {
@@ -37,7 +40,7 @@ export function FreeStrategyDailyReturnChart({ result }: { result: FreeBacktestR
         },
       },
       series: [
-        { name: '策略日收益', type: 'bar', data: rows.map(row => row.daily_return_pct ?? 0), itemStyle: { color: '#2563eb' }, barMaxWidth: 8 },
+        { name: '策略日收益', type: 'bar', data: rows.map(row => row.daily_return_pct ?? 0), itemStyle: { color: (params: any) => Number(params.value) >= 0 ? BULL_COLOR : BEAR_COLOR }, barMaxWidth: 8 },
         { name: '基准日收益', type: 'line', data: rows.map(row => row.benchmark_daily_return_pct), symbol: 'none', lineStyle: { color: '#64748b', width: 1.1, type: 'dashed' }, itemStyle: { color: '#64748b' } },
         { name: '超额日收益', type: 'line', data: rows.map(row => row.excess_daily_return_pct), symbol: 'none', lineStyle: { color: '#0f766e', width: 1.4 }, itemStyle: { color: '#0f766e' }, markLine: { silent: true, symbol: 'none', label: { show: false }, lineStyle: { color: ct.border, width: 1 }, data: [{ yAxis: 0 }] } },
       ],
@@ -47,7 +50,7 @@ export function FreeStrategyDailyReturnChart({ result }: { result: FreeBacktestR
 
   return <div>
     <div className="flex flex-wrap items-center gap-3 px-1 pb-2 text-[10px] text-muted">
-      <span className="inline-flex items-center gap-1"><i className="h-2 w-2 bg-blue-600" />策略日收益</span>
+      <span className="inline-flex items-center gap-1"><span className="flex h-2 w-2 overflow-hidden"><i className="h-2 w-1 bg-bull" /><i className="h-2 w-1 bg-bear" /></span>策略日收益</span>
       <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 border-t border-dashed border-slate-500" />基准日收益</span>
       <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-teal-700" />超额日收益</span>
     </div>

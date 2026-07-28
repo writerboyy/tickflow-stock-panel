@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Activity, CalendarDays, ChartNoAxesCombined, ClipboardList, ScrollText } from 'lucide-react'
 import type { FreeBacktestResult } from '@/lib/api'
+import { priceColorClass } from '@/lib/format'
 import { FiveFortunesProcessChart, type FiveFortunesDailyReport } from './charts/FiveFortunesProcessChart'
 import { FreeStrategyDailyReturnChart } from './charts/FreeStrategyDailyReturnChart'
 import { FreeStrategyPerformanceChart } from './charts/FreeStrategyPerformanceChart'
@@ -73,11 +74,23 @@ function statusTone(value: unknown) {
 }
 
 function sideTone(value: unknown) {
-  return value === 'buy' ? 'text-success' : value === 'sell' ? 'text-danger' : 'text-foreground'
+  return value === 'buy' ? 'text-bull' : value === 'sell' ? 'text-bear' : 'text-foreground'
 }
 
-function Metric({ label, value, tone }: { label: string; value: string; tone?: 'positive' | 'negative' }) {
-  const color = tone === 'positive' ? 'text-success' : tone === 'negative' ? 'text-danger' : 'text-foreground'
+function orderIntent(row: Record<string, any>) {
+  const requestedSide = row.requested_side ?? row.side
+  if (requestedSide === 'target') {
+    if (typeof row.target_percent === 'number') return `目标仓位 ${percent(row.target_percent * 100)}`
+    if (typeof row.target_quantity === 'number') return `目标数量 ${number(row.target_quantity, 0)} 股`
+    if (typeof row.target_value === 'number') return `目标市值 ${number(row.target_value, 2)}`
+  }
+  if (typeof row.quantity === 'number') return `${side(requestedSide)} ${number(row.quantity, 0)} 股`
+  if (typeof row.value === 'number') return `按金额${side(requestedSide)} ${number(row.value, 2)}`
+  return side(requestedSide)
+}
+
+function Metric({ label, value, colorValue }: { label: string; value: string; colorValue?: number }) {
+  const color = colorValue == null ? 'text-foreground' : priceColorClass(colorValue)
   return <div className="min-w-0 border-b border-border px-3 py-3 sm:border-r"><div className="text-[10px] text-muted">{label}</div><div className={`mt-1 truncate text-sm font-semibold tabular-nums ${color}`}>{value}</div></div>
 }
 
@@ -93,12 +106,12 @@ function PerformanceView({ result }: { result: FreeBacktestResult }) {
   return <div>
     <div className="grid grid-cols-2 border-l border-t border-border md:grid-cols-4 xl:grid-cols-6">
       <Metric label="期末资产" value={number(result.final_equity)} />
-      <Metric label="累计收益" value={percent(result.return_pct)} tone={result.return_pct >= 0 ? 'positive' : 'negative'} />
-      <Metric label="年化收益" value={percent(performance.annual_return_pct)} />
-      <Metric label="基准收益" value={percent(performance.benchmark_return_pct)} />
-      <Metric label="超额收益" value={percent(performance.excess_return_pct)} />
-      <Metric label="最大回撤" value={percent(result.max_drawdown_pct)} tone="negative" />
-      <Metric label="Alpha" value={percent(performance.alpha_pct)} />
+      <Metric label="累计收益" value={percent(result.return_pct)} colorValue={result.return_pct} />
+      <Metric label="年化收益" value={percent(performance.annual_return_pct)} colorValue={Number(performance.annual_return_pct)} />
+      <Metric label="基准收益" value={percent(performance.benchmark_return_pct)} colorValue={Number(performance.benchmark_return_pct)} />
+      <Metric label="超额收益" value={percent(performance.excess_return_pct)} colorValue={Number(performance.excess_return_pct)} />
+      <Metric label="最大回撤" value={percent(result.max_drawdown_pct)} colorValue={-Math.abs(result.max_drawdown_pct)} />
+      <Metric label="Alpha" value={percent(performance.alpha_pct)} colorValue={Number(performance.alpha_pct)} />
       <Metric label="Beta" value={number(performance.beta, 3)} />
       <Metric label="Sharpe" value={number(performance.sharpe_ratio, 3)} />
       <Metric label="Sortino" value={number(performance.sortino_ratio, 3)} />
@@ -132,7 +145,7 @@ function OrdersView({ result }: { result: FreeBacktestResult }) {
           </div>
           <div className="mt-2 flex min-w-0 items-center justify-between gap-3 text-[11px]">
             <span className="truncate font-mono text-xs font-medium">{String(row.symbol ?? '—')}</span>
-            <span className="shrink-0 text-muted">{side(row.requested_side ?? row.side)} <span className="px-1">→</span> <span className={sideTone(row.executed_side)}>{side(row.executed_side)}</span></span>
+            <span className="shrink-0 text-muted">{orderIntent(row)} <span className="px-1">→</span> <span className={sideTone(row.executed_side)}>{side(row.executed_side)}</span></span>
           </div>
           <dl className="mt-2 grid grid-cols-3 gap-2 text-[10px]">
             <div><dt className="text-muted">成交数量</dt><dd className="mt-0.5 tabular-nums">{number(row.filled_quantity, 0)}</dd></div>
@@ -142,7 +155,7 @@ function OrdersView({ result }: { result: FreeBacktestResult }) {
           {row.reason ? <div className="mt-2 break-words text-[10px] text-danger">{String(row.reason)}</div> : null}
         </article>)}
       </div>
-      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[980px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">提交时间</th><th>标的</th><th>委托</th><th>成交方向</th><th>成交数量</th><th>均价</th><th>费用</th><th>状态</th><th>原因</th></tr></thead><tbody>{transactions.map((row, index) => <tr key={String(row.transaction_id ?? row.id ?? index)} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(row.submitted_at)}</td><td className="font-mono">{String(row.symbol ?? '')}</td><td>{side(row.requested_side ?? row.side)}</td><td className={sideTone(row.executed_side)}>{side(row.executed_side)}</td><td className="tabular-nums">{number(row.filled_quantity, 0)}</td><td className="tabular-nums">{number(row.average_fill_price, 4)}</td><td className="tabular-nums">{number(row.fee, 2)}</td><td><span className={statusTone(row.status)}>{status(row.status)}</span></td><td className="max-w-64 truncate" title={String(row.reason ?? '')}>{String(row.reason || '—')}</td></tr>)}</tbody></table></TableWrap></div>
+      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[980px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">提交时间</th><th>标的</th><th>委托意图</th><th>成交方向</th><th>成交数量</th><th>均价</th><th>费用</th><th>状态</th><th>原因</th></tr></thead><tbody>{transactions.map((row, index) => <tr key={String(row.transaction_id ?? row.id ?? index)} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(row.submitted_at)}</td><td className="font-mono">{String(row.symbol ?? '')}</td><td className="whitespace-nowrap">{orderIntent(row)}</td><td className={sideTone(row.executed_side)}>{side(row.executed_side)}</td><td className="tabular-nums">{number(row.filled_quantity, 0)}</td><td className="tabular-nums">{number(row.average_fill_price, 4)}</td><td className="tabular-nums">{number(row.fee, 2)}</td><td><span className={statusTone(row.status)}>{status(row.status)}</span></td><td className="max-w-64 truncate" title={String(row.reason ?? '')}>{String(row.reason || '—')}</td></tr>)}</tbody></table></TableWrap></div>
     </div>
     <div>
       <div className="mb-2 text-xs font-medium">成交与归因 <span className="font-normal text-muted">{result.fills.length}</span></div>
@@ -158,19 +171,19 @@ function OrdersView({ result }: { result: FreeBacktestResult }) {
             <div><dt className="text-muted">价格</dt><dd className="mt-0.5 tabular-nums">{number(fill.price, 4)}</dd></div>
             <div><dt className="text-muted">成交额</dt><dd className="mt-0.5 tabular-nums">{number(fill.value, 2)}</dd></div>
             <div><dt className="text-muted">费用</dt><dd className="mt-0.5 tabular-nums">{number(fill.fee, 2)}</dd></div>
-            <div><dt className="text-muted">已实现盈亏</dt><dd className={`mt-0.5 tabular-nums ${pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : ''}`}>{number(pnl, 2)}</dd></div>
-            <div><dt className="text-muted">收益率</dt><dd className="mt-0.5 tabular-nums">{percent(attribution?.realized_return_pct)}</dd></div>
+            <div><dt className="text-muted">已实现盈亏</dt><dd className={`mt-0.5 tabular-nums ${priceColorClass(pnl)}`}>{number(pnl, 2)}</dd></div>
+            <div><dt className="text-muted">收益率</dt><dd className={`mt-0.5 tabular-nums ${priceColorClass(attribution?.realized_return_pct)}`}>{percent(attribution?.realized_return_pct)}</dd></div>
           </dl>
         </article> })}
       </div>
-      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[860px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">成交时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>成交额</th><th>费用</th><th>已实现盈亏</th><th>收益率</th></tr></thead><tbody>{result.fills.map((fill, index) => { const attribution = result.attribution?.[index]; const pnl = Number(attribution?.realized_pnl ?? 0); return <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(fill.timestamp)}</td><td className="font-mono">{fill.symbol}</td><td className={sideTone(fill.side)}>{side(fill.side)}</td><td>{number(fill.quantity, 0)}</td><td>{number(fill.price, 4)}</td><td>{number(fill.value, 2)}</td><td>{number(fill.fee, 2)}</td><td className={pnl > 0 ? 'text-success' : pnl < 0 ? 'text-danger' : ''}>{number(pnl, 2)}</td><td>{percent(attribution?.realized_return_pct)}</td></tr> })}</tbody></table></TableWrap></div>
+      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[860px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">成交时间</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>成交额</th><th>费用</th><th>已实现盈亏</th><th>收益率</th></tr></thead><tbody>{result.fills.map((fill, index) => { const attribution = result.attribution?.[index]; const pnl = Number(attribution?.realized_pnl ?? 0); return <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="whitespace-nowrap py-2">{dateTime(fill.timestamp)}</td><td className="font-mono">{fill.symbol}</td><td className={sideTone(fill.side)}>{side(fill.side)}</td><td>{number(fill.quantity, 0)}</td><td>{number(fill.price, 4)}</td><td>{number(fill.value, 2)}</td><td>{number(fill.fee, 2)}</td><td className={priceColorClass(pnl)}>{number(pnl, 2)}</td><td className={priceColorClass(attribution?.realized_return_pct)}>{percent(attribution?.realized_return_pct)}</td></tr> })}</tbody></table></TableWrap></div>
     </div>
   </div>
 }
 
 function DailyView({ result }: { result: FreeBacktestResult }) {
   const rows = result.daily_equity_curve ?? []
-  return <div className="space-y-4"><div className="border-b border-border pb-3"><FreeStrategyDailyReturnChart result={result} /></div><TableWrap><table className="w-full min-w-[1040px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>总资产</th><th>现金</th><th>仓位</th><th>日收益</th><th>基准日收益</th><th>超额</th><th>回撤</th><th>持仓</th></tr></thead><tbody>{rows.map(row => <tr key={row.date} className="border-t border-border"><td className="whitespace-nowrap py-2">{row.date}</td><td>{number(row.equity)}</td><td>{number(row.cash)}</td><td>{percent(row.exposure_pct, 1)}</td><td>{percent(row.daily_return_pct)}</td><td>{percent(row.benchmark_daily_return_pct)}</td><td>{percent(row.excess_daily_return_pct)}</td><td className="text-danger">{percent(row.drawdown_pct)}</td><td className="max-w-96 font-mono text-[10px]">{Object.entries(row.positions).filter(([, quantity]) => quantity > 0).map(([symbol, quantity]) => `${symbol} ${number(quantity, 0)}`).join(' · ') || '空仓'}</td></tr>)}</tbody></table></TableWrap></div>
+  return <div className="space-y-4"><div className="border-b border-border pb-3"><FreeStrategyDailyReturnChart result={result} /></div><TableWrap><table className="w-full min-w-[1040px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>总资产</th><th>现金</th><th>仓位</th><th>日收益</th><th>基准日收益</th><th>超额</th><th>回撤</th><th>持仓</th></tr></thead><tbody>{rows.map(row => <tr key={row.date} className="border-t border-border"><td className="whitespace-nowrap py-2">{row.date}</td><td>{number(row.equity)}</td><td>{number(row.cash)}</td><td>{percent(row.exposure_pct, 1)}</td><td className={priceColorClass(row.daily_return_pct)}>{percent(row.daily_return_pct)}</td><td className={priceColorClass(row.benchmark_daily_return_pct)}>{percent(row.benchmark_daily_return_pct)}</td><td className={priceColorClass(row.excess_daily_return_pct)}>{percent(row.excess_daily_return_pct)}</td><td className={priceColorClass(-Math.abs(row.drawdown_pct))}>{percent(row.drawdown_pct)}</td><td className="max-w-96 font-mono text-[10px]">{Object.entries(row.positions).filter(([, quantity]) => quantity > 0).map(([symbol, quantity]) => `${symbol} ${number(quantity, 0)}`).join(' · ') || '空仓'}</td></tr>)}</tbody></table></TableWrap></div>
 }
 
 function DecisionsView({ reports, fills }: { reports: FiveFortunesDailyReport[]; fills: Record<string, any>[] }) {
@@ -185,7 +198,7 @@ function DecisionsView({ reports, fills }: { reports: FiveFortunesDailyReport[];
     }
     return byDay
   }, [fills])
-  return <div className="space-y-4"><div className="border-b border-border pb-3"><FiveFortunesProcessChart reports={reports} fills={fills} /></div><TableWrap><table className="w-full min-w-[1360px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>状态</th><th>决策</th><th>目标持仓</th><th>实际持仓</th><th>实际成交</th><th>候选</th><th>过滤</th><th>流动性池</th><th>风控</th></tr></thead><tbody>{reports.map(report => { const trades = activity.get(report.date) ?? { buy: 0, sell: 0 }; return <tr key={report.date} className="border-t border-border align-top"><td className="whitespace-nowrap py-2">{report.date}</td><td><div>{report.regime}</div>{report.raw_regime && report.raw_regime !== report.regime ? <div className="text-[10px] text-muted">原始 {report.raw_regime}</div> : null}</td><td>{DECISION_LABELS[report.decision?.reason ?? ''] ?? report.decision?.reason ?? '—'}</td><td className="font-mono">{report.target.join(', ') || '空仓'}</td><td className="font-mono">{report.holdings?.join(', ') || '空仓'}</td><td className="whitespace-nowrap"><span className="text-success">买 {trades.buy}</span><span className="ml-2 text-danger">卖 {trades.sell}</span></td><td className="max-w-80"><div>{report.candidate_count ?? report.candidates.length} 个</div><div className="mt-1 text-[10px] text-muted">{report.candidates.map(item => `${item.symbol}${item.score == null ? '' : ` ${number(item.score, 2)}`}`).join(' · ') || '—'}</div></td><td className="max-w-64 text-[10px]">{Object.entries(report.filter_rejections ?? {}).map(([key, count]) => `${key} ${count}`).join(' · ') || '—'}</td><td>{report.liquidity_pool_count ?? '—'}</td><td>{report.risk_action ? `${report.risk_action.action ?? ''} ${percent(Number(report.risk_action.drawdown ?? 0) * 100)}` : '—'}</td></tr> })}</tbody></table></TableWrap></div>
+  return <div className="space-y-4"><div className="border-b border-border pb-3"><FiveFortunesProcessChart reports={reports} fills={fills} /></div><TableWrap><table className="w-full min-w-[1360px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>状态</th><th>决策</th><th>目标持仓</th><th>实际持仓</th><th>实际成交</th><th>候选</th><th>过滤</th><th>流动性池</th><th>风控</th></tr></thead><tbody>{reports.map(report => { const trades = activity.get(report.date) ?? { buy: 0, sell: 0 }; return <tr key={report.date} className="border-t border-border align-top"><td className="whitespace-nowrap py-2">{report.date}</td><td><div>{report.regime}</div>{report.raw_regime && report.raw_regime !== report.regime ? <div className="text-[10px] text-muted">原始 {report.raw_regime}</div> : null}</td><td>{DECISION_LABELS[report.decision?.reason ?? ''] ?? report.decision?.reason ?? '—'}</td><td className="font-mono">{report.target.join(', ') || '空仓'}</td><td className="font-mono">{report.holdings?.join(', ') || '空仓'}</td><td className="whitespace-nowrap"><span className="text-bull">买 {trades.buy}</span><span className="ml-2 text-bear">卖 {trades.sell}</span></td><td className="max-w-80"><div>{report.candidate_count ?? report.candidates.length} 个</div><div className="mt-1 text-[10px] text-muted">{report.candidates.map(item => `${item.symbol}${item.score == null ? '' : ` ${number(item.score, 2)}`}`).join(' · ') || '—'}</div></td><td className="max-w-64 text-[10px]">{Object.entries(report.filter_rejections ?? {}).map(([key, count]) => `${key} ${count}`).join(' · ') || '—'}</td><td>{report.liquidity_pool_count ?? '—'}</td><td>{report.risk_action ? `${report.risk_action.action ?? ''} ${percent(Number(report.risk_action.drawdown ?? 0) * 100)}` : '—'}</td></tr> })}</tbody></table></TableWrap></div>
 }
 
 function LogsView({ result }: { result: FreeBacktestResult }) {

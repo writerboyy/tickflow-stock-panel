@@ -4,6 +4,9 @@ import { useECharts } from './useECharts'
 import type { FreeBacktestResult } from '@/lib/api'
 import { useChartTheme } from '@/lib/theme'
 
+const BULL_COLOR = '#f04438'
+const BEAR_COLOR = '#12b76a'
+
 export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestResult }) {
   const ct = useChartTheme()
   const option = useMemo<EChartsOption | null>(() => {
@@ -23,7 +26,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
         name: fill.side === 'buy' ? '买入' : '卖出',
         coord: [date, value],
         value: fill.symbol,
-        itemStyle: { color: fill.side === 'buy' ? '#16a34a' : '#dc2626' },
+        itemStyle: { color: fill.side === 'buy' ? BULL_COLOR : BEAR_COLOR },
       })
       return marks
     }, [])
@@ -69,7 +72,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
         ...(hasBenchmark ? [{ name: result.benchmark_symbol ?? '基准', type: 'line', data: benchmark, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#64748b', width: 1.2, type: 'dashed' }, itemStyle: { color: '#64748b' } }] : []),
         ...(hasExcess ? [{ name: '超额净值', type: 'line', data: excess, symbol: 'none', yAxisIndex: 0, lineStyle: { color: '#0f766e', width: 1.4 }, itemStyle: { color: '#0f766e' } }] : []),
         { name: '仓位', type: 'line', data: exposure, symbol: 'none', yAxisIndex: 1, lineStyle: { color: '#d97706', width: 1.1 }, itemStyle: { color: '#d97706' }, areaStyle: { color: 'rgba(217,119,6,0.08)' } },
-        { name: '回撤', type: 'line', data: drawdown, xAxisIndex: 1, yAxisIndex: 2, symbol: 'none', lineStyle: { color: '#dc2626', width: 1 }, itemStyle: { color: '#dc2626' }, areaStyle: { color: 'rgba(220,38,38,0.12)' } },
+        { name: '回撤', type: 'line', data: drawdown, xAxisIndex: 1, yAxisIndex: 2, symbol: 'none', lineStyle: { color: BEAR_COLOR, width: 1 }, itemStyle: { color: BEAR_COLOR }, areaStyle: { color: 'rgba(18,183,106,0.12)' } },
       ],
     } as any
   }, [ct, result])
@@ -82,7 +85,7 @@ export function FreeStrategyPerformanceChart({ result }: { result: FreeBacktestR
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 border-t border-dashed border-slate-500" />基准</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-teal-700" />超额净值</span>
         <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-amber-600" />仓位</span>
-        <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-red-600" />回撤</span>
+        <span className="inline-flex items-center gap-1"><i className="h-0.5 w-3 bg-bear" />回撤</span>
       </div>
       <div ref={chartRef} className="h-[330px]" />
     </div>
