@@ -138,7 +138,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("wecom_bot_service init failed: %s", e)
 
-    # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
+    # 内置扩展表 (概念/行业/资金流向): 先创建 config (含拉取配置), 默认开启定时拉取。
     # 必须在 pull_scheduler.refresh() 之前执行, 否则全新部署时 scheduler 读不到
     # 刚创建的预设, 定时任务不会启动。
     try:

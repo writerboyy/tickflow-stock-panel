@@ -314,11 +314,10 @@ def list_configs(request: Request):
 
 @router.post("/presets/{config_id}/fetch")
 async def fetch_preset_data(request: Request, config_id: str):
-    """手动触发内置预设 (概念/行业) 的数据拉取。
+    """手动触发内置预设 (概念/行业/资金流向) 的数据拉取。
 
     注意: 必须在 /{config_id}/... 动态路由之前声明, 否则 'presets' 会被当成 config_id。
-    与通用 pull/run 不同: 走 ext_presets 的结构转换 (接口的 concepts/industries
-    数组 → 拼接成字符串), 保证 schema 与现有数据一致。
+    与通用 pull/run 相同: 走 ext_presets 的结构转换, 保证 schema 与现有数据一致。
     """
     from app.services.ext_presets import fetch_preset
 

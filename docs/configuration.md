@@ -75,7 +75,7 @@ LOG_LEVEL=INFO        # DEBUG | INFO | WARNING | ERROR
 DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 ```
 
-整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据。
+整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业/资金流向扩展数据,全部是程序运行时生成/拉取的用户数据。
 
 如需迁移数据,直接拷贝整个 `data/` 目录即可。详见 [deployment.md → 更新代码](./deployment.md#更新代码已部署用户必读)。
 
