@@ -14,7 +14,8 @@ from zoneinfo import ZoneInfo
 import httpx
 import polars as pl
 
-from app.services.kline_sync import _write_minute_partition
+from app.indicators.pipeline import compute_enriched
+from app.services.kline_sync import _atomic_write_parquet, _write_minute_partition
 from app.tickflow.repository import DataStore, KlineRepository
 
 
@@ -25,6 +26,9 @@ DAILY_FIELDS = [
 ]
 INTRADAY_FIELDS = [
     "instrument_id", "trade_date", "trade_time", "minute_index", "price", "volume", "prev_close",
+]
+DIVIDEND_FIELDS = [
+    "instrument_id", "dividend_date", "accumulated_dividend",
 ]
 
 
@@ -59,12 +63,12 @@ def _request(
     raise error
 
 
-def _daily_frames(
+def _daily_frame(
     symbol: str,
     rows: list[dict[str, Any]],
     start: date,
     end: date,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+) -> pl.DataFrame:
     normalized = []
     for row in rows:
         timestamp = datetime.fromisoformat(str(row["trade_time"]))
@@ -85,14 +89,70 @@ def _daily_frames(
         })
     daily = pl.DataFrame(normalized)
     if daily.is_empty():
-        return daily, daily
-    daily = daily.sort("date")
-    enriched = daily.with_columns(
-        pl.col("close").alias("raw_close"),
-        pl.col("high").alias("raw_high"),
-        pl.col("low").alias("raw_low"),
+        return daily
+    return daily.sort("date")
+
+
+def _dividend_factors(
+    symbol: str,
+    daily: pl.DataFrame,
+    dividend_rows: list[dict[str, Any]],
+    existing: pl.DataFrame,
+) -> pl.DataFrame:
+    factors = existing.filter(pl.col("symbol") == symbol) if not existing.is_empty() else existing
+    replacements: list[dict[str, Any]] = []
+    previous_accumulated = 0.0
+    for row in sorted(dividend_rows, key=lambda item: str(item["dividend_date"])):
+        day = datetime.strptime(str(row["dividend_date"]), "%Y%m%d").date()
+        accumulated = float(row["accumulated_dividend"])
+        cash_dividend = accumulated - previous_accumulated
+        previous_accumulated = accumulated
+        if cash_dividend <= 0:
+            continue
+        previous = daily.filter(pl.col("date") < day).tail(1)
+        if previous.is_empty():
+            continue
+        previous_close = float(previous["close"][0])
+        if previous_close <= cash_dividend:
+            raise ValueError(f"invalid dividend for {symbol} on {day}: {cash_dividend}")
+        split_ratio = 1.0
+        if not factors.is_empty():
+            current = factors.filter(pl.col("trade_date") == day)
+            if not current.is_empty():
+                observed = float(current["ex_factor"][0])
+                nearest = round(observed)
+                if nearest >= 2 and abs(observed - nearest) / nearest <= 0.02:
+                    split_ratio = float(nearest)
+        replacements.append({
+            "symbol": symbol,
+            "trade_date": day,
+            "ex_factor": split_ratio * previous_close / (previous_close - cash_dividend),
+        })
+    if not replacements:
+        return factors
+    replacement_frame = pl.DataFrame(replacements)
+    if factors.is_empty():
+        return replacement_frame.sort("trade_date")
+    replaced_dates = replacement_frame["trade_date"].to_list()
+    return (
+        pl.concat([factors.filter(~pl.col("trade_date").is_in(replaced_dates)), replacement_frame])
+        .sort("trade_date")
     )
-    return daily, enriched
+
+
+def _load_factors(data_dir: Path) -> pl.DataFrame:
+    path = data_dir / "adj_factor_etf" / "all.parquet"
+    return pl.read_parquet(path) if path.exists() else pl.DataFrame()
+
+
+def _save_factors(data_dir: Path, symbol: str, factors: pl.DataFrame, existing: pl.DataFrame) -> None:
+    if factors.is_empty():
+        return
+    other = existing.filter(pl.col("symbol") != symbol) if not existing.is_empty() else existing
+    merged = factors if other.is_empty() else pl.concat([other, factors])
+    path = data_dir / "adj_factor_etf" / "all.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_parquet(merged.sort(["symbol", "trade_date"]), path)
 
 
 def _minute_frame(
@@ -156,6 +216,7 @@ def import_symbol(
     axdata_url: str,
     workers: int,
     retries: int,
+    replace_minute: bool = False,
 ) -> tuple[int, int]:
     daily_rows = _request(
         axdata_url,
@@ -164,19 +225,33 @@ def import_symbol(
         DAILY_FIELDS,
         retries=retries,
     )
-    daily, enriched = _daily_frames(symbol, daily_rows, start - timedelta(days=120), end)
+    daily = _daily_frame(symbol, daily_rows, start - timedelta(days=120), end)
     if daily.is_empty():
         raise RuntimeError(f"AxData returned no daily data for {symbol}")
 
+    dividend_rows = _request(
+        axdata_url,
+        "fund_etf_dividend_sina",
+        {"symbol": symbol, "limit": 5000},
+        DIVIDEND_FIELDS,
+        retries=retries,
+    )
+    existing_factors = _load_factors(data_dir)
+    factors = _dividend_factors(symbol, daily, dividend_rows, existing_factors)
+    enriched = compute_enriched(daily, factors=factors, instruments=None)
+
     trading_dates = daily.filter(pl.col("date") >= start)["date"].to_list()
     existing_dates = _existing_minute_dates(data_dir, symbol, trading_dates)
-    missing_dates = [day for day in trading_dates if day not in existing_dates]
+    requested_dates = trading_dates if replace_minute else [
+        day for day in trading_dates if day not in existing_dates
+    ]
     logger.info(
-        "%s daily=%d, minute dates missing=%d, existing=%d",
+        "%s daily=%d, minute dates requested=%d, existing=%d, dividends=%d",
         symbol,
         daily.height,
-        len(missing_dates),
+        len(requested_dates),
         len(existing_dates),
+        len(dividend_rows),
     )
 
     intraday_by_date: dict[date, list[dict[str, Any]]] = {}
@@ -190,7 +265,7 @@ def import_symbol(
                 INTRADAY_FIELDS,
                 retries=retries,
             ): day
-            for day in missing_dates
+            for day in requested_dates
         }
         for completed, future in enumerate(as_completed(futures), start=1):
             day = futures[future]
@@ -204,6 +279,7 @@ def import_symbol(
     repo = KlineRepository(DataStore(data_dir))
     repo.append_etf_daily(daily)
     repo.append_etf_enriched(enriched)
+    _save_factors(data_dir, symbol, factors, existing_factors)
     _merge_instrument(repo, symbol, name)
 
     ratios = {
@@ -233,6 +309,11 @@ def main() -> None:
     parser.add_argument("--axdata-url", default="http://127.0.0.1:8666")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument(
+        "--replace-minute",
+        action="store_true",
+        help="Replace existing minute rows with AxData raw prices adjusted by imported dividends",
+    )
     args = parser.parse_args()
     if args.start > args.end:
         parser.error("--start must not be after --end")
@@ -249,6 +330,7 @@ def main() -> None:
         axdata_url=args.axdata_url,
         workers=args.workers,
         retries=args.retries,
+        replace_minute=args.replace_minute,
     )
     logger.info("import complete: daily=%d minute=%d", daily_count, minute_count)
 

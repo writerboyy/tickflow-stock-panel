@@ -112,6 +112,7 @@ def test_market_catalog_uses_minute_availability_instead_of_symbol_exclusions():
 
 def test_historical_etf_names_preserve_original_dynamic_groups():
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["520500.SH"]) == "香港组:药"
+    assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588020.SH"]) is None
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588790.SH"]) is None
     assert five._dynamic_group("恒生创新药ETF华泰柏瑞") == "香港组:创药"
     assert five._dynamic_group("港股红利ETF") == "香港组:红利"
@@ -199,11 +200,11 @@ def test_weighted_momentum_matches_original_r_squared_weighting():
     assert r2 == pytest.approx(0.9717552752848408)
 
 
-def test_momentum_upper_boundary_only_blocks_new_position():
+def test_momentum_entry_uses_upper_bound_only_for_stale_quote():
     context = initialized_context()
     rows = [
-        {**metric("A", 4.997, variable_prices(1)), "upper_score": 5.001},
-        {**metric("B", 4.9, variable_prices(2)), "upper_score": 4.95},
+        {**metric("A", 4.997, variable_prices(1)), "entry_score": 5.001},
+        {**metric("B", 4.9, variable_prices(2)), "entry_score": 4.95},
     ]
     state = context.state["five_fortunes"]
     state["all_metric_rows"] = rows
@@ -211,6 +212,11 @@ def test_momentum_upper_boundary_only_blocks_new_position():
     targets = five._choose_targets(context, rows, rows)
 
     assert targets == ["B"]
+
+    rows[0]["entry_score"] = rows[0]["score"]
+    targets = five._choose_targets(context, rows, rows)
+
+    assert targets == ["A"]
 
 
 def test_momentum_filter_keeps_hard_upper_bound():
@@ -262,7 +268,7 @@ def test_regime_change_day_blocks_immediate_swap():
 
 def test_weak_regime_drawdown_uses_five_percent_half_position():
     context = initialized_context(equity=94.0)
-    context.portfolio.positions = {"A": 100.0}
+    context.portfolio.positions = {"A": 218_300.0}
     state = context.state["five_fortunes"]
     state["regime"] = "走弱期"
     state["peak_equity"] = 100.0
@@ -270,8 +276,8 @@ def test_weak_regime_drawdown_uses_five_percent_half_position():
 
     five._risk_monitor(context)
 
-    assert context.orders == [("quantity", "A", 50.0)]
-    assert state["position_scale"] == 0.5
+    assert context.orders == [("quantity", "A", 109_100)]
+    assert state["position_scale"] == 1.0
     assert state["risk_actions"][-1]["action"] == "half"
     assert state["risk_actions"][-1]["thresholds"] == {
         "half": 0.05,
@@ -293,6 +299,36 @@ def test_normal_regime_does_not_reduce_position_at_six_percent_drawdown():
     assert state["risk_actions"] == []
 
 
+def test_weak_regime_noop_defensive_action_keeps_peak_equity():
+    context = initialized_context(equity=91.0)
+    context.portfolio.positions = {five.DEFENSIVE_ETF: 100.0}
+    state = context.state["five_fortunes"]
+    state["regime"] = "走弱期"
+    state["peak_equity"] = 100.0
+    context.now = datetime(2026, 7, 20, 10, 31)
+
+    five._risk_monitor(context)
+
+    assert context.orders == []
+    assert state["peak_equity"] == 100.0
+    assert state["risk_action_date"] is None
+    assert state["risk_actions"] == []
+
+
+def test_drawdown_clear_action_does_not_reenter_on_same_day():
+    context = initialized_context(equity=91.0)
+    context.now = datetime(2026, 7, 20, 13, 11)
+    state = context.state["five_fortunes"]
+    state["risk_action_date"] = context.now.date().isoformat()
+    state["risk_mode"] = "defensive"
+    state["target"] = [five.DEFENSIVE_ETF]
+    state["intraday"]["raw_close"][five.DEFENSIVE_ETF] = 100.0
+
+    five._buy_targets(context)
+
+    assert context.orders == []
+
+
 def test_buy_targets_reserves_reference_commission_and_slippage():
     context = initialized_context()
     state = context.state["five_fortunes"]
@@ -302,6 +338,39 @@ def test_buy_targets_reserves_reference_commission_and_slippage():
     five._buy_targets(context)
 
     assert context.orders == [("quantity", "A", 1_125_900)]
+
+
+def test_rebuy_cooldown_keeps_selected_target_but_filters_when_buying():
+    context = initialized_context()
+    state = context.state["five_fortunes"]
+    state["rebuy_cooldown"]["A"] = 1
+    state["intraday"]["raw_close"]["A"] = 1.0
+    rows = [metric("A", 4.0, variable_prices())]
+
+    state["target"] = five._choose_targets(context, rows, rows)
+
+    five._buy_targets(context)
+
+    assert state["target"] == ["A"]
+    assert context.orders == []
+
+
+def test_limit_up_holding_is_not_sold_or_replaced(monkeypatch):
+    context = initialized_context()
+    context.portfolio.positions = {"A": 100.0}
+    state = context.state["five_fortunes"]
+    state["intraday"]["raw_close"].update({"A": 1.1, "B": 1.0})
+    state["intraday"]["limit_up"]["A"] = 1.1
+    target = metric("B", 4.0, variable_prices())
+
+    monkeypatch.setattr(five, "_rank_candidates", lambda _context: [target])
+    monkeypatch.setattr(five, "_candidate_pool", lambda *_args: [target])
+    monkeypatch.setattr(five, "_choose_targets", lambda *_args: ["B"])
+
+    five._prepare_and_sell(context)
+    five._buy_targets(context)
+
+    assert context.orders == []
 
 
 def test_four_consecutive_filter_fail_days_force_defensive(monkeypatch):
@@ -333,10 +402,10 @@ def test_candidate_pool_uses_regime_threshold():
     assert [row["symbol"] for row in five._candidate_pool(rows, "走弱期")] == ["A"]
 
 
-def test_candidate_pool_keeps_reference_boundary_score():
-    rows = [metric("A", 4.9677263479, []), metric("B", 4.4206089384, [])]
+def test_candidate_pool_uses_reference_ninety_percent_boundary():
+    rows = [metric("A", 4.753851, []), metric("B", 4.278, [])]
 
-    assert [row["symbol"] for row in five._candidate_pool(rows, "震荡期")] == ["A", "B"]
+    assert [row["symbol"] for row in five._candidate_pool(rows, "震荡期")] == ["A"]
 
 
 def test_rank_candidate_correlation_history_excludes_current_snapshot(monkeypatch):
