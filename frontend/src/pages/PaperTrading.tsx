@@ -87,13 +87,16 @@ function EquityChart({ account }: { account: PaperAccount }) {
     },
     yAxis: {
       type: 'value', scale: true,
-      axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => value >= 10_000 ? `${(value / 10_000).toFixed(0)}万` : String(value) },
+      axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => value.toFixed(2) },
       splitLine: { lineStyle: { color: theme.grid } },
     },
-    series: [{ type: 'line', name: '总资产', data: rows.map(row => row.equity), showSymbol: false, lineStyle: { width: 1.5, color: '#3b82f6' }, areaStyle: { color: 'rgba(59,130,246,0.08)' } }],
+    series: [{ type: 'line', name: '净值', data: rows.map(row => row.nav), showSymbol: false, lineStyle: { width: 1.5, color: '#3b82f6' }, areaStyle: { color: 'rgba(59,130,246,0.08)' } }],
   }) : null, [rows, theme])
   const ref = useECharts(option, [option])
-  return rows.length ? <div ref={ref} className="h-52 w-full" /> : <div className="grid h-52 place-items-center text-xs text-muted">等待首个净值采样</div>
+  return <div className="relative h-52 w-full">
+    <div ref={ref} className="h-full w-full" />
+    {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个净值采样</div> : null}
+  </div>
 }
 
 function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: string; onClose: () => void; onCreated: (account: PaperAccount) => void }) {

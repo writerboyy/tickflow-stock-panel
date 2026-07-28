@@ -1004,13 +1004,21 @@ export interface PaperAccount {
   return_pct?: number
   drawdown_pct?: number
   positions?: Record<string, number>
+  config?: { initial_capital?: number }
   account?: {
     cash: number
     positions: Record<string, number>
     avg_cost: Record<string, number>
     orders: PaperOrder[]
     fills: PaperFill[]
-    equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
+    equity_curve: {
+      timestamp: string
+      equity: number
+      cash: number
+      nav: number
+      drawdown_pct: number
+      positions: Record<string, number>
+    }[]
   }
   risk_config: PaperRiskConfig
   risk_status?: { daily_loss_locked?: boolean; drawdown_locked?: boolean; reason?: string | null; triggered_at?: string | null }

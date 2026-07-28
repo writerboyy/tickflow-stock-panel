@@ -11,10 +11,12 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time as clock_time, timedelta
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
 from app.free_strategy.bars import Bar, rows_to_bars
+from app.free_strategy.continuation import compact_paper_checkpoint
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
 from app.free_strategy.store import PaperAccountStore, now_iso
 
@@ -404,8 +406,19 @@ class MarketDataHub:
         self._ws_state = "disconnected"
 
 
-def _engine_from_state(state: dict[str, Any], account_root: Path, data_dir: Path) -> FreeStrategyEngine:
-    from app.free_strategy.process import _instrument_records, _read_rows
+def _engine_from_state(
+    state: dict[str, Any],
+    account_root: Path,
+    data_dir: Path,
+    *,
+    preload_market_history: bool = False,
+) -> FreeStrategyEngine:
+    from app.free_strategy.process import (
+        MarketData,
+        _instrument_records,
+        _prepare_market_reference,
+        _read_rows,
+    )
     from app.tickflow.repository import DataStore, KlineRepository
 
     raw = dict(state.get("config", {}))
@@ -426,18 +439,68 @@ def _engine_from_state(state: dict[str, Any], account_root: Path, data_dir: Path
         instruments=_instrument_records(repo, asset_type, timeframe),
         risk_config=risk,
     )
+    runtime_timestamp = (
+        state.get("last_bar")
+        or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
+    )
+    run_start = (
+        datetime.fromisoformat(str(runtime_timestamp)).date()
+        if runtime_timestamp else date.today()
+    )
+    engine.set_run_window(run_start, date.today())
+    if "unit_net_value" in engine.extra_history_requirements:
+        from app.free_strategy.fund_nav import prepare_fund_nav_data
+
+        prepare_fund_nav_data(repo, engine, run_start, date.today())
+
+    history_asset_by_symbol = {
+        str(item["symbol"]): requested_asset
+        for requested_asset, _period in engine.market_history_requirements
+        for item in _instrument_records(repo, requested_asset, "1d")
+    }
+    market_loaded_through: date | None = None
+
+    def load_market_history(cutoff: datetime) -> None:
+        nonlocal market_loaded_through
+        target = cutoff.date()
+        if market_loaded_through is not None and market_loaded_through >= target:
+            return
+        market = MarketData()
+        references = {
+            requested_asset: _prepare_market_reference(
+                repo, engine, target, target, requested_asset, market,
+            )
+            for requested_asset, period in engine.market_history_requirements
+            if period == "1d"
+        }
+        primary = references.get(asset_type, {"enabled": False})
+        engine.market_history_metadata = (
+            {**primary, "assets": references}
+            if len(references) > 1 else primary
+        )
+        market_loaded_through = target
 
     def load_history(symbol: str, count: int, period: str, cutoff: datetime) -> list[Bar]:
         if not symbol or count <= 0:
             return []
         start = cutoff.date() - timedelta(days=max(30, count * 3))
         try:
-            rows = _read_rows(repo, [symbol], start, cutoff.date(), asset_type, period)
+            rows = _read_rows(
+                repo,
+                [symbol],
+                start,
+                cutoff.date(),
+                history_asset_by_symbol.get(symbol, asset_type),
+                period,
+            )
         except ValueError:
             return []
         return [bar for bar in rows if bar.timestamp <= cutoff][-count:]
 
     engine.set_history_loader(load_history)
+    engine.set_market_history_loader(load_market_history)
+    if preload_market_history and engine.market_history_requirements:
+        load_market_history(datetime.now())
     if state.get("checkpoint"):
         engine.restore_checkpoint(state["checkpoint"])
     else:
@@ -456,12 +519,42 @@ def inspect_account_runtime(state: dict[str, Any], account_root: Path, data_dir:
     return symbols, engine.execution_mode
 
 
+def _equity_snapshot(
+    engine: FreeStrategyEngine,
+    state: dict[str, Any],
+    timestamp: datetime,
+) -> dict[str, Any]:
+    prices = dict(engine._current_close_prices)  # noqa: SLF001
+    equity = engine.account.equity(prices)
+    initial_capital = float(engine.config.initial_capital)
+    peak = max(float(state.get("equity_peak", initial_capital)), equity)
+    state["equity_peak"] = peak
+    return {
+        "timestamp": timestamp.isoformat(),
+        "equity": equity,
+        "cash": engine.account.cash,
+        "nav": equity / initial_capital if initial_capital else 1.0,
+        "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0.0,
+        "positions": {
+            symbol: quantity
+            for symbol, quantity in engine.account.positions.items()
+            if quantity > 0
+        },
+        "source": "paper",
+    }
+
+
 def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
     account_root = Path(root) / account_id
     store = PaperAccountStore(Path(root).parent)
     state = store.get(account_id)
     try:
-        engine = _engine_from_state(state, account_root, Path(root).parent)
+        engine = _engine_from_state(
+            state,
+            account_root,
+            Path(root).parent,
+            preload_market_history=True,
+        )
     except Exception as exc:  # noqa: BLE001
         state["status"] = "paused"
         state["last_error"] = f"模拟账户初始化失败: {exc}"
@@ -472,7 +565,6 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
     state["scheduled_times"] = engine.scheduled_times
     state["universe"] = engine.universe
     store.save(state)
-    last_sample_minute = ""
     notified: set[str] = set()
     notification_times: deque[float] = deque()
 
@@ -557,7 +649,11 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
                     bars = [bar for bar in bars if bar.timestamp > engine._last_timestamp]  # noqa: SLF001
                 if not bars:
                     continue
-                engine.run(bars, finalize_session=False, return_result=False)
+                snapshots = []
+                for timestamp, rows in groupby(bars, key=lambda bar: bar.timestamp):
+                    engine.run(list(rows), finalize_session=False, return_result=False)
+                    snapshots.append(_equity_snapshot(engine, current, timestamp))
+                store.upsert_equity_curve(account_id, snapshots)
                 current["last_bar"] = max((bar.timestamp.isoformat() for bar in bars), default=current.get("last_bar"))
             else:
                 continue
@@ -582,36 +678,30 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
             event = {"type": "risk", **engine.risk_status}
             store.append_event(account_id, event)
             notify(event)
-        checkpoint = engine.checkpoint()
         timestamp = engine._last_timestamp or datetime.now()  # noqa: SLF001
-        minute = timestamp.strftime("%Y-%m-%dT%H:%M")
-        if minute != last_sample_minute:
-            prices = dict(engine._current_close_prices)  # noqa: SLF001
-            equity = engine.account.equity(prices)
-            engine.account.equity_curve.append({
-                "timestamp": timestamp.isoformat(),
-                "equity": equity,
-                "cash": engine.account.cash,
-                "positions": dict(engine.account.positions),
-            })
-            checkpoint = engine.checkpoint()
-            last_sample_minute = minute
+        if message.get("type") == "quotes":
+            store.upsert_equity_curve(account_id, [_equity_snapshot(engine, current, timestamp)])
+        engine.account.equity_curve.clear()
+        checkpoint = compact_paper_checkpoint(engine.checkpoint())
         prices = dict(engine._current_close_prices)  # noqa: SLF001
         equity = engine.account.equity(prices)
-        curve = engine.account.equity_curve
-        peak = max([float(row.get("equity", 0)) for row in curve] + [float(engine.config.initial_capital), equity])
+        peak = max(float(current.get("equity_peak", engine.config.initial_capital)), equity)
+        for key in ("account", "state", "runtime"):
+            current.pop(key, None)
         current.update({
             "checkpoint": checkpoint,
-            "account": checkpoint["account"],
-            "state": checkpoint["state"],
-            "runtime": checkpoint["runtime"],
             "universe": engine.universe,
             "risk_status": engine.risk_status,
             "cash": engine.account.cash,
             "equity": equity,
             "return_pct": (equity / engine.config.initial_capital - 1) * 100,
             "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0,
-            "positions": dict(engine.account.positions),
+            "positions": {
+                symbol: quantity
+                for symbol, quantity in engine.account.positions.items()
+                if quantity > 0
+            },
+            "equity_peak": peak,
             "last_error": None,
         })
         store.save(current)

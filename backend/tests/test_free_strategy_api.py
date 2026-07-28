@@ -1,7 +1,7 @@
 import json
 import queue
 from hashlib import sha256
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -478,3 +478,36 @@ def test_paper_orders_and_fills_are_separate(tmp_path):
     fills = client.get("/api/free-strategies/paper/accounts/paper-1/fills").json()["fills"]
     assert fills[0]["type"] == "fill"
     assert fills[0]["order_id"] == "o1"
+
+
+def test_paper_detail_uses_persisted_curve_without_private_continuation_fields(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper-curve",
+        "status": "paused",
+        "config": {"initial_capital": 100},
+        "continuation": {"job_id": "private-run"},
+        "checkpoint": {"account": {"cash": 110, "orders": [], "fills": []}},
+        "state": {"private": True},
+    })
+    store.upsert_equity_curve("paper-curve", [{
+        "timestamp": datetime.now().replace(microsecond=0).isoformat(),
+        "equity": 110,
+        "cash": 110,
+        "nav": 1.1,
+        "drawdown_pct": 0,
+        "positions": {},
+        "source": "backtest",
+    }])
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    payload = client.get("/api/free-strategies/paper/accounts/paper-curve").json()
+
+    assert payload["account"]["equity_curve"][0]["nav"] == 1.1
+    assert "source" not in payload["account"]["equity_curve"][0]
+    assert "continuation" not in payload
+    assert "checkpoint" not in payload
+    assert "state" not in payload

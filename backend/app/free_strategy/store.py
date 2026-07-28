@@ -5,9 +5,10 @@ import fcntl
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,103 @@ class PaperAccountStore:
         state = {"schema_version": 2, **state, "updated_at": now_iso()}
         _atomic_json_write(path / "state.json", state)
         return state
+
+    def replace_equity_curve(self, account_id: str, rows: list[dict[str, Any]]) -> None:
+        path = self._path(account_id)
+        path.mkdir(parents=True, exist_ok=True)
+        database = path / "equity.sqlite3"
+        with self._account_lock(account_id), sqlite3.connect(database) as connection:
+            self._ensure_equity_table(connection)
+            connection.execute("DELETE FROM equity_curve")
+            self._upsert_equity_rows(connection, rows)
+
+    def upsert_equity_curve(self, account_id: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        path = self._path(account_id)
+        path.mkdir(parents=True, exist_ok=True)
+        database = path / "equity.sqlite3"
+        with self._account_lock(account_id), sqlite3.connect(database) as connection:
+            self._ensure_equity_table(connection)
+            self._upsert_equity_rows(connection, rows)
+            cutoff = (datetime.now().date() - timedelta(days=365)).isoformat()
+            connection.execute("DELETE FROM equity_curve WHERE timestamp < ?", (cutoff,))
+
+    def equity_curve(self, account_id: str, *, days: int = 365) -> list[dict[str, Any]]:
+        database = self._path(account_id) / "equity.sqlite3"
+        if not database.exists():
+            return []
+        cutoff = (datetime.now().date() - timedelta(days=max(1, days))).isoformat()
+        with sqlite3.connect(database) as connection:
+            self._ensure_equity_table(connection)
+            rows = connection.execute(
+                """
+                SELECT timestamp, equity, cash, nav, drawdown_pct, positions
+                FROM equity_curve
+                WHERE timestamp >= ?
+                ORDER BY timestamp
+                """,
+                (cutoff,),
+            ).fetchall()
+        return [
+            {
+                "timestamp": timestamp,
+                "equity": equity,
+                "cash": cash,
+                "nav": nav,
+                "drawdown_pct": drawdown_pct,
+                "positions": json.loads(positions),
+            }
+            for timestamp, equity, cash, nav, drawdown_pct, positions in rows
+        ]
+
+    @staticmethod
+    def _ensure_equity_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equity_curve (
+                timestamp TEXT PRIMARY KEY,
+                equity REAL NOT NULL,
+                cash REAL NOT NULL,
+                nav REAL NOT NULL,
+                drawdown_pct REAL NOT NULL,
+                positions TEXT NOT NULL,
+                source TEXT NOT NULL
+            )
+            """
+        )
+
+    @staticmethod
+    def _upsert_equity_rows(
+        connection: sqlite3.Connection,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        connection.executemany(
+            """
+            INSERT INTO equity_curve (
+                timestamp, equity, cash, nav, drawdown_pct, positions, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(timestamp) DO UPDATE SET
+                equity = excluded.equity,
+                cash = excluded.cash,
+                nav = excluded.nav,
+                drawdown_pct = excluded.drawdown_pct,
+                positions = excluded.positions,
+                source = excluded.source
+            """,
+            [
+                (
+                    str(row["timestamp"]),
+                    float(row["equity"]),
+                    float(row["cash"]),
+                    float(row["nav"]),
+                    float(row["drawdown_pct"]),
+                    json.dumps(row.get("positions", {}), ensure_ascii=False),
+                    str(row.get("source") or "paper"),
+                )
+                for row in rows
+            ],
+        )
 
     @classmethod
     def _account_lock(cls, account_id: str) -> threading.Lock:

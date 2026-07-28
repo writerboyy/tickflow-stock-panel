@@ -244,6 +244,9 @@ class Context:
         cutoff = self.now
         if cutoff is None:
             return []
+        if self._engine._market_history_loader is not None:
+            self._engine._market_history_loader(cutoff)
+            history = self._engine._market_history_by_period.get(timeframe, {}).get(symbol, [])
         visible = [bar for bar in history if bar.timestamp < cutoff]
         return list(visible[-count:])
 
@@ -383,6 +386,7 @@ class FreeStrategyEngine:
         self._counter = 0
         self._callbacks: dict[str, Callable[..., Any]] = {}
         self._history_loader: Callable[[str, int, str, datetime], list[Bar]] | None = None
+        self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
         self._session_finished = False
         self._last_bars = BarsView()
@@ -459,6 +463,12 @@ class FreeStrategyEngine:
     ) -> None:
         self._history_loader = loader
 
+    def set_market_history_loader(
+        self,
+        loader: Callable[[datetime], None] | None,
+    ) -> None:
+        self._market_history_loader = loader
+
     def set_run_window(self, start: date, end: date) -> None:
         self.run_start = start
         self.run_end = end
@@ -508,9 +518,12 @@ class FreeStrategyEngine:
         count = 0
         for bar in sorted(bars, key=lambda item: (item.timestamp, item.symbol)):
             values = history.setdefault(bar.symbol, [])
-            if values and values[-1].timestamp == bar.timestamp:
-                values[-1] = bar
-                continue
+            if values:
+                if values[-1].timestamp == bar.timestamp:
+                    values[-1] = bar
+                    continue
+                if values[-1].timestamp > bar.timestamp:
+                    continue
             values.append(bar)
             self._market_dates.add(bar.timestamp.date())
             count += 1
@@ -788,6 +801,7 @@ class FreeStrategyEngine:
             "account": self.account.snapshot(),
             "state": self.context.state,
             "runtime": self.runtime_snapshot(),
+            "universe": self.universe,
             "benchmark_curve": self._benchmark_curve,
             "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
             "applied_splits": {symbol: value.isoformat() for symbol, value in self._applied_splits.items()},
@@ -809,6 +823,8 @@ class FreeStrategyEngine:
         self.account.restore(raw.get("account", {}))
         self.context.state = copy.deepcopy(raw.get("state", self.context.state))
         self.state = copy.deepcopy(self.context.state)
+        if raw.get("universe"):
+            self.context.set_universe(raw["universe"])
         self.restore_runtime(raw.get("runtime"))
         self._benchmark_curve = list(raw.get("benchmark_curve", []))
         self._bought_dates = {

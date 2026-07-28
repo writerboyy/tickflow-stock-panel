@@ -1,13 +1,15 @@
 import queue
+import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 import pytest
 
+from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
-from app.free_strategy.paper import MarketDataHub, PaperTradingSupervisor
+from app.free_strategy.paper import MarketDataHub, PaperTradingSupervisor, _equity_snapshot
 from app.free_strategy.store import PaperAccountStore
 from app.services.quote_service import QuoteService
 
@@ -342,3 +344,90 @@ def test_checkpoint_is_versioned_and_events_are_cursor_paginated(tmp_path):
     assert [row["message"] for row in first["events"]] == ["4", "3"]
     assert [row["message"] for row in second["events"]] == ["2", "1"]
     assert len({row["id"] for row in store.events("paper")}) == 5
+
+
+def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "stopped"})
+    now = datetime.now()
+    recent = (now - timedelta(days=2)).replace(microsecond=0).isoformat()
+    stale = (now - timedelta(days=370)).replace(microsecond=0).isoformat()
+    store.replace_equity_curve("paper", [
+        {"timestamp": stale, "equity": 90, "cash": 90, "nav": 0.9,
+         "drawdown_pct": 10, "positions": {}, "source": "backtest"},
+        {"timestamp": recent, "equity": 100, "cash": 100, "nav": 1,
+         "drawdown_pct": 0, "positions": {}, "source": "backtest"},
+    ])
+    store.upsert_equity_curve("paper", [
+        {"timestamp": recent, "equity": 110, "cash": 10, "nav": 1.1,
+         "drawdown_pct": 0, "positions": {"X": 10}, "source": "paper"},
+    ])
+
+    assert store.equity_curve("paper") == [{
+        "timestamp": recent,
+        "equity": 110.0,
+        "cash": 10.0,
+        "nav": 1.1,
+        "drawdown_pct": 0.0,
+        "positions": {"X": 10},
+    }]
+    with sqlite3.connect(tmp_path / "paper_accounts" / "paper" / "equity.sqlite3") as db:
+        assert db.execute("SELECT count(*) FROM equity_curve").fetchone()[0] == 1
+
+
+def test_equity_snapshot_uses_continuous_peak_and_nav():
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n    context.set_universe(['X'])\n"
+        "def on_bar(context, bars):\n    pass\n",
+        config=FreeStrategyConfig(initial_capital=100),
+    )
+    engine.account.cash = 20
+    engine.account.positions = {"X": 10}
+    engine.account.avg_cost = {"X": 8}
+    engine._current_close_prices = {"X": 8}  # noqa: SLF001
+    state = {"equity_peak": 120}
+
+    row = _equity_snapshot(engine, state, datetime(2026, 7, 28, 9, 30))
+
+    assert row["equity"] == 100
+    assert row["nav"] == 1
+    assert row["drawdown_pct"] == pytest.approx(100 / 6)
+    assert row["positions"] == {"X": 10}
+    assert state["equity_peak"] == 120
+
+
+def test_checkpoint_restores_dynamic_universe():
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n    context.set_universe(['A'])\n"
+        "def on_bar(context, bars):\n    pass\n",
+    )
+    checkpoint = engine.checkpoint()
+    checkpoint["universe"] = ["A", "B"]
+    restored = FreeStrategyEngine(engine.source)
+
+    restored.restore_checkpoint(checkpoint)
+
+    assert restored.universe == ["A", "B"]
+
+
+def test_market_history_loader_refreshes_before_read_and_skips_older_overlap():
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+    calls = []
+
+    def load(cutoff):
+        calls.append(cutoff)
+        engine.preload_market_history([
+            Bar("X", datetime(2026, 7, 27, 15), 10, 10, 10, 10),
+            Bar("X", datetime(2026, 7, 24, 15), 9, 9, 9, 9),
+        ])
+
+    engine.preload_market_history([
+        Bar("X", datetime(2026, 7, 27, 15), 10, 10, 10, 10),
+    ])
+    engine.set_market_history_loader(load)
+    engine.context.now = datetime(2026, 7, 28, 9, 29)
+
+    rows = engine.context.market_history_bars("X", count=2)
+
+    assert len(calls) == 1
+    assert [(row.date.isoformat(), row.close) for row in rows] == [("2026-07-27", 10)]

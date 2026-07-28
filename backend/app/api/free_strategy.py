@@ -48,6 +48,32 @@ def _paper_supervisor(request: Request) -> PaperTradingSupervisor | None:
     return getattr(request.app.state, "paper_supervisor", None)
 
 
+def _public_paper_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in state.items()
+        if key not in {"checkpoint", "state", "runtime", "continuation"}
+    }
+
+
+def _legacy_paper_curve(state: dict[str, Any], rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    initial = float(state.get("config", {}).get("initial_capital") or 1)
+    peak = initial
+    result = []
+    for row in rows:
+        equity = float(row.get("equity", initial))
+        peak = max(peak, equity)
+        result.append({
+            "timestamp": str(row["timestamp"]),
+            "equity": equity,
+            "cash": float(row.get("cash", equity)),
+            "nav": equity / initial,
+            "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0.0,
+            "positions": dict(row.get("positions", {})),
+        })
+    return result
+
+
 def _run_root(request: Request) -> Path:
     data_dir = getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir
     return Path(data_dir) / "free_strategy_runs"
@@ -625,7 +651,7 @@ def _paper_loop(account_id: str, root: str) -> None:
 
 @router.get("/paper/accounts")
 def list_paper_accounts(request: Request):
-    return {"accounts": _paper_store(request).list()}
+    return {"accounts": [_public_paper_state(state) for state in _paper_store(request).list()]}
 
 
 @router.post("/paper/accounts")
@@ -679,11 +705,19 @@ def paper_status(request: Request):
 
 @router.get("/paper/accounts/{account_id}")
 def get_paper_account(account_id: str, request: Request):
+    store = _paper_store(request)
     try:
-        result = _paper_store(request).get(account_id)
+        state = store.get(account_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
-    result["events"] = _paper_store(request).events(account_id)
+    result = _public_paper_state(state)
+    account = dict(state.get("account") or state.get("checkpoint", {}).get("account", {}))
+    curve = store.equity_curve(account_id)
+    if not curve and account.get("equity_curve"):
+        curve = _legacy_paper_curve(state, account["equity_curve"])
+    account["equity_curve"] = curve
+    result["account"] = account
+    result["events"] = store.events(account_id)
     return result
 
 
@@ -714,10 +748,14 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
     if supervisor is not None:
         try:
             if action in {"start", "resume"}:
-                return supervisor.start(account_id)
+                return _public_paper_state(supervisor.start(account_id))
             if action == "unlock-risk":
-                return supervisor.unlock_risk(account_id)
-            return supervisor.pause_or_stop(account_id, "paused" if action == "pause" else "stopped")
+                return _public_paper_state(supervisor.unlock_risk(account_id))
+            return _public_paper_state(
+                supervisor.pause_or_stop(
+                    account_id, "paused" if action == "pause" else "stopped",
+                )
+            )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
     if action in {"start", "resume"}:
@@ -736,7 +774,7 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
             process.terminate()
         state["status"] = "stopped"
     store.append_event(account_id, {"type": action})
-    return store.save(state)
+    return _public_paper_state(store.save(state))
 
 
 @router.get("/paper/accounts/{account_id}/events")
