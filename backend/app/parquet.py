@@ -30,6 +30,8 @@ ENRICHED_STORAGE_SCHEMA: dict[str, pl.DataType] = {
     "raw_high": pl.Float64,
     "raw_low": pl.Float64,
     "turnover_rate": pl.Float64,
+    "total_shares": pl.Float64,
+    "float_shares": pl.Float64,
     "consecutive_limit_ups": pl.UInt32,
     "consecutive_limit_downs": pl.UInt32,
     "quote_ts": pl.Int64,

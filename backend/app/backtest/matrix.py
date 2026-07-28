@@ -3544,13 +3544,14 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
 
     mask = np.ones(market.shape, dtype=bool)
     close = market.close
+    market_price = market.fields.get("raw_close", close)
     if config.get("price_min") is not None:
         mask &= close >= float(config["price_min"])
     if config.get("price_max") is not None:
         mask &= close <= float(config["price_max"])
 
-    _apply_bound(mask, close * _optional_field(market, "total_shares"), config, "market_cap")
-    _apply_bound(mask, close * _optional_field(market, "float_shares"), config, "float_cap")
+    _apply_bound(mask, market_price * _optional_field(market, "total_shares"), config, "market_cap")
+    _apply_bound(mask, market_price * _optional_field(market, "float_shares"), config, "float_cap")
     _apply_bound(mask, _required_field_for_bound(market, config, "amount"), config, "amount")
     _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
 

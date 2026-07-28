@@ -1,7 +1,7 @@
 """Screener 服务(§6.3)。
 
 性能优化:
-  - enriched parquet 仅存 14 列基础数据, 指标和信号即时计算
+  - enriched parquet 仅存 17 列基础数据, 指标和信号即时计算
   - preset 策略: 从内存缓存或即时计算获取完整指标, ~10-50ms
   - custom SQL: DuckDB (用户传 SQL WHERE 字符串), ~10-50ms
 """
@@ -51,7 +51,7 @@ class ScreenerService:
     def _load_enriched_for_date(self, target_date: date) -> pl.DataFrame:
         """从 enriched parquet 读取指定日期的基础数据并即时计算完整指标+信号。
 
-        enriched parquet 仅存 14 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
+        enriched parquet 仅存 17 列。读取后需要即时计算 ma/ema/macd/kdj/rsi/boll/momentum/signal 等列。
         对于最新日, 优先使用内存缓存 (已包含完整指标)。
         """
         # 优先使用 repo 最新日缓存
@@ -81,7 +81,7 @@ class ScreenerService:
                             df = df.join(df_i.select(inst_cols), on="symbol", how="left")
                     return df
 
-        # 历史日期: 从 parquet 读取 14 列, 即时计算指标 (慢路径)
+        # 历史日期: 从 parquet 读取 17 列, 即时计算指标 (慢路径)
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         ds = target_date.isoformat()
         target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
@@ -141,7 +141,7 @@ class ScreenerService:
         return pl.DataFrame()
 
     def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
-        """从 14 列基础数据即时计算完整 enriched (含全部指标和信号)。
+        """从 17 列基础数据即时计算完整 enriched (含全部指标和信号)。
 
         读取历史数据作为指标计算的 warmup, 计算完成后只返回目标日期的行。
         """
@@ -155,7 +155,8 @@ class ScreenerService:
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         start = target_date - timedelta(days=150)
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low",
+                     "total_shares", "float_shares"]
 
         try:
             lf = (
@@ -193,9 +194,14 @@ class ScreenerService:
 
         # JOIN instruments (name, total_shares, float_shares)
         if not instruments.is_empty():
-            inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
-            if "name" not in df_result.columns:
-                df_result = df_result.join(instruments.select(inst_cols), on="symbol", how="left")
+            inst_cols = [
+                c for c in ["name", "total_shares", "float_shares"]
+                if c in instruments.columns and c not in df_result.columns
+            ]
+            if inst_cols:
+                df_result = df_result.join(
+                    instruments.select(["symbol", *inst_cols]), on="symbol", how="left"
+                )
 
         return df_result
 
@@ -212,10 +218,15 @@ class ScreenerService:
             if cached is not None and not cached.is_empty():
                 # JOIN instruments (repo 缓存不含 name 等列)
                 instruments = self.repo.get_instruments_asset(self.asset_type)
-                if instruments is not None and not instruments.is_empty() and "name" not in cached.columns:
-                    inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"]
-                                 if c in instruments.columns]
-                    cached = cached.join(instruments.select(inst_cols), on="symbol", how="left")
+                if instruments is not None and not instruments.is_empty():
+                    inst_cols = [
+                        c for c in ["name", "total_shares", "float_shares"]
+                        if c in instruments.columns and c not in cached.columns
+                    ]
+                    if inst_cols:
+                        cached = cached.join(
+                            instruments.select(["symbol", *inst_cols]), on="symbol", how="left"
+                        )
                 elapsed = (time.perf_counter() - t0) * 1000
                 logger.info("_load_enriched_history(%s, %d): repo cache hit, %.1fms, %d rows",
                             target_date, lookback_days, elapsed, len(cached))
@@ -246,7 +257,8 @@ class ScreenerService:
 
         enriched_dir = self.repo.store.data_dir / self._enriched_dirname
         read_cols = ["symbol", "date", "open", "high", "low", "close", "volume",
-                     "amount", "raw_close", "raw_high", "raw_low"]
+                     "amount", "raw_close", "raw_high", "raw_low",
+                     "total_shares", "float_shares"]
 
         try:
             lf = (
@@ -275,9 +287,14 @@ class ScreenerService:
             )
 
         if instruments is not None and not instruments.is_empty():
-            inst_cols = [c for c in ["symbol", "name", "total_shares", "float_shares"] if c in instruments.columns]
-            if "name" not in df_full.columns:
-                df_full = df_full.join(instruments.select(inst_cols), on="symbol", how="left")
+            inst_cols = [
+                c for c in ["name", "total_shares", "float_shares"]
+                if c in instruments.columns and c not in df_full.columns
+            ]
+            if inst_cols:
+                df_full = df_full.join(
+                    instruments.select(["symbol", *inst_cols]), on="symbol", how="left"
+                )
 
         # 裁剪掉 warmup 部分, 只保留 lookback 范围 (减少 group_by 开销)。
         # 按交易日计数: 从数据里实际存在的交易日序列取最后 lookback_days 个交易日,
@@ -315,7 +332,7 @@ class ScreenerService:
         """自定义 SQL 条件选股。
 
         先通过 Polars 即时计算完整指标, 再用 DuckDB 做 SQL WHERE 过滤。
-        kline_enriched DuckDB 视图只有 14 列, 不能直接用于指标过滤。
+        kline_enriched DuckDB 视图只有 17 列, 不能直接用于指标过滤。
         """
         t0 = time.perf_counter()
 

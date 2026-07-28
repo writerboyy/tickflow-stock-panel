@@ -1,10 +1,10 @@
 """enriched 表计算流水线(§7.5 / §7.7 Step 2)。
 
 存储层 (enriched parquet):
-  仅存储基础行情窄表 (14 列), 指标和信号由各服务即时计算。
+  仅存储基础行情窄表 (17 列), 指标和信号由各服务即时计算。
 
   存储列: symbol, date, OHLCV(前复权), volume, amount,
-          raw_close, raw_high, raw_low, turnover_rate,
+          raw_close, raw_high, raw_low, turnover_rate, total_shares, float_shares,
           consecutive_limit_ups, consecutive_limit_downs
 
 设计:
@@ -29,7 +29,7 @@ from app.price_limits import (
     polars_limit_price,
     polars_price_limit_pct,
 )
-from app.share_capital import apply_historical_float_shares, load_share_history
+from app.share_capital import apply_point_in_time_shares, load_share_history
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +60,14 @@ def invalidate_custom_signals() -> None:
     _custom_signal_exprs = None
 
 
-# enriched parquet 仅存储的列 (14 列)
+# enriched parquet 仅存储的列 (17 列)
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
     "volume", "amount",
     "raw_close", "raw_high", "raw_low",       # 不复权原始价
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
+    "total_shares", "float_shares",           # 当时已公告且已生效的股本
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
     "consecutive_limit_downs",
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
@@ -92,6 +93,8 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
     "turnover_rate":           "换手率",
+    "total_shares":            "当时总股本",
+    "float_shares":            "当时流通股本",
     "consecutive_limit_ups":   "连板数",
     "consecutive_limit_downs": "连跌数",
     # ── 基础指标 ─────────────────────────────────────────
@@ -668,16 +671,19 @@ def compute_limit_signals(
         instrument_needs.add("name")
     if "turnover_rate" in want:
         instrument_needs.add("float_shares")
+        instrument_needs.add("total_shares")
     if need_up:
         instrument_needs.add("limit_up")
     if need_down:
         instrument_needs.add("limit_down")
-    for c in ["name", "float_shares", "limit_up", "limit_down"]:
+    for c in ["name", "total_shares", "float_shares", "limit_up", "limit_down"]:
         if c not in instrument_needs:
             continue
         if c in instruments.columns:
             inst_cols.append(c)
-    if need_price_limits and "as_of" in instruments.columns:
+    if (
+        need_price_limits or instrument_needs & {"total_shares", "float_shares"}
+    ) and "as_of" in instruments.columns:
         inst_cols.append(
             pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
         )
@@ -697,7 +703,7 @@ def compute_limit_signals(
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
 
     if "turnover_rate" in want:
-        df = apply_historical_float_shares(df, historical_shares, today=cn_today())
+        df = apply_point_in_time_shares(df, historical_shares, today=cn_today())
 
     # 计算换手率(%) = volume(手) * 10000 / float_shares(股)
     if "turnover_rate" in want and "float_shares" in df.columns and "volume" in df.columns:
@@ -714,7 +720,7 @@ def compute_limit_signals(
     # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
     # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
     if not need_price_limits:
-        cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down") if c in df.columns]
+        cleanup = [c for c in ("name", "limit_up", "limit_down", "_instrument_as_of") if c in df.columns]
         return df.drop(cleanup)
 
     _adj_today = pl.col("close") / pl.col("raw_close")
@@ -890,8 +896,8 @@ def compute_limit_signals(
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
-    # name / float_shares / limit_up / limit_down 只用于计算, 不存入 enriched
-    for c in ["name", "float_shares", "limit_up", "limit_down"]:
+    # name / limit_up / limit_down 只用于计算, 不存入 enriched
+    for c in ["name", "limit_up", "limit_down"]:
         if c in df.columns and c != "turnover_rate":
             cleanup.append(c)
     internal_outputs = {"signal_limit_up", "signal_limit_down"} - want
@@ -991,7 +997,7 @@ def compute_enriched(
 
 
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (14 列)。"""
+    """写入 parquet 前裁剪到存储列 (17 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     return df.select(cols)
 
@@ -1002,7 +1008,7 @@ def run_pipeline(data_dir: Path | None = None,
                  on_batch_done: Callable[[int, int], None] | None = None) -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
-    enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
+    enriched 表仅存储 17 列基础行情窄表（含按时点解析的总股本和流通股本）。
 
     模式:
       - 全量 (symbols=None, new_dates_only=False):
@@ -1671,7 +1677,7 @@ def compute_enriched_today(
 def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFrame:
     """盘中增量版的涨跌停/换手率/炸板/连板计算。"""
     inst_cols = ["symbol"]
-    for c in ["float_shares", "limit_up", "limit_down"]:
+    for c in ["total_shares", "float_shares", "limit_up", "limit_down"]:
         if c in instruments.columns:
             inst_cols.append(c)
     if "as_of" in instruments.columns:
@@ -1805,7 +1811,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
-    for c in ["name", "float_shares"]:
+    for c in ["name"]:
         if c in df.columns:
             cleanup.append(c)
     df = df.drop([c for c in cleanup if c in df.columns])

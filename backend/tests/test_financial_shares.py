@@ -8,6 +8,7 @@ import pytest
 
 from app.api import data as data_api
 from app.indicators import pipeline
+from app.share_capital import apply_point_in_time_shares
 from app.services import financial_sync
 from app.tickflow.capabilities import CapabilitySet
 
@@ -123,12 +124,14 @@ def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
     })
     instruments = pl.DataFrame({
         "symbol": ["600000.SH"],
+        "total_shares": [400_000_000.0],
         "float_shares": [200_000_000.0],
     })
     shares = pl.DataFrame({
         "symbol": ["600000.SH", "600000.SH"],
         "period_end": ["2023-12-31", "2024-06-30"],
         "announce_date": ["2024-04-15", None],
+        "total_shares": [300_000_000.0, 350_000_000.0],
         "float_shares": [100_000_000.0, 50_000_000.0],
     })
 
@@ -139,10 +142,26 @@ def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
         historical_shares=shares,
     )
 
-    assert result["turnover_rate"].to_list() == pytest.approx([0.5, 0.5, 1.0, 2.0, 0.5])
+    values = result["turnover_rate"].to_list()
+    assert values[:2] == [None, None]
+    assert values[2:] == pytest.approx([1.0, 2.0, 0.5])
+    assert result["total_shares"].to_list() == [
+        None,
+        None,
+        300_000_000.0,
+        350_000_000.0,
+        400_000_000.0,
+    ]
+    assert result["float_shares"].to_list() == [
+        None,
+        None,
+        100_000_000.0,
+        50_000_000.0,
+        200_000_000.0,
+    ]
 
 
-def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
+def test_turnover_without_share_history_does_not_use_current_shares_for_history(monkeypatch):
     monkeypatch.setattr(pipeline, "cn_today", lambda: date(2026, 7, 18))
     bars = pl.DataFrame({
         "symbol": ["600000.SH"],
@@ -160,7 +179,79 @@ def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
         needed={"turnover_rate"},
     )
 
-    assert result["turnover_rate"][0] == pytest.approx(0.5)
+    assert result["turnover_rate"][0] is None
+
+
+def test_share_capital_waits_for_both_announcement_and_effective_date():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH"] * 3,
+        "date": [date(2024, 6, 14), date(2024, 6, 15), date(2024, 6, 30)],
+        "total_shares": [200.0] * 3,
+        "float_shares": [100.0] * 3,
+        "_instrument_as_of": [date(2026, 7, 18)] * 3,
+    })
+    shares = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "period_end": ["2023-12-31", "2024-06-30"],
+        "announce_date": ["2024-01-15", "2024-06-15"],
+        "total_shares": [80.0, 160.0],
+        "float_shares": [40.0, 80.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [80.0, 80.0, 160.0]
+    assert result["float_shares"].to_list() == [40.0, 40.0, 80.0]
+
+
+def test_instrument_snapshot_is_only_used_on_or_after_its_as_of_date():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "date": [date(2024, 5, 31), date(2024, 6, 1)],
+        "total_shares": [200.0, 200.0],
+        "float_shares": [100.0, 100.0],
+        "_instrument_as_of": [date(2024, 6, 1), date(2024, 6, 1)],
+    })
+
+    result = apply_point_in_time_shares(rows, pl.DataFrame(), today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [None, 200.0]
+    assert result["float_shares"].to_list() == [None, 100.0]
+
+
+def test_late_older_period_does_not_override_newer_share_event():
+    rows = pl.DataFrame({
+        "symbol": ["301491.SZ", "301491.SZ"],
+        "date": [date(2025, 8, 28), date(2025, 8, 29)],
+        "total_shares": [200.0, 200.0],
+        "float_shares": [100.0, 100.0],
+        "_instrument_as_of": [date(2026, 7, 18)] * 2,
+    })
+    shares = pl.DataFrame({
+        "symbol": ["301491.SZ", "301491.SZ"],
+        "period_end": ["2025-08-06", "2025-06-30"],
+        "announce_date": ["2025-08-05", "2025-08-29"],
+        "total_shares": [129.0, 96.75],
+        "float_shares": [27.0, 0.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [129.0, 129.0]
+    assert result["float_shares"].to_list() == [27.0, 27.0]
+
+
+def test_enriched_storage_keeps_point_in_time_share_capital():
+    frame = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2024, 6, 30)],
+        "total_shares": [200.0],
+        "float_shares": [100.0],
+    })
+
+    result = pipeline._select_storage_cols(frame)
+
+    assert result.columns == ["symbol", "date", "total_shares", "float_shares"]
 
 
 def test_data_status_includes_share_history(tmp_path):

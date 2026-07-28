@@ -423,9 +423,9 @@ def _basic_filter_dependencies(config: dict) -> set[str]:
     if any(config.get(key) is not None for key in ("turnover_min", "turnover_max")):
         dependencies.add("turnover_rate")
     if any(config.get(key) is not None for key in ("market_cap_min", "market_cap_max")):
-        dependencies.add("total_shares")
+        dependencies.update({"raw_close", "total_shares"})
     if any(config.get(key) is not None for key in ("float_cap_min", "float_cap_max")):
-        dependencies.add("float_shares")
+        dependencies.update({"raw_close", "float_shares"})
     if config.get("exclude_st"):
         dependencies.add("name")
     return dependencies
