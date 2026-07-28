@@ -97,6 +97,19 @@ def test_initialize_registers_available_etf_universe():
     assert context.extra_history_requirements == {"unit_net_value"}
 
 
+def test_market_catalog_uses_minute_availability_instead_of_symbol_exclusions():
+    context = FakeContext()
+    context.instruments = lambda _asset=None: [
+        {"symbol": "161226.SZ", "name": "国投白银LOF", "has_minute": True},
+        {"symbol": "164824.SZ", "name": "印度基金LOF", "has_minute": False},
+    ]
+
+    _, _, _, minute_symbols = five._market_catalog(context)
+
+    assert "161226.SZ" in minute_symbols
+    assert "164824.SZ" not in minute_symbols
+
+
 def test_historical_etf_names_preserve_original_dynamic_groups():
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["520500.SH"]) == "香港组:药"
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588790.SH"]) is None
