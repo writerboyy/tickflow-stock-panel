@@ -177,9 +177,21 @@ export function FreeStrategy() {
 
   const list = strategies.data?.strategies ?? []
   const templateList = templates.data?.templates ?? []
-  const runs = savedRuns.data?.runs ?? []
+  const runs = useMemo(() => savedRuns.data?.runs ?? [], [savedRuns.data?.runs])
+  const runCountByStrategy = useMemo(() => {
+    const counts = new Map<string, number>()
+    runs.forEach(runItem => {
+      const strategyId = String(runItem.metadata?.strategy_id ?? '')
+      if (strategyId) counts.set(strategyId, (counts.get(strategyId) ?? 0) + 1)
+    })
+    return counts
+  }, [runs])
+  const strategyRuns = useMemo(
+    () => runs.filter(runItem => String(runItem.metadata?.strategy_id ?? '') === selectedId),
+    [runs, selectedId],
+  )
   const selected = list.find(item => item.id === selectedId)
-  const selectedRun = runs.find(item => item.job_id === selectedRunId)
+  const selectedRun = strategyRuns.find(item => item.job_id === selectedRunId)
   const draft = useMemo<EditorSnapshot>(() => ({ name, source, config }), [name, source, config])
   const dirty = baseline === null || JSON.stringify(draft) !== JSON.stringify(baseline)
   const detailLoading = Boolean(selectedId) && (detail.isFetching || detail.data?.id !== selectedId)
@@ -202,6 +214,11 @@ export function FreeStrategy() {
     setConfig(next.config)
     setBaseline(next)
   }, [detail.data, selectedId])
+  useEffect(() => {
+    setSelectedRunId('')
+    setResult(null)
+    setMobileRunDetail(false)
+  }, [selectedId])
 
   const resetNewStrategy = () => {
     setSelectedId('')
@@ -401,12 +418,12 @@ export function FreeStrategy() {
           <option value="">加载模板</option>{templateList.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}
         </select>
         <button disabled={saving || !dirty || detailLoading} className="inline-flex items-center gap-1 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50" onClick={save}><Save className="h-3.5 w-3.5" />{saving ? '保存中…' : '保存'}</button>
-      </div> : <div className="text-[11px] tabular-nums text-muted">共 {runs.length} 条回测记录</div>}
+      </div> : <div className="text-[11px] text-muted">{selected ? <><span className="text-foreground">{selected.name}</span><span className="mx-1.5">·</span><span className="tabular-nums">{strategyRuns.length} 条记录</span></> : '未选择策略'}</div>}
     </div>
 
     <div className="flex shrink-0 border-b border-border" role="tablist" aria-label="量化策略工作区">
       <button type="button" role="tab" aria-selected={workspaceView === 'strategy'} onClick={() => setWorkspaceView('strategy')} className={`inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-xs transition-colors ${workspaceView === 'strategy' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Code2 className="h-3.5 w-3.5" />策略开发</button>
-      <button type="button" role="tab" aria-selected={workspaceView === 'backtests'} onClick={() => setWorkspaceView('backtests')} className={`inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-xs transition-colors ${workspaceView === 'backtests' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><History className="h-3.5 w-3.5" />回测记录<span className="tabular-nums text-[10px]">{runs.length}</span></button>
+      <button type="button" role="tab" aria-selected={workspaceView === 'backtests'} onClick={() => setWorkspaceView('backtests')} className={`inline-flex h-9 items-center gap-1.5 border-b-2 px-3 text-xs transition-colors ${workspaceView === 'backtests' ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><History className="h-3.5 w-3.5" />回测记录<span className="tabular-nums text-[10px]">{strategyRuns.length}</span></button>
     </div>
 
     {workspaceView === 'strategy' ? <div className="grid min-h-[560px] shrink-0 grid-cols-[220px_minmax(0,1fr)_280px] gap-3 max-xl:min-h-[820px] max-xl:grid-cols-[180px_minmax(0,1fr)] max-md:min-h-0 max-md:grid-cols-1">
@@ -449,30 +466,44 @@ export function FreeStrategy() {
           <button type="button" onClick={createPaper} disabled={!config.strategy_id || dirty} className="shrink-0 rounded-btn border border-border px-2.5 py-1.5 text-[11px] hover:border-accent hover:text-accent disabled:opacity-40">创建模拟账户</button>
         </div>
       </section>
-    </div> : <div className="grid min-w-0 shrink-0 grid-cols-[300px_minmax(0,1fr)] items-start gap-3 max-lg:grid-cols-[250px_minmax(0,1fr)] max-md:grid-cols-1">
-      <section className={`max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2.5 max-md:max-h-[calc(100vh-180px)] max-md:min-h-0 ${mobileRunDetail ? 'max-md:hidden' : ''}`}>
-        <div className="mb-2 flex h-7 items-center justify-between gap-2"><span className="inline-flex items-center gap-1.5 text-xs font-medium"><History className="h-3.5 w-3.5 text-accent" />历史回测 <span className="font-normal tabular-nums text-muted">{runs.length}</span></span><div className="flex items-center gap-0.5">{selectedRun ? <><IconButton title="重命名回测记录" onClick={() => openRename({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除回测记录" danger onClick={() => openDelete({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Trash2 className="h-3.5 w-3.5" /></IconButton></> : null}</div></div>
-        <div className="space-y-1.5">
+    </div> : <div className="grid min-w-0 shrink-0 grid-cols-[200px_290px_minmax(0,1fr)] items-start gap-3 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">
+      <section className={`max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2 max-xl:col-span-2 max-xl:min-h-0 max-xl:max-h-36 max-lg:col-span-1 max-md:max-h-44 ${mobileRunDetail ? 'max-md:hidden' : ''}`}>
+        <div className="flex h-7 items-center px-2 text-xs font-medium">策略</div>
+        <div className="space-y-0.5 max-xl:grid max-xl:grid-cols-2 max-xl:gap-1 max-xl:space-y-0 max-md:grid-cols-1">
+          {list.map(item => {
+            const count = runCountByStrategy.get(item.id) ?? 0
+            return <button key={item.id} type="button" disabled={running} onClick={() => requestEditorAction({ type: 'select', id: item.id })} className={`w-full border-l-2 px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${selectedId === item.id ? 'border-l-accent bg-accent/10' : 'border-l-transparent hover:bg-elevated'}`}>
+              <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{item.name}</span><span className={`shrink-0 tabular-nums text-[10px] ${selectedId === item.id ? 'text-accent' : 'text-muted'}`}>{count}</span></div>
+              <div className="mt-1 text-[10px] text-muted">r{item.revision} · {count ? `${count} 次回测` : '暂无回测'}</div>
+            </button>
+          })}
+        </div>
+        {!list.length ? <EmptyState icon={BookOpen} title="还没有策略" /> : null}
+      </section>
+
+      <section className={`max-h-[calc(100vh-180px)] min-h-[420px] overflow-y-auto rounded-md border border-border bg-surface p-2 max-lg:max-h-72 max-lg:min-h-0 max-md:max-h-[calc(100vh-180px)] ${mobileRunDetail ? 'max-md:hidden' : ''}`}>
+        <div className="mb-1 flex min-h-9 items-center justify-between gap-2 border-b border-border px-2 pb-1"><span className="min-w-0"><span className="block truncate text-xs font-medium">{selected?.name ?? '回测记录'}</span><span className="mt-0.5 block text-[10px] tabular-nums text-muted">{strategyRuns.length} 条记录</span></span><div className="flex shrink-0 items-center gap-0.5">{selectedRun ? <><IconButton title="重命名回测记录" onClick={() => openRename({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Pencil className="h-3.5 w-3.5" /></IconButton><IconButton title="删除回测记录" danger onClick={() => openDelete({ type: 'backtest', id: selectedRun.job_id, name: selectedRun.name })}><Trash2 className="h-3.5 w-3.5" /></IconButton></> : null}</div></div>
+        <div>
           {running ? <div className="rounded border border-accent bg-accent/10 px-2.5 py-2.5" aria-current="true">
             <div className="flex items-center justify-between gap-2 text-[11px]"><span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-accent"><LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" /><span className="truncate">{name}</span></span><span className="shrink-0 tabular-nums text-accent">{progressPct == null ? '运行中' : `${Math.round(progressPct * 100)}%`}</span></div>
             <div className="mt-1.5 truncate text-[10px] text-muted">{progress}</div>
-            {selectedRunId ? <div className="mt-1 truncate font-mono text-[10px] text-muted">{selectedRunId}</div> : null}
           </div> : null}
-          {runs.map(runItem => {
+          {strategyRuns.map(runItem => {
             const metadata = runItem.metadata ?? {}
             const returnPct = Number(runItem.return_pct ?? 0)
-            return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.job_id}`} className={`w-full rounded border px-2.5 py-2.5 text-left transition-colors ${!running && selectedRunId === runItem.job_id ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/60 hover:bg-elevated'}`}>
+            return <button type="button" key={runItem.job_id} onClick={() => void loadSavedRun(runItem.job_id)} aria-label={`查看回测 ${runItem.name}`} className={`w-full border-l-2 border-b px-2.5 py-2.5 text-left transition-colors ${!running && selectedRunId === runItem.job_id ? 'border-l-accent border-b-border bg-accent/10' : 'border-l-transparent border-b-border hover:bg-elevated'}`}>
               <div className="flex items-start justify-between gap-2 text-[11px]"><span className="min-w-0 truncate font-medium">{runItem.name}</span><span className={`shrink-0 tabular-nums ${priceColorClass(returnPct)}`}>{returnPct >= 0 ? '+' : ''}{returnPct.toFixed(2)}%</span></div>
               <div className="mt-1.5 truncate text-[10px] text-muted">{String(metadata.start ?? '—')} 至 {String(metadata.end ?? '—')} · {String(metadata.timeframe ?? '—')}{executionModeLabel(metadata.execution_mode) ? ` · ${executionModeLabel(metadata.execution_mode)}` : ''}</div>
-              <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="truncate font-mono">{runItem.job_id}</span><span className="shrink-0"><span className={priceColorClass(-Math.abs(Number(runItem.max_drawdown_pct ?? 0)))}>回撤 {Number(runItem.max_drawdown_pct ?? 0).toFixed(2)}%</span> · {runItem.fills} 成交</span></div>
+              <div className="mt-1 flex justify-between gap-2 text-[10px] text-muted"><span className="shrink-0">r{String(metadata.source_revision ?? '—')}</span><span className="shrink-0"><span className={priceColorClass(-Math.abs(Number(runItem.max_drawdown_pct ?? 0)))}>回撤 {Number(runItem.max_drawdown_pct ?? 0).toFixed(2)}%</span> · {runItem.fills} 成交</span></div>
             </button>
           })}
         </div>
         {savedRuns.isLoading ? <div className="py-4 text-center text-[11px] text-muted">加载回测记录...</div> : null}
-        {!savedRuns.isLoading && !runs.length ? <EmptyState icon={History} title="还没有回测记录" hint="返回策略开发，完成一次历史回测后会保存在这里。" /> : null}
+        {!savedRuns.isLoading && selected && !strategyRuns.length && !running ? <EmptyState icon={History} title="该策略暂无回测记录" /> : null}
+        {!selected ? <EmptyState icon={History} title="请选择策略" /> : null}
       </section>
 
-      <div className={`min-w-0 ${mobileRunDetail ? '' : 'max-md:hidden'}`}>
+      <div className={`min-w-0 max-xl:col-start-2 max-lg:col-start-auto ${mobileRunDetail ? '' : 'max-md:hidden'}`}>
         <button type="button" onClick={() => setMobileRunDetail(false)} className="mb-2 hidden h-8 items-center gap-1 text-xs text-muted hover:text-foreground max-md:inline-flex"><ArrowLeft className="h-3.5 w-3.5" />返回回测记录</button>
         {error ? <div className="mb-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2.5 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
         {running ? <section className="min-h-[420px] rounded-md border border-border bg-surface p-4" aria-live="polite">
@@ -485,7 +516,7 @@ export function FreeStrategy() {
             <div className="mt-3 h-1.5 overflow-hidden rounded bg-elevated"><div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${Math.max(2, Math.round((progressPct ?? 0) * 100))}%` }} /></div>
             <div className="mt-3 break-all font-mono text-[10px] text-muted">任务 {selectedRunId || '正在生成...'}</div>
           </div>
-        </section> : result ? <FreeStrategyResult result={result} title={selectedRun?.name} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title="选择一条回测记录" hint="这里会展示净值、回撤、订单成交、逐日资产和策略日志。" /></section>}
+        </section> : result ? <FreeStrategyResult result={result} title={selectedRun?.name} /> : <section className="min-h-[420px] rounded-md border border-border bg-surface"><EmptyState icon={History} title={selected ? `选择「${selected.name}」的回测记录` : '请选择策略'} /></section>}
       </div>
     </div>}
 
