@@ -702,8 +702,7 @@ def _append_five_fortunes_decision(
         if float(quantity) > 0
     ]
     decision_type = "empty" if not target and not holdings else "hold" if target == holdings else "rebalance"
-    reason_code = str(decision.get("reason") or "ranked_target")
-    from app.free_strategy.five_fortunes import DECISION_REASON_LABELS
+    from app.free_strategy.five_fortunes import decision_reason_payload
 
     store.append_event_once(account_id, {
         "id": f"signal:five_fortunes:{trading_date}:decision",
@@ -722,8 +721,7 @@ def _append_five_fortunes_decision(
             for row in list(state.get("candidate_rows", []))[:10]
             if row.get("symbol")
         ],
-        "reason_code": reason_code,
-        "reason": DECISION_REASON_LABELS.get(reason_code, reason_code),
+        **decision_reason_payload(decision),
     })
 
 

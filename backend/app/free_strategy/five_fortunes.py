@@ -35,14 +35,23 @@ ETF_PRICE_TICK = 0.001
 MOMENTUM_SCORE_MAX = 5.0
 DECISION_REASON_LABELS = {
     "ranked_target": "选择综合排名最高的候选标的",
+    "hold_top_rank": "当前持仓仍为排名最高候选，继续持有",
     "no_candidate_defensive": "无合格候选，切换防御标的",
     "anti_churn_hold": "排名变化未满足连续确认，继续持有",
+    "filter_fail_switch": "当前持仓未通过当日筛选，切换至排名最高的候选标的",
+    "candidate_pool_exit_switch": "当前持仓未进入当日候选范围，切换至排名更高的候选标的",
+    "rank_lag_switch": "当前持仓连续未重返首位，切换至排名更高的候选标的",
     "regime_change_hold": "市场状态刚切换，暂不调仓",
     "low_correlation_switch": "候选标的与当前持仓相关性较低，执行切换",
     "high_correlation_hold": "候选标的与当前持仓高度相关，继续持有",
     "high_pair_overlay": "高相关组合保护生效，继续持有",
     "correlation_hold_guard": "相关性换仓保护生效，继续持有",
     "four_day_filter_fail_defensive": "连续四个交易日未通过筛选，切换防御标的",
+}
+CORRELATION_REASON_LABELS = {
+    "low_correlation_allow": "修正相关性较低，允许换仓",
+    "high_pair_overlay": "高相关组合保护生效，拦截换仓",
+    "correlation_hold_guard": "相关性换仓保护生效，拦截换仓",
 }
 WUFU_GROUP_NAME_OVERRIDES = {
     "161226.SZ": "国投白银LOF",
@@ -120,6 +129,38 @@ SPECIAL_GROUPS = (
 
 def _state(context) -> dict[str, Any]:
     return context.state["five_fortunes"]
+
+
+def decision_reason_payload(decision: dict[str, Any]) -> dict[str, Any]:
+    reason_code = str(decision.get("reason") or "ranked_target")
+    if reason_code == "pending":
+        reason_code = "ranked_target"
+    if reason_code == "low_correlation_switch" and not decision.get("trigger_reason"):
+        if decision.get("filter_fail_symbols"):
+            reason_code = "filter_fail_switch"
+        elif decision.get("held_rank") is None:
+            reason_code = "filter_fail_switch"
+        elif int(decision.get("held_rank") or 0) > int(decision.get("candidate_count") or 0):
+            reason_code = "candidate_pool_exit_switch"
+        else:
+            reason_code = "rank_lag_switch"
+    trigger_code = str(decision.get("trigger_reason") or reason_code)
+    payload: dict[str, Any] = {
+        "reason_code": reason_code,
+        "reason": DECISION_REASON_LABELS.get(reason_code, reason_code),
+        "trigger_reason_code": trigger_code,
+        "trigger_reason": DECISION_REASON_LABELS.get(trigger_code, trigger_code),
+    }
+    correlation = decision.get("correlation")
+    if isinstance(correlation, dict):
+        correlation_code = str(correlation.get("reason") or "")
+        payload["correlation_check"] = {
+            "adjusted_correlation": correlation.get("p_adj"),
+            "result": "blocked" if correlation.get("blocked") else "passed",
+            "reason_code": correlation_code,
+            "reason": CORRELATION_REASON_LABELS.get(correlation_code, correlation_code),
+        }
+    return payload
 
 
 def _dynamic_group(name: str) -> str | None:
@@ -554,6 +595,7 @@ def _prepare_and_sell(context) -> None:
             state["filter_fail_streak"] = 0
             state["filter_fail_last_date"] = None
             state["decision"]["reason"] = "four_day_filter_fail_defensive"
+            state["decision"]["trigger_reason"] = "four_day_filter_fail_defensive"
             context.log("五福 S2：连续4个交易日发生filter_fail卖出，强制切换防御ETF")
     else:
         state["filter_fail_streak"] = 0
@@ -571,7 +613,6 @@ def _prepare_and_sell(context) -> None:
     for symbol in held:
         if symbol not in targets and _can_trade(state, symbol):
             context.order_target_percent(symbol, 0.0)
-    reason_code = str(state["decision"].get("reason") or "ranked_target")
     decision_type = (
         "empty" if not targets and not held
         else "hold" if targets == held
@@ -591,8 +632,7 @@ def _prepare_and_sell(context) -> None:
                 {"symbol": row["symbol"], "score": row.get("score")}
                 for row in candidate_rows[:10]
             ],
-            "reason_code": reason_code,
-            "reason": DECISION_REASON_LABELS.get(reason_code, reason_code),
+            **decision_reason_payload(state["decision"]),
         },
         event_id=f"five_fortunes:{day}:decision",
     )
@@ -860,9 +900,13 @@ def _choose_targets(
     filtered_rows: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     state = _state(context)
-    state["decision"].setdefault("reason", "ranked_target")
+    decision = state["decision"]
+    if decision.get("reason") in {None, "", "pending"}:
+        decision["reason"] = "ranked_target"
+    decision.setdefault("trigger_reason", decision["reason"])
     if not rows:
-        state["decision"]["reason"] = "no_candidate_defensive"
+        decision["reason"] = "no_candidate_defensive"
+        decision["trigger_reason"] = "no_candidate_defensive"
         return [DEFENSIVE_ETF] if _has_price(state, DEFENSIVE_ETF) else []
     held = _held_symbols(context)
     current = held[0] if held else None
@@ -879,26 +923,35 @@ def _choose_targets(
         eligible = {row["symbol"] for row in rows}
         ranked = filtered_rows or rows
         rank = next((index + 1 for index, row in enumerate(ranked) if row["symbol"] == current), None)
-        if current in eligible and current != top:
+        if current == top:
+            decision["reason"] = "hold_top_rank"
+            decision["trigger_reason"] = "hold_top_rank"
+        elif current in eligible:
+            decision["trigger_reason"] = "rank_lag_switch"
             streak = int(state["rank_streak"].get(current, 0)) + 1
             state["rank_streak"][current] = streak
             if streak < 5:
                 target = current
-                state["decision"]["reason"] = "anti_churn_hold"
+                decision["reason"] = "anti_churn_hold"
             else:
                 state["rank_streak"][current] = 0
+                decision["reason"] = "rank_lag_switch"
         else:
             state["rank_streak"][current] = 0
+            switch_reason = "filter_fail_switch" if rank is None else "candidate_pool_exit_switch"
+            decision["reason"] = switch_reason
+            decision["trigger_reason"] = switch_reason
         if current != target:
             if current not in eligible and state.get("regime_changed_today"):
                 target = current
-                state["decision"]["reason"] = "regime_change_hold"
+                decision["reason"] = "regime_change_hold"
             else:
                 target = _low_correlation_target(context, current, entry_rows) or current
-                state["decision"]["reason"] = "low_correlation_switch" if target != current else "high_correlation_hold"
+                if target == current:
+                    decision["reason"] = "high_correlation_hold"
         if target != current:
             target = _apply_correlation_hold_guard(context, current, target) or current
-        state["decision"].update({"held": current, "held_rank": rank})
+        decision.update({"held": current, "held_rank": rank})
     return [target]
 
 

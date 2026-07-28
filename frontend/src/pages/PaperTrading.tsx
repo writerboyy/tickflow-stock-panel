@@ -80,6 +80,25 @@ function returnClass(value?: number) {
   return Number(value ?? 0) >= 0 ? 'text-bull' : 'text-bear'
 }
 
+function decisionReasonText(event: PaperEvent) {
+  if (event.decision === 'rebalance' && event.trigger_reason) return event.trigger_reason
+  if (event.reason_code === 'low_correlation_switch') {
+    return '当前持仓未进入当日候选范围，切换至排名更高的候选标的'
+  }
+  return event.reason ?? '已完成当日决策'
+}
+
+function correlationCheckText(event: PaperEvent) {
+  const check = event.correlation_check
+  if (check) {
+    const value = check.adjusted_correlation
+    const prefix = value == null ? '' : `P_adj ${Number(value).toFixed(3)}，`
+    return `${prefix}${check.reason || (check.result === 'blocked' ? '相关性校验未通过' : '相关性校验通过')}`
+  }
+  if (event.reason_code === 'low_correlation_switch') return '低相关校验通过'
+  return ''
+}
+
 function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
   const symbol = event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : ''
   if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${symbol} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
@@ -88,7 +107,7 @@ function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) 
   if (event.type === 'signal') {
     const label = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
     const targets = (event.target_symbols ?? []).map(item => formatInstrumentLabel(item, symbolNames[item])).join('、') || '空仓'
-    return `${label} · ${event.regime ?? '—'} · 目标 ${targets} · ${event.reason ?? '已完成当日决策'}`
+    return `${label} · ${event.regime ?? '—'} · 目标 ${targets} · ${decisionReasonText(event)}`
   }
   return String(event.message ?? event.reason ?? event.type)
 }
@@ -151,13 +170,15 @@ function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instru
   const decisionTone = event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
   const targets = event.target_symbols ?? []
   const holdings = event.holding_symbols ?? []
+  const correlationCheck = correlationCheckText(event)
   return <div className="space-y-3 px-4 py-3 text-xs">
     <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{decisionLabel}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
     <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
       <span className="text-muted">市场状态</span><span>{event.regime ?? '—'}{event.raw_regime && event.raw_regime !== event.regime ? ` · 原始 ${event.raw_regime}` : ''}</span>
       <span className="text-muted">目标标的</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
       <span className="text-muted">当前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
-      <span className="text-muted">决策原因</span><span className="leading-5">{event.reason ?? '—'}</span>
+      <span className="text-muted">决策原因</span><span className="leading-5">{decisionReasonText(event)}</span>
+      {correlationCheck ? <><span className="text-muted">相关性校验</span><span className="leading-5">{correlationCheck}</span></> : null}
     </div>
     {event.candidates?.length ? <div className="border-t border-border pt-2 text-[10px] text-muted">候选 {event.candidates.slice(0, 3).map(item => instrumentLabel(item.symbol)).join('、')}</div> : null}
   </div>

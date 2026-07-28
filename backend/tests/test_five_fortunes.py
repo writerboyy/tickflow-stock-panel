@@ -277,6 +277,56 @@ def test_regime_change_day_blocks_immediate_swap():
     assert state["decision"]["reason"] == "regime_change_hold"
 
 
+def test_filter_failure_switch_reports_trigger_and_correlation_separately(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 28, 13, 10)
+    context.portfolio.positions = {"159985.SZ": 100.0}
+    state = context.state["five_fortunes"]
+    state["decision"] = {"date": "2026-07-28", "reason": "pending"}
+    held = metric("159985.SZ", 1.60, variable_prices())
+    candidate = metric("159920.SZ", 1.85, variable_prices(5))
+
+    def rank(_context):
+        state["all_metric_rows"] = [held, candidate]
+        return [candidate]
+
+    monkeypatch.setattr(five, "_rank_candidates", rank)
+    monkeypatch.setattr(five, "_candidate_pool", lambda *_args: [candidate])
+    monkeypatch.setattr(five, "_adjusted_correlation", lambda *_args: 0.1388)
+
+    five._prepare_and_sell(context)
+
+    signal = context.signals[-1]
+    assert signal["decision"] == "rebalance"
+    assert signal["reason_code"] == "filter_fail_switch"
+    assert signal["reason"] == "当前持仓未通过当日筛选，切换至排名最高的候选标的"
+    assert signal["trigger_reason_code"] == "filter_fail_switch"
+    assert signal["correlation_check"] == {
+        "adjusted_correlation": 0.1388,
+        "result": "passed",
+        "reason_code": "low_correlation_allow",
+        "reason": "修正相关性较低，允许换仓",
+    }
+
+
+def test_legacy_low_correlation_reason_is_restored_from_filter_failure():
+    payload = five.decision_reason_payload({
+        "reason": "low_correlation_switch",
+        "held_rank": None,
+        "candidate_count": 1,
+        "filter_fail_symbols": ["159985.SZ"],
+        "correlation": {
+            "p_adj": 0.1388,
+            "blocked": False,
+            "reason": "low_correlation_allow",
+        },
+    })
+
+    assert payload["reason_code"] == "filter_fail_switch"
+    assert payload["trigger_reason_code"] == "filter_fail_switch"
+    assert payload["correlation_check"]["reason_code"] == "low_correlation_allow"
+
+
 def test_weak_regime_drawdown_uses_five_percent_half_position():
     context = initialized_context(equity=94.0)
     context.portfolio.positions = {"A": 218_300.0}

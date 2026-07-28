@@ -1088,6 +1088,14 @@ export interface PaperEvent {
   holding_symbols?: string[]
   candidates?: { symbol: string; score?: number | null }[]
   reason_code?: string
+  trigger_reason_code?: string
+  trigger_reason?: string
+  correlation_check?: {
+    adjusted_correlation?: number | null
+    result?: 'passed' | 'blocked'
+    reason_code?: string
+    reason?: string
+  }
   [key: string]: unknown
 }
 
