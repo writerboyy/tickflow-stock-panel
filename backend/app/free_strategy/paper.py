@@ -815,6 +815,9 @@ def _catch_up_bars(
         until=cutoff,
     ))
     rows = [bar for bar in rows if (last_timestamp is None or bar.timestamp > last_timestamp) and bar.timestamp <= cutoff]
+    existing_sync = current.get("sync")
+    if not rows and isinstance(existing_sync, dict) and existing_sync.get("phase") == "live":
+        return current
     days = [day for day, _ in groupby(rows, key=lambda bar: bar.timestamp.date())]
     target = max((bar.timestamp for bar in rows), default=last_timestamp)
     sync = {
@@ -1155,17 +1158,21 @@ class PaperTradingSupervisor:
             state["execution_mode"] = execution_mode
             state["universe"] = sorted(symbols)
             state["last_error"] = None
-            phase = "live" if mode in QUOTE_MODES else "catching_up"
-            state["sync"] = {
-                "phase": phase,
-                "from": state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp"),
-                "target": None,
-                "through": state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp"),
-                "processed_days": 0,
-                "total_days": 0,
-                "missing_symbols": [],
-                "updated_at": now_iso(),
-            }
+            existing_sync = state.get("sync")
+            if mode in QUOTE_MODES or not (
+                isinstance(existing_sync, dict) and existing_sync.get("phase") == "live"
+            ):
+                phase = "live" if mode in QUOTE_MODES else "catching_up"
+                state["sync"] = {
+                    "phase": phase,
+                    "from": state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp"),
+                    "target": None,
+                    "through": state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp"),
+                    "processed_days": 0,
+                    "total_days": 0,
+                    "missing_symbols": [],
+                    "updated_at": now_iso(),
+                }
             self.store.save(state)
             process = self._processes.get(account_id)
             if process is None or not process.is_alive():

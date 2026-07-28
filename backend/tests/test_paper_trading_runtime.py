@@ -9,7 +9,7 @@ import pytest
 
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
-from app.free_strategy.paper import MarketDataHub, PaperTradingSupervisor, _equity_snapshot
+from app.free_strategy.paper import MarketDataHub, PaperTradingSupervisor, _catch_up_bars, _equity_snapshot
 from app.free_strategy.store import PaperAccountStore
 from app.services.quote_service import QuoteService
 
@@ -238,6 +238,63 @@ def test_supervisor_detaches_runtime_after_worker_pauses(tmp_path):
     assert supervisor._processes == {}  # noqa: SLF001
 
 
+def test_supervisor_restart_preserves_live_sync_until_worker_checks_bars(monkeypatch, tmp_path):
+    class FakeProcess:
+        def __init__(self):
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+    class FakeContext:
+        @staticmethod
+        def Queue(maxsize):
+            return queue.Queue(maxsize=maxsize)
+
+        @staticmethod
+        def Process(*_args, **_kwargs):
+            return FakeProcess()
+
+    sync = {
+        "phase": "live",
+        "from": "2026-07-27T15:00:00",
+        "target": "2026-07-28T15:00:00",
+        "through": "2026-07-28T15:00:00",
+        "processed_days": 1,
+        "total_days": 1,
+        "missing_symbols": ["MISSING"],
+        "updated_at": "2026-07-28T16:00:00+08:00",
+    }
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "status": "running",
+        "last_bar": "2026-07-28T15:00:00",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+        "sync": sync,
+    })
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.data_dir = tmp_path
+    supervisor.store = store
+    supervisor.hub = object()
+    supervisor._ctx = FakeContext()  # noqa: SLF001
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {}  # noqa: SLF001
+    supervisor._queues = {}  # noqa: SLF001
+    monkeypatch.setattr(
+        "app.free_strategy.paper.inspect_account_runtime",
+        lambda *_args: ({"X"}, "full_bar"),
+    )
+
+    result = supervisor.start("paper")
+
+    assert result["sync"] == sync
+    assert [row["type"] for row in store.events("paper")] == ["start"]
+
+
 def test_websocket_reconnect_resubscribes_and_recovers_before_quotes(monkeypatch):
     class FakeQuotes:
         def get(self, symbols):
@@ -353,6 +410,39 @@ def test_paper_event_id_is_appended_once(tmp_path):
     assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is True
     assert store.append_event_once("paper", {"id": "decision:2026-07-28", "type": "signal"}) is False
     assert [row["id"] for row in store.events("paper")] == ["decision:2026-07-28"]
+
+
+def test_up_to_date_restart_preserves_live_sync_state(monkeypatch, tmp_path):
+    sync = {
+        "phase": "live",
+        "from": "2026-07-27T15:00:00",
+        "target": "2026-07-28T15:00:00",
+        "through": "2026-07-28T15:00:00",
+        "processed_days": 1,
+        "total_days": 1,
+        "missing_symbols": ["MISSING"],
+        "updated_at": "2026-07-28T16:00:00+08:00",
+    }
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "last_bar": "2026-07-28T15:00:00",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+        "sync": sync,
+    })
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n    context.set_universe(['X'])\n"
+        "def on_bar(context, bars):\n    pass\n",
+        timeframe="1m",
+    )
+    monkeypatch.setattr("app.free_strategy.process._read_rows", lambda *_args, **_kwargs: [])
+
+    result = _catch_up_bars(store, "paper", current, engine, tmp_path)
+
+    assert result["sync"] == sync
+    assert store.get("paper")["sync"] == sync
+    assert store.events("paper") == []
 
 
 def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):
