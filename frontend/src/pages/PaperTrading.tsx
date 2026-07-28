@@ -28,6 +28,7 @@ import { toast } from '@/components/Toast'
 import { pushAlertToast } from '@/components/AlertToast'
 import { useECharts } from './backtest/charts/useECharts'
 import { useChartTheme } from '@/lib/theme'
+import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -58,9 +59,10 @@ function statusClass(value: PaperAccount['status']) {
   return value === 'running' ? 'text-success' : value === 'paused' ? 'text-warning' : 'text-muted'
 }
 
-function eventText(event: PaperEvent) {
-  if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${event.symbol ?? ''} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
-  if (event.type === 'rejected') return `${event.symbol ?? '委托'}：${event.reason ?? '已拒绝'}`
+function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
+  const symbol = event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : ''
+  if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${symbol} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
+  if (event.type === 'rejected') return `${symbol || '委托'}：${event.reason ?? '已拒绝'}`
   if (event.type === 'risk') return String(event.reason ?? '风控锁定')
   return String(event.message ?? event.reason ?? event.type)
 }
@@ -71,31 +73,49 @@ function formatTime(value?: string) {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN', { hour12: false })
 }
 
-function EquityChart({ account }: { account: PaperAccount }) {
+function ReturnChart({ account }: { account: PaperAccount }) {
   const theme = useChartTheme()
-  const rows = account.account?.equity_curve ?? []
-  const option = useMemo<EChartsOption | null>(() => rows.length ? ({
-    animation: false,
-    grid: { left: 58, right: 18, top: 20, bottom: 34 },
-    tooltip: { trigger: 'axis', backgroundColor: theme.tooltipBg, borderColor: theme.tooltipBorder, textStyle: { color: theme.tooltipText, fontSize: 11 } },
-    xAxis: {
-      type: 'category',
-      data: rows.map(row => formatTime(row.timestamp)),
-      boundaryGap: false,
-      axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true },
-      axisLine: { lineStyle: { color: theme.border } },
-    },
-    yAxis: {
-      type: 'value', scale: true,
-      axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => value.toFixed(2) },
-      splitLine: { lineStyle: { color: theme.grid } },
-    },
-    series: [{ type: 'line', name: '净值', data: rows.map(row => row.nav), showSymbol: false, lineStyle: { width: 1.5, color: '#3b82f6' }, areaStyle: { color: 'rgba(59,130,246,0.08)' } }],
-  }) : null, [rows, theme])
+  const rows = useMemo(() => account.account?.equity_curve ?? [], [account.account?.equity_curve])
+  const option = useMemo<EChartsOption | null>(() => {
+    if (!rows.length) return null
+    const returns = rows.map(row => (Number(row.nav) - 1) * 100)
+    const isPositive = (returns.at(-1) ?? 0) >= 0
+    const lineColor = isPositive ? '#f04438' : '#12b76a'
+    const areaColor = isPositive ? 'rgba(240,68,56,0.08)' : 'rgba(18,183,106,0.08)'
+    return {
+      animation: false,
+      grid: { left: 62, right: 18, top: 20, bottom: 34 },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: theme.tooltipBg,
+        borderColor: theme.tooltipBorder,
+        textStyle: { color: theme.tooltipText, fontSize: 11 },
+        formatter: (params: any) => {
+          const item = Array.isArray(params) ? params[0] : params
+          const value = Number(item?.value ?? 0)
+          return `<div>${String(item?.axisValue ?? '')}</div><div>累计收益 ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: rows.map(row => formatTime(row.timestamp)),
+        boundaryGap: false,
+        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true },
+        axisLine: { lineStyle: { color: theme.border } },
+      },
+      yAxis: {
+        type: 'value', scale: true,
+        min: (range: { min: number }) => Math.min(0, range.min),
+        axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
+        splitLine: { lineStyle: { color: theme.grid } },
+      },
+      series: [{ type: 'line', name: '累计收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: lineColor }, itemStyle: { color: lineColor }, areaStyle: { color: areaColor } }],
+    }
+  }, [rows, theme])
   const ref = useECharts(option, [option])
   return <div className="relative h-52 w-full">
     <div ref={ref} className="h-full w-full" />
-    {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个净值采样</div> : null}
+    {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
   </div>
 }
 
@@ -198,7 +218,24 @@ export function PaperTrading() {
   const eventsQuery = useQuery({ queryKey: ['free-paper-events', selectedId], queryFn: () => api.paperEvents(selectedId), enabled: Boolean(selectedId) })
   const accounts = accountsQuery.data?.accounts ?? []
   const account = detailQuery.data ?? accounts.find(item => item.id === selectedId)
-  const events = eventsQuery.data?.events ?? []
+  const events = useMemo(() => eventsQuery.data?.events ?? [], [eventsQuery.data?.events])
+  const instrumentSymbols = useMemo(() => {
+    const symbols = new Set<string>(account?.universe ?? [])
+    const snapshot = account?.account
+    Object.keys(snapshot?.positions ?? account?.positions ?? {}).forEach(symbol => symbols.add(symbol))
+    snapshot?.orders?.forEach(order => symbols.add(order.symbol))
+    snapshot?.fills?.forEach(fill => symbols.add(fill.symbol))
+    events.forEach(event => { if (event.symbol) symbols.add(event.symbol) })
+    return [...symbols].sort()
+  }, [account, events])
+  const namesQuery = useQuery({
+    queryKey: ['instrument-names', instrumentSymbols.join(',')],
+    queryFn: () => api.instrumentNames(instrumentSymbols),
+    enabled: instrumentSymbols.length > 0,
+    staleTime: 300_000,
+  })
+  const symbolNames = namesQuery.data?.names ?? {}
+  const instrumentLabel = (symbol: unknown) => formatInstrumentLabel(symbol, symbolNames[String(symbol ?? '')])
 
   useEffect(() => {
     if (!selectedId && accounts[0]) setSelectedId(accounts[0].id)
@@ -293,14 +330,14 @@ export function PaperTrading() {
         </section>
 
         <section className="grid grid-cols-[minmax(0,1fr)_260px] border-b border-border max-lg:grid-cols-1">
-          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">净值曲线</div><EquityChart account={account} /></div>
+          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart account={account} /></div>
           <div className="p-3 text-[11px]">
             <div className="mb-3 font-medium">行情状态</div>
             <div className="space-y-2 text-muted">
               <div className="flex items-center justify-between gap-2"><span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />最后行情</span><span className="truncate font-mono text-[10px] text-foreground">{formatTime(account.last_quote ?? account.last_bar ?? status?.last_quote_at ?? undefined)}</span></div>
               <div className="flex items-center justify-between"><span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />轮询耗时</span><span className="font-mono text-foreground">{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span></div>
               <div className="flex items-center justify-between"><span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />WebSocket</span><span className="text-foreground">{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span></div>
-              <div className="flex items-center justify-between"><span className="inline-flex items-center gap-1.5"><Radio className="h-3.5 w-3.5" />股票池</span><span className="font-mono text-foreground">{account.universe?.length ?? 0}</span></div>
+              <div className="flex items-center justify-between" title="策略当前监听的标的数量，由每个策略独立维护"><span className="inline-flex items-center gap-1.5"><Radio className="h-3.5 w-3.5" />当前订阅池</span><span className="font-mono text-foreground">{account.universe?.length ?? 0}</span></div>
             </div>
           </div>
         </section>
@@ -309,11 +346,11 @@ export function PaperTrading() {
           {([['positions', '持仓', WalletCards], ['signals', '信号', Activity], ['orders', '委托', ListOrdered], ['fills', '成交', Gauge], ['logs', '日志', FileText]] as const).map(([value, label, Icon]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}</button>)}
         </div>
         <section className="min-h-56 overflow-x-auto p-3">
-          {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{symbol}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{Number(snapshot?.avg_cost?.[symbol] ?? 0).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{MONEY.format(quantity * Number(snapshot?.avg_cost?.[symbol] ?? 0))}</td></tr>)}</tbody></table> : null}
-          {tab === 'signals' ? <EventRows rows={signalEvents} /> : null}
-          {tab === 'orders' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 font-medium">状态</th><th className="px-2 py-2 font-medium">原因</th></tr></thead><tbody>{orders.slice().reverse().map(order => <tr key={order.id} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(order.submitted_at)}</td><td className="px-2 py-2.5 font-mono">{order.symbol}</td><td className="px-2 py-2.5">{order.side}</td><td className="px-2 py-2.5 text-right font-mono">{order.quantity ?? '—'}</td><td className="px-2 py-2.5">{order.status}</td><td className="px-2 py-2.5 text-muted">{order.reason || '—'}</td></tr>)}</tbody></table> : null}
-          {tab === 'fills' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">价格</th><th className="px-2 py-2 text-right font-medium">费用</th></tr></thead><tbody>{fills.slice().reverse().map((fill, index) => <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(fill.timestamp)}</td><td className="px-2 py-2.5 font-mono">{fill.symbol}</td><td className="px-2 py-2.5">{fill.side}</td><td className="px-2 py-2.5 text-right font-mono">{fill.quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{fill.price.toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{fill.fee.toFixed(2)}</td></tr>)}</tbody></table> : null}
-          {tab === 'logs' ? <EventRows rows={logEvents} /> : null}
+          {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{Number(snapshot?.avg_cost?.[symbol] ?? 0).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{MONEY.format(quantity * Number(snapshot?.avg_cost?.[symbol] ?? 0))}</td></tr>)}</tbody></table> : null}
+          {tab === 'signals' ? <EventRows rows={signalEvents} symbolNames={symbolNames} /> : null}
+          {tab === 'orders' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 font-medium">状态</th><th className="px-2 py-2 font-medium">原因</th></tr></thead><tbody>{orders.slice().reverse().map(order => <tr key={order.id} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(order.submitted_at)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(order.symbol)}</td><td className="px-2 py-2.5">{order.side}</td><td className="px-2 py-2.5 text-right font-mono">{order.quantity ?? '—'}</td><td className="px-2 py-2.5">{order.status}</td><td className="px-2 py-2.5 text-muted">{order.reason || '—'}</td></tr>)}</tbody></table> : null}
+          {tab === 'fills' ? <table className="w-full min-w-[680px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">时间</th><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 font-medium">方向</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">价格</th><th className="px-2 py-2 text-right font-medium">费用</th></tr></thead><tbody>{fills.slice().reverse().map((fill, index) => <tr key={`${fill.order_id}-${index}`} className="border-t border-border"><td className="px-2 py-2.5 text-muted">{formatTime(fill.timestamp)}</td><td className="px-2 py-2.5 font-mono">{instrumentLabel(fill.symbol)}</td><td className="px-2 py-2.5">{fill.side}</td><td className="px-2 py-2.5 text-right font-mono">{fill.quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{fill.price.toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{fill.fee.toFixed(2)}</td></tr>)}</tbody></table> : null}
+          {tab === 'logs' ? <EventRows rows={logEvents} symbolNames={symbolNames} /> : null}
           {((tab === 'positions' && !positions.length) || (tab === 'signals' && !signalEvents.length) || (tab === 'orders' && !orders.length) || (tab === 'fills' && !fills.length) || (tab === 'logs' && !logEvents.length)) ? <div className="py-12 text-center text-xs text-muted">暂无记录</div> : null}
         </section>
       </main>}
@@ -323,6 +360,6 @@ export function PaperTrading() {
   </div>
 }
 
-function EventRows({ rows }: { rows: PaperEvent[] }) {
-  return <div className="space-y-1">{rows.map(event => <div key={event.id} className="grid grid-cols-[150px_80px_minmax(0,1fr)] gap-2 border-b border-border px-2 py-2 text-xs max-sm:grid-cols-[110px_minmax(0,1fr)]"><span className="text-[10px] text-muted">{formatTime(event.timestamp)}</span><span className="font-mono text-[10px] text-muted max-sm:hidden">{event.symbol ?? event.type}</span><span className={event.type === 'error' || event.type === 'risk' ? 'text-danger' : event.type === 'rejected' ? 'text-warning' : ''}>{eventText(event)}</span></div>)}</div>
+function EventRows({ rows, symbolNames }: { rows: PaperEvent[]; symbolNames: Record<string, string> }) {
+  return <div className="space-y-1">{rows.map(event => <div key={event.id} className="grid grid-cols-[150px_180px_minmax(0,1fr)] gap-2 border-b border-border px-2 py-2 text-xs max-sm:grid-cols-[110px_minmax(0,1fr)]"><span className="text-[10px] text-muted">{formatTime(event.timestamp)}</span><span className="truncate font-mono text-[10px] text-muted max-sm:hidden" title={event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type}>{event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type}</span><span className={event.type === 'error' || event.type === 'risk' ? 'text-danger' : event.type === 'rejected' ? 'text-warning' : ''}>{eventText(event, symbolNames)}</span></div>)}</div>
 }

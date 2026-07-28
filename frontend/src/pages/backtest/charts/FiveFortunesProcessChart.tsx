@@ -28,7 +28,7 @@ const REGIME_COLORS: Record<string, string> = {
   走弱期: '#dc2626',
 }
 
-export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFortunesDailyReport[]; fills: Record<string, any>[] }) {
+export function FiveFortunesProcessChart({ reports, fills, formatInstrument = String }: { reports: FiveFortunesDailyReport[]; fills: Record<string, any>[]; formatInstrument?: (symbol: string) => string }) {
   const ct = useChartTheme()
   const option = useMemo<EChartsOption | null>(() => {
     if (!reports.length) return null
@@ -66,7 +66,7 @@ export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFort
         formatter: (params: any) => {
           const report = reports[params[0]?.dataIndex ?? 0]
           const activity = trades.get(report.date) ?? { buy: 0, sell: 0 }
-          return `<div>${report.date} · ${report.regime}</div><div>过滤后 ${report.filtered_count ?? 0} · 候选 ${report.candidate_count ?? report.candidates.length} · 流动性池 ${report.liquidity_pool_count ?? 0}</div><div>目标 ${report.target.join(', ') || '空仓'}</div><div>实际持仓 ${report.holdings?.join(', ') || '空仓'}</div><div>实际成交 买入 ${activity.buy} · 卖出 ${activity.sell}</div>${report.regime_changed ? '<div>状态切换</div>' : ''}${report.risk_action ? `<div>风控 ${report.risk_action.action ?? ''}</div>` : ''}`
+          return `<div>${report.date} · ${report.regime}</div><div>过滤后 ${report.filtered_count ?? 0} · 候选 ${report.candidate_count ?? report.candidates.length} · 流动性池 ${report.liquidity_pool_count ?? 0}</div><div>目标 ${report.target.map(formatInstrument).join(', ') || '空仓'}</div><div>实际持仓 ${report.holdings?.map(formatInstrument).join(', ') || '空仓'}</div><div>实际成交 买入 ${activity.buy} · 卖出 ${activity.sell}</div>${report.regime_changed ? '<div>状态切换</div>' : ''}${report.risk_action ? `<div>风控 ${report.risk_action.action ?? ''}</div>` : ''}`
         },
       },
       series: [
@@ -80,7 +80,7 @@ export function FiveFortunesProcessChart({ reports, fills }: { reports: FiveFort
         { name: '卖出', type: 'bar', xAxisIndex: 1, yAxisIndex: 2, stack: 'trade', data: dates.map(day => -(trades.get(day)?.sell ?? 0)), itemStyle: { color: BEAR_COLOR }, barMaxWidth: 8 },
       ],
     } as any
-  }, [ct, fills, reports])
+  }, [ct, fills, formatInstrument, reports])
   const chartRef = useECharts(option, [option])
 
   return <div>
