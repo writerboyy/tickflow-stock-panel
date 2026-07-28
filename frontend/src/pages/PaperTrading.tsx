@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   CirclePause,
   CirclePlay,
-  Clock3,
   FileText,
   Gauge,
   ListOrdered,
@@ -18,9 +17,11 @@ import {
   Trash2,
   WalletCards,
   Wifi,
+  X,
 } from 'lucide-react'
 import type { EChartsOption } from 'echarts'
 import { api, type CreatePaperAccount, type PaperAccount, type PaperEvent, type PaperFill, type PaperMarketMode, type PaperOrder } from '@/lib/api'
+import { DatePicker } from '@/components/DatePicker'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
@@ -88,17 +89,6 @@ function decisionReasonText(event: PaperEvent) {
   return event.reason ?? '已完成当日决策'
 }
 
-function correlationCheckText(event: PaperEvent) {
-  const check = event.correlation_check
-  if (check) {
-    const value = check.adjusted_correlation
-    const prefix = value == null ? '' : `P_adj ${Number(value).toFixed(3)}，`
-    return `${prefix}${check.reason || (check.result === 'blocked' ? '相关性校验未通过' : '相关性校验通过')}`
-  }
-  if (event.reason_code === 'low_correlation_switch') return '低相关校验通过'
-  return ''
-}
-
 function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
   const symbol = event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : ''
   if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${symbol} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
@@ -107,7 +97,7 @@ function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) 
   if (event.type === 'signal') {
     const label = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
     const targets = (event.target_symbols ?? []).map(item => formatInstrumentLabel(item, symbolNames[item])).join('、') || '空仓'
-    return `${label} · ${event.regime ?? '—'} · 目标 ${targets} · ${decisionReasonText(event)}`
+    return `${label} · 目标 ${targets} · ${decisionReasonText(event)}`
   }
   return String(event.message ?? event.reason ?? event.type)
 }
@@ -116,6 +106,10 @@ function formatTime(value?: string) {
   if (!value) return '—'
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString('zh-CN', { hour12: false })
+}
+
+function eventTradingDate(event: PaperEvent) {
+  return String(event.trading_date || event.timestamp || '').slice(0, 10)
 }
 
 function orderDirection(order: PaperOrder, fills: PaperFill[]) {
@@ -154,9 +148,6 @@ function ReturnChart({ account }: { account: PaperAccount }) {
   const option = useMemo<EChartsOption | null>(() => {
     if (!rows.length) return null
     const returns = rows.map(row => (Number(row.nav) - 1) * 100)
-    const isPositive = (returns.at(-1) ?? 0) >= 0
-    const lineColor = isPositive ? '#f04438' : '#12b76a'
-    const areaColor = isPositive ? 'rgba(240,68,56,0.08)' : 'rgba(18,183,106,0.08)'
     return {
       animation: false,
       grid: { left: 62, right: 18, top: 20, bottom: 34 },
@@ -184,7 +175,7 @@ function ReturnChart({ account }: { account: PaperAccount }) {
         axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
         splitLine: { lineStyle: { color: theme.grid } },
       },
-      series: [{ type: 'line', name: '累计收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: lineColor }, itemStyle: { color: lineColor }, areaStyle: { color: areaColor } }],
+      series: [{ type: 'line', name: '累计收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } }],
     }
   }, [rows, theme])
   const ref = useECharts(option, [option])
@@ -200,17 +191,13 @@ function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instru
   const decisionTone = event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
   const targets = event.target_symbols ?? []
   const holdings = event.holding_symbols ?? []
-  const correlationCheck = correlationCheckText(event)
   return <div className="space-y-3 px-4 py-3 text-xs">
     <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{decisionLabel}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
     <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
-      <span className="text-muted">市场状态</span><span>{event.regime ?? '—'}{event.raw_regime && event.raw_regime !== event.regime ? ` · 原始 ${event.raw_regime}` : ''}</span>
       <span className="text-muted">目标标的</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
       <span className="text-muted">当前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
       <span className="text-muted">决策原因</span><span className="leading-5">{decisionReasonText(event)}</span>
-      {correlationCheck ? <><span className="text-muted">相关性校验</span><span className="leading-5">{correlationCheck}</span></> : null}
     </div>
-    {event.candidates?.length ? <div className="border-t border-border pt-2 text-[10px] text-muted">候选 {event.candidates.slice(0, 3).map(item => instrumentLabel(item.symbol)).join('、')}</div> : null}
   </div>
 }
 
@@ -330,6 +317,7 @@ export function PaperTrading() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [selectedId, setSelectedId] = useState('')
   const [tab, setTab] = useState<DetailTab>('positions')
+  const [decisionDate, setDecisionDate] = useState('')
   const [showCreate, setShowCreate] = useState(searchParams.get('create') === '1')
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
@@ -370,6 +358,10 @@ export function PaperTrading() {
     if (!selectedId && accounts[0]) setSelectedId(accounts[0].id)
     if (selectedId && accounts.length && !accounts.some(item => item.id === selectedId)) setSelectedId(accounts[0].id)
   }, [accounts, selectedId])
+
+  useEffect(() => {
+    setDecisionDate('')
+  }, [selectedId])
 
   useEffect(() => {
     notifiedSequence.current = Math.max(0, ...(detailQuery.data?.events ?? []).map(event => event.sequence))
@@ -425,6 +417,10 @@ export function PaperTrading() {
   const fills = snapshot?.fills ?? []
   const orders = snapshot?.orders ?? []
   const decisionEvents = signalsQuery.data?.signals ?? []
+  const decisionDates = decisionEvents.map(eventTradingDate).filter(Boolean).sort()
+  const visibleDecisionEvents = decisionDate
+    ? decisionEvents.filter(event => eventTradingDate(event) === decisionDate)
+    : decisionEvents
   const latestDecision = decisionEvents.find(event => event.signal_type === 'daily_decision')
   const logEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
   const status = statusQuery.data
@@ -470,23 +466,32 @@ export function PaperTrading() {
           <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} /></div>
         </section>
 
-        <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
+        {syncLabel(account) || account.market_mode === 'poll_3s' || account.market_mode === 'websocket' ? <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
           {syncLabel(account) ? <span className={`inline-flex items-center gap-1.5 ${syncClass(account)}`}><Activity className="h-3.5 w-3.5" />{syncLabel(account)}</span> : null}
-          <span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />已处理至 <span className="font-mono text-foreground">{formatTime(account.sync?.through ?? account.last_quote ?? account.last_bar)}</span></span>
           {account.sync?.phase === 'catching_up' ? <span className="font-mono text-warning">目标 {formatTime(account.sync.target ?? undefined)}</span> : null}
           {account.market_mode === 'poll_3s' ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span> : null}
           {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span> : null}
-        </section>
+        </section> : null}
 
         <div className="flex border-b border-border px-3 pt-2">
           {([['positions', '持仓', WalletCards, positions.length], ['decisions', '决策', Activity, decisionEvents.length], ['trades', '交易', ListOrdered, orders.length], ['logs', '日志', FileText, logEvents.length]] as const).map(([value, label, Icon, count]) => <button key={value} type="button" onClick={() => setTab(value)} className={`inline-flex h-8 items-center gap-1.5 border-b-2 px-3 text-xs ${tab === value ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{label}<span className="font-mono text-[9px] opacity-70">{count}</span></button>)}
         </div>
         <section className="min-h-56 overflow-x-auto p-3">
+          {tab === 'decisions' ? <div className="mb-3 flex flex-wrap items-end justify-between gap-2 border-b border-border px-2 pb-3">
+            <div>
+              <label className="mb-1 block text-[10px] text-muted">交易日</label>
+              <div className="flex items-center gap-1.5">
+                <DatePicker value={decisionDate} onChange={setDecisionDate} min={decisionDates[0]} max={decisionDates.at(-1)} placeholder="全部日期" align="left" />
+                {decisionDate ? <button type="button" title="查看全部日期" aria-label="查看全部日期" onClick={() => setDecisionDate('')} className="inline-flex h-7 w-7 items-center justify-center rounded border border-border text-muted hover:text-foreground"><X className="h-3.5 w-3.5" /></button> : null}
+              </div>
+            </div>
+            <span className="text-[10px] text-muted">{decisionDate ? `${decisionDate} · ${visibleDecisionEvents.length} 条` : `全部 ${decisionEvents.length} 条`}</span>
+          </div> : null}
           {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{Number(snapshot?.avg_cost?.[symbol] ?? 0).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{MONEY.format(quantity * Number(snapshot?.avg_cost?.[symbol] ?? 0))}</td></tr>)}</tbody></table> : null}
-          {tab === 'decisions' ? <EventRows rows={decisionEvents} symbolNames={symbolNames} /> : null}
+          {tab === 'decisions' ? <EventRows rows={visibleDecisionEvents} symbolNames={symbolNames} /> : null}
           {tab === 'trades' ? <TradeTable orders={orders} fills={fills} instrumentLabel={instrumentLabel} /> : null}
           {tab === 'logs' ? <EventRows rows={logEvents} symbolNames={symbolNames} /> : null}
-          {((tab === 'positions' && !positions.length) || (tab === 'decisions' && !decisionEvents.length) || (tab === 'trades' && !orders.length) || (tab === 'logs' && !logEvents.length)) ? <div className="py-12 text-center text-xs text-muted">暂无记录</div> : null}
+          {((tab === 'positions' && !positions.length) || (tab === 'decisions' && !visibleDecisionEvents.length) || (tab === 'trades' && !orders.length) || (tab === 'logs' && !logEvents.length)) ? <div className="py-12 text-center text-xs text-muted">暂无记录</div> : null}
         </section>
       </main>}
     </div>
