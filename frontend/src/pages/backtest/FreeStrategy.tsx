@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
+import { DatePicker } from '@/components/DatePicker'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
 import { priceColorClass } from '@/lib/format'
@@ -432,7 +433,8 @@ export function FreeStrategy() {
           <label>资产<select className={INPUT} value={config.asset_type} onChange={event => setConfig({ ...config, asset_type: event.target.value as FreeBacktestConfig['asset_type'] })}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
           <label>周期<select className={INPUT} value={config.timeframe} onChange={event => setConfig({ ...config, timeframe: event.target.value as FreeBacktestConfig['timeframe'] })}><option value="1d">1d</option><option value="30m">30m</option><option value="5m">5m</option><option value="1m">1m</option></select></label>
           <label className="col-span-2">基准<input className={INPUT} value={config.benchmark_symbol} onChange={event => setConfig({ ...config, benchmark_symbol: event.target.value.trim() })} /></label>
-          <label>开始<input type="date" className={INPUT} value={config.start} onChange={event => setConfig({ ...config, start: event.target.value })} /></label><label>结束<input type="date" className={INPUT} value={config.end} onChange={event => setConfig({ ...config, end: event.target.value })} /></label>
+          <div><label className="mb-1 block">开始</label><DatePicker value={config.start ?? ''} onChange={value => setConfig({ ...config, start: value })} max={config.end || undefined} className="w-full" buttonClassName="w-full justify-start" align="left" /></div>
+          <div><label className="mb-1 block">结束</label><DatePicker value={config.end ?? ''} onChange={value => setConfig({ ...config, end: value })} min={config.start || undefined} className="w-full" buttonClassName="w-full justify-start" /></div>
           <label>初始资金<input type="number" className={INPUT} value={config.initial_capital} onChange={event => setConfig({ ...config, initial_capital: Number(event.target.value) })} /></label><label>最小单位<input type="number" className={INPUT} value={config.lot_size} onChange={event => setConfig({ ...config, lot_size: Number(event.target.value) })} /></label>
           <label>手续费<input type="number" step="0.0001" className={INPUT} value={config.fees_pct} onChange={event => setConfig({ ...config, fees_pct: Number(event.target.value) })} /></label><label>滑点(bps)<input type="number" className={INPUT} value={config.slippage_bps} onChange={event => setConfig({ ...config, slippage_bps: Number(event.target.value) })} /></label>
           <label>结算<select className={INPUT} value={config.settlement} onChange={event => setConfig({ ...config, settlement: event.target.value as FreeBacktestConfig['settlement'] })}><option value="t1">T+1（默认）</option><option value="t0">T+0</option></select></label><label>成交<select className={INPUT} value={config.fill_policy} onChange={event => setConfig({ ...config, fill_policy: event.target.value as FreeBacktestConfig['fill_policy'] })}><option value="next_open">下一根开盘</option><option value="close">当前收盘</option></select></label>

@@ -1200,6 +1200,7 @@ export const api = {
     if (types) query.set('types', types)
     return request<{ events: PaperEvent[]; next_cursor: number | null }>(`/api/free-strategies/paper/accounts/${id}/events?${query}`)
   },
+  paperSignals: (id: string) => request<{ signals: PaperEvent[]; total: number }>(`/api/free-strategies/paper/accounts/${id}/signals`),
   paperOrders: (id: string) => request<{ orders: PaperOrder[] }>(`/api/free-strategies/paper/accounts/${id}/orders`),
   paperFills: (id: string) => request<{ fills: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/fills`),
   paperLogs: (id: string) => request<{ logs: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),

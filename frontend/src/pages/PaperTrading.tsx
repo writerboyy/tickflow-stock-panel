@@ -339,6 +339,7 @@ export function PaperTrading() {
   const statusQuery = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus, refetchInterval: 3_000 })
   const detailQuery = useQuery({ queryKey: ['free-paper-account', selectedId], queryFn: () => api.paperAccount(selectedId), enabled: Boolean(selectedId), refetchInterval: selectedId ? 5_000 : false })
   const eventsQuery = useQuery({ queryKey: ['free-paper-events', selectedId], queryFn: () => api.paperEvents(selectedId), enabled: Boolean(selectedId) })
+  const signalsQuery = useQuery({ queryKey: ['free-paper-signals', selectedId], queryFn: () => api.paperSignals(selectedId), enabled: Boolean(selectedId) })
   const accounts = accountsQuery.data?.accounts ?? []
   const account = detailQuery.data ?? accounts.find(item => item.id === selectedId)
   const events = useMemo(() => eventsQuery.data?.events ?? [], [eventsQuery.data?.events])
@@ -349,8 +350,13 @@ export function PaperTrading() {
     snapshot?.orders?.forEach(order => symbols.add(order.symbol))
     snapshot?.fills?.forEach(fill => symbols.add(fill.symbol))
     events.forEach(event => { if (event.symbol) symbols.add(event.symbol) })
+    signalsQuery.data?.signals.forEach(event => {
+      event.target_symbols?.forEach(symbol => symbols.add(symbol))
+      event.holding_symbols?.forEach(symbol => symbols.add(symbol))
+      event.candidates?.forEach(candidate => symbols.add(candidate.symbol))
+    })
     return [...symbols].sort()
-  }, [account, events])
+  }, [account, events, signalsQuery.data?.signals])
   const namesQuery = useQuery({
     queryKey: ['instrument-names', instrumentSymbols.join(',')],
     queryFn: () => api.instrumentNames(instrumentSymbols),
@@ -377,6 +383,7 @@ export function PaperTrading() {
       notifiedSequence.current = Math.max(notifiedSequence.current, event.sequence)
       void qc.invalidateQueries({ queryKey: ['free-paper-account', selectedId] })
       void qc.invalidateQueries({ queryKey: ['free-paper-events', selectedId] })
+      if (event.type === 'signal') void qc.invalidateQueries({ queryKey: ['free-paper-signals', selectedId] })
       if (['fill', 'rejected', 'risk'].includes(event.type)) {
         pushAlertToast({ ts: Date.now(), source: 'strategy', type: event.type, symbol: event.symbol, message: eventText(event), severity: event.type === 'risk' ? 'critical' : event.type === 'rejected' ? 'warn' : 'info' })
       }
@@ -389,7 +396,7 @@ export function PaperTrading() {
     setPendingAction(value)
     try {
       await api.paperAction(account.id, value)
-      await Promise.all([accountsQuery.refetch(), detailQuery.refetch(), statusQuery.refetch(), eventsQuery.refetch()])
+      await Promise.all([accountsQuery.refetch(), detailQuery.refetch(), statusQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])
     } catch {
       return
     } finally {
@@ -417,8 +424,8 @@ export function PaperTrading() {
   const positions = Object.entries(snapshot?.positions ?? account?.positions ?? {}).filter(([, quantity]) => quantity > 0)
   const fills = snapshot?.fills ?? []
   const orders = snapshot?.orders ?? []
-  const decisionEvents = events.filter(event => event.type === 'signal')
-  const latestDecision = events.find(event => event.type === 'signal' && event.signal_type === 'daily_decision')
+  const decisionEvents = signalsQuery.data?.signals ?? []
+  const latestDecision = decisionEvents.find(event => event.signal_type === 'daily_decision')
   const logEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
   const status = statusQuery.data
 
@@ -441,7 +448,7 @@ export function PaperTrading() {
             <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
             <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
             <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Square className="h-4 w-4" /></button>
-            <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>
+            <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>
             <button type="button" title={account.status === 'stopped' ? '删除' : '请先停止账户'} disabled={Boolean(pendingAction) || account.status !== 'stopped'} onClick={() => setDeleteTarget(account)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-danger hover:text-danger disabled:opacity-35"><Trash2 className="h-4 w-4" /></button>
           </div>
         </div>

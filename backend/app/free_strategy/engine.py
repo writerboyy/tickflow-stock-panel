@@ -1454,6 +1454,7 @@ class FreeStrategyEngine:
                 "daily_equity_curve": daily_curve, "performance": performance,
                 "benchmark_symbol": self.config.benchmark_symbol,
                 "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
+                "strategy_signals": self.signals,
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
                 "corporate_actions": self.account.corporate_actions,
                 "positions": self.account.positions, "logs": self.logs, "state": self.state,
