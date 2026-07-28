@@ -41,6 +41,28 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
     assert payload["strategy_name"] == "五福"
 
 
+def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_path):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        datastore=SimpleNamespace(data_dir=tmp_path),
+    )))
+    strategy = {"id": "seven", "name": "七星", "source": "def on_bar(context, bars): pass", "revision": 1}
+
+    payload = _job_payload(
+        BacktestWrite(
+            strategy_id="seven",
+            reserve_buy_fees=False,
+            t0_symbols=["513310.SH"],
+            allow_stale_fills=True,
+        ),
+        strategy,
+        request,
+    )
+
+    assert payload["config"]["reserve_buy_fees"] is False
+    assert payload["config"]["t0_symbols"] == ["513310.SH"]
+    assert payload["config"]["allow_stale_fills"] is True
+
+
 def test_backtest_request_can_leave_universe_to_strategy_source(tmp_path):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         datastore=SimpleNamespace(data_dir=tmp_path),

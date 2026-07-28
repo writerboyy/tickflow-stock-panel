@@ -12,6 +12,7 @@ from app.free_strategy.process import (
     _aligned_warmup_bars,
     _load_scheduled_history,
     _prepare_market_data,
+    _preload_tradable_dates,
     _read_rows,
     advance_scheduled_session,
     execute_backtest,
@@ -114,6 +115,23 @@ def test_market_preparation_does_not_inject_undeclared_history():
     }
     assert engine.context.history_bars("X", count=100, timeframe="1d") == []
     assert market.previous_adjusted_close["X"] == 1.0
+
+
+def test_stale_fill_dates_include_only_days_with_trading_evidence():
+    active = datetime(2024, 2, 1).date()
+    suspended = datetime(2024, 2, 2).date()
+    engine = FreeStrategyEngine(
+        "def on_bar(context, bars):\n    pass\n",
+        config=FreeStrategyConfig(allow_stale_fills=True),
+    )
+    market = MarketData(daily={
+        ("X", active): daily_row(active, 10),
+        ("X", suspended): {**daily_row(suspended, 0), "open": 0, "high": 0},
+    })
+
+    _preload_tradable_dates(engine, market)
+
+    assert engine._tradable_dates == {("X", active)}  # noqa: SLF001
 
 
 def test_market_preparation_injects_exact_declared_bars_per_symbol():

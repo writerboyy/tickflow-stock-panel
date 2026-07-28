@@ -447,7 +447,9 @@ def _engine_from_state(
     from app.free_strategy.process import (
         MarketData,
         _instrument_records,
+        _load_market_data,
         _prepare_market_reference,
+        _preload_tradable_dates,
         _read_rows,
     )
     from app.tickflow.repository import DataStore, KlineRepository
@@ -479,6 +481,11 @@ def _engine_from_state(
         if runtime_timestamp else date.today()
     )
     engine.set_run_window(run_start, date.today())
+    if config.allow_stale_fills:
+        _preload_tradable_dates(
+            engine,
+            _load_market_data(repo, engine.universe, run_start, date.today(), asset_type),
+        )
     if "unit_net_value" in engine.extra_history_requirements:
         from app.free_strategy.fund_nav import prepare_fund_nav_data
 
@@ -744,6 +751,13 @@ def _process_bar_rows(
     *,
     notify: Any = None,
 ) -> dict[str, Any]:
+    bars = list(bars)
+    if engine.config.allow_stale_fills:
+        engine.preload_tradable_dates(
+            (bar.symbol, bar.timestamp.date())
+            for bar in bars
+            if bar.tradable and not bar.suspended and bar.open > 0 and bar.high > 0
+        )
     before_orders = len(engine.account.orders)
     before_fills = len(engine.account.fills)
     before_logs = len(engine.logs)

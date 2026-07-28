@@ -5,7 +5,7 @@ import pytest
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
-from app.free_strategy import five_fortunes
+from app.free_strategy import five_fortunes, seven_stars
 from app.free_strategy.five_fortunes import (
     DEFENSIVE_ETF,
     REGIME_FALLBACK_PROXIES,
@@ -201,7 +201,7 @@ def on_bar(context, bars):
         FreeStrategyEngine(source)
 
 
-@pytest.mark.parametrize("template_id", ["dual_ma", "etf_rotation", "five_fortunes"])
+@pytest.mark.parametrize("template_id", ["dual_ma", "etf_rotation", "five_fortunes", "seven_stars"])
 def test_templates_define_universe_in_strategy_source(template_id):
     template = TEMPLATES[template_id]
 
@@ -215,6 +215,14 @@ def test_five_fortunes_template_is_a_self_contained_source_snapshot():
 
     assert source == Path(five_fortunes.__file__).read_text(encoding="utf-8")
     assert "from app.free_strategy.five_fortunes import" not in source
+    assert "from jqdata import" not in source
+
+
+def test_seven_stars_template_is_a_self_contained_source_snapshot():
+    source = TEMPLATES["seven_stars"]["source"]
+
+    assert source == Path(seven_stars.__file__).read_text(encoding="utf-8")
+    assert "from app.free_strategy.seven_stars import" not in source
     assert "from jqdata import" not in source
 
 
@@ -275,6 +283,26 @@ def test_five_fortunes_template_uses_reference_backtest_parameters():
         "price_tick": 0.001,
         "benchmark_symbol": "510300.SH",
         "settlement": "t1",
+        "fill_policy": "close",
+    }
+
+
+def test_seven_stars_template_uses_reference_backtest_parameters():
+    assert TEMPLATES["seven_stars"]["config"] == {
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "initial_capital": 100_000,
+        "fees_pct": 0.0002,
+        "commission_pct": 0.0002,
+        "min_commission": 5,
+        "reserve_buy_fees": False,
+        "stamp_tax_pct": 0,
+        "slippage_bps": 0.5,
+        "price_tick": 0.001,
+        "benchmark_symbol": "510300.SH",
+        "settlement": "t1",
+        "t0_symbols": seven_stars.T0_ETFS,
+        "allow_stale_fills": True,
         "fill_policy": "close",
     }
 
@@ -529,6 +557,107 @@ def after_trading_end(context):
     t0 = FreeStrategyEngine(source, config=FreeStrategyConfig(lot_size=100, settlement="t0", fill_policy="close")).run(bars)
     assert len(t1["fills"]) == 1
     assert len(t0["fills"]) == 2
+
+
+def test_symbol_level_t0_can_coexist_with_t1():
+    source = """
+def on_bar(context, bars):
+    context.buy('T0', quantity=100)
+    context.buy('T1', quantity=100)
+
+def after_trading_end(context):
+    context.sell('T0', quantity=100)
+    context.sell('T1', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            lot_size=100,
+            settlement="t1",
+            t0_symbols=["T0"],
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("T0", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("T1", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+    ])
+
+    assert [(fill["symbol"], fill["side"]) for fill in result["fills"]] == [
+        ("T0", "buy"),
+        ("T1", "buy"),
+        ("T0", "sell"),
+    ]
+
+
+def test_buy_fee_reservation_can_match_post_fill_commission_brokers():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    bars = [Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10)]
+    reserved = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            commission_pct=0.01,
+            reserve_buy_fees=True,
+            fill_policy="close",
+            slippage_bps=0,
+        ),
+    ).run(bars)
+    post_fill = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            commission_pct=0.01,
+            reserve_buy_fees=False,
+            fill_policy="close",
+            slippage_bps=0,
+        ),
+    ).run(bars)
+
+    assert reserved["fills"] == []
+    assert post_fill["fills"][0]["quantity"] == 100
+    assert post_fill["checkpoint"]["account"]["cash"] == pytest.approx(-10)
+
+
+def test_stale_fill_requires_current_day_trading_evidence():
+    source = """
+def initialize(context):
+    context.schedule(sell_x, '09:45')
+
+def sell_x(context):
+    context.sell('X', quantity=100)
+
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            settlement="t0",
+            allow_stale_fills=True,
+            fill_policy="close",
+            fees_pct=0,
+            slippage_bps=0,
+        ),
+    )
+    engine.preload_market_history([
+        Bar("X", datetime(2024, 1, 2, 15), 11, 12, 10, 11),
+    ])
+    engine.preload_tradable_dates([("X", datetime(2024, 1, 2).date())])
+
+    result = engine.run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("Y", datetime(2024, 1, 2, 9, 45), 1, 1, 1, 1),
+    ])
+
+    assert [(fill["symbol"], fill["side"], fill["timestamp"]) for fill in result["fills"]] == [
+        ("X", "buy", "2024-01-01T15:00:00"),
+        ("X", "sell", "2024-01-02T09:45:00"),
+    ]
 
 
 def test_lifecycle_and_scheduled_callback():

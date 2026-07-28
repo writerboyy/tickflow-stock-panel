@@ -7,7 +7,7 @@ import math
 import re
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time as datetime_time, timedelta
 from itertools import groupby
 from statistics import mean, pstdev
@@ -26,12 +26,15 @@ class FreeStrategyConfig:
     commission_pct: float | None = None
     sell_commission_pct: float | None = None
     min_commission: float = 0.0
+    reserve_buy_fees: bool = True
     stamp_tax_pct: float = 0.001
     slippage_bps: float = 5.0
     price_tick: float | None = None
     lot_size: int = 100
     max_exposure_pct: float = 1.0
     settlement: str = "t1"
+    t0_symbols: list[str] = field(default_factory=list)
+    allow_stale_fills: bool = False
     fill_policy: str = "next_open"
     asset_type: str = "stock"
     benchmark_symbol: str = "510300.SH"
@@ -417,6 +420,7 @@ class FreeStrategyEngine:
         self.history: dict[str, list[Bar]] = {}
         self._history_by_period: dict[str, dict[str, list[Bar]]] = {timeframe: self.history}
         self._market_history_by_period: dict[str, dict[str, list[Bar]]] = {}
+        self._tradable_dates: set[tuple[str, date]] = set()
         self._market_dates: set[date] = set()
         self.market_history_metadata: dict[str, Any] = {"enabled": False}
         self._instruments = [dict(item) for item in (instruments or [])]
@@ -578,6 +582,9 @@ class FreeStrategyEngine:
             count += 1
         return count
 
+    def preload_tradable_dates(self, values: Iterable[tuple[str, date]]) -> None:
+        self._tradable_dates.update(values)
+
     def has_market_date(self, day: date) -> bool:
         return day in self._market_dates
 
@@ -676,6 +683,11 @@ class FreeStrategyEngine:
         return 1
 
     def _fill_order(self, order: Order, bar: Bar | None, timestamp: datetime | None, field: str) -> None:
+        if bar is None and self.config.allow_stale_fills and timestamp is not None:
+            trades_today = (order.symbol, timestamp.date()) in self._tradable_dates
+            price = self._current_close_prices.get(order.symbol, 0.0)
+            if trades_today and price > 0:
+                bar = Bar(order.symbol, timestamp, price, price, price, price)
         if bar is None:
             order.status = "rejected"
             order.reason = "证券停牌或无可交易行情"
@@ -730,7 +742,11 @@ class FreeStrategyEngine:
         lot = max(1, self.config.lot_size)
         qty = math.floor(qty / lot) * lot
         if side == "sell":
-            bought_today = self.config.settlement == "t1" and self._bought_dates.get(order.symbol) == (timestamp.date() if timestamp else self.context.now.date())
+            bought_today = (
+                self.config.settlement == "t1"
+                and order.symbol not in self.config.t0_symbols
+                and self._bought_dates.get(order.symbol) == (timestamp.date() if timestamp else self.context.now.date())
+            )
             available = self.account.available.get(order.symbol, 0.0 if bought_today else current)
             qty = min(qty, available)
         else:
@@ -740,7 +756,11 @@ class FreeStrategyEngine:
                 self.account.equity(self._current_close_prices) * self.risk_config.max_symbol_exposure_pct
                 - current * raw_price,
             )
-            cash_gross = max(0.0, self.account.cash - self.config.min_commission) / (1 + commission_rate)
+            cash_gross = (
+                max(0.0, self.account.cash - self.config.min_commission) / (1 + commission_rate)
+                if self.config.reserve_buy_fees
+                else max(0.0, self.account.cash)
+            )
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
         if qty <= 0:
             if order.side == "target":
@@ -758,7 +778,7 @@ class FreeStrategyEngine:
             old = self.account.positions.get(order.symbol, 0.0)
             self.account.avg_cost[order.symbol] = ((old * self.account.avg_cost.get(order.symbol, price)) + gross + fee) / (old + qty)
             self.account.positions[order.symbol] = old + qty
-            if self.config.settlement == "t0":
+            if self.config.settlement == "t0" or order.symbol in self.config.t0_symbols:
                 self.account.available[order.symbol] = self.account.positions[order.symbol]
             else:
                 self._bought_dates[order.symbol] = (timestamp.date() if timestamp else self.context.now.date())

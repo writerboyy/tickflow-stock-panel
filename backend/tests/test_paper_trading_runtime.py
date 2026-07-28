@@ -16,6 +16,7 @@ from app.free_strategy.paper import (
     _append_engine_events,
     _catch_up_bars,
     _equity_snapshot,
+    _process_bar_rows,
 )
 from app.free_strategy.store import PaperAccountStore
 from app.services.quote_service import QuoteService
@@ -493,6 +494,61 @@ def test_up_to_date_restart_preserves_live_sync_state(monkeypatch, tmp_path):
     assert result["sync"] == sync
     assert store.get("paper")["sync"] == sync
     assert store.events("paper") == []
+
+
+def test_paper_bar_batch_preloads_delayed_open_as_tradable(tmp_path):
+    source = """
+def initialize(context):
+    context.schedule(sell_x, '09:45')
+
+def sell_x(context):
+    if context.now.day == 2:
+        context.sell('X', quantity=100)
+
+def on_bar(context, bars):
+    if context.now.day == 1 and 'X' in bars:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            settlement="t0",
+            allow_stale_fills=True,
+            fill_policy="close",
+            fees_pct=0,
+            slippage_bps=0,
+        ),
+    )
+    store = PaperAccountStore(tmp_path)
+    current = store.save({"id": "paper", "status": "running", "equity_peak": 1_000})
+    current = _process_bar_rows(
+        store,
+        "paper",
+        current,
+        engine,
+        [Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10)],
+    )
+
+    _process_bar_rows(
+        store,
+        "paper",
+        current,
+        engine,
+        [
+            Bar("Y", datetime(2024, 1, 2, 9, 45), 1, 1, 1, 1),
+            Bar("X", datetime(2024, 1, 2, 10), 11, 11, 11, 11),
+        ],
+    )
+
+    assert [
+        (fill.symbol, fill.side, fill.timestamp)
+        for fill in engine.account.fills
+    ] == [
+        ("X", "buy", "2024-01-01T15:00:00"),
+        ("X", "sell", "2024-01-02T09:45:00"),
+    ]
 
 
 def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .seven_stars import T0_ETFS
+
 
 LEGACY_FIVE_FORTUNES_SOURCE = '''from app.free_strategy.five_fortunes import (
     DEFENSIVE_ETF,
@@ -29,6 +31,7 @@ MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
     "098dd281478b43527ecf706f2f140a19b21f4e7b9e2c6744d8120fcf64279380",
 })
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
+SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
 
 
 TEMPLATES = {
@@ -101,5 +104,26 @@ def on_bar(context, bars):
             "fill_policy": "close",
         },
         "source": FIVE_FORTUNES_SOURCE,
+    },
+    "seven_stars": {
+        "name": "七星策略",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "etf",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0002,
+            "commission_pct": 0.0002,
+            "min_commission": 5,
+            "reserve_buy_fees": False,
+            "stamp_tax_pct": 0,
+            "slippage_bps": 0.5,
+            "price_tick": 0.001,
+            "benchmark_symbol": "510300.SH",
+            "settlement": "t1",
+            "t0_symbols": T0_ETFS,
+            "allow_stale_fills": True,
+            "fill_policy": "close",
+        },
+        "source": SEVEN_STARS_SOURCE,
     },
 }

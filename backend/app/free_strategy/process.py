@@ -439,6 +439,7 @@ def _prepare_market_data(
     )
     load_start = start - timedelta(days=lookback_days)
     market_data = _load_market_data(repo, symbols, load_start, end, asset_type)
+    _preload_tradable_dates(engine, market_data)
     references = {
         requested_asset: _prepare_market_reference(
             repo, engine, start, end, requested_asset, market_data,
@@ -495,6 +496,16 @@ def _prepare_market_data(
         "start": min(dates).isoformat() if dates else None,
         "end": max(dates).isoformat() if dates else None,
     }
+
+
+def _preload_tradable_dates(engine: FreeStrategyEngine, market: MarketData) -> None:
+    if not engine.config.allow_stale_fills:
+        return
+    engine.preload_tradable_dates(
+        (symbol, day)
+        for (symbol, day), row in market.daily.items()
+        if float(row.get("open") or 0) > 0 and float(row.get("high") or 0) > 0
+    )
 
 
 def _scheduled_price_metadata(

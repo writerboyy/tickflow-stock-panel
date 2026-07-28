@@ -281,12 +281,15 @@ class BacktestWrite(BaseModel):
     fees_pct: float = Field(default=0.0002, ge=0)
     commission_pct: float | None = Field(default=None, ge=0)
     min_commission: float = Field(default=0, ge=0)
+    reserve_buy_fees: bool = True
     stamp_tax_pct: float = Field(default=0.001, ge=0)
     slippage_bps: float = Field(default=5, ge=0)
     price_tick: float | None = Field(default=None, gt=0)
     lot_size: int = Field(default=100, ge=1)
     max_exposure_pct: float = Field(default=1.0, gt=0, le=1)
     settlement: Literal["t1", "t0"] = "t1"
+    t0_symbols: list[str] = Field(default_factory=list)
+    allow_stale_fills: bool = False
     fill_policy: Literal["next_open", "close"] = "next_open"
     benchmark_symbol: str = "510300.SH"
 

@@ -969,12 +969,15 @@ export interface FreeBacktestConfig {
   fees_pct: number
   commission_pct?: number | null
   min_commission: number
+  reserve_buy_fees?: boolean
   stamp_tax_pct: number
   slippage_bps: number
   price_tick: number | null
   lot_size: number
   max_exposure_pct: number
   settlement: 't1' | 't0'
+  t0_symbols?: string[]
+  allow_stale_fills?: boolean
   fill_policy: 'next_open' | 'close'
   benchmark_symbol: string
 }
