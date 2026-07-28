@@ -12,7 +12,6 @@ import {
   ListOrdered,
   Pencil,
   Plus,
-  Radio,
   RefreshCw,
   ShieldAlert,
   Square,
@@ -68,15 +67,13 @@ function syncLabel(account: PaperAccount) {
     return total > 0 ? `补齐中 ${done}/${total}` : '补齐中'
   }
   if (phase === 'error') return '同步失败'
-  if (phase === 'live') return '已追平'
-  return statusLabel(account.status)
+  return ''
 }
 
 function syncClass(account: PaperAccount) {
   if (account.sync?.phase === 'catching_up') return 'text-warning'
   if (account.sync?.phase === 'error') return 'text-danger'
-  if (account.sync?.phase === 'live') return 'text-success'
-  return statusClass(account.status)
+  return 'text-muted'
 }
 
 function returnClass(value?: number) {
@@ -193,14 +190,6 @@ function RenameAccountDialog({ account, onClose, onSaved }: { account: PaperAcco
   </Modal>
 }
 
-function UniverseDialog({ account, instrumentLabel, onClose }: { account: PaperAccount; instrumentLabel: (symbol: unknown) => string; onClose: () => void }) {
-  const symbols = account.universe ?? []
-  return <Modal labelledBy="paper-universe-title" onClose={onClose} panelClassName="w-[92vw] max-w-lg rounded-card border border-border bg-surface shadow-xl">
-    <div className="border-b border-border px-4 py-3"><div className="flex items-center justify-between"><h2 id="paper-universe-title" className="text-sm font-semibold">当前订阅池</h2><span className="font-mono text-xs text-muted">{symbols.length}</span></div></div>
-    <div className="grid max-h-[60vh] grid-cols-2 gap-x-4 overflow-y-auto p-4 text-xs max-sm:grid-cols-1">{symbols.map(symbol => <div key={symbol} className="border-b border-border py-2 font-mono">{instrumentLabel(symbol)}</div>)}</div>
-  </Modal>
-}
-
 function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: string; onClose: () => void; onCreated: (account: PaperAccount) => void }) {
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const paperStatus = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus })
@@ -294,7 +283,6 @@ export function PaperTrading() {
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
   const [renameTarget, setRenameTarget] = useState<PaperAccount | null>(null)
-  const [showUniverse, setShowUniverse] = useState(false)
   const notifiedSequence = useRef(0)
   const accountsQuery = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts, refetchInterval: 10_000 })
   const statusQuery = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus, refetchInterval: 3_000 })
@@ -389,7 +377,7 @@ export function PaperTrading() {
       <aside className={`min-h-0 overflow-y-auto border-r border-border p-2 max-xl:max-h-36 max-xl:border-b max-xl:border-r-0 ${account ? 'max-md:max-h-40' : ''}`}>
         <div className="space-y-1 max-xl:grid max-xl:grid-cols-2 max-xl:gap-1 max-xl:space-y-0 max-sm:grid-cols-1">
           {accounts.map(item => <button key={item.id} type="button" onClick={() => setSelectedId(item.id)} className={`w-full border-l-2 px-2.5 py-2 text-left transition-colors ${selectedId === item.id ? 'border-l-accent bg-accent/8' : 'border-l-transparent hover:bg-elevated'}`}>
-            <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{item.name}</span><span className={`shrink-0 text-[10px] ${syncClass(item)}`}>{syncLabel(item)}</span></div>
+            <div className="flex items-center justify-between gap-2"><span className="truncate text-xs font-medium">{item.name}</span><span className={`shrink-0 text-[10px] ${syncLabel(item) ? syncClass(item) : statusClass(item.status)}`}>{syncLabel(item) || statusLabel(item.status)}</span></div>
             <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted"><span className="truncate">{MODE_LABEL[item.market_mode] ?? item.market_mode} · {formatTime(item.sync?.through ?? item.last_bar ?? item.updated_at)}</span><span className={`shrink-0 tabular-nums ${returnClass(item.return_pct)}`}>{Number(item.return_pct ?? 0) >= 0 ? '+' : ''}{Number(item.return_pct ?? 0).toFixed(2)}%</span></div>
           </button>)}
           {!accounts.length && !accountsQuery.isLoading ? <div className="py-10 text-center text-xs text-muted">暂无模拟账户</div> : null}
@@ -397,7 +385,7 @@ export function PaperTrading() {
       </aside>
       {!account ? <EmptyState icon={WalletCards} title="选择或创建模拟账户" /> : <main className="min-h-0 overflow-y-auto">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-          <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{account.status === 'running' ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
+          <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{syncLabel(account) ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
           <div className="flex items-center gap-1">
             <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-accent hover:text-accent disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
             <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border text-muted hover:border-warning hover:text-warning disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
@@ -425,12 +413,11 @@ export function PaperTrading() {
         </section>
 
         <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
-          <span className={`inline-flex items-center gap-1.5 ${syncClass(account)}`}><Activity className="h-3.5 w-3.5" />{syncLabel(account)}</span>
+          {syncLabel(account) ? <span className={`inline-flex items-center gap-1.5 ${syncClass(account)}`}><Activity className="h-3.5 w-3.5" />{syncLabel(account)}</span> : null}
           <span className="inline-flex items-center gap-1.5"><Clock3 className="h-3.5 w-3.5" />已处理至 <span className="font-mono text-foreground">{formatTime(account.sync?.through ?? account.last_quote ?? account.last_bar)}</span></span>
           {account.sync?.phase === 'catching_up' ? <span className="font-mono text-warning">目标 {formatTime(account.sync.target ?? undefined)}</span> : null}
           {account.market_mode === 'poll_3s' ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span> : null}
           {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span> : null}
-          <button type="button" onClick={() => setShowUniverse(true)} title="查看该策略独立维护的订阅标的" className="inline-flex items-center gap-1.5 text-muted hover:text-foreground"><Radio className="h-3.5 w-3.5" />当前订阅池 <span className="font-mono text-foreground">{account.universe?.length ?? 0}</span></button>
         </section>
 
         <div className="flex border-b border-border px-3 pt-2">
@@ -448,7 +435,6 @@ export function PaperTrading() {
     </div>
     {showCreate ? <CreateAccountDialog strategyId={searchParams.get('strategy_id') ?? ''} onClose={() => { setShowCreate(false); setSearchParams({}) }} onCreated={created => { setShowCreate(false); setSearchParams({}); setSelectedId(created.id); void accountsQuery.refetch() }} /> : null}
     {renameTarget ? <RenameAccountDialog account={renameTarget} onClose={() => setRenameTarget(null)} onSaved={() => Promise.all([accountsQuery.refetch(), detailQuery.refetch()])} /> : null}
-    {showUniverse && account ? <UniverseDialog account={account} instrumentLabel={instrumentLabel} onClose={() => setShowUniverse(false)} /> : null}
     {deleteTarget ? <Modal labelledBy="delete-paper-title" onClose={() => setDeleteTarget(null)} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl"><div className="p-4"><h2 id="delete-paper-title" className="text-sm font-semibold">删除「{deleteTarget.name}」？</h2><div className="mt-2 text-xs text-muted">账户 checkpoint 与事件流水将被删除。</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setDeleteTarget(null)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted">取消</button><button type="button" disabled={pendingAction === 'delete'} onClick={() => void remove()} className="rounded-btn bg-danger px-3 py-1.5 text-xs font-medium text-white">确认删除</button></div></div></Modal> : null}
   </div>
 }
