@@ -221,13 +221,18 @@ class QuoteService:
 
     def stop(self) -> None:
         """停止后台行情轮询线程。"""
+        self.shutdown()
+        self._save_enabled(False)
+        logger.info("行情服务已停止")
+
+    def shutdown(self) -> None:
+        """仅停止运行时线程，保留用户的实时行情开关偏好。"""
         self._running = False
         self._enabled = False
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
-        self._save_enabled(False)
-        logger.info("行情服务已停止")
+        logger.info("行情服务运行时已关闭")
 
     def enable(self) -> bool:
         """开启自动行情 (不立即启动线程，等下一个交易时段)。

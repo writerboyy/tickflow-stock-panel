@@ -123,6 +123,10 @@ export function useQuoteStream(
         failCount = 0
         toastFired = false
         _setStatus('connected')
+        qc.invalidateQueries({ queryKey: QK.quoteStatus })
+        if (enabledRef.current) {
+          qc.invalidateQueries({ queryKey: QK.indexQuotes })
+        }
       }
 
       // sse-starlette ping 心跳走 SSE comment，不会到达这里

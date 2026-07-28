@@ -274,7 +274,7 @@ async def lifespan(app: FastAPI):
         paper_supervisor.close()
     qs = getattr(app.state, "quote_service", None)
     if qs:
-        qs.stop()
+        qs.shutdown()
     dsvc = getattr(app.state, "depth_service", None)
     if dsvc:
         dsvc.stop_polling()
