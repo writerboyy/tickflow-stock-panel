@@ -65,6 +65,19 @@ def test_resolver_expands_virtual_scoring_dependencies():
     assert "ma20_bias" not in plan.indicator_columns
 
 
+def test_market_cap_filter_uses_unadjusted_price_dependency():
+    plan = StrategyDependencyResolver().resolve(
+        _strategy(),
+        params={"rsi_max": 30},
+        basic_filter={"enabled": True, "market_cap_min": 1_000_000.0},
+        entry_signals=[],
+        exit_signals=[],
+    )
+
+    assert "raw_close" in plan.base_columns
+    assert "total_shares" in plan.instrument_columns
+
+
 def test_history_strategy_without_required_features_falls_back_to_full(caplog):
     strategy = _strategy(
         filter_fn=None,

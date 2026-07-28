@@ -477,7 +477,7 @@ class KlineRepository:
     def _refresh_enriched(self) -> None:
         """从 parquet 加载 enriched 最新日到内存 + 构建聚合表。
 
-        enriched parquet 仅存 14 列基础数据。启动时读入历史数据并即时计算完整指标，
+        enriched parquet 仅存 17 列基础数据。启动时读入历史数据并即时计算完整指标，
         将结果缓存在内存中供各服务使用。
 
         优化: 扩大历史读取范围, 同时缓存完整历史 (含指标), 供 filter_history 策略直接复用。
@@ -497,7 +497,7 @@ class KlineRepository:
                 logger.info("enriched refresh skipped: no latest date (%.2fs)", time.perf_counter() - started)
                 return
 
-            # Step 1: 直接读最新日期的分区文件 (仅 14 列)
+            # Step 1: 直接读最新日期的分区文件 (仅 17 列)
             enriched_dir = self.store.data_dir / "kline_daily_enriched"
             ds = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
             target_parquet = enriched_dir / f"date={ds}" / "part.parquet"
@@ -514,14 +514,15 @@ class KlineRepository:
                 logger.info("enriched refresh skipped: latest parquet empty (%.2fs)", time.perf_counter() - started)
                 return
 
-            # Step 2: 读近 300 天 14 列数据 → compute → filter(latest) → 缓存
+            # Step 2: 读近 300 天 17 列数据 → compute → filter(latest) → 缓存
             # 300 日历天 ≈ 210 交易日, 覆盖 filter_history 最大 lookback(90) + warmup(60)
             try:
                 from datetime import timedelta
                 from app.indicators.pipeline import compute_indicators, compute_signals, compute_limit_signals
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "raw_close", "raw_high", "raw_low",
+                                         "total_shares", "float_shares"]
                              if c in df_latest.columns]
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
@@ -590,9 +591,9 @@ class KlineRepository:
                         logger.info("enriched refresh done (%.2fs)", time.perf_counter() - started)
                         return
             except Exception as e:  # noqa: BLE001
-                logger.warning("enriched 即时计算失败, 使用原始 14 列缓存: %s", e)
+                logger.warning("enriched 即时计算失败, 使用原始 17 列缓存: %s", e)
 
-            # 降级: 直接使用 14 列数据 + 构建 live_agg
+            # 降级: 直接使用 17 列数据 + 构建 live_agg
             self._enriched_cache = df_latest
             self._enriched_cache_date = latest
             step = time.perf_counter()
@@ -1817,7 +1818,7 @@ class KlineRepository:
         self._write_daily_partition(df, "kline_daily")
 
     def append_enriched(self, df: pl.DataFrame) -> None:
-        """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 14 列存储列。"""
+        """按日分区写入 enriched 数据 (merge-upsert)。磁盘仅写入 17 列存储列。"""
         if df.is_empty():
             return
         from app.indicators.pipeline import ENRICHED_STORAGE_COLS
@@ -2111,7 +2112,7 @@ class KlineRepository:
     def flush_live_enriched(self, df: pl.DataFrame) -> None:
         """覆写当天 kline_daily_enriched 分区 (实时 enriched 落盘, 非merge)。
 
-        内存缓存保留完整指标列供各服务使用，磁盘仅写入 14 列存储列。
+        内存缓存保留完整指标列供各服务使用，磁盘仅写入 17 列存储列。
         """
         self.flush_live_enriched_asset("stock", df)
 
