@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import pytest
+import polars as pl
 
-from scripts.import_axdata_etf import _daily_frames, _minute_frame
+from app.indicators.pipeline import compute_enriched
+from scripts.import_axdata_etf import _daily_frame, _dividend_factors, _minute_frame
 
 
 def test_daily_frames_keep_raw_prices_for_unadjusted_axdata_rows():
@@ -19,7 +21,7 @@ def test_daily_frames_keep_raw_prices_for_unadjusted_axdata_rows():
         "amount": 324_024_864.0,
     }]
 
-    daily, enriched = _daily_frames(
+    daily = _daily_frame(
         "161226.SZ", rows, date(2025, 10, 1), date(2025, 10, 31),
     )
 
@@ -33,7 +35,38 @@ def test_daily_frames_keep_raw_prices_for_unadjusted_axdata_rows():
         "volume": 2_452_661.92,
         "amount": 324_024_864.0,
     }]
-    assert enriched.select("raw_close", "raw_high", "raw_low").row(0) == (1.36, 1.363, 1.289)
+
+
+def test_dividend_factors_replace_vendor_cash_factor():
+    daily = pl.DataFrame({
+        "symbol": ["512400.SH", "512400.SH"],
+        "date": [date(2025, 9, 12), date(2025, 9, 15)],
+        "open": [1.538, 1.549],
+        "high": [1.572, 1.557],
+        "low": [1.533, 1.521],
+        "close": [1.562, 1.535],
+        "volume": [1_000_000.0, 1_000_000.0],
+        "amount": [156_200_000.0, 153_500_000.0],
+    })
+    existing = pl.DataFrame({
+        "symbol": ["512400.SH"],
+        "trade_date": [date(2025, 9, 15)],
+        "ex_factor": [1.010884],
+    })
+    dividends = [
+        {"dividend_date": "20240918", "accumulated_dividend": 0.01},
+        {"dividend_date": "20250915", "accumulated_dividend": 0.025},
+    ]
+
+    factors = _dividend_factors("512400.SH", daily, dividends, existing)
+
+    factor = factors.row(0, named=True)
+    assert factor["symbol"] == "512400.SH"
+    assert factor["trade_date"] == date(2025, 9, 15)
+    assert factor["ex_factor"] == pytest.approx(1.562 / 1.547)
+
+    enriched = compute_enriched(daily, factors=factors)
+    assert enriched.filter(pl.col("date") == date(2025, 9, 12))["close"][0] == pytest.approx(1.547)
 
 
 def test_minute_frame_uses_adjusted_price_and_raw_amount():

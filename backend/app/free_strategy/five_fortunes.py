@@ -30,8 +30,7 @@ WUFU_ETF_POOL = [
 DEFENSIVE_ETF = "511880.SH"
 WUFU_MINUTE_POOL = WUFU_ETF_POOL
 WUFU_DYNAMIC_POOL_EXCLUSIONS = {"159814.SZ"}
-CANDIDATE_SCORE_RATIO = 0.89
-CANDIDATE_SCORE_EPSILON = 0.001
+CANDIDATE_SCORE_RATIO = 0.9
 ETF_PRICE_TICK = 0.001
 MOMENTUM_SCORE_MAX = 5.0
 WUFU_GROUP_NAME_OVERRIDES = {
@@ -43,6 +42,7 @@ WUFU_GROUP_NAME_OVERRIDES = {
     "520500.SH": "恒生新药",
     "561100.SH": "电子龙头",
     "561980.SH": "芯片设备",
+    "588020.SH": "科创50E",
     "588710.SH": "科半导体",
     "588760.SH": "AI科创",
     "588790.SH": "科创智能",
@@ -165,7 +165,10 @@ def initialize(context) -> None:
     context.require_extra_history("unit_net_value")
     context.state.setdefault("five_fortunes", {
         "daily": {},
-        "intraday": {"date": None, "close": {}, "raw_close": {}, "volume": {}, "amount": {}},
+        "intraday": {
+            "date": None, "close": {}, "raw_close": {}, "volume": {}, "amount": {},
+            "last_volume": {}, "limit_up": {}, "limit_down": {}, "suspended": {}, "tradable": {},
+        },
         "regime": "震荡期",
         "raw_regime": "震荡期",
         "regime_pending": None,
@@ -359,6 +362,11 @@ def before_trading_start(context) -> None:
         "raw_close": {},
         "volume": {},
         "amount": {},
+        "last_volume": {},
+        "limit_up": {},
+        "limit_down": {},
+        "suspended": {},
+        "tradable": {},
     }
     state["risk_mode"] = None
     state["position_scale"] = 1.0
@@ -371,7 +379,10 @@ def on_bar(context, bars) -> None:
     intraday = state["intraday"]
     day = context.now.date().isoformat()
     if intraday.get("date") != day:
-        intraday = {"date": day, "close": {}, "raw_close": {}, "volume": {}, "amount": {}}
+        intraday = {
+            "date": day, "close": {}, "raw_close": {}, "volume": {}, "amount": {},
+            "last_volume": {}, "limit_up": {}, "limit_down": {}, "suspended": {}, "tradable": {},
+        }
         state["intraday"] = intraday
     for symbol, bar in bars.items():
         raw_close = bar.execution_price("close")
@@ -379,6 +390,11 @@ def on_bar(context, bars) -> None:
         intraday["raw_close"][symbol] = raw_close
         intraday["volume"][symbol] = float(intraday["volume"].get(symbol, 0.0)) + bar.volume
         intraday["amount"][symbol] = float(intraday["amount"].get(symbol, 0.0)) + bar.amount
+        intraday["last_volume"][symbol] = float(bar.volume)
+        intraday["limit_up"][symbol] = bar.limit_up
+        intraday["limit_down"][symbol] = bar.limit_down
+        intraday["suspended"][symbol] = bool(bar.suspended)
+        intraday["tradable"][symbol] = bool(bar.tradable)
     _minute_stop_loss(context, bars)
 
 
@@ -518,7 +534,7 @@ def _prepare_and_sell(context) -> None:
         "regime_changed": bool(state.get("regime_changed_today")),
     })
     for symbol in held:
-        if symbol not in targets:
+        if symbol not in targets and _can_trade(state, symbol):
             context.order_target_percent(symbol, 0.0)
     context.log(
         f"五福 13:10：状态={state['regime']}，过筛={len(filtered_rows)}，候选={len(candidate_rows)}，"
@@ -528,15 +544,27 @@ def _prepare_and_sell(context) -> None:
 
 def _buy_targets(context) -> None:
     state = _state(context)
+    day = context.now.date().isoformat()
+    if state.get("risk_action_date") == day and state.get("risk_mode") in {"flat", "defensive"}:
+        context.log("五福 13:11：组合回撤清仓当日不再开仓")
+        return
     targets = state.get("target", [])
     if not targets:
         return
     scale = min(1.0, max(0.0, float(state.get("position_scale", 1.0))))
     available_cash = float(context.portfolio.cash) * scale
     held = set(_held_symbols(context))
+    if any(symbol not in targets for symbol in held):
+        context.log("五福 13:11：非目标持仓尚未卖出，不新增仓位")
+        return
     submitted = []
-    targets_to_buy = [symbol for symbol in targets if symbol not in held]
+    targets_to_buy = [
+        symbol for symbol in targets
+        if symbol not in held and state["rebuy_cooldown"].get(symbol, 0) <= 0
+    ]
     for index, symbol in enumerate(targets_to_buy):
+        if not _can_trade(state, symbol):
+            continue
         raw_price = state["intraday"].get("raw_close", {}).get(symbol)
         if raw_price is None or raw_price <= 0:
             continue
@@ -569,28 +597,31 @@ def _risk_monitor(context) -> None:
         half_threshold, defensive_threshold, flat_threshold = 0.10, 0.12, 0.20
     held = _held_symbols(context)
     action = None
-    if drawdown >= flat_threshold:
+    sellable = [symbol for symbol in held if _can_trade(state, symbol)]
+    if drawdown >= flat_threshold and sellable:
         action = "flat"
         state["risk_mode"] = "flat"
         state["target"] = []
-        for symbol in held:
+        for symbol in sellable:
             context.order_target_percent(symbol, 0.0)
             state["rebuy_cooldown"][symbol] = max(3, int(state["rebuy_cooldown"].get(symbol, 0)))
         context.log(f"五福风控：回撤{drawdown:.2%}≥{flat_threshold:.0%}，全部清仓")
     elif drawdown >= defensive_threshold:
-        action = "defensive"
-        state["risk_mode"] = "defensive"
-        state["target"] = [DEFENSIVE_ETF]
-        for symbol in held:
-            if symbol != DEFENSIVE_ETF:
+        sell_symbols = [symbol for symbol in sellable if symbol != DEFENSIVE_ETF]
+        if sell_symbols:
+            action = "defensive"
+            state["risk_mode"] = "defensive"
+            state["target"] = [DEFENSIVE_ETF]
+            for symbol in sell_symbols:
                 context.order_target_percent(symbol, 0.0)
                 state["rebuy_cooldown"][symbol] = max(3, int(state["rebuy_cooldown"].get(symbol, 0)))
-        context.log(f"五福风控：回撤{drawdown:.2%}≥{defensive_threshold:.0%}，切换防御ETF")
-    elif drawdown >= half_threshold:
+            context.log(f"五福风控：回撤{drawdown:.2%}≥{defensive_threshold:.0%}，切换防御ETF")
+    elif drawdown >= half_threshold and sellable:
         action = "half"
-        state["position_scale"] = 0.5
-        for symbol in held:
-            context.order_target(symbol, context.portfolio.positions.get(symbol, 0.0) * 0.5)
+        for symbol in sellable:
+            quantity = float(context.portfolio.positions.get(symbol, 0.0))
+            target = math.floor(quantity * 0.5 / 100) * 100
+            context.order_target(symbol, target)
         context.log(f"五福风控：回撤{drawdown:.2%}≥{half_threshold:.0%}，可卖持仓减半")
     if action:
         state["risk_action_date"] = day
@@ -623,6 +654,22 @@ def _minute_stop_loss(context, bars) -> None:
         context.log(f"五福止损：{symbol} 现价{current:.4f} < 成本{cost:.4f}×{threshold:.0%}，冷却2日")
 
 
+def _can_trade(state: dict[str, Any], symbol: str) -> bool:
+    intraday = state.get("intraday", {})
+    if intraday.get("suspended", {}).get(symbol, False):
+        return False
+    if intraday.get("tradable", {}).get(symbol, True) is False:
+        return False
+    price = intraday.get("raw_close", {}).get(symbol)
+    if price is None:
+        return True
+    limit_up = intraday.get("limit_up", {}).get(symbol)
+    limit_down = intraday.get("limit_down", {}).get(symbol)
+    if limit_up is not None and float(price) >= float(limit_up) - 1e-9:
+        return False
+    return limit_down is None or float(price) > float(limit_down) + 1e-9
+
+
 def _rank_candidates(context) -> list[dict[str, Any]]:
     state = _state(context)
     intraday = state["intraday"]
@@ -640,6 +687,7 @@ def _rank_candidates(context) -> list[dict[str, Any]]:
             symbol, closes[-46:], volumes[-45:],
             float(intraday["volume"].get(symbol, 0.0)), context, regime,
             history[-1]["date"],
+            stale_quote=float(intraday.get("last_volume", {}).get(symbol, 0.0)) <= 0,
         )
         if metric is None:
             continue
@@ -665,12 +713,16 @@ def _metric_for(
     context,
     regime: str,
     nav_date: str,
+    *,
+    stale_quote: bool = False,
 ) -> dict[str, Any] | None:
     score, annualized, r2 = _weighted_momentum(closes, 25)
     short_score, _, _ = _weighted_momentum(closes, 21)
     if score is None or short_score is None:
         return None
-    upper_score, _, _ = _weighted_momentum([*closes[:-1], closes[-1] + ETF_PRICE_TICK], 25)
+    entry_score = score
+    if stale_quote:
+        entry_score, _, _ = _weighted_momentum([*closes[:-1], closes[-1] + ETF_PRICE_TICK], 25)
     current = closes[-1]
     ma10 = sum(closes[-10:]) / 10
     volume_ratio = _projected_volume_ratio(volumes, today_volume, context)
@@ -687,7 +739,7 @@ def _metric_for(
     return {
         "symbol": symbol,
         "score": score,
-        "upper_score": upper_score,
+        "entry_score": entry_score,
         "annualized_return": annualized,
         "r2": r2,
         "short_score": short_score,
@@ -746,7 +798,7 @@ def _candidate_pool(filtered_rows: list[dict[str, Any]], regime: str) -> list[di
     threshold = float(top[0]["score"]) * ratio
     return [
         row for row in top
-        if float(row["score"]) + CANDIDATE_SCORE_EPSILON >= threshold
+        if float(row["score"]) >= threshold
     ]
 
 
@@ -771,8 +823,7 @@ def _choose_targets(
     entry_rows = [
         row for row in rows
         if row["symbol"] == current
-        or float(row["score"]) > 5
-        or float(row.get("upper_score") or row["score"]) <= 5
+        or float(row.get("entry_score") or row["score"]) <= MOMENTUM_SCORE_MAX
     ]
     if not entry_rows:
         entry_rows = rows
@@ -802,10 +853,6 @@ def _choose_targets(
         if target != current:
             target = _apply_correlation_hold_guard(context, current, target) or current
         state["decision"].update({"held": current, "held_rank": rank})
-    if state["rebuy_cooldown"].get(target, 0) > 0:
-        fallback = next((row["symbol"] for row in entry_rows if state["rebuy_cooldown"].get(row["symbol"], 0) <= 0), None)
-        target = fallback or (current if held else DEFENSIVE_ETF)
-        state["decision"]["reason"] = "rebuy_cooldown_fallback"
     return [target]
 
 
