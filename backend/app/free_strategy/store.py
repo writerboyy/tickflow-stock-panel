@@ -139,11 +139,11 @@ class PaperAccountStore:
         if not database.exists():
             return []
         cutoff = (datetime.now().date() - timedelta(days=max(1, days))).isoformat()
-        with sqlite3.connect(database) as connection:
+        with self._account_lock(account_id), sqlite3.connect(database) as connection:
             self._ensure_equity_table(connection)
             rows = connection.execute(
                 """
-                SELECT timestamp, equity, cash, nav, drawdown_pct, positions
+                SELECT timestamp, equity, cash, nav, drawdown_pct, positions, avg_cost
                 FROM equity_curve
                 WHERE timestamp >= ?
                 ORDER BY timestamp
@@ -158,8 +158,9 @@ class PaperAccountStore:
                 "nav": nav,
                 "drawdown_pct": drawdown_pct,
                 "positions": json.loads(positions),
+                "avg_cost": json.loads(avg_cost),
             }
-            for timestamp, equity, cash, nav, drawdown_pct, positions in rows
+            for timestamp, equity, cash, nav, drawdown_pct, positions, avg_cost in rows
         ]
 
     @staticmethod
@@ -173,10 +174,19 @@ class PaperAccountStore:
                 nav REAL NOT NULL,
                 drawdown_pct REAL NOT NULL,
                 positions TEXT NOT NULL,
+                avg_cost TEXT NOT NULL DEFAULT '{}',
                 source TEXT NOT NULL
             )
             """
         )
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(equity_curve)")
+        }
+        if "avg_cost" not in columns:
+            connection.execute(
+                "ALTER TABLE equity_curve ADD COLUMN avg_cost TEXT NOT NULL DEFAULT '{}'"
+            )
 
     @staticmethod
     def _upsert_equity_rows(
@@ -186,14 +196,15 @@ class PaperAccountStore:
         connection.executemany(
             """
             INSERT INTO equity_curve (
-                timestamp, equity, cash, nav, drawdown_pct, positions, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                timestamp, equity, cash, nav, drawdown_pct, positions, avg_cost, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(timestamp) DO UPDATE SET
                 equity = excluded.equity,
                 cash = excluded.cash,
                 nav = excluded.nav,
                 drawdown_pct = excluded.drawdown_pct,
                 positions = excluded.positions,
+                avg_cost = excluded.avg_cost,
                 source = excluded.source
             """,
             [
@@ -204,6 +215,7 @@ class PaperAccountStore:
                     float(row["nav"]),
                     float(row["drawdown_pct"]),
                     json.dumps(row.get("positions", {}), ensure_ascii=False),
+                    json.dumps(row.get("avg_cost", {}), ensure_ascii=False),
                     str(row.get("source") or "paper"),
                 )
                 for row in rows

@@ -1,10 +1,12 @@
 import json
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 
+from app.free_strategy.bars import Bar
 from app.free_strategy.continuation import continue_account_from_backtest
+from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.store import PaperAccountStore
 
 
@@ -28,6 +30,26 @@ CONFIG = {
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_backtest_daily_curve_captures_average_cost():
+    engine = FreeStrategyEngine(
+        "def on_bar(context, bars):\n    context.buy('X', quantity=10)\n",
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            lot_size=1,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+        ),
+    )
+
+    result = engine.run([
+        Bar("X", datetime(2026, 7, 24, 15), 10, 10, 10, 10),
+    ])
+
+    assert result["daily_equity_curve"][0]["avg_cost"] == {"X": 10}
 
 
 def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
@@ -75,7 +97,8 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
              "drawdown_pct": 10, "positions": {}},
             {"date": "2026-07-24", "timestamp": "2026-07-24T15:00:00",
              "equity": 110_000, "cash": 10, "strategy_nav": 1.1,
-             "drawdown_pct": 0, "positions": {"X": 10}},
+             "drawdown_pct": 0, "positions": {"X": 10},
+             "avg_cost": {"X": 9}},
         ],
     })
 
@@ -103,6 +126,7 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "nav": 1.1,
         "drawdown_pct": 0.0,
         "positions": {"X": 10.0},
+        "avg_cost": {"X": 9.0},
     }]
     assert list((store._path("paper") / "backups").glob("state-*.json"))
 

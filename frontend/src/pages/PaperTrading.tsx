@@ -425,21 +425,37 @@ export function PaperTrading() {
 
   const accountState = account?.account
   const equityRows = accountState?.equity_curve ?? []
-  const availableDates = [...new Set(equityRows.map(row => row.timestamp.slice(0, 10)))].sort()
+  const decisionEvents = signalsQuery.data?.signals ?? []
+  const allFills = accountState?.fills ?? []
+  const allOrders = accountState?.orders ?? []
+  const allLogEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
+  const availableDates = [...new Set([
+    ...equityRows.map(row => row.timestamp.slice(0, 10)),
+    ...allFills.map(fill => fill.timestamp.slice(0, 10)),
+    ...allOrders.map(order => order.submitted_at.slice(0, 10)),
+    ...decisionEvents.map(eventTradingDate),
+    ...allLogEvents.map(eventTradingDate),
+  ].filter(Boolean))].sort()
   const latestDate = availableDates.at(-1) ?? ''
   const activeDate = availableDates.includes(selectedDate) ? selectedDate : latestDate
-  const selectedSnapshot = equityRows.filter(row => row.timestamp.slice(0, 10) === activeDate).at(-1)
   const visibleEquityRows = activeDate ? equityRows.filter(row => row.timestamp.slice(0, 10) <= activeDate) : equityRows
-  const isLatestDate = activeDate === latestDate
-  const positions = Object.entries(selectedSnapshot?.positions ?? (isLatestDate ? account?.positions : {}) ?? {}).filter(([, quantity]) => quantity > 0)
-  const fills = (accountState?.fills ?? []).filter(fill => fill.timestamp.slice(0, 10) === activeDate)
-  const orders = (accountState?.orders ?? []).filter(order => order.submitted_at.slice(0, 10) === activeDate)
-  const decisionEvents = signalsQuery.data?.signals ?? []
+  const selectedSnapshot = visibleEquityRows.at(-1)
+  const latestSnapshotDate = equityRows.at(-1)?.timestamp.slice(0, 10) ?? ''
+  const useCurrentState = !activeDate || !latestSnapshotDate || activeDate >= latestSnapshotDate
+  const positions = Object.entries((useCurrentState ? account?.positions : selectedSnapshot?.positions) ?? {}).filter(([, quantity]) => quantity > 0)
+  const fills = allFills.filter(fill => fill.timestamp.slice(0, 10) === activeDate)
+  const orders = allOrders.filter(order => order.submitted_at.slice(0, 10) === activeDate)
   const visibleDecisionEvents = decisionEvents.filter(event => eventTradingDate(event) === activeDate)
   const latestDecision = visibleDecisionEvents.find(event => event.signal_type === 'daily_decision')
-  const logEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type) && eventTradingDate(event) === activeDate)
-  const selectedReturn = selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : Number(account?.return_pct ?? 0)
-  const selectedDrawdown = Number(selectedSnapshot?.drawdown_pct ?? account?.drawdown_pct ?? 0)
+  const logEvents = allLogEvents.filter(event => eventTradingDate(event) === activeDate)
+  const selectedEquity = useCurrentState ? account?.equity : selectedSnapshot?.equity
+  const selectedCash = useCurrentState ? account?.cash : selectedSnapshot?.cash
+  const selectedReturn = useCurrentState
+    ? Number(account?.return_pct ?? 0)
+    : selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : null
+  const selectedDrawdown = useCurrentState
+    ? Number(account?.drawdown_pct ?? 0)
+    : selectedSnapshot ? Number(selectedSnapshot.drawdown_pct) : null
   const selectTradingDate = (value: string) => {
     const resolved = availableDates.includes(value)
       ? value
@@ -480,10 +496,10 @@ export function PaperTrading() {
 
         <section className="grid grid-cols-4 border-b border-border max-lg:grid-cols-2">
           {[
-            ['总资产', MONEY.format(selectedSnapshot?.equity ?? account.equity ?? account.cash), Activity, ''],
-            ['可用现金', MONEY.format(selectedSnapshot?.cash ?? account.cash), WalletCards, ''],
-            ['累计收益', `${selectedReturn >= 0 ? '+' : ''}${selectedReturn.toFixed(2)}%`, Gauge, returnClass(selectedReturn)],
-            ['当前回撤', selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%', ShieldAlert, selectedDrawdown > 0 ? 'text-bear' : ''],
+            ['总资产', selectedEquity == null ? '—' : MONEY.format(selectedEquity), Activity, ''],
+            ['可用现金', selectedCash == null ? '—' : MONEY.format(selectedCash), WalletCards, ''],
+            ['累计收益', selectedReturn == null ? '—' : `${selectedReturn >= 0 ? '+' : ''}${selectedReturn.toFixed(2)}%`, Gauge, selectedReturn == null ? '' : returnClass(selectedReturn)],
+            ['当前回撤', selectedDrawdown == null ? '—' : selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%', ShieldAlert, selectedDrawdown != null && selectedDrawdown > 0 ? 'text-bear' : ''],
           ].map(([label, value, Icon, tone], index) => <div key={String(label)} className={`px-4 py-3 ${index < 3 ? 'border-r border-border max-lg:odd:border-r' : ''} max-lg:border-b`}><div className="flex items-center gap-1.5 text-[10px] text-muted"><Icon className="h-3.5 w-3.5" />{label as string}</div><div className={`mt-1.5 font-mono text-[16px] tabular-nums ${tone as string}`}>{value as string}</div></div>)}
         </section>
 
@@ -504,7 +520,7 @@ export function PaperTrading() {
         </div>
         <section className="min-h-56 overflow-x-auto p-3">
           {tab === 'positions' ? <table className="w-full min-w-[560px] text-left text-xs"><thead className="text-[10px] text-muted"><tr><th className="px-2 py-2 font-medium">标的</th><th className="px-2 py-2 text-right font-medium">数量</th><th className="px-2 py-2 text-right font-medium">成本</th><th className="px-2 py-2 text-right font-medium">成本市值</th></tr></thead><tbody>{positions.map(([symbol, quantity]) => {
-            const averageCost = isLatestDate ? accountState?.avg_cost?.[symbol] : undefined
+            const averageCost = (useCurrentState ? accountState?.avg_cost : selectedSnapshot?.avg_cost)?.[symbol]
             return <tr key={symbol} className="border-t border-border"><td className="px-2 py-2.5 font-mono">{instrumentLabel(symbol)}</td><td className="px-2 py-2.5 text-right font-mono">{quantity.toLocaleString()}</td><td className="px-2 py-2.5 text-right font-mono">{averageCost == null ? '—' : Number(averageCost).toFixed(3)}</td><td className="px-2 py-2.5 text-right font-mono">{averageCost == null ? '—' : MONEY.format(quantity * Number(averageCost))}</td></tr>
           })}</tbody></table> : null}
           {tab === 'decisions' ? <EventRows rows={visibleDecisionEvents} symbolNames={symbolNames} /> : null}

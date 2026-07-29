@@ -1034,6 +1034,7 @@ export interface PaperAccount {
       nav: number
       drawdown_pct: number
       positions: Record<string, number>
+      avg_cost?: Record<string, number>
     }[]
   }
   risk_config: PaperRiskConfig
@@ -1198,7 +1199,7 @@ export const api = {
   renamePaperAccount: (id: string, name: string) =>
     request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   paperEvents: (id: string, cursor?: number, types?: string) => {
-    const query = new URLSearchParams({ limit: '100' })
+    const query = new URLSearchParams({ limit: '500' })
     if (cursor != null) query.set('cursor', String(cursor))
     if (types) query.set('types', types)
     return request<{ events: PaperEvent[]; next_cursor: number | null }>(`/api/free-strategies/paper/accounts/${id}/events?${query}`)

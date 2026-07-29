@@ -109,6 +109,12 @@ def continue_account_from_backtest(
                 for symbol, quantity in row.get("positions", {}).items()
                 if float(quantity) > 0
             },
+            "avg_cost": {
+                symbol: float(value)
+                for symbol, value in row.get("avg_cost", {}).items()
+                if symbol in row.get("positions", {})
+                and float(row["positions"][symbol]) > 0
+            },
             "source": "backtest",
         }
         for row in daily_curve

@@ -578,6 +578,11 @@ def _equity_snapshot(
             for symbol, quantity in engine.account.positions.items()
             if quantity > 0
         },
+        "avg_cost": {
+            symbol: engine.account.avg_cost[symbol]
+            for symbol, quantity in engine.account.positions.items()
+            if quantity > 0 and symbol in engine.account.avg_cost
+        },
         "source": "paper",
     }
 

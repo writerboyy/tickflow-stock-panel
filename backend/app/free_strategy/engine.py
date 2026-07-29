@@ -1027,6 +1027,7 @@ class FreeStrategyEngine:
                 "equity": self.account.equity(self._current_close_prices),
                 "cash": self.account.cash,
                 "positions": dict(self.account.positions),
+                "avg_cost": dict(self.account.avg_cost),
                 "position_values": position_values,
             })
         if self._session_benchmark_close is not None:

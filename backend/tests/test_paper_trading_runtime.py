@@ -565,7 +565,8 @@ def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):
     ])
     store.upsert_equity_curve("paper", [
         {"timestamp": recent, "equity": 110, "cash": 10, "nav": 1.1,
-         "drawdown_pct": 0, "positions": {"X": 10}, "source": "paper"},
+         "drawdown_pct": 0, "positions": {"X": 10}, "avg_cost": {"X": 8.5},
+         "source": "paper"},
     ])
 
     assert store.equity_curve("paper") == [{
@@ -575,9 +576,45 @@ def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):
         "nav": 1.1,
         "drawdown_pct": 0.0,
         "positions": {"X": 10},
+        "avg_cost": {"X": 8.5},
     }]
     with sqlite3.connect(tmp_path / "paper_accounts" / "paper" / "equity.sqlite3") as db:
         assert db.execute("SELECT count(*) FROM equity_curve").fetchone()[0] == 1
+
+
+def test_paper_equity_curve_migrates_legacy_database(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "stopped"})
+    database = tmp_path / "paper_accounts" / "paper" / "equity.sqlite3"
+    timestamp = datetime.now().replace(microsecond=0).isoformat()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE equity_curve (
+                timestamp TEXT PRIMARY KEY,
+                equity REAL NOT NULL,
+                cash REAL NOT NULL,
+                nav REAL NOT NULL,
+                drawdown_pct REAL NOT NULL,
+                positions TEXT NOT NULL,
+                source TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO equity_curve VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, 100, 20, 1, 0, '{"X": 10}', "paper"),
+        )
+
+    assert store.equity_curve("paper") == [{
+        "timestamp": timestamp,
+        "equity": 100.0,
+        "cash": 20.0,
+        "nav": 1.0,
+        "drawdown_pct": 0.0,
+        "positions": {"X": 10},
+        "avg_cost": {},
+    }]
 
 
 def test_equity_snapshot_uses_continuous_peak_and_nav():
@@ -598,6 +635,7 @@ def test_equity_snapshot_uses_continuous_peak_and_nav():
     assert row["nav"] == 1
     assert row["drawdown_pct"] == pytest.approx(100 / 6)
     assert row["positions"] == {"X": 10}
+    assert row["avg_cost"] == {"X": 8}
     assert state["equity_peak"] == 120
 
 
