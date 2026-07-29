@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, Database, Plus, RefreshCw, Zap, FileWarning } from 'lucide-react'
+import { Check, Database, FileWarning, Link2, Plus, RefreshCw, Trash2, Zap } from 'lucide-react'
 import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -312,6 +312,8 @@ export function SettingsDataSourcesPanel() {
         </div>
       </section>
 
+      <KaipanlaConnection />
+
       {/* ===== 下方: 编辑区 ===== */}
       <AnimatePresence mode="wait">
         <motion.div
@@ -387,6 +389,99 @@ export function SettingsDataSourcesPanel() {
         </div>
       )}
     </div>
+  )
+}
+
+function KaipanlaConnection() {
+  const qc = useQueryClient()
+  const [sourceUrl, setSourceUrl] = useState('')
+  const status = useQuery({ queryKey: QK.kaipanla, queryFn: api.kaipanlaStatus })
+  const save = useMutation({
+    mutationFn: () => api.saveKaipanlaConnection(sourceUrl),
+    onSuccess: () => {
+      setSourceUrl('')
+      qc.invalidateQueries({ queryKey: QK.kaipanla })
+      qc.invalidateQueries({ queryKey: QK.extData })
+      toast('开盘啦连接已保存', 'success')
+    },
+  })
+  const clear = useMutation({
+    mutationFn: api.clearKaipanlaConnection,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.kaipanla })
+      toast('开盘啦连接已清除', 'success')
+    },
+  })
+  const configured = status.data?.configured ?? false
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2.5">
+          <Link2 className="h-4 w-4 text-secondary" />
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-medium text-foreground">开盘啦扩展数据</h2>
+              <span className="text-[9px] uppercase tracking-wider text-muted/60 border border-border rounded px-1.5 py-0.5">
+                辅助数据
+              </span>
+            </div>
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+              <span className={`h-1.5 w-1.5 rounded-full ${configured ? 'bg-accent' : 'bg-muted/40'}`} />
+              {status.isLoading ? '检查中' : configured ? '已连接 · 自动采集' : '未连接'}
+            </div>
+          </div>
+        </div>
+        {configured && (
+          <button
+            type="button"
+            title="清除开盘啦连接"
+            aria-label="清除开盘啦连接"
+            disabled={clear.isPending}
+            onClick={() => {
+              if (window.confirm('确认清除开盘啦连接凭据？')) clear.mutate()
+            }}
+            className="h-8 w-8 inline-flex items-center justify-center rounded-btn text-muted hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      {configured && status.data && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-[10px] text-muted font-mono">
+          <span>Token {status.data.token_masked}</span>
+          <span>UserID {status.data.user_id_masked}</span>
+          <span>DeviceID {status.data.device_id_masked}</span>
+        </div>
+      )}
+
+      <form
+        className="flex flex-col sm:flex-row gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (sourceUrl.trim()) save.mutate()
+        }}
+      >
+        <input
+          type="password"
+          value={sourceUrl}
+          onChange={event => setSourceUrl(event.target.value)}
+          placeholder="粘贴完整授权 URL"
+          autoComplete="off"
+          aria-label="开盘啦完整授权 URL"
+          className="min-w-0 flex-1 rounded-btn border border-border bg-base px-3 py-2 text-xs text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60"
+        />
+        <button
+          type="submit"
+          disabled={!sourceUrl.trim() || save.isPending}
+          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-btn bg-accent text-white text-xs font-medium hover:bg-accent/90 transition-colors disabled:opacity-50"
+        >
+          {save.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Link2 className="h-3.5 w-3.5" />}
+          保存连接
+        </button>
+      </form>
+    </section>
   )
 }
 

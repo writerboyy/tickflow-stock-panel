@@ -779,6 +779,15 @@ export interface SettingsState {
   ai_user_agent: string
 }
 
+export interface KaipanlaStatus {
+  configured: boolean
+  token_masked: string
+  user_id_masked: string
+  device_id_masked: string
+  tables: string[]
+  automatic: boolean
+}
+
 /** 保存 TickFlow Key 的响应(先探后存) */
 export interface SaveTickflowKeyResult {
   ok: boolean
@@ -1287,6 +1296,14 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
+  kaipanlaStatus: () => request<KaipanlaStatus>('/api/settings/kaipanla'),
+  saveKaipanlaConnection: (sourceUrl: string) =>
+    request<KaipanlaStatus>('/api/settings/kaipanla', {
+      method: 'PUT',
+      body: JSON.stringify({ source_url: sourceUrl }),
+    }),
+  clearKaipanlaConnection: () =>
+    request<KaipanlaStatus>('/api/settings/kaipanla', { method: 'DELETE' }),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
