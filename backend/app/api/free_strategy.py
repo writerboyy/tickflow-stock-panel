@@ -20,6 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config import settings
+from app.free_strategy.continuation import continue_account_from_backtest
 from app.free_strategy.process import start_process
 from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
@@ -308,6 +309,7 @@ class BacktestWrite(BaseModel):
     initial_capital: float = Field(default=1_000_000, gt=0)
     fees_pct: float = Field(default=0.0002, ge=0)
     commission_pct: float | None = Field(default=None, ge=0)
+    sell_commission_pct: float | None = Field(default=None, ge=0)
     min_commission: float = Field(default=0, ge=0)
     reserve_buy_fees: bool = True
     stamp_tax_pct: float = Field(default=0.001, ge=0)
@@ -332,6 +334,7 @@ class PaperRiskWrite(BaseModel):
 class PaperWrite(BacktestWrite):
     name: str = Field(default="量化策略 · 模拟", min_length=1, max_length=40)
     market_mode: Literal["bar_1m", "bar_1d", "poll_3s", "websocket"] | None = None
+    continuation_job_id: str | None = Field(default=None, min_length=1, max_length=64)
     risk_config: PaperRiskWrite = Field(default_factory=PaperRiskWrite)
 
     @field_validator("name", mode="before")
@@ -626,6 +629,8 @@ def _paper_loop(account_id: str, root: str) -> None:
         _instrument_records,
         _load_market_data,
         _load_scheduled_history,
+        _load_scheduled_history_batch,
+        _merge_market_data,
         _prepare_market_data,
         _prepare_market_reference,
         _read_rows,
@@ -672,6 +677,17 @@ def _paper_loop(account_id: str, root: str) -> None:
                     repo, market_data, asset_type, symbol, count, period, cutoff,
                 )
             )
+            engine.set_history_batch_loader(
+                lambda symbols, count, period, cutoff: _load_scheduled_history_batch(
+                    repo,
+                    market_data,
+                    asset_type,
+                    symbols,
+                    count,
+                    period,
+                    cutoff,
+                )
+            )
         state["warmup"] = warmup_metadata
         state["execution_mode"] = engine.execution_mode
         state["scheduled_times"] = engine.scheduled_times
@@ -710,8 +726,7 @@ def _paper_loop(account_id: str, root: str) -> None:
                     for symbol, symbol_day in market_data.daily
                 ):
                     daily_update = _load_market_data(repo, symbols, today, today, asset_type)
-                    market_data.daily.update(daily_update.daily)
-                    market_data.names.update(daily_update.names)
+                    _merge_market_data(market_data, daily_update)
                 trading_day = any(
                     symbol in symbols and symbol_day == today
                     for symbol, symbol_day in market_data.daily
@@ -755,8 +770,7 @@ def _paper_loop(account_id: str, root: str) -> None:
                     symbol_day == today for _, symbol_day in market_data.daily
                 ):
                     daily_update = _load_market_data(repo, symbols, today, today, asset_type)
-                    market_data.daily.update(daily_update.daily)
-                    market_data.names.update(daily_update.names)
+                    _merge_market_data(market_data, daily_update)
                 try:
                     bars = _read_rows(
                         repo, symbols, today, today, asset_type, timeframe,
@@ -826,6 +840,7 @@ def create_paper_account(req: PaperWrite, request: Request):
     account_id = uuid.uuid4().hex[:12]
     payload = req.model_dump()
     risk_config = payload.pop("risk_config")
+    continuation_job_id = payload.pop("continuation_job_id", None)
     state = {
         "id": account_id,
         "name": req.name,
@@ -862,6 +877,19 @@ def create_paper_account(req: PaperWrite, request: Request):
     path = store._path(account_id)
     (path / "strategy.py").write_text(strategy["source"], encoding="utf-8")
     store.append_event(account_id, {"type": "created", "strategy_revision": strategy.get("revision")})
+    if continuation_job_id:
+        try:
+            _run_path(request, continuation_job_id)
+            data_dir = Path(
+                getattr(request.app.state, "datastore", None).data_dir
+                if hasattr(request.app.state, "datastore") else settings.data_dir
+            )
+            result = continue_account_from_backtest(data_dir, account_id, continuation_job_id)
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError, OSError) as exc:
+            store.delete(account_id)
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        store.append_event(account_id, {"type": "continued", "job_id": continuation_job_id})
+        return _public_paper_state(result)
     return result
 
 

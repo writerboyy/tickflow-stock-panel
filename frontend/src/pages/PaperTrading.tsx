@@ -264,7 +264,7 @@ function RenameAccountDialog({ account, onClose, onSaved }: { account: PaperAcco
   </Modal>
 }
 
-function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: string; onClose: () => void; onCreated: (account: PaperAccount) => void }) {
+function CreateAccountDialog({ strategyId, backtestJobId, onClose, onCreated }: { strategyId: string; backtestJobId: string; onClose: () => void; onCreated: (account: PaperAccount) => void }) {
   const strategies = useQuery({ queryKey: ['free-strategies'], queryFn: api.freeStrategies })
   const paperStatus = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus })
   const list = strategies.data?.strategies ?? []
@@ -288,6 +288,7 @@ function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: s
     fill_policy: 'next_open',
     benchmark_symbol: '510300.SH',
     market_mode: 'bar_1d',
+    continuation_job_id: backtestJobId || null,
     risk_config: DEFAULT_RISK,
   })
   const [pending, setPending] = useState(false)
@@ -305,9 +306,10 @@ function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: s
       name: current.name === '量化策略 · 模拟' ? `${selected.name} · 模拟` : current.name,
       asset_type: saved.asset_type === 'stock' ? 'stock' : 'etf',
       market_mode: saved.timeframe === '1d' ? 'bar_1d' : 'bar_1m',
-      initial_capital: Number(saved.initial_capital ?? current.initial_capital),
+      initial_capital: Number(saved.paper_initial_capital ?? saved.initial_capital ?? current.initial_capital),
       fees_pct: Number(saved.fees_pct ?? current.fees_pct),
       commission_pct: saved.commission_pct == null ? null : Number(saved.commission_pct),
+      sell_commission_pct: saved.sell_commission_pct == null ? null : Number(saved.sell_commission_pct),
       min_commission: Number(saved.min_commission ?? current.min_commission),
       reserve_buy_fees: typeof saved.reserve_buy_fees === 'boolean' ? saved.reserve_buy_fees : current.reserve_buy_fees,
       stamp_tax_pct: Number(saved.stamp_tax_pct ?? current.stamp_tax_pct),
@@ -320,8 +322,9 @@ function CreateAccountDialog({ strategyId, onClose, onCreated }: { strategyId: s
       t0_symbols: Array.isArray(saved.t0_symbols) ? saved.t0_symbols.map(String) : [],
       allow_stale_fills: saved.allow_stale_fills === true,
       fill_policy: saved.fill_policy === 'close' ? 'close' : 'next_open',
+      continuation_job_id: backtestJobId || null,
     }))
-  }, [form.strategy_id, list])
+  }, [backtestJobId, form.strategy_id, list])
 
   const setRisk = (key: keyof typeof DEFAULT_RISK, value: number) => setForm(current => ({ ...current, risk_config: { ...current.risk_config, [key]: value } }))
   const submit = async () => {
@@ -607,7 +610,7 @@ export function PaperTrading() {
         </section>
       </main>}
     </div>
-    {showCreate ? <CreateAccountDialog strategyId={searchParams.get('strategy_id') ?? ''} onClose={() => { setShowCreate(false); setSearchParams({}) }} onCreated={created => { setShowCreate(false); setSearchParams({}); setSelectedId(created.id); void accountsQuery.refetch() }} /> : null}
+    {showCreate ? <CreateAccountDialog strategyId={searchParams.get('strategy_id') ?? ''} backtestJobId={searchParams.get('backtest_job_id') ?? ''} onClose={() => { setShowCreate(false); setSearchParams({}) }} onCreated={created => { setShowCreate(false); setSearchParams({}); setSelectedId(created.id); void accountsQuery.refetch() }} /> : null}
     {renameTarget ? <RenameAccountDialog account={renameTarget} onClose={() => setRenameTarget(null)} onSaved={() => Promise.all([accountsQuery.refetch(), detailQuery.refetch()])} /> : null}
     {deleteTarget ? <Modal labelledBy="delete-paper-title" onClose={() => setDeleteTarget(null)} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl"><div className="p-4"><h2 id="delete-paper-title" className="text-sm font-semibold">删除「{deleteTarget.name}」？</h2><div className="mt-2 text-xs text-muted">账户 checkpoint 与事件流水将被删除。</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setDeleteTarget(null)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted">取消</button><button type="button" disabled={pendingAction === 'delete'} onClick={() => void remove()} className="rounded-btn bg-danger px-3 py-1.5 text-xs font-medium text-white">确认删除</button></div></div></Modal> : null}
   </div>

@@ -17,6 +17,7 @@ _EXECUTION_CONFIG_KEYS = (
     "initial_capital",
     "fees_pct",
     "commission_pct",
+    "sell_commission_pct",
     "min_commission",
     "reserve_buy_fees",
     "stamp_tax_pct",

@@ -49,6 +49,10 @@ class _Subscription:
     input_queue: Any
     last_bar: str = ""
     valuation_symbols: set[str] | None = None
+    execution_mode: str = "full_bar"
+    scheduled_times: tuple[str, ...] = ()
+    last_dispatch_cutoff: str = ""
+    last_dispatch_at: float = 0.0
 
 
 def _put_latest(target: Any, payload: dict[str, Any]) -> None:
@@ -114,7 +118,7 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
 
 
 class MarketDataHub:
-    """跨账户共享全市场轮询、闭合 K 线读取和 WebSocket 连接。"""
+    """跨账户共享行情轮询、闭合 K 线时钟和 WebSocket 连接。"""
 
     def __init__(self, quote_service: Any, repo: Any) -> None:
         self.quote_service = quote_service
@@ -141,6 +145,8 @@ class MarketDataHub:
         input_queue: Any,
         last_bar: str = "",
         valuation_symbols: set[str] | None = None,
+        execution_mode: str = "full_bar",
+        scheduled_times: list[str] | tuple[str, ...] = (),
     ) -> None:
         if mode not in MARKET_MODES | LEGACY_MARKET_MODES:
             raise ValueError(f"不支持的行情模式: {mode}")
@@ -153,7 +159,15 @@ class MarketDataHub:
                     raise ValueError(f"WebSocket 去重订阅最多 {WS_SYMBOL_LIMIT} 只，当前需要 {len(combined)} 只")
             previous = self._subscriptions.get(account_id)
             self._subscriptions[account_id] = _Subscription(
-                account_id, mode, cleaned, asset_type, input_queue, last_bar, valuation,
+                account_id,
+                mode,
+                cleaned,
+                asset_type,
+                input_queue,
+                last_bar,
+                valuation,
+                execution_mode,
+                tuple(scheduled_times),
             )
             try:
                 if mode == "poll_3s" and not self._poll_leased:
@@ -208,6 +222,7 @@ class MarketDataHub:
         account_id: str,
         symbols: set[str],
         valuation_symbols: set[str] | None = None,
+        last_bar: str | None = None,
     ) -> None:
         with self._lock:
             subscription = self._subscriptions.get(account_id)
@@ -226,6 +241,8 @@ class MarketDataHub:
                 self.quote_service.set_symbol_consumer(
                     f"paper:{account_id}", subscription.valuation_symbols,
                 )
+            if last_bar is not None:
+                subscription.last_bar = str(last_bar)
             if subscription.mode == "websocket":
                 self._sync_websocket()
 
@@ -276,6 +293,9 @@ class MarketDataHub:
             now = cn_naive_now()
             with self._lock:
                 targets = [sub for sub in self._subscriptions.values() if sub.mode.startswith("bar_")]
+            scheduled = [sub for sub in targets if sub.execution_mode == "scheduled"]
+            self._dispatch_scheduled_clocks(scheduled, now)
+            targets = [sub for sub in targets if sub.execution_mode != "scheduled"]
             groups: dict[tuple[str, str], list[_Subscription]] = {}
             for sub in targets:
                 groups.setdefault((sub.mode, sub.asset_type), []).append(sub)
@@ -335,6 +355,43 @@ class MarketDataHub:
                     }
                     if _put_bar_batch(sub.input_queue, payload):
                         sub.last_bar = max(bar.timestamp.isoformat() for bar in fresh)
+
+    def _dispatch_scheduled_clocks(
+        self,
+        subscriptions: list[_Subscription],
+        now: datetime,
+    ) -> None:
+        for sub in subscriptions:
+            cutoff = _closed_bar_cutoff(sub.mode, now)
+            try:
+                last_bar = datetime.fromisoformat(sub.last_bar) if sub.last_bar else None
+            except ValueError:
+                last_bar = None
+            boundaries = [
+                datetime.combine(cutoff.date(), clock_time.fromisoformat(value))
+                for value in sub.scheduled_times
+            ]
+            if cutoff.time() >= clock_time(15, 0):
+                boundaries.append(datetime.combine(cutoff.date(), clock_time(15, 0)))
+            if not any(
+                boundary <= cutoff and (last_bar is None or boundary > last_bar)
+                for boundary in boundaries
+            ):
+                continue
+            cutoff_value = cutoff.isoformat()
+            monotonic_now = time.monotonic()
+            if (
+                sub.last_dispatch_cutoff == cutoff_value
+                and monotonic_now - sub.last_dispatch_at < 5
+            ):
+                continue
+            if _put_bar_batch(sub.input_queue, {
+                "type": "scheduled_clock",
+                "account_id": sub.account_id,
+                "cutoff": cutoff_value,
+            }):
+                sub.last_dispatch_cutoff = cutoff_value
+                sub.last_dispatch_at = monotonic_now
 
     def _websocket_symbols(self, *, exclude: str | None = None) -> set[str]:
         return set().union(*(
@@ -479,6 +536,7 @@ def _engine_from_state(
         MarketData,
         _instrument_records,
         _load_market_data,
+        _load_scheduled_history_batch,
         _prepare_market_reference,
         _preload_tradable_dates,
         _read_rows,
@@ -529,6 +587,7 @@ def _engine_from_state(
         for item in _instrument_records(repo, requested_asset, "1d")
     }
     market_loaded_through: date | None = None
+    scheduled_history_market = MarketData()
 
     def load_market_history(cutoff: datetime) -> None:
         nonlocal market_loaded_through
@@ -568,6 +627,17 @@ def _engine_from_state(
         return [bar for bar in rows if bar.timestamp <= cutoff][-count:]
 
     engine.set_history_loader(load_history)
+    engine.set_history_batch_loader(
+        lambda symbols, count, period, cutoff: _load_scheduled_history_batch(
+            repo,
+            scheduled_history_market,
+            asset_type,
+            symbols,
+            count,
+            period,
+            cutoff,
+        )
+    )
     engine.set_market_history_loader(load_market_history)
     if preload_market_history and engine.market_history_requirements:
         load_market_history(cn_naive_now())
@@ -844,12 +914,214 @@ def _process_bar_rows(
     return _persist_engine_state(store, account_id, current, engine, snapshots)
 
 
+def _scheduled_trading_dates(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    market: Any,
+    start: date,
+    cutoff: datetime,
+    asset_type: str,
+) -> list[date]:
+    from app.free_strategy.process import _ensure_scheduled_market_data
+
+    probes = list(dict.fromkeys([
+        *(
+            symbol
+            for symbol, quantity in engine.account.positions.items()
+            if float(quantity) > 0
+        ),
+        *engine.universe[:20],
+    ]))
+    if not probes:
+        return []
+    _ensure_scheduled_market_data(
+        repo,
+        market,
+        probes,
+        start,
+        cutoff.date(),
+        asset_type,
+    )
+    result = {
+        day
+        for symbol, day in market.daily
+        if symbol in probes and start <= day <= cutoff.date()
+    }
+    if (
+        cutoff.date() not in result
+        and cutoff.date().weekday() < 5
+        and cutoff.time() >= clock_time(9, 30)
+    ):
+        get_snapshot = getattr(repo, "get_minute_snapshot", None)
+        if callable(get_snapshot):
+            frame = get_snapshot(probes, cutoff, asset_type)
+            if frame is not None and not frame.is_empty():
+                result.add(cutoff.date())
+    return sorted(result)
+
+
+def _process_scheduled_day(
+    store: PaperAccountStore,
+    account_id: str,
+    current: dict[str, Any],
+    engine: FreeStrategyEngine,
+    repo: Any,
+    market: Any,
+    day: date,
+    cutoff: datetime,
+    asset_type: str,
+    timeframe: str,
+    *,
+    finalize: bool,
+    notify: Any = None,
+) -> dict[str, Any]:
+    from app.free_strategy.process import advance_scheduled_session
+
+    before_orders = len(engine.account.orders)
+    before_fills = len(engine.account.fills)
+    before_logs = len(engine.logs)
+    before_risk = engine.risk_status
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        day,
+        cutoff,
+        asset_type,
+        timeframe,
+        finalize=finalize,
+    )
+    timestamp = engine._last_timestamp  # noqa: SLF001
+    if timestamp is None:
+        return current
+    _append_five_fortunes_decision(store, account_id, engine, timestamp)
+    _append_engine_events(
+        store,
+        account_id,
+        engine,
+        before_orders=before_orders,
+        before_fills=before_fills,
+        before_logs=before_logs,
+        before_risk=before_risk,
+        notify=notify,
+    )
+    current["last_bar"] = timestamp.isoformat()
+    return _persist_engine_state(
+        store,
+        account_id,
+        current,
+        engine,
+        [_equity_snapshot(engine, current, timestamp)],
+    )
+
+
+def _catch_up_scheduled(
+    store: PaperAccountStore,
+    account_id: str,
+    current: dict[str, Any],
+    engine: FreeStrategyEngine,
+    repo: Any,
+    market: Any,
+    cutoff: datetime,
+    asset_type: str,
+    timeframe: str,
+) -> dict[str, Any]:
+    last_value = (
+        current.get("last_bar")
+        or current.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
+    )
+    last_timestamp = datetime.fromisoformat(str(last_value)) if last_value else None
+    start_day = last_timestamp.date() if last_timestamp else cutoff.date()
+    runtime = engine.runtime_snapshot()
+    if (
+        runtime.get("session_finished")
+        and runtime.get("session_date") == start_day.isoformat()
+    ):
+        start_day += timedelta(days=1)
+    trading_dates = (
+        _scheduled_trading_dates(repo, engine, market, start_day, cutoff, asset_type)
+        if start_day <= cutoff.date() else []
+    )
+    existing_sync = current.get("sync")
+    if not trading_dates and isinstance(existing_sync, dict) and existing_sync.get("phase") == "live":
+        return current
+
+    target = None
+    if trading_dates:
+        last_day = trading_dates[-1]
+        target = (
+            datetime.combine(last_day, clock_time(15, 0))
+            if last_day < cutoff.date() else cutoff
+        )
+    sync = {
+        "phase": "catching_up",
+        "from": last_timestamp.isoformat() if last_timestamp else None,
+        "target": target.isoformat() if target else None,
+        "through": last_timestamp.isoformat() if last_timestamp else None,
+        "processed_days": 0,
+        "total_days": len(trading_dates),
+        "missing_symbols": [],
+        "updated_at": now_iso(),
+    }
+    current["sync"] = sync
+    current = store.update_fields(account_id, {"sync": sync})
+    if trading_dates:
+        store.append_event(account_id, {
+            "type": "sync",
+            "phase": "catching_up",
+            "from": sync["from"],
+            "target": sync["target"],
+        })
+    for index, trading_day in enumerate(trading_dates, start=1):
+        latest = store.get(account_id)
+        if latest.get("status") != "running":
+            return latest
+        day_cutoff = (
+            datetime.combine(trading_day, clock_time(15, 0))
+            if trading_day < cutoff.date() else cutoff
+        )
+        current = _process_scheduled_day(
+            store,
+            account_id,
+            current,
+            engine,
+            repo,
+            market,
+            trading_day,
+            day_cutoff,
+            asset_type,
+            timeframe,
+            finalize=day_cutoff.time() >= clock_time(15, 0),
+        )
+        sync.update({
+            "through": current.get("last_bar"),
+            "processed_days": index,
+            "updated_at": now_iso(),
+        })
+        current["sync"] = dict(sync)
+        current = store.update_fields(account_id, {"sync": dict(sync)})
+
+    sync.update({"phase": "live", "updated_at": now_iso()})
+    current["sync"] = sync
+    current = store.update_fields(account_id, {"sync": sync})
+    store.append_event(account_id, {
+        "type": "sync",
+        "phase": "live",
+        "through": sync["through"],
+        "target": sync["target"],
+    })
+    return current
+
+
 def _catch_up_bars(
     store: PaperAccountStore,
     account_id: str,
     current: dict[str, Any],
     engine: FreeStrategyEngine,
     data_dir: Path,
+    *,
+    repo: Any = None,
+    scheduled_market: Any = None,
 ) -> dict[str, Any]:
     mode = state_market_mode(current)
     if not mode.startswith("bar_"):
@@ -865,10 +1137,10 @@ def _catch_up_bars(
         }
         return store.update_fields(account_id, {"sync": current["sync"]})
 
-    from app.free_strategy.process import _read_rows
+    from app.free_strategy.process import MarketData, _read_rows
     from app.tickflow.repository import DataStore, KlineRepository
 
-    repo = KlineRepository(DataStore(data_dir))
+    repo = repo or KlineRepository(DataStore(data_dir))
     held_symbols = {
         symbol
         for symbol, quantity in engine.account.positions.items()
@@ -883,12 +1155,25 @@ def _catch_up_bars(
     cutoff = _closed_bar_cutoff(mode, cn_naive_now())
     start_day = last_timestamp.date() if last_timestamp else cn_today()
     timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1d")
+    asset_type = str(current.get("config", {}).get("asset_type", "stock"))
+    if engine.execution_mode == "scheduled":
+        return _catch_up_scheduled(
+            store,
+            account_id,
+            current,
+            engine,
+            repo,
+            scheduled_market or MarketData(),
+            cutoff,
+            asset_type,
+            timeframe,
+        )
     rows = list(_read_rows(
         repo,
         symbols,
         start_day,
         cutoff.date(),
-        str(current.get("config", {}).get("asset_type", "stock")),
+        asset_type,
         timeframe,
         require_all_symbols=False,
         allow_empty=True,
@@ -975,9 +1260,14 @@ def _catch_up_bars(
 
 
 def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadline: Any = None) -> None:
+    from app.free_strategy.process import MarketData
+    from app.tickflow.repository import DataStore, KlineRepository
+
     account_root = Path(root) / account_id
     store = PaperAccountStore(Path(root).parent)
     state = store.get(account_id)
+    repo = KlineRepository(DataStore(Path(root).parent))
+    scheduled_market = MarketData()
     try:
         engine = _engine_from_state(
             state,
@@ -1002,7 +1292,15 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
         "universe": engine.universe,
     })
     try:
-        state = _catch_up_bars(store, account_id, state, engine, Path(root).parent)
+        state = _catch_up_bars(
+            store,
+            account_id,
+            state,
+            engine,
+            Path(root).parent,
+            repo=repo,
+            scheduled_market=scheduled_market,
+        )
     except Exception as exc:  # noqa: BLE001
         latest = store.get(account_id)
         sync = dict(latest.get("sync", {}))
@@ -1082,7 +1380,48 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
             store.append_event(account_id, {"type": "market_gap", "reason": message.get("reason")})
             continue
         try:
-            if message.get("type") == "quotes":
+            if message.get("type") == "scheduled_clock":
+                if engine.execution_mode != "scheduled":
+                    continue
+                cutoff = datetime.fromisoformat(str(message["cutoff"]))
+                asset_type = str(current.get("config", {}).get("asset_type", "stock"))
+                trading_dates = _scheduled_trading_dates(
+                    repo,
+                    engine,
+                    scheduled_market,
+                    cutoff.date(),
+                    cutoff,
+                    asset_type,
+                )
+                if not trading_dates:
+                    continue
+                current = _process_scheduled_day(
+                    store,
+                    account_id,
+                    current,
+                    engine,
+                    repo,
+                    scheduled_market,
+                    cutoff.date(),
+                    cutoff,
+                    asset_type,
+                    {
+                        "bar_1m": "1m",
+                        "bar_5m": "5m",
+                        "bar_30m": "30m",
+                    }.get(state_market_mode(current), "1d"),
+                    finalize=cutoff.time() >= clock_time(15, 0),
+                    notify=notify,
+                )
+                sync = dict(current.get("sync", {}))
+                sync.update({
+                    "phase": "live",
+                    "through": current.get("last_bar"),
+                    "target": current.get("last_bar"),
+                    "updated_at": now_iso(),
+                })
+                current = store.update_fields(account_id, {"sync": sync})
+            elif message.get("type") == "quotes":
                 before_orders = len(engine.account.orders)
                 before_fills = len(engine.account.fills)
                 before_logs = len(engine.logs)
@@ -1219,10 +1558,17 @@ class PaperTradingSupervisor:
                         self._queues[account_id],
                         str(state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp") or ""),
                         held_symbols,
+                        execution_mode=str(state.get("execution_mode") or "full_bar"),
+                        scheduled_times=tuple(state.get("scheduled_times") or ()),
                     )
                 elif sync_phase != "live" and self.hub.has_subscription(account_id):
                     self.hub.unregister(account_id)
-                self.hub.update_symbols(account_id, symbols, held_symbols)
+                self.hub.update_symbols(
+                    account_id,
+                    symbols,
+                    held_symbols,
+                    str(state.get("last_bar") or ""),
+                )
             except ValueError as exc:
                 self.pause_or_stop(account_id, "paused")
                 self.store.update_fields(account_id, {"last_error": str(exc)})

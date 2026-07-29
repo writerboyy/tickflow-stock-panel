@@ -277,6 +277,35 @@ class Context:
             result[symbol] = list(visible[-count:])
         return result
 
+    def current_bars(self) -> BarsView:
+        return BarsView(self._engine._session_bars)
+
+    def history_batch(
+        self,
+        symbols: Iterable[str],
+        count: int = 20,
+        timeframe: str | None = None,
+    ) -> dict[str, list[Bar]]:
+        normalized = list(dict.fromkeys(
+            str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
+        ))
+        if count <= 0 or not normalized:
+            return {}
+        cutoff = self.now
+        period = timeframe or self.period
+        if self._engine._history_batch_loader is not None and cutoff is not None:
+            result = self._engine._history_batch_loader(normalized, count, period, cutoff)
+            visible = {
+                symbol: [bar for bar in result.get(symbol, []) if bar.timestamp <= cutoff][-count:]
+                for symbol in normalized
+            }
+            self._engine.market_rows_consumed += sum(len(values) for values in visible.values())
+            return visible
+        return {
+            symbol: list(self._engine._history_by_period.get(period, {}).get(symbol, [])[-count:])
+            for symbol in normalized
+        }
+
     def _sync(self, prices: dict[str, float]) -> None:
         self.portfolio.cash = self._engine.account.cash
         self.portfolio.positions = dict(self._engine.account.positions)
@@ -284,7 +313,13 @@ class Context:
         self.portfolio.avg_cost = dict(self._engine.account.avg_cost)
         self.portfolio.total_value = self._engine.account.equity(prices)
 
-    def schedule(self, callback: Callable[..., Any], at: str | datetime_time) -> None:
+    def schedule(
+        self,
+        callback: Callable[..., Any],
+        at: str | datetime_time,
+        *,
+        symbols: Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None = None,
+    ) -> None:
         if not callable(callback):
             raise ValueError("定时任务 callback 必须可调用")
         if isinstance(at, datetime_time) and (at.second or at.microsecond):
@@ -295,6 +330,8 @@ class Context:
         if any(existing_at == value and existing is callback for existing_at, existing, _ in self._scheduled):
             return
         self._scheduled.append((value, callback, False))
+        if symbols is not None:
+            self._engine._scheduled_symbol_scopes[(value, callback)] = symbols
 
     schedule_function = schedule
 
@@ -436,6 +473,13 @@ class FreeStrategyEngine:
         self._callbacks: dict[str, Callable[..., Any]] = {}
         self._callback_deadline = callback_deadline
         self._history_loader: Callable[[str, int, str, datetime], list[Bar]] | None = None
+        self._history_batch_loader: Callable[
+            [list[str], int, str, datetime], dict[str, list[Bar]]
+        ] | None = None
+        self._scheduled_symbol_scopes: dict[
+            tuple[str, Callable[..., Any]],
+            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
+        ] = {}
         self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
         self._session_finished = False
@@ -506,6 +550,32 @@ class FreeStrategyEngine:
     def scheduled_times(self) -> list[str]:
         return sorted({at for at, _, _ in self.context._scheduled})
 
+    def scheduled_snapshot_symbols(self, timestamp: datetime) -> list[str] | None:
+        current_time = timestamp.strftime("%H:%M")
+        due = [
+            (callback, done)
+            for at, callback, done in self.context._scheduled
+            if at == current_time
+        ]
+        if not due:
+            return []
+        result: list[str] = []
+        for callback, done in due:
+            if done:
+                continue
+            scope = self._scheduled_symbol_scopes.get((current_time, callback))
+            if scope is None:
+                return None
+            values = (
+                self._protected_call("定时任务标的范围", scope, self.context, timestamp)
+                if callable(scope) else scope
+            )
+            for raw in values:
+                symbol = str(raw).strip().upper()
+                if symbol and symbol not in result:
+                    result.append(symbol)
+        return result
+
     @property
     def pending_orders(self) -> list[tuple[Order, datetime]]:
         return list(self.pending)
@@ -524,6 +594,14 @@ class FreeStrategyEngine:
         loader: Callable[[str, int, str, datetime], list[Bar]] | None,
     ) -> None:
         self._history_loader = loader
+
+    def set_history_batch_loader(
+        self,
+        loader: Callable[
+            [list[str], int, str, datetime], dict[str, list[Bar]]
+        ] | None,
+    ) -> None:
+        self._history_batch_loader = loader
 
     def set_market_history_loader(
         self,

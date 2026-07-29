@@ -51,6 +51,7 @@ def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_pat
         BacktestWrite(
             strategy_id="seven",
             reserve_buy_fees=False,
+            sell_commission_pct=0.0001,
             t0_symbols=["513310.SH"],
             allow_stale_fills=True,
         ),
@@ -59,6 +60,7 @@ def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_pat
     )
 
     assert payload["config"]["reserve_buy_fees"] is False
+    assert payload["config"]["sell_commission_pct"] == 0.0001
     assert payload["config"]["t0_symbols"] == ["513310.SH"]
     assert payload["config"]["allow_stale_fills"] is True
 
@@ -449,6 +451,79 @@ def test_paper_account_must_be_stopped_before_delete(tmp_path):
     deleted = client.delete("/api/free-strategies/paper/accounts/paper-active")
     assert deleted.status_code == 200
     assert not store._path("paper-active").exists()
+
+
+def test_create_paper_account_continues_from_backtest_without_private_fields(
+    monkeypatch,
+    tmp_path,
+):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "small-cap",
+        "小市值",
+        "def on_bar(context, bars):\n    pass\n",
+        {},
+    )
+    captured = {}
+
+    def continue_account(data_dir, account_id, job_id):
+        captured.update({
+            "data_dir": data_dir,
+            "account_id": account_id,
+            "job_id": job_id,
+        })
+        store = PaperAccountStore(data_dir)
+        state = store.get(account_id)
+        assert "continuation_job_id" not in state["config"]
+        state["checkpoint"] = {"private": True}
+        state["continuation"] = {"job_id": job_id}
+        return store.save(state)
+
+    monkeypatch.setattr(free_strategy, "continue_account_from_backtest", continue_account)
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    response = TestClient(app).post("/api/free-strategies/paper/accounts", json={
+        "strategy_id": strategy["id"],
+        "name": "小市值模拟",
+        "timeframe": "1d",
+        "market_mode": "bar_1d",
+        "continuation_job_id": "verified-run",
+    })
+
+    assert response.status_code == 200
+    assert captured["data_dir"] == tmp_path
+    assert captured["job_id"] == "verified-run"
+    assert response.json()["strategy_id"] == strategy["id"]
+    assert "checkpoint" not in response.json()
+    assert "continuation" not in response.json()
+
+
+def test_create_paper_account_rolls_back_when_continuation_fails(monkeypatch, tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "small-cap",
+        "小市值",
+        "def on_bar(context, bars):\n    pass\n",
+        {},
+    )
+    monkeypatch.setattr(
+        free_strategy,
+        "continue_account_from_backtest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("参数不一致")),
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    response = TestClient(app).post("/api/free-strategies/paper/accounts", json={
+        "strategy_id": strategy["id"],
+        "name": "小市值模拟",
+        "timeframe": "1d",
+        "market_mode": "bar_1d",
+        "continuation_job_id": "bad-run",
+    })
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "参数不一致"
+    assert PaperAccountStore(tmp_path).list() == []
 
 
 def test_resume_restarts_missing_paper_process(monkeypatch, tmp_path):

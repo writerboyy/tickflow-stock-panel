@@ -148,3 +148,24 @@ def test_continue_account_rejects_mismatched_source(tmp_path):
 
     with pytest.raises(ValueError, match="源码"):
         continue_account_from_backtest(tmp_path, "paper", "run")
+
+
+def test_continue_account_rejects_mismatched_sell_commission(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "strategy_id": "small-cap",
+        "source_hash": "source-hash",
+        "status": "paused",
+        "config": {**CONFIG, "sell_commission_pct": 0.0002},
+    })
+    run = tmp_path / "free_strategy_runs" / "run"
+    write_json(run / "manifest.json", {
+        "strategy_id": "small-cap",
+        "strategy_source_sha256": "source-hash",
+        "payload": {"config": {**CONFIG, "sell_commission_pct": 0.0001}},
+    })
+    write_json(run / "result.json", {})
+
+    with pytest.raises(ValueError, match="sell_commission_pct"):
+        continue_account_from_backtest(tmp_path, "paper", "run")

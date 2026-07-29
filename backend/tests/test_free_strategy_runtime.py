@@ -5,7 +5,7 @@ import pytest
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
-from app.free_strategy import five_fortunes, seven_stars
+from app.free_strategy import five_fortunes, seven_stars, small_cap_limitup
 from app.free_strategy.five_fortunes import (
     DEFENSIVE_ETF,
     REGIME_FALLBACK_PROXIES,
@@ -201,11 +201,28 @@ def on_bar(context, bars):
         FreeStrategyEngine(source)
 
 
-@pytest.mark.parametrize("template_id", ["dual_ma", "etf_rotation", "five_fortunes", "seven_stars"])
-def test_templates_define_universe_in_strategy_source(template_id):
+@pytest.mark.parametrize(
+    ("template_id", "instruments"),
+    [
+        ("dual_ma", []),
+        ("etf_rotation", []),
+        ("five_fortunes", []),
+        ("seven_stars", []),
+        ("small_cap_limitup", [{
+            "symbol": "000001.SZ",
+            "asset_type": "stock",
+            "has_minute": True,
+        }]),
+    ],
+)
+def test_templates_define_universe_in_strategy_source(template_id, instruments):
     template = TEMPLATES[template_id]
 
-    engine = FreeStrategyEngine(template["source"], timeframe=template.get("config", {}).get("timeframe", "1d"))
+    engine = FreeStrategyEngine(
+        template["source"],
+        timeframe=template.get("config", {}).get("timeframe", "1d"),
+        instruments=instruments,
+    )
 
     assert engine.universe
 
@@ -223,6 +240,13 @@ def test_seven_stars_template_is_a_self_contained_source_snapshot():
 
     assert source == Path(seven_stars.__file__).read_text(encoding="utf-8")
     assert "from app.free_strategy.seven_stars import" not in source
+    assert "from jqdata import" not in source
+
+
+def test_small_cap_template_is_a_self_contained_source_snapshot():
+    source = TEMPLATES["small_cap_limitup"]["source"]
+
+    assert source == Path(small_cap_limitup.__file__).read_text(encoding="utf-8")
     assert "from jqdata import" not in source
 
 
@@ -303,6 +327,25 @@ def test_seven_stars_template_uses_reference_backtest_parameters():
         "settlement": "t1",
         "t0_symbols": seven_stars.T0_ETFS,
         "allow_stale_fills": True,
+        "fill_policy": "close",
+    }
+
+
+def test_small_cap_template_uses_reference_capital_for_paper_continuation():
+    assert TEMPLATES["small_cap_limitup"]["config"] == {
+        "timeframe": "1m",
+        "asset_type": "stock",
+        "initial_capital": 130_000,
+        "paper_initial_capital": 130_000,
+        "fees_pct": 0.0001,
+        "commission_pct": 0.0001,
+        "sell_commission_pct": 0.0001,
+        "min_commission": 1,
+        "stamp_tax_pct": 0.0005,
+        "slippage_bps": 10,
+        "price_tick": 0.01,
+        "benchmark_symbol": "399101.SZ",
+        "settlement": "t1",
         "fill_policy": "close",
     }
 
@@ -619,6 +662,34 @@ def on_bar(context, bars):
     assert reserved["fills"] == []
     assert post_fill["fills"][0]["quantity"] == 100
     assert post_fill["checkpoint"]["account"]["cash"] == pytest.approx(-10)
+
+
+def test_sell_commission_can_differ_from_buy_commission():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    else:
+        context.sell('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=2_000,
+            commission_pct=0.001,
+            sell_commission_pct=0.002,
+            min_commission=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            settlement="t1",
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
+    ])
+
+    assert [fill["fee"] for fill in result["fills"]] == pytest.approx([1, 2])
 
 
 def test_stale_fill_requires_current_day_trading_evidence():

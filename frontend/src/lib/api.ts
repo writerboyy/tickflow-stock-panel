@@ -968,6 +968,7 @@ export interface FreeBacktestConfig {
   initial_capital: number
   fees_pct: number
   commission_pct?: number | null
+  sell_commission_pct?: number | null
   min_commission: number
   reserve_buy_fees?: boolean
   stamp_tax_pct: number
@@ -1134,6 +1135,7 @@ export interface PaperStatus {
 export type CreatePaperAccount = FreeBacktestConfig & {
   name: string
   market_mode: PaperMarketMode
+  continuation_job_id?: string | null
   risk_config: PaperRiskConfig
 }
 

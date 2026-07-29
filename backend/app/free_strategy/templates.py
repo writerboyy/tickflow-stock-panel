@@ -32,6 +32,7 @@ MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
 })
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
+SMALL_CAP_LIMITUP_SOURCE = Path(__file__).with_name("small_cap_limitup.py").read_text(encoding="utf-8")
 
 
 TEMPLATES = {
@@ -125,5 +126,26 @@ def on_bar(context, bars):
             "fill_policy": "close",
         },
         "source": SEVEN_STARS_SOURCE,
+    },
+    "small_cap_limitup": {
+        "name": "涨停基因小市值",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "stock",
+            "initial_capital": 130_000,
+            "paper_initial_capital": 130_000,
+            "fees_pct": 0.0001,
+            "commission_pct": 0.0001,
+            "sell_commission_pct": 0.0001,
+            "min_commission": 1,
+            "stamp_tax_pct": 0.0005,
+            # PriceRelatedSlippage(0.002) is a full spread; each side pays half.
+            "slippage_bps": 10,
+            "price_tick": 0.01,
+            "benchmark_symbol": "399101.SZ",
+            "settlement": "t1",
+            "fill_policy": "close",
+        },
+        "source": SMALL_CAP_LIMITUP_SOURCE,
     },
 }

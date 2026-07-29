@@ -8,9 +8,11 @@ import queue
 import shutil
 import threading
 import time as time_module
+from bisect import bisect_left, insort
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,9 +30,140 @@ MARKET_METADATA_CALENDAR_DAYS = 30
 @dataclass
 class MarketData:
     daily: dict[tuple[str, date], dict[str, Any]] = field(default_factory=dict)
+    daily_dates: dict[str, list[date]] = field(default_factory=dict)
+    daily_bar_cache: dict[tuple[str, date], Bar] = field(default_factory=dict)
+    loaded_daily_ranges: dict[str, list[tuple[date, date]]] = field(default_factory=dict)
     names: dict[str, str] = field(default_factory=dict)
+    name_changes: dict[str, tuple[tuple[date, str, str], ...]] = field(default_factory=dict)
     previous_scale: dict[str, float] = field(default_factory=dict)
     previous_adjusted_close: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.daily_dates and self.daily:
+            for symbol, day in sorted(self.daily):
+                self.daily_dates.setdefault(symbol, []).append(day)
+
+
+def _set_daily_row(
+    market: MarketData,
+    symbol: str,
+    day: date,
+    row: dict[str, Any],
+) -> None:
+    key = (symbol, day)
+    market.daily_bar_cache.pop(key, None)
+    if key not in market.daily:
+        dates = market.daily_dates.setdefault(symbol, [])
+        if not dates or day > dates[-1]:
+            dates.append(day)
+        elif day not in dates:
+            insort(dates, day)
+    market.daily[key] = row
+
+
+def _record_loaded_daily_range(
+    market: MarketData,
+    symbol: str,
+    start: date,
+    end: date,
+) -> None:
+    ranges = sorted([*market.loaded_daily_ranges.get(symbol, []), (start, end)])
+    merged: list[tuple[date, date]] = []
+    for range_start, range_end in ranges:
+        if merged and range_start <= merged[-1][1] + timedelta(days=1):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], range_end))
+        else:
+            merged.append((range_start, range_end))
+    market.loaded_daily_ranges[symbol] = merged
+
+
+def _missing_daily_ranges(
+    market: MarketData,
+    symbol: str,
+    start: date,
+    end: date,
+) -> list[tuple[date, date]]:
+    cursor = start
+    missing: list[tuple[date, date]] = []
+    for range_start, range_end in market.loaded_daily_ranges.get(symbol, []):
+        if range_end < cursor:
+            continue
+        if range_start > end:
+            break
+        if range_start > cursor:
+            missing.append((cursor, min(end, range_start - timedelta(days=1))))
+        cursor = max(cursor, range_end + timedelta(days=1))
+        if cursor > end:
+            break
+    if cursor <= end:
+        missing.append((cursor, end))
+    return missing
+
+
+def _merge_market_data(target: MarketData, source: MarketData) -> None:
+    for (symbol, day), row in source.daily.items():
+        _set_daily_row(target, symbol, day, row)
+    target.names.update(source.names)
+    target.name_changes.update(source.name_changes)
+    for symbol, ranges in source.loaded_daily_ranges.items():
+        for start, end in ranges:
+            _record_loaded_daily_range(target, symbol, start, end)
+
+
+def _previous_daily_row(
+    market: MarketData,
+    symbol: str,
+    day: date,
+) -> dict[str, Any]:
+    dates = market.daily_dates.get(symbol, [])
+    index = bisect_left(dates, day) - 1
+    return market.daily.get((symbol, dates[index]), {}) if index >= 0 else {}
+
+
+@lru_cache(maxsize=4)
+def _read_instrument_name_changes(
+    path: str,
+    modified_ns: int,
+) -> dict[str, tuple[tuple[date, str, str], ...]]:
+    del modified_ns
+    frame = pl.read_parquet(
+        path,
+        columns=["symbol", "change_date", "before_name", "after_name"],
+    ).sort(["symbol", "change_date"])
+    result: dict[str, list[tuple[date, str, str]]] = {}
+    for symbol, change_date, before_name, after_name in frame.iter_rows():
+        result.setdefault(str(symbol), []).append((
+            change_date,
+            str(before_name or ""),
+            str(after_name or ""),
+        ))
+    return {symbol: tuple(values) for symbol, values in result.items()}
+
+
+def _instrument_name_changes(repo: Any) -> dict[str, tuple[tuple[date, str, str], ...]]:
+    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+    if data_dir is None:
+        return {}
+    path = data_dir / "instrument_name_history" / "part.parquet"
+    if not path.exists():
+        return {}
+    try:
+        return _read_instrument_name_changes(str(path), path.stat().st_mtime_ns)
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        logger.debug("股票简称变更快照读取跳过: %s", exc)
+        return {}
+
+
+def _name_on(
+    current_name: str,
+    changes: tuple[tuple[date, str, str], ...],
+    day: date,
+) -> str:
+    for change_date, before_name, after_name in changes:
+        if day < change_date:
+            return before_name or current_name
+        current_name = after_name or current_name
+    return current_name
 
 
 def _instrument_records(
@@ -50,12 +183,39 @@ def _instrument_records(
     get_minute_symbols = getattr(repo, "get_minute_symbols", None)
     if timeframe != "1d" and callable(get_minute_symbols):
         minute_symbols = get_minute_symbols(asset_type, start, end)
+    name_changes = _instrument_name_changes(repo) if asset_type == "stock" else {}
+    industries: dict[str, str] = {}
+    if asset_type == "stock":
+        try:
+            industry_path = repo.store.data_dir / "ext_data" / "ext_hy_ths" / "part.parquet"
+            if industry_path.exists():
+                industry_frame = pl.read_parquet(
+                    industry_path,
+                    columns=["symbol", "所属同花顺行业"],
+                )
+                industries = {
+                    str(symbol): str(value or "")
+                    for symbol, value in industry_frame.iter_rows()
+                }
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            logger.debug("小市值行业快照读取跳过: %s", exc)
     records = []
     for raw in frame.iter_rows(named=True):
         item = dict(raw)
         item["symbol"] = str(item["symbol"])
         item["asset_type"] = str(item.get("asset_type") or asset_type).lower()
         item["has_minute"] = minute_symbols is None or item["symbol"] in minute_symbols
+        item["name_changes"] = [
+            {
+                "date": change_date.isoformat(),
+                "before": before_name,
+                "after": after_name,
+            }
+            for change_date, before_name, after_name in name_changes.get(item["symbol"], ())
+        ]
+        industry = industries.get(item["symbol"], "")
+        item["industry"] = industry
+        item["industry_l2"] = industry.split("-")[1] if industry.count("-") >= 1 else industry
         records.append(item)
     return records
 
@@ -68,16 +228,32 @@ def _load_market_data(
     asset_type: str,
 ) -> MarketData:
     market = MarketData()
+    if asset_type == "stock":
+        market.name_changes.update(_instrument_name_changes(repo))
     get_daily = getattr(repo, "get_daily_asset", None)
     if callable(get_daily):
         columns = [
             "date", "open", "high", "low", "close", "volume", "amount",
-            "raw_close", "raw_high", "raw_low",
+            "raw_close", "raw_high", "raw_low", "turnover_rate",
+            "total_shares", "float_shares",
         ]
-        for symbol in symbols:
-            frame = get_daily(asset_type, symbol, start, end, columns)
+        get_batch = getattr(repo, "get_daily_asset_batch", None)
+        frame = (
+            get_batch(asset_type, symbols, start, end, ["symbol", *columns])
+            if len(symbols) > 1 and callable(get_batch)
+            else pl.DataFrame()
+        )
+        if not frame.is_empty() and "symbol" in frame.columns:
             for row in frame.iter_rows(named=True):
-                market.daily[(symbol, row["date"])] = dict(row)
+                symbol = str(row["symbol"])
+                _set_daily_row(market, symbol, row["date"], dict(row))
+        else:
+            for symbol in symbols:
+                frame = get_daily(asset_type, symbol, start, end, columns)
+                for row in frame.iter_rows(named=True):
+                    _set_daily_row(market, symbol, row["date"], dict(row))
+        for symbol in symbols:
+            _record_loaded_daily_range(market, symbol, start, end)
     get_instruments = getattr(repo, "get_instruments_asset", None)
     if callable(get_instruments):
         instruments = get_instruments(asset_type)
@@ -111,7 +287,8 @@ def _prepare_market_reference(
     load_start = start - timedelta(days=requested_bars * 2 + 14)
     columns = [
         "symbol", "date", "open", "high", "low", "close", "volume", "amount",
-        "raw_close", "raw_high", "raw_low",
+        "raw_close", "raw_high", "raw_low", "turnover_rate",
+        "total_shares", "float_shares",
     ]
     frame = get_batch(asset_type, symbols, load_start, end, columns)
     if frame.is_empty():
@@ -137,7 +314,7 @@ def _prepare_market_reference(
         close = float(row["close"])
         raw_close = float(row.get("raw_close") or close)
         scale = raw_close / close if close > 0 else 1.0
-        market.daily[(symbol, day)] = dict(row)
+        _set_daily_row(market, symbol, day, dict(row))
         bars.append(Bar(
             symbol=symbol,
             timestamp=datetime.combine(day, time(15, 0)),
@@ -148,6 +325,15 @@ def _prepare_market_reference(
             raw_high=float(row.get("raw_high") or float(row["high"]) * scale),
             raw_low=float(row.get("raw_low") or float(row["low"]) * scale),
             raw_close=raw_close,
+            turnover_rate=(
+                float(row["turnover_rate"]) if row.get("turnover_rate") is not None else None
+            ),
+            total_shares=(
+                float(row["total_shares"]) if row.get("total_shares") is not None else None
+            ),
+            float_shares=(
+                float(row["float_shares"]) if row.get("float_shares") is not None else None
+            ),
         ))
     market.names.update({item["symbol"]: str(item.get("name") or "") for item in records})
     engine.preload_market_history(bars, "1d")
@@ -198,17 +384,27 @@ def _observe_daily_price(
     adjusted_close: float,
     raw_close: float,
     asset_type: str,
-) -> dict[str, float]:
+    day: date,
+) -> dict[str, float | None]:
     scale = raw_close / adjusted_close if adjusted_close > 0 and raw_close > 0 else 1.0
     split_ratio = _split_ratio(market.previous_scale.get(symbol), scale, asset_type)
     previous_close = market.previous_adjusted_close.get(symbol)
     reference = previous_close * scale if previous_close is not None else None
     market.previous_scale[symbol] = scale
     market.previous_adjusted_close[symbol] = adjusted_close
-    pct = _limit_pct(symbol, asset_type, market.names.get(symbol, ""))
+    pct = _limit_pct(
+        symbol,
+        asset_type,
+        _name_on(
+            market.names.get(symbol, ""),
+            market.name_changes.get(symbol, ()),
+            day,
+        ),
+    )
     return {
         "scale": scale,
         "split_ratio": split_ratio,
+        "previous_close": reference,
         "limit_up": _round_limit(reference * (1 + pct), asset_type) if reference is not None else None,
         "limit_down": _round_limit(reference * (1 - pct), asset_type) if reference is not None else None,
     }
@@ -223,12 +419,13 @@ def _daily_bars(
 ) -> list[Bar]:
     rows: list[Bar] = []
     for symbol in symbols:
-        for (row_symbol, day), row in sorted(market.daily.items(), key=lambda item: item[0][1]):
-            if row_symbol != symbol or not start <= day <= end:
+        for day in market.daily_dates.get(symbol, []):
+            if not start <= day <= end:
                 continue
+            row = market.daily[(symbol, day)]
             close = float(row["close"])
             raw_close = float(row.get("raw_close") or close)
-            observed = _observe_daily_price(market, symbol, close, raw_close, asset_type)
+            observed = _observe_daily_price(market, symbol, close, raw_close, asset_type, day)
             scale = observed["scale"]
             rows.append(Bar(
                 symbol=symbol,
@@ -244,6 +441,19 @@ def _daily_bars(
                 suspended=float(row["open"]) == 0 and float(row["high"]) == 0,
                 limit_up=observed["limit_up"], limit_down=observed["limit_down"],
                 split_ratio=observed["split_ratio"],
+                previous_close=observed["previous_close"],
+                turnover_rate=(
+                    float(row["turnover_rate"])
+                    if row.get("turnover_rate") is not None else None
+                ),
+                total_shares=(
+                    float(row["total_shares"])
+                    if row.get("total_shares") is not None else None
+                ),
+                float_shares=(
+                    float(row["float_shares"])
+                    if row.get("float_shares") is not None else None
+                ),
             ))
     return sorted(rows, key=lambda bar: (bar.timestamp, bar.symbol))
 
@@ -266,7 +476,7 @@ def _minute_metadata(frame: Any, market: MarketData, asset_type: str) -> dict[tu
         daily = market.daily.get((symbol, day), {})
         raw_close = float(daily.get("raw_close") or daily.get("close") or adjusted_close)
         metadata[(symbol, day)] = _observe_daily_price(
-            market, symbol, adjusted_close, raw_close, asset_type,
+            market, symbol, adjusted_close, raw_close, asset_type, day,
         )
     return metadata
 
@@ -291,9 +501,9 @@ def _aligned_warmup_bars(
     result: list[Bar] = []
     for symbol in symbols:
         rows = [
-            (day, row)
-            for (row_symbol, day), row in market.daily.items()
-            if row_symbol == symbol and start <= day <= end
+            (day, market.daily[(symbol, day)])
+            for day in market.daily_dates.get(symbol, [])
+            if start <= day <= end
         ]
         rows.sort(key=lambda item: item[0])
         if not rows:
@@ -325,6 +535,18 @@ def _aligned_warmup_bars(
                 low=raw_low / aligned_scale, close=raw_close / aligned_scale,
                 volume=float(row.get("volume") or 0), amount=float(row.get("amount") or 0),
                 raw_open=raw_open, raw_high=raw_high, raw_low=raw_low, raw_close=raw_close,
+                turnover_rate=(
+                    float(row["turnover_rate"])
+                    if row.get("turnover_rate") is not None else None
+                ),
+                total_shares=(
+                    float(row["total_shares"])
+                    if row.get("total_shares") is not None else None
+                ),
+                float_shares=(
+                    float(row["float_shares"])
+                    if row.get("float_shares") is not None else None
+                ),
             ))
     return sorted(result, key=lambda bar: (bar.timestamp, bar.symbol))
 
@@ -372,12 +594,38 @@ def _read_rows(
             return rows
         rows: list[Bar] = []
         for symbol in symbols:
-            frame = repo.get_daily_asset(asset_type, symbol, start, end, ["date", "open", "high", "low", "close", "volume", "amount", "raw_close", "raw_high", "raw_low"])
+            frame = repo.get_daily_asset(asset_type, symbol, start, end, [
+                "date", "open", "high", "low", "close", "volume", "amount",
+                "raw_close", "raw_high", "raw_low", "turnover_rate",
+                "total_shares", "float_shares",
+            ])
             for row in frame.iter_rows(named=True):
                 close = float(row["close"])
                 raw_close = float(row.get("raw_close") or close)
                 scale = raw_close / close if close > 0 else 1.0
-                rows.append(Bar(symbol=symbol, timestamp=datetime.combine(row["date"], time(15, 0)), open=float(row["open"]), high=float(row["high"]), low=float(row["low"]), close=close, volume=float(row.get("volume") or 0), amount=float(row.get("amount") or 0), raw_open=float(row["open"]) * scale, raw_high=float(row.get("raw_high") or float(row["high"]) * scale), raw_low=float(row.get("raw_low") or float(row["low"]) * scale), raw_close=raw_close))
+                rows.append(Bar(
+                    symbol=symbol,
+                    timestamp=datetime.combine(row["date"], time(15, 0)),
+                    open=float(row["open"]), high=float(row["high"]),
+                    low=float(row["low"]), close=close,
+                    volume=float(row.get("volume") or 0), amount=float(row.get("amount") or 0),
+                    raw_open=float(row["open"]) * scale,
+                    raw_high=float(row.get("raw_high") or float(row["high"]) * scale),
+                    raw_low=float(row.get("raw_low") or float(row["low"]) * scale),
+                    raw_close=raw_close,
+                    turnover_rate=(
+                        float(row["turnover_rate"])
+                        if row.get("turnover_rate") is not None else None
+                    ),
+                    total_shares=(
+                        float(row["total_shares"])
+                        if row.get("total_shares") is not None else None
+                    ),
+                    float_shares=(
+                        float(row["float_shares"])
+                        if row.get("float_shares") is not None else None
+                    ),
+                ))
         if not rows:
             raise ValueError("没有可用的日K数据，请先同步历史行情")
         return rows
@@ -459,8 +707,7 @@ def _prepare_market_data(
     )
     if not any(start <= day <= end for _, day in market_data.daily):
         formal_market_data = _load_market_data(repo, symbols, start, end, asset_type)
-        market_data.daily.update(formal_market_data.daily)
-        market_data.names.update(formal_market_data.names)
+        _merge_market_data(market_data, formal_market_data)
 
     warmup_end = start - timedelta(days=1)
     if timeframe == "1d":
@@ -520,23 +767,39 @@ def _scheduled_price_metadata(
     close = float(current.get("close") or 0)
     raw_close = float(current.get("raw_close") or close or 0)
     scale = raw_close / close if close > 0 and raw_close > 0 else 1.0
-    previous_rows = [
-        (row_day, row)
-        for (row_symbol, row_day), row in market.daily.items()
-        if row_symbol == symbol and row_day < day
-    ]
-    previous = max(previous_rows, key=lambda item: item[0])[1] if previous_rows else {}
+    previous = _previous_daily_row(market, symbol, day)
     previous_close = float(previous.get("close") or 0)
     previous_raw_close = float(previous.get("raw_close") or previous_close or 0)
+    previous_local_scale = (
+        previous_raw_close / previous_close
+        if previous_close > 0 and previous_raw_close > 0 else 1.0
+    )
+    previous_open = (
+        float(previous.get("open") or 0) * previous_local_scale
+        if previous else None
+    )
     previous_scale = (
         previous_raw_close / previous_close
         if previous_close > 0 and previous_raw_close > 0 else None
     )
     reference = previous_close * scale if previous_close > 0 else None
-    pct = _limit_pct(symbol, asset_type, market.names.get(symbol, ""))
+    pct = _limit_pct(
+        symbol,
+        asset_type,
+        _name_on(
+            market.names.get(symbol, ""),
+            market.name_changes.get(symbol, ()),
+            day,
+        ),
+    )
     return {
         "scale": scale,
         "split_ratio": _split_ratio(previous_scale, scale, asset_type),
+        "previous_open": previous_open,
+        "previous_close": reference,
+        "turnover_rate": previous.get("turnover_rate"),
+        "total_shares": previous.get("total_shares"),
+        "float_shares": previous.get("float_shares"),
         "limit_up": _round_limit(reference * (1 + pct), asset_type) if reference is not None else None,
         "limit_down": _round_limit(reference * (1 - pct), asset_type) if reference is not None else None,
     }
@@ -564,6 +827,10 @@ def _scheduled_minute_bars(
             close=float(row["close"]),
             volume=float(row.get("volume") or 0),
             amount=float(row.get("amount") or 0),
+            session_volume=(
+                float(row["session_volume"])
+                if row.get("session_volume") is not None else None
+            ),
             raw_open=float(row["open"]) * scale,
             raw_high=float(row["high"]) * scale,
             raw_low=float(row["low"]) * scale,
@@ -571,6 +838,26 @@ def _scheduled_minute_bars(
             limit_up=metadata["limit_up"],
             limit_down=metadata["limit_down"],
             split_ratio=float(metadata["split_ratio"] or 1.0),
+            previous_open=(
+                float(metadata["previous_open"])
+                if metadata["previous_open"] is not None else None
+            ),
+            previous_close=(
+                float(metadata["previous_close"])
+                if metadata["previous_close"] is not None else None
+            ),
+            turnover_rate=(
+                float(metadata["turnover_rate"])
+                if metadata["turnover_rate"] is not None else None
+            ),
+            total_shares=(
+                float(metadata["total_shares"])
+                if metadata["total_shares"] is not None else None
+            ),
+            float_shares=(
+                float(metadata["float_shares"])
+                if metadata["float_shares"] is not None else None
+            ),
         ))
     return rows
 
@@ -581,12 +868,16 @@ def _scheduled_daily_bar(
     day: date,
     asset_type: str,
 ) -> Bar | None:
-    row = market.daily.get((symbol, day))
+    key = (symbol, day)
+    cached = market.daily_bar_cache.get(key)
+    if cached is not None:
+        return cached
+    row = market.daily.get(key)
     if row is None:
         return None
     metadata = _scheduled_price_metadata(market, symbol, day, asset_type)
     scale = float(metadata["scale"] or 1.0)
-    return Bar(
+    bar = Bar(
         symbol=symbol,
         timestamp=datetime.combine(day, time(15, 0)),
         open=float(row["open"]),
@@ -595,6 +886,7 @@ def _scheduled_daily_bar(
         close=float(row["close"]),
         volume=float(row.get("volume") or 0),
         amount=float(row.get("amount") or 0),
+        session_volume=float(row.get("volume") or 0),
         raw_open=float(row["open"]) * scale,
         raw_high=float(row.get("raw_high") or float(row["high"]) * scale),
         raw_low=float(row.get("raw_low") or float(row["low"]) * scale),
@@ -604,7 +896,29 @@ def _scheduled_daily_bar(
         limit_up=metadata["limit_up"],
         limit_down=metadata["limit_down"],
         split_ratio=float(metadata["split_ratio"] or 1.0),
+        previous_open=(
+            float(metadata["previous_open"])
+            if metadata["previous_open"] is not None else None
+        ),
+        previous_close=(
+            float(metadata["previous_close"])
+            if metadata["previous_close"] is not None else None
+        ),
+        turnover_rate=(
+            float(row["turnover_rate"])
+            if row.get("turnover_rate") is not None else None
+        ),
+        total_shares=(
+            float(row["total_shares"])
+            if row.get("total_shares") is not None else None
+        ),
+        float_shares=(
+            float(row["float_shares"])
+            if row.get("float_shares") is not None else None
+        ),
     )
+    market.daily_bar_cache[key] = bar
+    return bar
 
 
 def _ensure_scheduled_market_data(
@@ -615,22 +929,31 @@ def _ensure_scheduled_market_data(
     end: date,
     asset_type: str,
 ) -> None:
-    known = {
-        symbol for symbol, day in market.daily
-        if start <= day <= end
-    }
-    missing = [symbol for symbol in symbols if symbol not in known]
-    if not missing:
-        return
-    loaded = _load_market_data(repo, missing, start, end, asset_type)
-    market.daily.update(loaded.daily)
-    market.names.update(loaded.names)
+    requests: dict[tuple[date, date], list[str]] = {}
+    for symbol in symbols:
+        if (
+            symbol not in market.loaded_daily_ranges
+            and any(start <= day <= end for day in market.daily_dates.get(symbol, []))
+        ):
+            continue
+        for missing_range in _missing_daily_ranges(market, symbol, start, end):
+            requests.setdefault(missing_range, []).append(symbol)
+    for (range_start, range_end), missing_symbols in sorted(requests.items()):
+        loaded = _load_market_data(
+            repo,
+            missing_symbols,
+            range_start,
+            range_end,
+            asset_type,
+        )
+        _merge_market_data(market, loaded)
 
 
-def _scheduled_symbols(engine: FreeStrategyEngine) -> list[str]:
+def _scheduled_symbols(engine: FreeStrategyEngine, timestamp: datetime) -> list[str]:
     result: list[str] = []
+    scoped = engine.scheduled_snapshot_symbols(timestamp)
     for symbol in [
-        *engine.universe,
+        *(engine.universe if scoped is None else scoped),
         *engine.account.positions,
         engine.config.benchmark_symbol,
     ]:
@@ -647,7 +970,7 @@ def _scheduled_snapshot(
     asset_type: str,
     timeframe: str,
 ) -> list[Bar]:
-    symbols = _scheduled_symbols(engine)
+    symbols = _scheduled_symbols(engine, timestamp)
     _ensure_scheduled_market_data(
         repo, market, symbols, timestamp.date() - timedelta(days=45), timestamp.date(), asset_type,
     )
@@ -657,18 +980,27 @@ def _scheduled_snapshot(
             if (bar := _scheduled_daily_bar(market, symbol, timestamp.date(), asset_type)) is not None
         ]
 
+    get_range = getattr(repo, "get_minute_range", None)
     get_snapshot = getattr(repo, "get_minute_snapshot", None)
     if callable(get_snapshot):
         frame = get_snapshot(symbols, timestamp, asset_type)
     else:
-        frame = repo.get_minute_range(symbols, timestamp.date(), timestamp.date(), asset_type)
-        if not frame.is_empty():
-            frame = (
-                frame.filter(pl.col("datetime") <= timestamp)
-                .sort(["symbol", "datetime"])
-                .group_by("symbol", maintain_order=True)
-                .tail(1)
+        frame = get_range(symbols, timestamp.date(), timestamp.date(), asset_type)
+    if not frame.is_empty():
+        frame = frame.filter(pl.all_horizontal([
+            pl.col(column).is_not_null() & pl.col(column).is_finite()
+            for column in ("open", "high", "low", "close")
+        ]))
+    if not frame.is_empty() and not callable(get_snapshot):
+        frame = (
+            frame.filter(pl.col("datetime") <= timestamp)
+            .with_columns(
+                pl.col("volume").sum().over("symbol").alias("session_volume"),
             )
+            .sort(["symbol", "datetime"])
+            .group_by("symbol", maintain_order=True)
+            .tail(1)
+        )
     bars = _scheduled_minute_bars(frame, market, asset_type)
     if timeframe == "1d" and timestamp.time() < time(15, 0) and not bars:
         raise ValueError("1d 定时策略的盘中任务需要分钟K能力和对应历史数据")
@@ -677,13 +1009,11 @@ def _scheduled_snapshot(
     for symbol in symbols:
         if symbol in found:
             continue
-        previous_days = [
-            row_day for row_symbol, row_day in market.daily
-            if row_symbol == symbol and row_day < timestamp.date()
-        ]
-        if not previous_days:
+        dates = market.daily_dates.get(symbol, [])
+        previous_index = bisect_left(dates, timestamp.date()) - 1
+        if previous_index < 0:
             continue
-        previous = _scheduled_daily_bar(market, symbol, max(previous_days), asset_type)
+        previous = _scheduled_daily_bar(market, symbol, dates[previous_index], asset_type)
         if previous is not None:
             bars.append(replace(
                 previous,
@@ -710,12 +1040,11 @@ def _load_scheduled_history(
         start = cutoff.date() - timedelta(days=count * 2 + 14)
         _ensure_scheduled_market_data(repo, market, [symbol], start, cutoff.date(), asset_type)
         include_today = cutoff.time() >= time(15, 0)
-        days = sorted(
-            row_day for row_symbol, row_day in market.daily
-            if row_symbol == symbol
-            and start <= row_day <= cutoff.date()
+        days = [
+            row_day for row_day in market.daily_dates.get(symbol, [])
+            if start <= row_day <= cutoff.date()
             and (row_day < cutoff.date() or include_today)
-        )
+        ]
         return [
             bar for day in days[-count:]
             if (bar := _scheduled_daily_bar(market, symbol, day, asset_type)) is not None
@@ -728,6 +1057,43 @@ def _load_scheduled_history(
     frame = frame.filter(pl.col("datetime") <= cutoff)
     bars = _scheduled_minute_bars(frame, market, asset_type)
     return group_bars(bars, timeframe)[-count:]
+
+
+def _load_scheduled_history_batch(
+    repo: Any,
+    market: MarketData,
+    asset_type: str,
+    symbols: list[str],
+    count: int,
+    timeframe: str,
+    cutoff: datetime,
+) -> dict[str, list[Bar]]:
+    if count <= 0 or not symbols:
+        return {}
+    if timeframe != "1d":
+        return {
+            symbol: _load_scheduled_history(
+                repo, market, asset_type, symbol, count, timeframe, cutoff,
+            )
+            for symbol in symbols
+        }
+    start = cutoff.date() - timedelta(days=count * 2 + 14)
+    _ensure_scheduled_market_data(
+        repo, market, symbols, start, cutoff.date(), asset_type,
+    )
+    include_today = cutoff.time() >= time(15, 0)
+    result: dict[str, list[Bar]] = {}
+    for symbol in symbols:
+        days = [
+            day for day in market.daily_dates.get(symbol, [])
+            if start <= day <= cutoff.date()
+            and (day < cutoff.date() or include_today)
+        ][-count:]
+        result[symbol] = [
+            bar for day in days
+            if (bar := _scheduled_daily_bar(market, symbol, day, asset_type)) is not None
+        ]
+    return result
 
 
 def _next_period_after(timestamp: datetime, timeframe: str) -> datetime:
@@ -779,10 +1145,10 @@ def _process_scheduled_fills(
         if timeframe == "1d":
             candidates: list[Bar] = []
             for symbol in symbols:
-                days = sorted(
-                    row_day for row_symbol, row_day in market.daily
-                    if row_symbol == symbol and due_at.date() < row_day <= until.date()
-                )
+                days = [
+                    row_day for row_day in market.daily_dates.get(symbol, [])
+                    if due_at.date() < row_day <= until.date()
+                ]
                 if not days or until < datetime.combine(days[0], time(9, 30)):
                     continue
                 bar = _scheduled_daily_bar(market, symbol, days[0], asset_type)
@@ -897,6 +1263,17 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             engine.set_history_loader(lambda symbol, count, timeframe, cutoff: _load_scheduled_history(
                 repo, market_data, payload["asset_type"], symbol, count, timeframe, cutoff,
             ))
+            engine.set_history_batch_loader(
+                lambda symbols, count, timeframe, cutoff: _load_scheduled_history_batch(
+                    repo,
+                    market_data,
+                    payload["asset_type"],
+                    symbols,
+                    count,
+                    timeframe,
+                    cutoff,
+                )
+            )
             trading_dates = sorted({
                 day for symbol, day in market_data.daily
                 if symbol in symbols and start <= day <= end

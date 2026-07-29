@@ -11,9 +11,13 @@ from app.free_strategy.process import (
     MarketData,
     _aligned_warmup_bars,
     _load_scheduled_history,
+    _load_scheduled_history_batch,
     _prepare_market_data,
     _preload_tradable_dates,
     _read_rows,
+    _scheduled_daily_bar,
+    _scheduled_snapshot,
+    _set_daily_row,
     advance_scheduled_session,
     execute_backtest,
 )
@@ -42,6 +46,44 @@ def daily_row(day, price: float) -> dict:
         "volume": 100.0,
         "amount": price * 100,
     }
+
+
+def test_scheduled_daily_bar_cache_invalidates_when_row_changes():
+    first_day = datetime(2024, 1, 2).date()
+    second_day = datetime(2024, 1, 3).date()
+    market = MarketData()
+    _set_daily_row(market, "X", first_day, daily_row(first_day, 10))
+    _set_daily_row(market, "X", second_day, daily_row(second_day, 11))
+
+    first = _scheduled_daily_bar(market, "X", second_day, "stock")
+    cached = _scheduled_daily_bar(market, "X", second_day, "stock")
+    _set_daily_row(market, "X", second_day, daily_row(second_day, 12))
+    refreshed = _scheduled_daily_bar(market, "X", second_day, "stock")
+
+    assert cached is first
+    assert refreshed is not first
+    assert refreshed is not None and refreshed.close == 12
+
+
+def test_scheduled_limits_use_name_valid_on_historical_date():
+    previous_day = datetime(2025, 8, 15).date()
+    historical_day = datetime(2025, 8, 18).date()
+    risk_warning_day = datetime(2026, 4, 29).date()
+    market = MarketData(
+        names={"002207.SZ": "*ST准油"},
+        name_changes={
+            "002207.SZ": ((risk_warning_day, "准油股份", "*ST准油"),),
+        },
+    )
+    _set_daily_row(market, "002207.SZ", previous_day, daily_row(previous_day, 10))
+    _set_daily_row(market, "002207.SZ", historical_day, daily_row(historical_day, 10))
+    _set_daily_row(market, "002207.SZ", risk_warning_day, daily_row(risk_warning_day, 10))
+
+    historical = _scheduled_daily_bar(market, "002207.SZ", historical_day, "stock")
+    risk_warning = _scheduled_daily_bar(market, "002207.SZ", risk_warning_day, "stock")
+
+    assert historical is not None and historical.limit_up == 11
+    assert risk_warning is not None and risk_warning.limit_up == 10.5
 
 
 def test_minute_warmup_daily_prices_align_to_minute_adjustment_scale():
@@ -639,6 +681,103 @@ def test_scheduled_aggregated_history_never_reads_minutes_after_cutoff():
         history = _load_scheduled_history(repo, market, "etf", "X", 10, timeframe, cutoff)
         assert history[-1].close == 11.0
         assert all(bar.timestamp <= cutoff for bar in history)
+
+
+def test_scheduled_batch_history_reuses_loaded_daily_range():
+    class BatchRepository:
+        def __init__(self):
+            self.ranges = []
+
+        def get_daily_asset_batch(self, _asset_type, symbols, start, end, _columns):
+            self.ranges.append((start, end))
+            return pl.DataFrame([
+                {"symbol": symbol, **daily_row(day, float(day.day))}
+                for symbol in symbols
+                for day in (
+                    datetime(2024, 1, 2).date(),
+                    datetime(2024, 1, 3).date(),
+                    datetime(2024, 1, 4).date(),
+                    datetime(2024, 1, 5).date(),
+                )
+                if start <= day <= end
+            ])
+
+        def get_daily_asset(self, *_args):
+            raise AssertionError("batch history must use the batch repository API")
+
+    repo = BatchRepository()
+    market = MarketData()
+    cutoff = datetime(2024, 1, 4, 10, 30)
+
+    first = _load_scheduled_history_batch(repo, market, "stock", ["X", "Y"], 2, "1d", cutoff)
+    second = _load_scheduled_history_batch(repo, market, "stock", ["X", "Y"], 2, "1d", cutoff)
+    shifted = _load_scheduled_history_batch(
+        repo,
+        market,
+        "stock",
+        ["X", "Y"],
+        2,
+        "1d",
+        datetime(2024, 1, 5, 10, 30),
+    )
+
+    assert len(repo.ranges) == 2
+    assert repo.ranges[1] == (
+        datetime(2024, 1, 5).date(),
+        datetime(2024, 1, 5).date(),
+    )
+    assert [bar.close for bar in first["X"]] == [2.0, 3.0]
+    assert [bar.close for bar in second["Y"]] == [2.0, 3.0]
+    assert [bar.close for bar in shifted["X"]] == [3.0, 4.0]
+
+
+def test_scheduled_snapshot_scope_avoids_full_universe_minute_reads():
+    calls = {"range": 0, "snapshot": []}
+
+    class CachedDayRepository:
+        def get_minute_range(self, *_args):
+            calls["range"] += 1
+            raise AssertionError("scheduled snapshots must use the snapshot repository API")
+
+        def get_minute_snapshot(self, symbols, at, _asset_type):
+            calls["snapshot"].append((list(symbols), at))
+            return pl.DataFrame([
+                minute_row(symbol, at, 10.0)
+                for symbol in symbols
+            ])
+
+    source = """
+def initialize(context):
+    context.set_universe(['X', 'Y'])
+    context.schedule(run, '10:30', symbols=['X'])
+
+def run(context):
+    pass
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    market = scheduled_market("X", "Y")
+    repo = CachedDayRepository()
+
+    morning = _scheduled_snapshot(
+        repo, engine, market, datetime(2024, 1, 2, 10, 30), "stock", "1m",
+    )
+    closing = _scheduled_snapshot(
+        repo, engine, market, datetime(2024, 1, 2, 15, 0), "stock", "1m",
+    )
+
+    assert calls == {
+        "range": 0,
+        "snapshot": [
+            (["X"], datetime(2024, 1, 2, 10, 30)),
+            (["X"], datetime(2024, 1, 2, 15, 0)),
+        ],
+    }
+    assert {bar.symbol for bar in morning} == {"X"}
+    assert {bar.symbol for bar in closing} == {"X"}
 
 
 def test_scheduled_next_open_preserves_t1_settlement():

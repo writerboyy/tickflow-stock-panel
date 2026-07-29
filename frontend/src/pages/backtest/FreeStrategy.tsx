@@ -336,7 +336,9 @@ export function FreeStrategy() {
 
   const createPaper = () => {
     if (!config.strategy_id) { setError('请先保存策略'); return }
-    navigate(`/paper-trading?create=1&strategy_id=${encodeURIComponent(config.strategy_id)}`)
+    const params = new URLSearchParams({ create: '1', strategy_id: config.strategy_id })
+    if (selectedRunId) params.set('backtest_job_id', selectedRunId)
+    navigate(`/paper-trading?${params.toString()}`)
   }
 
   const openRename = (target: RenameTarget) => {

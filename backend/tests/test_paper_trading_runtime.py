@@ -14,11 +14,13 @@ from app.free_strategy.engine import Fill, FreeStrategyConfig, FreeStrategyEngin
 from app.free_strategy.paper import (
     MarketDataHub,
     PaperTradingSupervisor,
+    _Subscription,
     _append_engine_events,
     _catch_up_bars,
     _equity_snapshot,
     _process_bar_rows,
 )
+from app.free_strategy.process import MarketData
 from app.free_strategy.store import PaperAccountStore
 from app.market_time import cn_now
 from app.services.quote_service import QuoteService
@@ -210,6 +212,31 @@ def test_bar_account_registers_only_held_symbols_for_live_valuation():
     assert service.symbol_consumers == {"paper:paper": {"513690.SH"}}
     hub.unregister("paper")
     assert service.symbol_consumers == {}
+
+
+def test_scheduled_bar_account_receives_clock_without_reading_minute_ranges():
+    target = queue.Queue(maxsize=2)
+    subscription = _Subscription(
+        "paper",
+        "bar_1m",
+        {"A", "B"},
+        "stock",
+        target,
+        "2024-01-01T15:00:00",
+        execution_mode="scheduled",
+        scheduled_times=("10:15",),
+    )
+    hub = MarketDataHub(FakeQuoteService(), repo=None)
+
+    hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 10, 16))  # noqa: SLF001
+    hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 10, 16))  # noqa: SLF001
+
+    assert target.get_nowait() == {
+        "type": "scheduled_clock",
+        "account_id": "paper",
+        "cutoff": "2024-01-02T10:15:00",
+    }
+    assert target.empty()
 
 
 def test_websocket_account_is_rejected_above_deduplicated_limit():
@@ -645,6 +672,113 @@ def test_up_to_date_restart_preserves_live_sync_state(monkeypatch, tmp_path):
     assert result["sync"] == sync
     assert store.get("paper")["sync"] == sync
     assert store.events("paper") == []
+
+
+def test_scheduled_catch_up_uses_scoped_snapshots_not_minute_ranges(monkeypatch, tmp_path):
+    calls = {"range": 0, "snapshot": []}
+    trading_day = datetime(2024, 1, 2).date()
+
+    class Repository:
+        @staticmethod
+        def _daily_rows(symbols, start, end):
+            return pl.DataFrame([
+                {
+                    "symbol": symbol,
+                    "date": day,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "close": 10.0,
+                    "volume": 1_000.0,
+                    "amount": 10_000.0,
+                    "raw_close": 10.0,
+                    "raw_high": 10.5,
+                    "raw_low": 9.5,
+                    "turnover_rate": 1.0,
+                    "total_shares": 1_000_000.0,
+                    "float_shares": 800_000.0,
+                }
+                for symbol in symbols
+                for day in (datetime(2024, 1, 1).date(), trading_day)
+                if start <= day <= end
+            ])
+
+        def get_daily_asset_batch(self, _asset_type, symbols, start, end, _columns):
+            return self._daily_rows(symbols, start, end)
+
+        def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
+            return self._daily_rows([symbol], start, end).drop("symbol")
+
+        @staticmethod
+        def get_instruments_asset(_asset_type):
+            return pl.DataFrame([
+                {"symbol": "X", "name": "X"},
+                {"symbol": "Y", "name": "Y"},
+            ])
+
+        def get_minute_snapshot(self, symbols, at, _asset_type):
+            calls["snapshot"].append((list(symbols), at))
+            return pl.DataFrame([
+                {
+                    "symbol": symbol,
+                    "datetime": at,
+                    "open": 10.0,
+                    "high": 10.0,
+                    "low": 10.0,
+                    "close": 10.0,
+                    "volume": 100.0,
+                    "amount": 1_000.0,
+                }
+                for symbol in symbols
+            ])
+
+        @staticmethod
+        def get_minute_next(_symbols, _after, _until, _asset_type):
+            return pl.DataFrame()
+
+        @staticmethod
+        def get_minute_range(*_args, **_kwargs):
+            calls["range"] += 1
+            raise AssertionError("scheduled catch-up must not scan minute ranges")
+
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n"
+        "    context.set_universe(['X', 'Y'])\n"
+        "    context.schedule(run, '10:15', symbols=['X'])\n"
+        "def run(context):\n"
+        "    context.state['ran'] = context.now.isoformat()\n",
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+    })
+    monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: datetime(2024, 1, 2, 15, 5))
+
+    result = _catch_up_bars(
+        store,
+        "paper",
+        current,
+        engine,
+        tmp_path,
+        repo=Repository(),
+        scheduled_market=MarketData(),
+    )
+
+    assert calls == {
+        "range": 0,
+        "snapshot": [
+            (["X"], datetime(2024, 1, 2, 10, 15)),
+            (["X"], datetime(2024, 1, 2, 15, 0)),
+        ],
+    }
+    assert engine.context.state["ran"] == "2024-01-02T10:15:00"
+    assert engine.execution_mode == "scheduled"
+    assert result["last_bar"] == "2024-01-02T15:00:00"
+    assert result["sync"]["phase"] == "live"
 
 
 def test_paper_bar_batch_preloads_delayed_open_as_tradable(tmp_path):
