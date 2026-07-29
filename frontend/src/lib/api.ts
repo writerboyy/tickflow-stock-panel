@@ -1019,6 +1019,15 @@ export interface PaperAccount {
   equity?: number
   return_pct?: number
   drawdown_pct?: number
+  valuation?: {
+    live: boolean
+    as_of?: string | null
+    date?: string | null
+    missing_symbols?: string[]
+    equity?: number
+    return_pct?: number
+    drawdown_pct?: number
+  }
   positions?: Record<string, number>
   config?: { initial_capital?: number }
   account?: {

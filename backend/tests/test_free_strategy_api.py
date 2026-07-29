@@ -538,6 +538,50 @@ def test_paper_detail_uses_persisted_curve_without_private_continuation_fields(t
     assert "state" not in payload
 
 
+def test_paper_account_endpoints_overlay_live_valuation_without_persisting_it(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    stored = store.save({
+        "id": "paper-live",
+        "name": "实时账户",
+        "status": "running",
+        "cash": 100,
+        "equity": 1_000,
+        "return_pct": 0,
+        "drawdown_pct": 0,
+        "positions": {"513690.SH": 500},
+        "config": {"initial_capital": 1_000},
+    })
+
+    class Supervisor:
+        @staticmethod
+        def live_valuation(_state):
+            return {
+                "live": True,
+                "as_of": "2026-07-29T10:00:00+08:00",
+                "date": "2026-07-29",
+                "missing_symbols": [],
+                "equity": 1_100,
+                "return_pct": 10,
+                "drawdown_pct": 2,
+            }
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.state.paper_supervisor = Supervisor()
+    app.include_router(router)
+    client = TestClient(app)
+
+    listed = client.get("/api/free-strategies/paper/accounts").json()["accounts"][0]
+    detail = client.get("/api/free-strategies/paper/accounts/paper-live").json()
+
+    for payload in (listed, detail):
+        assert payload["valuation"]["live"] is True
+        assert payload["equity"] == 1_100
+        assert payload["return_pct"] == 10
+        assert payload["drawdown_pct"] == 2
+    assert store.get("paper-live") == stored
+
+
 def test_running_paper_account_can_be_renamed(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({

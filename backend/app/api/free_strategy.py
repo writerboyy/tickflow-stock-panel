@@ -56,6 +56,21 @@ def _public_paper_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _valued_paper_state(
+    state: dict[str, Any],
+    supervisor: PaperTradingSupervisor | None,
+) -> dict[str, Any]:
+    result = _public_paper_state(state)
+    if supervisor is None or state.get("status") != "running":
+        return result
+    valuation = supervisor.live_valuation(state)
+    result["valuation"] = valuation
+    if valuation.get("live"):
+        for key in ("equity", "return_pct", "drawdown_pct"):
+            result[key] = valuation[key]
+    return result
+
+
 def _paper_account_view(account: dict[str, Any]) -> dict[str, Any]:
     result = dict(account)
     fills_by_order = {
@@ -768,7 +783,8 @@ def _paper_loop(account_id: str, root: str) -> None:
 
 @router.get("/paper/accounts")
 def list_paper_accounts(request: Request):
-    return {"accounts": [_public_paper_state(state) for state in _paper_store(request).list()]}
+    supervisor = _paper_supervisor(request)
+    return {"accounts": [_valued_paper_state(state, supervisor) for state in _paper_store(request).list()]}
 
 
 @router.post("/paper/accounts")
@@ -837,7 +853,7 @@ def get_paper_account(account_id: str, request: Request):
         state = store.get(account_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
-    result = _public_paper_state(state)
+    result = _valued_paper_state(state, _paper_supervisor(request))
     account = dict(state.get("account") or state.get("checkpoint", {}).get("account", {}))
     curve = store.equity_curve(account_id)
     if not curve and account.get("equity_curve"):

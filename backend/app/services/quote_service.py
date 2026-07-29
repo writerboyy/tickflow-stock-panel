@@ -28,12 +28,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, time as dt_time
+from datetime import date, datetime, time as dt_time
 from typing import Callable
 
 import polars as pl
 
-from app.market_time import cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 
@@ -173,6 +173,9 @@ class QuoteService:
         self._thread: threading.Thread | None = None
         self._temporary_consumers = 0
         self._temporary_original: tuple[bool, bool, float] | None = None
+        self._symbol_consumers: dict[str, set[str]] = {}
+        self._symbol_consumer_revision = 0
+        self._latest_quotes: dict[str, dict] = {}
         self._fetch_listeners: set[Callable[[], None]] = set()
         self._repo = None          # 延迟注入, 避免循环导入
         # SSE 订阅者集合: 每个 /stream 连接一个 QuoteSubscriber, 事件广播到所有订阅者
@@ -380,6 +383,98 @@ class QuoteService:
     def remove_fetch_listener(self, callback: Callable[[], None]) -> None:
         with self._lock:
             self._fetch_listeners.discard(callback)
+
+    def set_symbol_consumer(self, consumer_id: str, symbols: set[str]) -> None:
+        """注册需要随现有轮询补拉的少量标的。"""
+        cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        with self._lock:
+            previous_symbols = set().union(*self._symbol_consumers.values()) if self._symbol_consumers else set()
+            if cleaned:
+                self._symbol_consumers[consumer_id] = cleaned
+            else:
+                self._symbol_consumers.pop(consumer_id, None)
+            current_symbols = set().union(*self._symbol_consumers.values()) if self._symbol_consumers else set()
+            if current_symbols - previous_symbols:
+                self._symbol_consumer_revision += 1
+                final_key = self._final_sync_key(self._market_phase())
+                if final_key:
+                    self._final_sync_done.discard(final_key)
+
+    def remove_symbol_consumer(self, consumer_id: str) -> None:
+        with self._lock:
+            self._symbol_consumers.pop(consumer_id, None)
+
+    def get_fresh_quotes(self, symbols: set[str]) -> dict:
+        """返回当前交易日的最新报价快照，不触发网络请求。"""
+        requested = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        with self._lock:
+            cached = {symbol: dict(self._latest_quotes[symbol]) for symbol in requested if symbol in self._latest_quotes}
+            interval = self._interval
+        today = cn_today()
+        active_polling = self._should_poll_for_phase(self._market_phase())
+        max_age_s = max(interval * 2, 30.0)
+        now_mono = time.monotonic()
+        quotes: dict[str, dict] = {}
+        for symbol, quote in cached.items():
+            if quote.get("_quote_date") != today:
+                continue
+            if active_polling and now_mono - float(quote.get("_received_at") or 0) > max_age_s:
+                continue
+            quotes[symbol] = {key: value for key, value in quote.items() if not key.startswith("_")}
+        missing = sorted(requested - quotes.keys())
+        timestamps = [str(quote.get("timestamp")) for quote in quotes.values() if quote.get("timestamp")]
+        return {
+            "live": not missing,
+            "quotes": quotes,
+            "missing_symbols": missing,
+            "as_of": max(timestamps) if timestamps else None,
+            "date": today.isoformat(),
+        }
+
+    def _consumer_symbols(self) -> set[str]:
+        with self._lock:
+            return set().union(*self._symbol_consumers.values()) if self._symbol_consumers else set()
+
+    @staticmethod
+    def _quote_datetime(value) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.astimezone(CN_TZ) if value.tzinfo else value.replace(tzinfo=CN_TZ)
+        if isinstance(value, (int, float)):
+            seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
+            return datetime.fromtimestamp(seconds, tz=CN_TZ)
+        if value:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                return parsed.astimezone(CN_TZ) if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
+            except ValueError:
+                return None
+        return None
+
+    def _cache_latest_quotes(self, records: list[dict]) -> None:
+        received_at = time.monotonic()
+        fallback_time = cn_now()
+        updates: dict[str, dict] = {}
+        for raw in records:
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            price = raw.get("last_price", raw.get("close"))
+            if not symbol or price is None:
+                continue
+            quote_time = self._quote_datetime(raw.get("timestamp")) or fallback_time
+            updates[symbol] = {
+                **raw,
+                "symbol": symbol,
+                "last_price": float(price),
+                "timestamp": quote_time.isoformat(),
+                "_quote_date": quote_time.date(),
+                "_received_at": received_at,
+            }
+        if updates:
+            with self._lock:
+                self._latest_quotes.update(updates)
+
+    def record_quotes(self, records: list[dict]) -> None:
+        """把其他共享行情通道收到的报价并入只读快照。"""
+        self._cache_latest_quotes(records)
 
     def _notify_fetch_listeners(self) -> None:
         with self._lock:
@@ -633,6 +728,8 @@ class QuoteService:
         """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。返回本轮是否成功更新。"""
         with self._fetch_lock:
             before = self._fetched_at
+            with self._lock:
+                consumer_revision = self._symbol_consumer_revision
             if final:
                 logger.info("最终行情同步开始")
             if self.realtime_mode() == "watchlist":
@@ -640,9 +737,11 @@ class QuoteService:
             else:
                 self._fetch_full_market_quotes()
             updated = self._fetched_at > before
+            with self._lock:
+                consumers_unchanged = consumer_revision == self._symbol_consumer_revision
         if updated:
             self._notify_fetch_listeners()
-        return updated
+        return updated and (not final or consumers_unchanged)
 
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""
@@ -702,6 +801,11 @@ class QuoteService:
                 _core_syms = sorted(core_index_symbols)
                 resp.extend(tf.quotes.get(symbols=_core_syms) or [])
                 logger.info("核心指数行情拉取完成: %d 只 (%.2fs)", len(_core_syms), time.perf_counter() - _i0)
+            received_symbols = {str(item.get("symbol") or "").strip().upper() for item in resp}
+            missing_symbols = sorted(self._consumer_symbols() - received_symbols)
+            if missing_symbols:
+                resp.extend(tf.quotes.get(symbols=missing_symbols) or [])
+                logger.info("补拉模拟盘持仓行情: %d 只", len(missing_symbols))
         except Exception as e:  # noqa: BLE001
             logger.warning("行情拉取失败 (%.2fs): %s", time.perf_counter() - t0, e)
             return
@@ -742,11 +846,27 @@ class QuoteService:
                 "session": q.get("session"),
             })
 
-        self._process_full_market_records(records, t0=t0, now_ts=now_ts)
+        sparse_assets = {
+            asset_type
+            for asset_type, enabled in (
+                ("stock", preferences.get_realtime_pull_stock()),
+                ("etf", preferences.get_realtime_pull_etf()),
+            )
+            if not enabled
+        }
+        self._process_full_market_records(records, t0=t0, now_ts=now_ts, merge_assets=sparse_assets)
 
-    def _process_full_market_records(self, records: list[dict], *, t0: float, now_ts: float) -> None:
+    def _process_full_market_records(
+        self,
+        records: list[dict],
+        *,
+        t0: float,
+        now_ts: float,
+        merge_assets: set[str] | None = None,
+    ) -> None:
         """把全市场 records 写盘并增量计算 enriched。"""
         from app.services import preferences
+        merge_assets = merge_assets or set()
         all_index_symbols = set(self._repo.get_index_symbol_set()) if self._repo else set()
         core_index_symbols = set(preferences.get_realtime_index_symbols() or self.CORE_INDEX_SYMBOLS)
         all_index_symbols.update(core_index_symbols)
@@ -759,6 +879,7 @@ class QuoteService:
         if not records:
             logger.warning("行情数据为空")
             return
+        self._cache_latest_quotes(records)
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
@@ -787,14 +908,20 @@ class QuoteService:
         daily_df = self._build_daily(stock_records)
         if not daily_df.is_empty() and self._repo:
             try:
-                self._repo.flush_live_daily(daily_df)
+                if "stock" in merge_assets:
+                    self._repo.merge_live_daily_asset("stock", daily_df)
+                else:
+                    self._repo.flush_live_daily(daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("日K写盘失败: %s", e)
 
         etf_daily_df = self._build_daily(etf_records)
         if not etf_daily_df.is_empty() and self._repo:
             try:
-                self._repo.flush_live_daily_asset("etf", etf_daily_df)
+                if "etf" in merge_assets:
+                    self._repo.merge_live_daily_asset("etf", etf_daily_df)
+                else:
+                    self._repo.flush_live_daily_asset("etf", etf_daily_df)
             except Exception as e:  # noqa: BLE001
                 logger.warning("ETF 日K写盘失败: %s", e)
 
@@ -804,9 +931,9 @@ class QuoteService:
 
         # ---- 增量计算 enriched + 写盘 + 更新缓存 ----
         if not daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock")
+            self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge="stock" in merge_assets)
         if not etf_daily_df.is_empty() and self._repo:
-            self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
+            self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf", merge="etf" in merge_assets)
 
         # ---- 通知 SSE ----
         self._broadcast_quote_updated()
@@ -819,7 +946,8 @@ class QuoteService:
         from app.services import preferences
         from app.tickflow.client import get_paid_realtime_client
 
-        symbols = preferences.get_realtime_watchlist_symbols()
+        configured_symbols = set(preferences.get_realtime_watchlist_symbols())
+        symbols = sorted(configured_symbols | self._consumer_symbols())
         if not symbols:
             logger.info("自选实时未配置标的, 跳过行情拉取")
             return
@@ -870,6 +998,7 @@ class QuoteService:
                 "timestamp": q.get("timestamp"),
                 "session": q.get("session"),
             })
+        self._cache_latest_quotes(records)
 
         fetch_ms = (time.perf_counter() - t0) * 1000
         fetched_at = time.time() * 1000
@@ -885,8 +1014,9 @@ class QuoteService:
         _persist_last_fetch(fetched_at)
         logger.info("自选实时刷新: %d 只股票, 耗时 %.0fms", len(records), fetch_ms)
 
-        daily_df = self._build_daily(records)
-        quote_extra = self._build_quote_extra(records)
+        persistent_records = [row for row in records if row.get("symbol") in configured_symbols]
+        daily_df = self._build_daily(persistent_records)
+        quote_extra = self._build_quote_extra(persistent_records)
         if not daily_df.is_empty() and self._repo:
             try:
                 self._repo.merge_live_daily_asset("stock", daily_df)

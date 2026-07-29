@@ -46,6 +46,7 @@ class _Subscription:
     asset_type: str
     input_queue: Any
     last_bar: str = ""
+    valuation_symbols: set[str] | None = None
 
 
 def _put_latest(target: Any, payload: dict[str, Any]) -> None:
@@ -137,17 +138,21 @@ class MarketDataHub:
         asset_type: str,
         input_queue: Any,
         last_bar: str = "",
+        valuation_symbols: set[str] | None = None,
     ) -> None:
         if mode not in MARKET_MODES | LEGACY_MARKET_MODES:
             raise ValueError(f"不支持的行情模式: {mode}")
         cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        valuation = {str(symbol).strip().upper() for symbol in (valuation_symbols or set()) if str(symbol).strip()}
         with self._lock:
             if mode == "websocket":
                 combined = cleaned | self._websocket_symbols(exclude=account_id)
                 if len(combined) > WS_SYMBOL_LIMIT:
                     raise ValueError(f"WebSocket 去重订阅最多 {WS_SYMBOL_LIMIT} 只，当前需要 {len(combined)} 只")
             previous = self._subscriptions.get(account_id)
-            self._subscriptions[account_id] = _Subscription(account_id, mode, cleaned, asset_type, input_queue, last_bar)
+            self._subscriptions[account_id] = _Subscription(
+                account_id, mode, cleaned, asset_type, input_queue, last_bar, valuation,
+            )
             try:
                 if mode == "poll_3s" and not self._poll_leased:
                     self.quote_service.add_fetch_listener(self._on_poll_quotes)
@@ -157,6 +162,7 @@ class MarketDataHub:
                     self._ensure_bar_thread()
                 if mode == "websocket":
                     self._sync_websocket()
+                self.quote_service.set_symbol_consumer(f"paper:{account_id}", valuation)
             except Exception:
                 if previous is None:
                     self._subscriptions.pop(account_id, None)
@@ -172,6 +178,12 @@ class MarketDataHub:
                         self._sync_websocket()
                     except Exception:  # noqa: BLE001
                         logger.exception("WebSocket 订阅回滚失败")
+                if previous is None:
+                    self.quote_service.remove_symbol_consumer(f"paper:{account_id}")
+                else:
+                    self.quote_service.set_symbol_consumer(
+                        f"paper:{account_id}", previous.valuation_symbols or set(),
+                    )
                 raise
 
     def unregister(self, account_id: str) -> None:
@@ -179,6 +191,7 @@ class MarketDataHub:
             removed = self._subscriptions.pop(account_id, None)
             if removed is None:
                 return
+            self.quote_service.remove_symbol_consumer(f"paper:{account_id}")
             if removed.mode == "poll_3s" and not any(s.mode == "poll_3s" for s in self._subscriptions.values()):
                 self.quote_service.remove_fetch_listener(self._on_poll_quotes)
                 self.quote_service.release_temporary_polling()
@@ -188,7 +201,12 @@ class MarketDataHub:
             if removed.mode.startswith("bar_") and not any(s.mode.startswith("bar_") for s in self._subscriptions.values()):
                 self._bar_stop.set()
 
-    def update_symbols(self, account_id: str, symbols: set[str]) -> None:
+    def update_symbols(
+        self,
+        account_id: str,
+        symbols: set[str],
+        valuation_symbols: set[str] | None = None,
+    ) -> None:
         with self._lock:
             subscription = self._subscriptions.get(account_id)
             if subscription is None:
@@ -197,6 +215,15 @@ class MarketDataHub:
             if subscription.mode == "websocket" and len(cleaned | self._websocket_symbols(exclude=account_id)) > WS_SYMBOL_LIMIT:
                 raise ValueError("运行时股票池扩容超过 WebSocket 100 只上限")
             subscription.symbols = cleaned
+            if valuation_symbols is not None:
+                subscription.valuation_symbols = {
+                    str(symbol).strip().upper()
+                    for symbol in valuation_symbols
+                    if str(symbol).strip()
+                }
+                self.quote_service.set_symbol_consumer(
+                    f"paper:{account_id}", subscription.valuation_symbols,
+                )
             if subscription.mode == "websocket":
                 self._sync_websocket()
 
@@ -350,6 +377,7 @@ class MarketDataHub:
         self._ws_symbols = set(desired)
 
     def _on_websocket_quotes(self, records: list[dict[str, Any]]) -> None:
+        self.quote_service.record_quotes(records)
         recovering = self._ws_state in {"reconnecting", "error"}
         self._ws_state = "connected"
         self._ws_error = None
@@ -1124,7 +1152,8 @@ class PaperTradingSupervisor:
             if not symbols:
                 symbols.update(state.get("config", {}).get("symbols", []))
             positions = state.get("positions", {}) or state.get("checkpoint", {}).get("account", {}).get("positions", {})
-            symbols.update(symbol for symbol, quantity in positions.items() if float(quantity) > 0)
+            held_symbols = {symbol for symbol, quantity in positions.items() if float(quantity) > 0}
+            symbols.update(held_symbols)
             symbols.add(str(state.get("config", {}).get("benchmark_symbol", "510300.SH")))
             try:
                 sync_phase = str(state.get("sync", {}).get("phase") or "live")
@@ -1136,10 +1165,11 @@ class PaperTradingSupervisor:
                         str(state.get("config", {}).get("asset_type", "stock")),
                         self._queues[account_id],
                         str(state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp") or ""),
+                        held_symbols,
                     )
                 elif sync_phase != "live" and self.hub.has_subscription(account_id):
                     self.hub.unregister(account_id)
-                self.hub.update_symbols(account_id, symbols)
+                self.hub.update_symbols(account_id, symbols, held_symbols)
             except ValueError as exc:
                 state = self.pause_or_stop(account_id, "paused")
                 state["last_error"] = str(exc)
@@ -1209,6 +1239,8 @@ class PaperTradingSupervisor:
                 self._processes[account_id] = process
                 self._queues[account_id] = input_queue
             if mode in QUOTE_MODES:
+                positions = state.get("positions", {}) or state.get("checkpoint", {}).get("account", {}).get("positions", {})
+                held_symbols = {symbol for symbol, quantity in positions.items() if float(quantity) > 0}
                 try:
                     self.hub.register(
                         account_id,
@@ -1217,6 +1249,7 @@ class PaperTradingSupervisor:
                         str(state.get("config", {}).get("asset_type", "stock")),
                         self._queues[account_id],
                         str(state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp") or ""),
+                        held_symbols,
                     )
                 except Exception:
                     self._detach_runtime(account_id)
@@ -1260,6 +1293,40 @@ class PaperTradingSupervisor:
     def is_alive(self, account_id: str) -> bool:
         process = self._processes.get(account_id)
         return bool(process and process.is_alive())
+
+    def live_valuation(self, state: dict[str, Any]) -> dict[str, Any]:
+        """按最新报价只读估值，不修改策略状态或收益曲线。"""
+        positions = {
+            str(symbol): float(quantity)
+            for symbol, quantity in (
+                state.get("positions", {})
+                or state.get("checkpoint", {}).get("account", {}).get("positions", {})
+            ).items()
+            if float(quantity) > 0
+        }
+        if state.get("status") != "running":
+            return {"live": False, "as_of": None, "date": None, "missing_symbols": sorted(positions)}
+        snapshot = self.hub.quote_service.get_fresh_quotes(set(positions))
+        if not snapshot["live"]:
+            return {
+                "live": False,
+                "as_of": snapshot.get("as_of"),
+                "date": snapshot.get("date"),
+                "missing_symbols": snapshot.get("missing_symbols", []),
+            }
+        cash = float(state.get("cash") or state.get("checkpoint", {}).get("account", {}).get("cash") or 0)
+        equity = cash + sum(positions[symbol] * float(snapshot["quotes"][symbol]["last_price"]) for symbol in positions)
+        initial = float(state.get("config", {}).get("initial_capital") or 0)
+        peak = max(float(state.get("equity_peak") or initial), equity)
+        return {
+            "live": True,
+            "as_of": snapshot.get("as_of"),
+            "date": snapshot.get("date"),
+            "missing_symbols": [],
+            "equity": equity,
+            "return_pct": (equity / initial - 1) * 100 if initial else 0.0,
+            "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0.0,
+        }
 
     def status(self) -> dict[str, Any]:
         return self.hub.status()

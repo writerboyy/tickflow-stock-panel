@@ -45,6 +45,14 @@ const MODE_LABEL: Record<string, string> = {
   bar_30m: '30分钟K线（旧账户）',
 }
 
+const DECISION_REASON_LABEL: Record<string, string> = {
+  exit_without_target: '已卖出原持仓，暂无符合条件的买入标的',
+  hold_without_target: '暂无合格买入标的，原持仓继续持有',
+  hold_top_rank: '当前持仓仍是排名最高的合格标的',
+  no_eligible_target: '暂无符合条件的买入标的',
+  ranked_target: '调仓至排名最高的合格标的',
+}
+
 type DetailTab = 'positions' | 'decisions' | 'trades' | 'logs'
 type EquityPoint = NonNullable<PaperAccount['account']>['equity_curve'][number]
 
@@ -111,7 +119,8 @@ function decisionReasonText(event: PaperEvent) {
   if (event.reason_code === 'low_correlation_switch') {
     return '当前持仓未进入当日候选范围，切换至排名更高的候选标的'
   }
-  return event.reason ?? '已完成当日决策'
+  const reason = event.reason_code ?? event.reason
+  return reason ? (DECISION_REASON_LABEL[reason] ?? reason) : '已完成当日决策'
 }
 
 function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
@@ -219,7 +228,7 @@ function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instru
     <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{decisionLabel}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
     <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
       <span className="text-muted">目标标的</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
-      <span className="text-muted">当前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
+      <span className="text-muted">决策前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
       <span className="text-muted">决策原因</span><span className="leading-5">{decisionReasonText(event)}</span>
     </div>
   </div>
@@ -456,6 +465,7 @@ export function PaperTrading() {
   const allLogEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
   const availableDates = [...new Set([
     ...equityRows.map(row => row.timestamp.slice(0, 10)),
+    account?.valuation?.date ?? '',
     ...allFills.map(fill => fill.timestamp.slice(0, 10)),
     ...allOrders.map(order => order.submitted_at.slice(0, 10)),
     ...decisionEvents.map(eventTradingDate),
@@ -478,11 +488,22 @@ export function PaperTrading() {
   const selectedReturn = useCurrentState
     ? Number(account?.return_pct ?? 0)
     : selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : null
-  const selectedDrawdown = useCurrentState
-    ? Number(account?.drawdown_pct ?? 0)
-    : selectedSnapshot ? Number(selectedSnapshot.drawdown_pct) : null
+  const drawdownValues = visibleEquityRows
+    .map(row => Number(row.drawdown_pct))
+    .filter(Number.isFinite)
+  if (useCurrentState && account?.drawdown_pct != null && Number.isFinite(Number(account.drawdown_pct))) {
+    drawdownValues.push(Number(account.drawdown_pct))
+  }
+  const selectedMaxDrawdown = drawdownValues.reduce<number | null>(
+    (maximum, value) => maximum == null ? value : Math.max(maximum, value),
+    null,
+  )
   const initialCapital = account?.config?.initial_capital
-  const selectedDailyPerformance = dailyPerformance(equityRows, activeDate, selectedEquity, initialCapital)
+  const viewingLatest = !selectedDate
+  const liveValuationPending = viewingLatest && account?.status === 'running' && account.valuation?.live === false
+  const selectedDailyPerformance = liveValuationPending
+    ? null
+    : dailyPerformance(equityRows, activeDate, selectedEquity, initialCapital)
   const DailyReturnIcon = selectedDailyPerformance == null || selectedDailyPerformance.amount === 0
     ? Minus
     : selectedDailyPerformance.amount > 0 ? ArrowUpRight : ArrowDownRight
@@ -528,12 +549,12 @@ export function PaperTrading() {
         <section className="grid grid-cols-[1.15fr_1fr_1fr_1fr] border-b border-border max-lg:grid-cols-2">
           <div className={`relative min-w-0 overflow-hidden border-r border-border px-4 py-3.5 max-lg:border-b ${selectedDailyPerformance == null || selectedDailyPerformance.amount === 0 ? '' : selectedDailyPerformance.amount > 0 ? 'bg-bull/[0.045]' : 'bg-bear/[0.045]'}`}>
             {selectedDailyPerformance != null && selectedDailyPerformance.amount !== 0 ? <span className={`absolute inset-y-0 left-0 w-0.5 ${selectedDailyPerformance.amount > 0 ? 'bg-bull' : 'bg-bear'}`} /> : null}
-            <div className={`flex items-center gap-1.5 text-[10px] ${selectedDailyPerformance == null ? 'text-muted' : returnClass(selectedDailyPerformance.amount)}`}><DailyReturnIcon className="h-3.5 w-3.5" />{dailyMetricLabel}</div>
+            <div className={`flex items-center gap-1.5 text-[10px] ${selectedDailyPerformance == null ? 'text-muted' : returnClass(selectedDailyPerformance.amount)}`}><DailyReturnIcon className="h-3.5 w-3.5" />{dailyMetricLabel}{viewingLatest && account.valuation?.live ? <span className="inline-flex items-center gap-1 text-success"><Wifi className="h-3 w-3" />实时</span> : null}</div>
             <div className={`mt-1 whitespace-nowrap font-mono text-xl font-semibold tabular-nums max-sm:text-lg ${returnClass(selectedDailyPerformance?.amount)}`}>
               {selectedDailyPerformance == null ? '—' : signedMoney(selectedDailyPerformance.amount)}
             </div>
             <div className="mt-1 flex min-h-4 items-center gap-1.5 text-[10px] text-muted">
-              {selectedDailyPerformance == null ? '等待收益基准' : <><span className={`font-mono ${returnClass(selectedDailyPerformance.pct)}`}>{signedPercent(selectedDailyPerformance.pct)}</span><span>{selectedDailyPerformance.reference === 'previous-close' ? '较前一交易日' : '较初始资金'}</span></>}
+              {liveValuationPending ? '等待实时行情' : selectedDailyPerformance == null ? '等待收益基准' : <><span className={`font-mono ${returnClass(selectedDailyPerformance.pct)}`}>{signedPercent(selectedDailyPerformance.pct)}</span><span>{selectedDailyPerformance.reference === 'previous-close' ? '较前一交易日' : '较初始资金'}</span></>}
             </div>
           </div>
           <div className="min-w-0 border-r border-border px-4 py-3.5 max-lg:border-b max-lg:border-r-0">
@@ -547,8 +568,8 @@ export function PaperTrading() {
             <div className="mt-1 min-h-4 truncate text-[10px] text-muted">初始资金 <span className="font-mono text-secondary">{initialCapital == null ? '—' : MONEY.format(initialCapital)}</span></div>
           </div>
           <div className="min-w-0 px-4 py-3.5">
-            <div className="flex items-center gap-1.5 text-[10px] text-muted"><ShieldAlert className="h-3.5 w-3.5" />当前回撤</div>
-            <div className={`mt-1 font-mono text-lg tabular-nums ${selectedDrawdown != null && selectedDrawdown > 0 ? 'text-bear' : 'text-muted'}`}>{selectedDrawdown == null ? '—' : selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%'}</div>
+            <div className="flex items-center gap-1.5 text-[10px] text-muted"><ShieldAlert className="h-3.5 w-3.5" />最大回撤</div>
+            <div className={`mt-1 font-mono text-lg tabular-nums ${selectedMaxDrawdown != null && selectedMaxDrawdown > 0 ? 'text-bear' : 'text-muted'}`}>{selectedMaxDrawdown == null ? '—' : selectedMaxDrawdown > 0 ? `-${selectedMaxDrawdown.toFixed(2)}%` : '0.00%'}</div>
             <div className="mt-1 min-h-4 truncate text-[10px] text-muted">风控阈值 <span className="font-mono text-secondary">{account.risk_config?.max_drawdown_pct == null ? '—' : `${(account.risk_config.max_drawdown_pct * 100).toFixed(0)}%`}</span></div>
           </div>
         </section>

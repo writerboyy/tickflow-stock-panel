@@ -2,6 +2,7 @@ import queue
 import sqlite3
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from app.free_strategy.paper import (
     _process_bar_rows,
 )
 from app.free_strategy.store import PaperAccountStore
+from app.market_time import cn_now
 from app.services.quote_service import QuoteService
 
 
@@ -142,6 +144,7 @@ class FakeQuoteService:
         self.acquired = 0
         self.released = 0
         self.requested_assets = []
+        self.symbol_consumers = {}
         self.frame = pl.DataFrame([
             {"symbol": "A", "last_price": 10.0, "prev_close": 9.0},
             {"symbol": "B", "last_price": 20.0, "prev_close": 19.0},
@@ -165,6 +168,15 @@ class FakeQuoteService:
         self.requested_assets.append(_asset_type)
         return self.frame
 
+    def set_symbol_consumer(self, consumer_id, symbols):
+        self.symbol_consumers[consumer_id] = set(symbols)
+
+    def remove_symbol_consumer(self, consumer_id):
+        self.symbol_consumers.pop(consumer_id, None)
+
+    def record_quotes(self, _records):
+        pass
+
     def status(self):
         return {"interval_s": 3, "fetch_ms": 120}
 
@@ -187,6 +199,17 @@ def test_poll_accounts_share_one_feed_and_receive_filtered_quotes():
     assert service.released == 0
     hub.unregister("second")
     assert service.released == 1
+
+
+def test_bar_account_registers_only_held_symbols_for_live_valuation():
+    service = FakeQuoteService()
+    hub = MarketDataHub(service, repo=None)
+
+    hub.register("paper", "bar_1m", {"A", "513690.SH"}, "etf", queue.Queue(), valuation_symbols={"513690.SH"})
+
+    assert service.symbol_consumers == {"paper:paper": {"513690.SH"}}
+    hub.unregister("paper")
+    assert service.symbol_consumers == {}
 
 
 def test_websocket_account_is_rejected_above_deduplicated_limit():
@@ -394,6 +417,135 @@ def test_quote_poll_cycle_is_start_to_start_and_never_overlaps(monkeypatch):
     assert max_active == 1
     assert len(starts) == 3
     assert all((right - left) < 0.065 for left, right in zip(starts, starts[1:]))
+
+
+def test_quote_service_fetches_registered_etf_when_etf_universe_is_disabled(monkeypatch):
+    class Repo:
+        @staticmethod
+        def get_index_symbol_set():
+            return set()
+
+        @staticmethod
+        def get_etf_instruments():
+            return pl.DataFrame({"symbol": ["513690.SH"]})
+
+    class Quotes:
+        requested = []
+
+        @staticmethod
+        def get_by_universes(*, universes):
+            assert universes == ["CN_Equity_A"]
+            return [{"symbol": "600000.SH", "last_price": 10, "timestamp": cn_now().isoformat()}]
+
+        @classmethod
+        def get(cls, *, symbols):
+            cls.requested.append(symbols)
+            return [{"symbol": symbol, "last_price": 1.2, "timestamp": cn_now().isoformat()} for symbol in symbols]
+
+    service = QuoteService()
+    service.set_repo(Repo())
+    service.set_symbol_consumer("paper:one", {"513690.SH"})
+    captured = {}
+    monkeypatch.setattr("app.tickflow.client.get_paid_realtime_client", lambda: type("Client", (), {"quotes": Quotes()})())
+    monkeypatch.setattr("app.services.preferences.get_realtime_data_provider", lambda: "tickflow")
+    monkeypatch.setattr("app.services.preferences.get_realtime_pull_stock", lambda: True)
+    monkeypatch.setattr("app.services.preferences.get_realtime_pull_etf", lambda: False)
+    monkeypatch.setattr("app.services.preferences.get_realtime_pull_index", lambda: False)
+    monkeypatch.setattr("app.services.preferences.get_realtime_index_symbols", lambda: [])
+    monkeypatch.setattr("app.services.preferences.get_realtime_index_mode", lambda: "core")
+    monkeypatch.setattr(service, "_process_full_market_records", lambda records, **kwargs: captured.update(records=records, **kwargs))
+
+    service._fetch_full_market_quotes()  # noqa: SLF001
+
+    assert Quotes.requested == [["513690.SH"]]
+    assert {row["symbol"] for row in captured["records"]} == {"600000.SH", "513690.SH"}
+    assert captured["merge_assets"] == {"etf"}
+
+
+def test_new_symbol_consumer_reopens_completed_final_sync(monkeypatch):
+    service = QuoteService()
+    key = (cn_now().date(), "close")
+    service._final_sync_done.add(key)  # noqa: SLF001
+    monkeypatch.setattr(service, "_market_phase", lambda: "close_final")
+
+    service.set_symbol_consumer("paper:one", {"513690.SH"})
+
+    assert key not in service._final_sync_done  # noqa: SLF001
+
+
+def test_final_sync_retries_when_symbol_is_registered_during_fetch(monkeypatch):
+    service = QuoteService()
+    service._fetched_at = 1  # noqa: SLF001
+
+    def fetch():
+        service.set_symbol_consumer("paper:one", {"159920.SZ"})
+        service._fetched_at = 2  # noqa: SLF001
+
+    monkeypatch.setattr(service, "_fetch_full_market_quotes", fetch)
+    monkeypatch.setattr(service, "realtime_mode", lambda: "full_market")
+
+    assert service._fetch_quotes(final=True) is False  # noqa: SLF001
+
+
+def test_live_valuation_uses_current_quote_without_mutating_state():
+    class QuoteSnapshot:
+        @staticmethod
+        def get_fresh_quotes(symbols):
+            assert symbols == {"513690.SH"}
+            return {
+                "live": True,
+                "quotes": {"513690.SH": {"last_price": 2.0}},
+                "missing_symbols": [],
+                "as_of": "2026-07-29T10:00:00+08:00",
+                "date": "2026-07-29",
+            }
+
+    state = {
+        "status": "running",
+        "cash": 100,
+        "positions": {"513690.SH": 500},
+        "equity": 1_000,
+        "equity_peak": 1_200,
+        "config": {"initial_capital": 1_000},
+    }
+    original = deepcopy(state)
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.hub = SimpleNamespace(quote_service=QuoteSnapshot())
+
+    valuation = supervisor.live_valuation(state)
+
+    assert valuation["live"] is True
+    assert valuation["equity"] == 1_100
+    assert valuation["return_pct"] == pytest.approx(10)
+    assert valuation["drawdown_pct"] == pytest.approx(100 / 1_200 * 100)
+    assert state == original
+
+
+def test_live_valuation_reports_missing_quote_without_false_zero():
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.hub = SimpleNamespace(quote_service=SimpleNamespace(
+        get_fresh_quotes=lambda _symbols: {
+            "live": False,
+            "quotes": {},
+            "missing_symbols": ["513690.SH"],
+            "as_of": None,
+            "date": "2026-07-29",
+        },
+    ))
+
+    valuation = supervisor.live_valuation({
+        "status": "running",
+        "cash": 100,
+        "positions": {"513690.SH": 500},
+        "config": {"initial_capital": 1_000},
+    })
+
+    assert valuation == {
+        "live": False,
+        "as_of": None,
+        "date": "2026-07-29",
+        "missing_symbols": ["513690.SH"],
+    }
 
 
 def test_checkpoint_is_versioned_and_events_are_cursor_paginated(tmp_path):
