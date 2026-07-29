@@ -202,7 +202,7 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
         type: 'category',
         data: rows.map(row => formatTime(row.timestamp)),
         boundaryGap: false,
-        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true },
+        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true, formatter: (value: string) => value.split(' ')[0] },
         axisLine: { lineStyle: { color: theme.border } },
       },
       yAxis: {
