@@ -28,6 +28,7 @@ from app.free_strategy.templates import (
     MANAGED_FIVE_FORTUNES_SHA256,
     TEMPLATES,
 )
+from app.market_time import cn_naive_now, cn_today
 from app.services import preferences
 
 router = APIRouter(prefix="/api/free-strategies", tags=["free-strategy"])
@@ -59,8 +60,16 @@ def _public_paper_state(state: dict[str, Any]) -> dict[str, Any]:
 def _valued_paper_state(
     state: dict[str, Any],
     supervisor: PaperTradingSupervisor | None,
+    store: PaperAccountStore | None = None,
 ) -> dict[str, Any]:
     result = _public_paper_state(state)
+    persisted_max_drawdown = float(state.get("max_drawdown_pct") or 0.0)
+    if store is not None:
+        persisted_max_drawdown = max(
+            persisted_max_drawdown,
+            store.max_drawdown_pct(str(state["id"])),
+        )
+    result["max_drawdown_pct"] = persisted_max_drawdown
     if supervisor is None or state.get("status") != "running":
         return result
     valuation = supervisor.live_valuation(state)
@@ -68,6 +77,10 @@ def _valued_paper_state(
     if valuation.get("live"):
         for key in ("equity", "return_pct", "drawdown_pct"):
             result[key] = valuation[key]
+        result["max_drawdown_pct"] = max(
+            persisted_max_drawdown,
+            float(valuation.get("max_drawdown_pct") or valuation["drawdown_pct"]),
+        )
     return result
 
 
@@ -519,7 +532,7 @@ def delete_strategy(strategy_id: str, request: Request):
 
 
 def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request) -> dict[str, Any]:
-    end = req.end or date.today()
+    end = req.end or cn_today()
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
     config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end"})
     legacy_symbols = req.symbols or strategy.get("config", {}).get("symbols", [])
@@ -608,7 +621,7 @@ def cancel_backtest(job_id: str, request: Request):
 def _paper_loop(account_id: str, root: str) -> None:
     from dataclasses import asdict
     import time
-    from datetime import date, datetime, time as clock_time
+    from datetime import time as clock_time
     from app.free_strategy.process import (
         _instrument_records,
         _load_market_data,
@@ -622,6 +635,7 @@ def _paper_loop(account_id: str, root: str) -> None:
     from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
     from app.tickflow.repository import DataStore, KlineRepository
     account_root = Path(root) / account_id
+    paper_store = PaperAccountStore(Path(root).parent)
     path = account_root / "heartbeat.json"
     state_path = account_root / "state.json"
     try:
@@ -648,7 +662,7 @@ def _paper_loop(account_id: str, root: str) -> None:
         else:
             engine.account.restore(state.get("account", {}))
             engine.restore_runtime(state.get("runtime"))
-        today = date.today()
+        today = cn_today()
         market_data, warmup_metadata = _prepare_market_data(
             repo, engine, symbols, today, today, asset_type, timeframe,
         )
@@ -661,13 +675,19 @@ def _paper_loop(account_id: str, root: str) -> None:
         state["warmup"] = warmup_metadata
         state["execution_mode"] = engine.execution_mode
         state["scheduled_times"] = engine.scheduled_times
-        state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
+        state = paper_store.update_fields(account_id, {
+            "universe": symbols,
+            "universe_source": universe_source,
+            "warmup": warmup_metadata,
+            "execution_mode": engine.execution_mode,
+            "scheduled_times": engine.scheduled_times,
+        })
     except Exception as exc:
         # Keep the supervisor alive and make the failure inspectable from the API.
-        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"id": account_id}
-        state["status"] = "paused"
-        state["last_error"] = f"模拟账户初始化失败: {exc}"
-        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        paper_store.update_fields(account_id, {
+            "status": "paused",
+            "last_error": f"模拟账户初始化失败: {exc}",
+        })
         return
     last_bar = state.get("last_bar")
     while True:
@@ -678,7 +698,7 @@ def _paper_loop(account_id: str, root: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"timestamp": now_iso(), "account_id": account_id}), encoding="utf-8")
         try:
-            today = date.today()
+            today = cn_today()
             fill_count = len(engine.account.fills)
             log_count = len(engine.logs)
             callback_count = engine.callbacks_executed
@@ -697,7 +717,7 @@ def _paper_loop(account_id: str, root: str) -> None:
                     for symbol, symbol_day in market_data.daily
                 )
                 if trading_day:
-                    now = datetime.now()
+                    now = cn_naive_now()
                     was_finished = engine._session_finished
                     session_end = max(
                         clock_time(15, 1),
@@ -751,7 +771,7 @@ def _paper_loop(account_id: str, root: str) -> None:
                 if fresh:
                     engine.run(fresh, finalize_session=False)
                     last_bar = fresh[-1].timestamp.isoformat()
-                if datetime.now().time() >= clock_time(15, 1):
+                if cn_naive_now().time() >= clock_time(15, 1):
                     did_finish = engine.finish_session()
             changed = (
                 len(engine.account.fills) != fill_count
@@ -768,23 +788,35 @@ def _paper_loop(account_id: str, root: str) -> None:
                 state["runtime"] = checkpoint["runtime"]
                 state["last_bar"] = last_bar
                 for fill in engine.account.fills[fill_count:]:
-                    with (account_root / "ledger.jsonl").open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps({"timestamp": now_iso(), "type": "fill", **asdict(fill)}, ensure_ascii=False) + "\n")
+                    paper_store.append_event(account_id, {"type": "fill", **asdict(fill)})
                 for log in engine.logs[log_count:]:
-                    with (account_root / "ledger.jsonl").open("a", encoding="utf-8") as handle:
-                        handle.write(json.dumps({"type": "log", **log}, ensure_ascii=False) + "\n")
-                state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    paper_store.append_event(account_id, {"type": "log", **log})
+                paper_store.update_fields(account_id, {
+                    "checkpoint": state["checkpoint"],
+                    "account": state["account"],
+                    "state": state["state"],
+                    "runtime": state["runtime"],
+                    "last_bar": last_bar,
+                    "universe": state.get("universe", []),
+                    "callbacks_executed": state.get("callbacks_executed", 0),
+                    "market_rows_consumed": state.get("market_rows_consumed", 0),
+                })
         except Exception as exc:  # noqa: BLE001
-            state["status"] = "paused"
-            state["last_error"] = str(exc)
-            state_path.write_text(json.dumps({**state, "updated_at": now_iso()}, ensure_ascii=False, indent=2), encoding="utf-8")
+            paper_store.update_fields(account_id, {
+                "status": "paused",
+                "last_error": str(exc),
+            })
         time.sleep(5)
 
 
 @router.get("/paper/accounts")
 def list_paper_accounts(request: Request):
     supervisor = _paper_supervisor(request)
-    return {"accounts": [_valued_paper_state(state, supervisor) for state in _paper_store(request).list()]}
+    store = _paper_store(request)
+    return {"accounts": [
+        _valued_paper_state(state, supervisor, store)
+        for state in store.list()
+    ]}
 
 
 @router.post("/paper/accounts")
@@ -820,6 +852,7 @@ def create_paper_account(req: PaperWrite, request: Request):
         "equity": req.initial_capital,
         "return_pct": 0.0,
         "drawdown_pct": 0.0,
+        "max_drawdown_pct": 0.0,
         "positions": {},
         "state": {},
         "created_at": now_iso(),
@@ -853,7 +886,7 @@ def get_paper_account(account_id: str, request: Request):
         state = store.get(account_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
-    result = _valued_paper_state(state, _paper_supervisor(request))
+    result = _valued_paper_state(state, _paper_supervisor(request), store)
     account = dict(state.get("account") or state.get("checkpoint", {}).get("account", {}))
     curve = store.equity_curve(account_id)
     if not curve and account.get("equity_curve"):
@@ -872,11 +905,15 @@ def rename_paper_account(account_id: str, req: PaperRenameWrite, request: Reques
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="模拟账户不存在") from None
     previous = str(state.get("name") or "")
-    state["name"] = req.name
-    config = dict(state.get("config", {}))
-    config["name"] = req.name
-    state["config"] = config
-    saved = store.save(state)
+
+    def rename(current: dict[str, Any]) -> dict[str, Any]:
+        current["name"] = req.name
+        config = dict(current.get("config", {}))
+        config["name"] = req.name
+        current["config"] = config
+        return current
+
+    saved = store.update(account_id, rename)
     if previous != req.name:
         store.append_event(account_id, {
             "type": "renamed",
@@ -939,7 +976,7 @@ def paper_action(account_id: str, action: Literal["start", "pause", "resume", "s
             process.terminate()
         state["status"] = "stopped"
     store.append_event(account_id, {"type": action})
-    return _public_paper_state(store.save(state))
+    return _public_paper_state(store.update_fields(account_id, {"status": state["status"]}))
 
 
 @router.get("/paper/accounts/{account_id}/events")

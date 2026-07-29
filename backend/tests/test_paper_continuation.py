@@ -91,6 +91,7 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "checkpoint": checkpoint,
         "initial_capital": 100_000,
         "final_equity": 110_000,
+        "max_drawdown_pct": 17.5,
         "daily_equity_curve": [
             {"date": "2025-07-20", "timestamp": "2025-07-20T15:00:00",
              "equity": 90_000, "cash": 90_000, "strategy_nav": 0.9,
@@ -119,6 +120,7 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
     assert "state" not in saved
     assert "runtime" not in saved
     assert saved["last_bar"] == "2026-07-24T15:00:00"
+    assert saved["max_drawdown_pct"] == 17.5
     assert store.equity_curve("paper") == [{
         "timestamp": "2026-07-24T15:00:00",
         "equity": 110_000.0,

@@ -8,9 +8,12 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
+
+from app.market_time import cn_today
 
 
 def now_iso() -> str:
@@ -83,7 +86,7 @@ class FreeStrategyStore:
 
 
 class PaperAccountStore:
-    _locks: dict[str, threading.Lock] = {}
+    _locks: dict[str, threading.RLock] = {}
     _locks_guard = threading.Lock()
 
     def __init__(self, data_dir: Path):
@@ -107,11 +110,41 @@ class PaperAccountStore:
         return json.loads((self._path(account_id) / "state.json").read_text(encoding="utf-8"))
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:
+        account_id = str(state["id"])
+        with self._state_guard(account_id):
+            return self._save_state_unlocked(state)
+
+    def update(
+        self,
+        account_id: str,
+        updater: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any]:
+        """在同一跨进程锁内重新读取并更新账户状态。"""
+        with self._state_guard(account_id):
+            current = self.get(account_id)
+            updated = updater(current)
+            return self._save_state_unlocked(updated if updated is not None else current)
+
+    def update_fields(self, account_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        return self.update(account_id, lambda current: {**current, **fields})
+
+    def _save_state_unlocked(self, state: dict[str, Any]) -> dict[str, Any]:
         path = self._path(str(state["id"]))
         path.mkdir(parents=True, exist_ok=True)
-        state = {"schema_version": 2, **state, "updated_at": now_iso()}
-        _atomic_json_write(path / "state.json", state)
-        return state
+        saved = {"schema_version": 2, **state, "updated_at": now_iso()}
+        _atomic_json_write(path / "state.json", saved)
+        return saved
+
+    @contextmanager
+    def _state_guard(self, account_id: str) -> Iterator[None]:
+        path = self._path(account_id)
+        path.mkdir(parents=True, exist_ok=True)
+        with self._account_lock(account_id), (path / ".state.lock").open("a+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def replace_equity_curve(self, account_id: str, rows: list[dict[str, Any]]) -> None:
         path = self._path(account_id)
@@ -131,14 +164,14 @@ class PaperAccountStore:
         with self._account_lock(account_id), sqlite3.connect(database) as connection:
             self._ensure_equity_table(connection)
             self._upsert_equity_rows(connection, rows)
-            cutoff = (datetime.now().date() - timedelta(days=365)).isoformat()
+            cutoff = (cn_today() - timedelta(days=365)).isoformat()
             connection.execute("DELETE FROM equity_curve WHERE timestamp < ?", (cutoff,))
 
     def equity_curve(self, account_id: str, *, days: int = 365) -> list[dict[str, Any]]:
         database = self._path(account_id) / "equity.sqlite3"
         if not database.exists():
             return []
-        cutoff = (datetime.now().date() - timedelta(days=max(1, days))).isoformat()
+        cutoff = (cn_today() - timedelta(days=max(1, days))).isoformat()
         with self._account_lock(account_id), sqlite3.connect(database) as connection:
             self._ensure_equity_table(connection)
             rows = connection.execute(
@@ -162,6 +195,17 @@ class PaperAccountStore:
             }
             for timestamp, equity, cash, nav, drawdown_pct, positions, avg_cost in rows
         ]
+
+    def max_drawdown_pct(self, account_id: str) -> float:
+        database = self._path(account_id) / "equity.sqlite3"
+        if not database.exists():
+            return 0.0
+        with self._account_lock(account_id), sqlite3.connect(database) as connection:
+            self._ensure_equity_table(connection)
+            row = connection.execute(
+                "SELECT COALESCE(MAX(drawdown_pct), 0) FROM equity_curve"
+            ).fetchone()
+        return float(row[0] if row else 0.0)
 
     @staticmethod
     def _ensure_equity_table(connection: sqlite3.Connection) -> None:
@@ -223,70 +267,28 @@ class PaperAccountStore:
         )
 
     @classmethod
-    def _account_lock(cls, account_id: str) -> threading.Lock:
+    def _account_lock(cls, account_id: str) -> threading.RLock:
         with cls._locks_guard:
-            return cls._locks.setdefault(account_id, threading.Lock())
+            return cls._locks.setdefault(account_id, threading.RLock())
 
     def append_event(self, account_id: str, event: dict[str, Any]) -> None:
-        path = self._path(account_id)
-        path.mkdir(parents=True, exist_ok=True)
-        ledger = path / "ledger.jsonl"
-        with self._account_lock(account_id):
-            with ledger.open("a+", encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    handle.seek(0)
-                    lines = handle.read().splitlines()
-                    last = next((line for line in reversed(lines) if line.strip()), "")
-                    try:
-                        sequence = int(json.loads(last).get("sequence", 0)) + 1 if last else 1
-                    except (ValueError, json.JSONDecodeError):
-                        sequence = len(lines) + 1
-                    payload = {
-                        "id": str(event.get("id") or uuid.uuid4().hex),
-                        "timestamp": now_iso(),
-                        **event,
-                        "sequence": sequence,
-                    }
-                    handle.seek(0, os.SEEK_END)
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        with self._event_connection(account_id) as connection:
+            self._insert_event(connection, event)
 
     def append_event_once(self, account_id: str, event: dict[str, Any]) -> bool:
         event_id = str(event.get("id") or "").strip()
         if not event_id:
             raise ValueError("幂等事件必须提供 id")
-        ledger = self._path(account_id) / "ledger.jsonl"
-        with self._account_lock(account_id):
-            if ledger.exists():
-                for line in ledger.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        if str(json.loads(line).get("id") or "") == event_id:
-                            return False
-                    except json.JSONDecodeError:
-                        continue
-        self.append_event(account_id, event)
-        return True
+        with self._event_connection(account_id) as connection:
+            return self._insert_event(connection, event, ignore_duplicate=True)
 
     def events(self, account_id: str, limit: int = 500) -> list[dict[str, Any]]:
-        path = self._path(account_id) / "ledger.jsonl"
-        if not path.exists():
-            return []
-        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
-        result = []
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                result.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return result
+        with self._event_connection(account_id) as connection:
+            rows = connection.execute(
+                "SELECT payload FROM paper_events ORDER BY sequence DESC LIMIT ?",
+                (max(1, limit),),
+            ).fetchall()
+        return [json.loads(row[0]) for row in reversed(rows)]
 
     def events_page(
         self,
@@ -296,15 +298,153 @@ class PaperAccountStore:
         limit: int = 100,
         event_types: set[str] | None = None,
     ) -> dict[str, Any]:
-        rows = self.events(account_id, limit=100_000)
-        if event_types:
-            rows = [row for row in rows if row.get("type") in event_types]
+        page_size = max(1, min(limit, 500))
+        clauses: list[str] = []
+        parameters: list[Any] = []
         if cursor is not None:
-            rows = [row for row in rows if int(row.get("sequence", 0)) < cursor]
-        page = rows[-max(1, min(limit, 500)):]
-        page.reverse()
-        next_cursor = int(page[-1].get("sequence", 0)) if len(page) == max(1, min(limit, 500)) else None
+            clauses.append("sequence < ?")
+            parameters.append(cursor)
+        if event_types:
+            placeholders = ",".join("?" for _ in event_types)
+            clauses.append(f"type IN ({placeholders})")
+            parameters.extend(sorted(event_types))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._event_connection(account_id) as connection:
+            rows = connection.execute(
+                f"SELECT payload FROM paper_events {where} ORDER BY sequence DESC LIMIT ?",  # noqa: S608
+                (*parameters, page_size),
+            ).fetchall()
+        page = [json.loads(row[0]) for row in rows]
+        next_cursor = int(page[-1]["sequence"]) if len(page) == page_size else None
         return {"events": page, "next_cursor": next_cursor}
+
+    @contextmanager
+    def _event_connection(self, account_id: str) -> Iterator[sqlite3.Connection]:
+        path = self._path(account_id)
+        path.mkdir(parents=True, exist_ok=True)
+        with self._account_lock(account_id), (path / ".ledger.lock").open("a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                with sqlite3.connect(path / "ledger.sqlite3", timeout=30) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._ensure_event_table(connection)
+                    self._migrate_jsonl_events(connection, path / "ledger.jsonl")
+                    yield connection
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _ensure_event_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS paper_events (
+                sequence INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                timestamp TEXT NOT NULL,
+                type TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_events_type_sequence "
+            "ON paper_events(type, sequence)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS paper_event_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+
+    @staticmethod
+    def _migrate_jsonl_events(connection: sqlite3.Connection, ledger: Path) -> None:
+        migrated = connection.execute(
+            "SELECT 1 FROM paper_event_meta WHERE key = 'jsonl_migrated'"
+        ).fetchone()
+        if migrated:
+            return
+        maximum = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM paper_events"
+        ).fetchone()[0])
+        if ledger.exists():
+            for line in ledger.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_id = str(payload.get("id") or uuid.uuid4().hex)
+                if connection.execute(
+                    "SELECT 1 FROM paper_events WHERE id = ?", (event_id,)
+                ).fetchone():
+                    continue
+                try:
+                    sequence = int(payload.get("sequence") or maximum + 1)
+                except (TypeError, ValueError):
+                    sequence = maximum + 1
+                if sequence <= maximum or connection.execute(
+                    "SELECT 1 FROM paper_events WHERE sequence = ?", (sequence,)
+                ).fetchone():
+                    sequence = maximum + 1
+                maximum = sequence
+                payload.update({
+                    "id": event_id,
+                    "timestamp": str(payload.get("timestamp") or now_iso()),
+                    "sequence": sequence,
+                })
+                connection.execute(
+                    "INSERT INTO paper_events(sequence, id, timestamp, type, payload) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        sequence,
+                        event_id,
+                        payload["timestamp"],
+                        str(payload.get("type") or "event"),
+                        json.dumps(payload, ensure_ascii=False),
+                    ),
+                )
+        connection.execute(
+            "INSERT INTO paper_event_meta(key, value) VALUES ('jsonl_migrated', ?)",
+            (now_iso(),),
+        )
+
+    @staticmethod
+    def _insert_event(
+        connection: sqlite3.Connection,
+        event: dict[str, Any],
+        *,
+        ignore_duplicate: bool = False,
+    ) -> bool:
+        event_id = str(event.get("id") or uuid.uuid4().hex)
+        if ignore_duplicate and connection.execute(
+            "SELECT 1 FROM paper_events WHERE id = ?", (event_id,)
+        ).fetchone():
+            return False
+        sequence = int(connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM paper_events"
+        ).fetchone()[0])
+        payload = {
+            "id": event_id,
+            "timestamp": now_iso(),
+            **event,
+            "sequence": sequence,
+        }
+        try:
+            connection.execute(
+                "INSERT INTO paper_events(sequence, id, timestamp, type, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    sequence,
+                    event_id,
+                    str(payload["timestamp"]),
+                    str(payload.get("type") or "event"),
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            if ignore_duplicate:
+                return False
+            raise
+        return True
 
     def delete(self, account_id: str) -> None:
         shutil.rmtree(self._path(account_id))

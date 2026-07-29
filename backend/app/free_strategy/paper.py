@@ -9,6 +9,7 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time as clock_time, timedelta
 from hashlib import sha256
@@ -20,6 +21,7 @@ from app.free_strategy.bars import Bar, rows_to_bars
 from app.free_strategy.continuation import compact_paper_checkpoint
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
 from app.free_strategy.store import PaperAccountStore, now_iso
+from app.market_time import as_cn_naive, cn_naive_from_timestamp, cn_naive_now, cn_today
 
 logger = logging.getLogger(__name__)
 _PAPER_WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="paper-webhook")
@@ -78,12 +80,12 @@ def _quote_record(raw: dict[str, Any]) -> dict[str, Any] | None:
     price = raw.get("last_price", raw.get("close"))
     if not symbol or price is None:
         return None
-    timestamp = raw.get("timestamp") or datetime.now().isoformat()
+    timestamp = raw.get("timestamp") or cn_naive_now().isoformat()
     if isinstance(timestamp, datetime):
         timestamp = timestamp.isoformat()
     elif isinstance(timestamp, (int, float)):
         seconds = float(timestamp) / 1000 if float(timestamp) > 10_000_000_000 else float(timestamp)
-        timestamp = datetime.fromtimestamp(seconds).isoformat()
+        timestamp = cn_naive_from_timestamp(seconds).isoformat()
     return {
         "symbol": symbol,
         "timestamp": str(timestamp),
@@ -106,7 +108,7 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
     for raw in records:
         values = dict(raw)
         parsed = datetime.fromisoformat(str(values["timestamp"]).replace("Z", "+00:00"))
-        values["timestamp"] = parsed.astimezone().replace(tzinfo=None) if parsed.tzinfo else parsed
+        values["timestamp"] = as_cn_naive(parsed)
         quotes.append(Quote(**values))
     return quotes
 
@@ -271,7 +273,7 @@ class MarketDataHub:
         from app.free_strategy.process import _read_rows
 
         while not self._bar_stop.wait(1.0):
-            now = datetime.now()
+            now = cn_naive_now()
             with self._lock:
                 targets = [sub for sub in self._subscriptions.values() if sub.mode.startswith("bar_")]
             groups: dict[tuple[str, str], list[_Subscription]] = {}
@@ -388,7 +390,7 @@ class MarketDataHub:
     def _on_websocket_error(self, message: str) -> None:
         self._ws_state = "reconnecting"
         self._ws_error = str(message)
-        self._ws_disconnected_at = datetime.now()
+        self._ws_disconnected_at = cn_naive_now()
         with self._lock:
             targets = [sub for sub in self._subscriptions.values() if sub.mode == "websocket"]
         for sub in targets:
@@ -414,7 +416,7 @@ class MarketDataHub:
         for sub in targets:
             bars: list[Bar] = []
             try:
-                bars = _read_rows(self.repo, sorted(sub.symbols), date.today(), date.today(), sub.asset_type, "1m")
+                bars = _read_rows(self.repo, sorted(sub.symbols), cn_today(), cn_today(), sub.asset_type, "1m")
             except ValueError:
                 pass
             if self._ws_disconnected_at is not None:
@@ -471,6 +473,7 @@ def _engine_from_state(
     data_dir: Path,
     *,
     preload_market_history: bool = False,
+    callback_deadline: Any = None,
 ) -> FreeStrategyEngine:
     from app.free_strategy.process import (
         MarketData,
@@ -499,6 +502,7 @@ def _engine_from_state(
         state=state.get("state", {}),
         instruments=_instrument_records(repo, asset_type, timeframe),
         risk_config=risk,
+        callback_deadline=callback_deadline,
     )
     runtime_timestamp = (
         state.get("last_bar")
@@ -506,18 +510,18 @@ def _engine_from_state(
     )
     run_start = (
         datetime.fromisoformat(str(runtime_timestamp)).date()
-        if runtime_timestamp else date.today()
+        if runtime_timestamp else cn_today()
     )
-    engine.set_run_window(run_start, date.today())
+    engine.set_run_window(run_start, cn_today())
     if config.allow_stale_fills:
         _preload_tradable_dates(
             engine,
-            _load_market_data(repo, engine.universe, run_start, date.today(), asset_type),
+            _load_market_data(repo, engine.universe, run_start, cn_today(), asset_type),
         )
     if "unit_net_value" in engine.extra_history_requirements:
         from app.free_strategy.fund_nav import prepare_fund_nav_data
 
-        prepare_fund_nav_data(repo, engine, run_start, date.today())
+        prepare_fund_nav_data(repo, engine, run_start, cn_today())
 
     history_asset_by_symbol = {
         str(item["symbol"]): requested_asset
@@ -566,7 +570,7 @@ def _engine_from_state(
     engine.set_history_loader(load_history)
     engine.set_market_history_loader(load_market_history)
     if preload_market_history and engine.market_history_requirements:
-        load_market_history(datetime.now())
+        load_market_history(cn_naive_now())
     if state.get("checkpoint"):
         engine.restore_checkpoint(state["checkpoint"])
     else:
@@ -595,12 +599,17 @@ def _equity_snapshot(
     initial_capital = float(engine.config.initial_capital)
     peak = max(float(state.get("equity_peak", initial_capital)), equity)
     state["equity_peak"] = peak
+    drawdown_pct = ((peak - equity) / peak * 100) if peak else 0.0
+    state["max_drawdown_pct"] = max(
+        float(state.get("max_drawdown_pct", 0.0)),
+        drawdown_pct,
+    )
     return {
         "timestamp": timestamp.isoformat(),
         "equity": equity,
         "cash": engine.account.cash,
         "nav": equity / initial_capital if initial_capital else 1.0,
-        "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0.0,
+        "drawdown_pct": drawdown_pct,
         "positions": {
             symbol: quantity
             for symbol, quantity in engine.account.positions.items()
@@ -654,6 +663,7 @@ def _persist_engine_state(
     engine: FreeStrategyEngine,
     snapshots: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    stored_curve_drawdown = store.max_drawdown_pct(account_id)
     if snapshots:
         store.upsert_equity_curve(account_id, snapshots)
     engine.account.equity_curve.clear()
@@ -661,16 +671,22 @@ def _persist_engine_state(
     prices = dict(engine._current_close_prices)  # noqa: SLF001
     equity = engine.account.equity(prices)
     peak = max(float(current.get("equity_peak", engine.config.initial_capital)), equity)
-    for key in ("account", "state", "runtime"):
-        current.pop(key, None)
-    current.update({
+    drawdown_pct = ((peak - equity) / peak * 100) if peak else 0.0
+    maximum_drawdown = max(
+        float(current.get("max_drawdown_pct", 0.0)),
+        stored_curve_drawdown,
+        drawdown_pct,
+        *(float(row.get("drawdown_pct", 0.0)) for row in snapshots),
+    )
+    runtime_fields = {
         "checkpoint": checkpoint,
         "universe": engine.universe,
         "risk_status": engine.risk_status,
         "cash": engine.account.cash,
         "equity": equity,
         "return_pct": (equity / engine.config.initial_capital - 1) * 100,
-        "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0,
+        "drawdown_pct": drawdown_pct,
+        "max_drawdown_pct": maximum_drawdown,
         "positions": {
             symbol: quantity
             for symbol, quantity in engine.account.positions.items()
@@ -678,8 +694,18 @@ def _persist_engine_state(
         },
         "equity_peak": peak,
         "last_error": None,
-    })
-    return store.save(current)
+    }
+    for key in ("last_bar", "last_quote"):
+        if key in current:
+            runtime_fields[key] = current[key]
+
+    def persist(latest: dict[str, Any]) -> dict[str, Any]:
+        for key in ("account", "state", "runtime"):
+            latest.pop(key, None)
+        latest.update(runtime_fields)
+        return latest
+
+    return store.update(account_id, persist)
 
 
 def _append_engine_events(
@@ -837,7 +863,7 @@ def _catch_up_bars(
             "missing_symbols": [],
             "updated_at": now_iso(),
         }
-        return store.save(current)
+        return store.update_fields(account_id, {"sync": current["sync"]})
 
     from app.free_strategy.process import _read_rows
     from app.tickflow.repository import DataStore, KlineRepository
@@ -854,8 +880,8 @@ def _catch_up_bars(
         or current.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
     )
     last_timestamp = datetime.fromisoformat(str(last_value)) if last_value else None
-    cutoff = _closed_bar_cutoff(mode, datetime.now())
-    start_day = last_timestamp.date() if last_timestamp else date.today()
+    cutoff = _closed_bar_cutoff(mode, cn_naive_now())
+    start_day = last_timestamp.date() if last_timestamp else cn_today()
     timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1d")
     rows = list(_read_rows(
         repo,
@@ -886,7 +912,7 @@ def _catch_up_bars(
         "updated_at": now_iso(),
     }
     current["sync"] = sync
-    current = store.save(current)
+    current = store.update_fields(account_id, {"sync": sync})
     store.append_event(account_id, {
         "type": "sync",
         "phase": "catching_up",
@@ -896,7 +922,7 @@ def _catch_up_bars(
     if not rows:
         sync.update({"phase": "live", "updated_at": now_iso()})
         current["sync"] = sync
-        saved = store.save(current)
+        saved = store.update_fields(account_id, {"sync": sync})
         store.append_event(account_id, {"type": "sync", "phase": "live", "through": sync["through"]})
         return saved
 
@@ -934,11 +960,11 @@ def _catch_up_bars(
             "updated_at": now_iso(),
         })
         current["sync"] = dict(sync)
-        current = store.save(current)
+        current = store.update_fields(account_id, {"sync": dict(sync)})
 
     sync.update({"phase": "live", "updated_at": now_iso()})
     current["sync"] = sync
-    current = store.save(current)
+    current = store.update_fields(account_id, {"sync": sync})
     store.append_event(account_id, {
         "type": "sync",
         "phase": "live",
@@ -948,7 +974,7 @@ def _catch_up_bars(
     return current
 
 
-def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
+def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadline: Any = None) -> None:
     account_root = Path(root) / account_id
     store = PaperAccountStore(Path(root).parent)
     state = store.get(account_id)
@@ -958,27 +984,34 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
             account_root,
             Path(root).parent,
             preload_market_history=True,
+            callback_deadline=callback_deadline,
         )
+        mode = state_market_mode(state)
+        if mode in QUOTE_MODES and engine.execution_mode == "full_bar":
+            raise ValueError("3秒行情和 WebSocket 策略必须定义 on_quote(context, quotes) 或定时任务")
+        if mode.startswith("bar_") and engine.execution_mode == "quote":
+            raise ValueError("K线模式策略必须定义 on_bar(context, bars) 或定时任务")
     except Exception as exc:  # noqa: BLE001
-        state["status"] = "paused"
-        state["last_error"] = f"模拟账户初始化失败: {exc}"
-        store.save(state)
-        store.append_event(account_id, {"type": "error", "message": state["last_error"]})
+        message = f"模拟账户初始化失败: {exc}"
+        store.update_fields(account_id, {"status": "paused", "last_error": message})
+        store.append_event(account_id, {"type": "error", "message": message})
         return
-    state["execution_mode"] = engine.execution_mode
-    state["scheduled_times"] = engine.scheduled_times
-    state["universe"] = engine.universe
-    state = store.save(state)
+    state = store.update_fields(account_id, {
+        "execution_mode": engine.execution_mode,
+        "scheduled_times": engine.scheduled_times,
+        "universe": engine.universe,
+    })
     try:
         state = _catch_up_bars(store, account_id, state, engine, Path(root).parent)
     except Exception as exc:  # noqa: BLE001
-        state = store.get(account_id)
-        state["status"] = "paused"
-        state["last_error"] = str(exc)
-        sync = dict(state.get("sync", {}))
+        latest = store.get(account_id)
+        sync = dict(latest.get("sync", {}))
         sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
-        state["sync"] = sync
-        store.save(state)
+        store.update_fields(account_id, {
+            "status": "paused",
+            "last_error": str(exc),
+            "sync": sync,
+        })
         store.append_event(account_id, {"type": "error", "message": str(exc)})
         return
     notified: set[str] = set()
@@ -1071,7 +1104,7 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
                     before_risk=before_risk,
                     notify=notify,
                 )
-                timestamp = engine._last_timestamp or datetime.now()  # noqa: SLF001
+                timestamp = engine._last_timestamp or cn_naive_now()  # noqa: SLF001
                 current = _persist_engine_state(
                     store,
                     account_id,
@@ -1093,17 +1126,17 @@ def _paper_worker(account_id: str, root: str, input_queue: Any) -> None:
                     "target": current.get("last_bar"),
                     "updated_at": now_iso(),
                 })
-                current["sync"] = sync
-                store.save(current)
+                current = store.update_fields(account_id, {"sync": sync})
             else:
                 continue
         except Exception as exc:  # noqa: BLE001
-            current["status"] = "paused"
-            current["last_error"] = str(exc)
             sync = dict(current.get("sync", {}))
             sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
-            current["sync"] = sync
-            store.save(current)
+            store.update_fields(account_id, {
+                "status": "paused",
+                "last_error": str(exc),
+                "sync": sync,
+            })
             store.append_event(account_id, {"type": "error", "message": str(exc)})
             continue
 
@@ -1116,6 +1149,7 @@ class PaperTradingSupervisor:
         self._ctx = mp.get_context("spawn")
         self._processes: dict[str, mp.Process] = {}
         self._queues: dict[str, Any] = {}
+        self._deadlines: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._monitor_stop = threading.Event()
         self._monitor_thread = threading.Thread(target=self._monitor_accounts, name="paper-supervisor", daemon=True)
@@ -1140,14 +1174,33 @@ class PaperTradingSupervisor:
                 continue
             if process is None or not process.is_alive():
                 self._detach_runtime(account_id)
-                state["status"] = "paused"
-                state["last_error"] = "策略子进程已退出"
+                message = "策略子进程已退出"
                 sync = dict(state.get("sync", {}))
-                sync.update({"phase": "error", "error": state["last_error"], "updated_at": now_iso()})
-                state["sync"] = sync
-                self.store.save(state)
-                self.store.append_event(account_id, {"type": "error", "message": state["last_error"]})
+                sync.update({"phase": "error", "error": message, "updated_at": now_iso()})
+                self.store.update_fields(account_id, {
+                    "status": "paused",
+                    "last_error": message,
+                    "sync": sync,
+                })
+                self.store.append_event(account_id, {"type": "error", "message": message})
                 continue
+            deadline = getattr(self, "_deadlines", {}).get(account_id)
+            if deadline is not None:
+                with deadline.get_lock() if hasattr(deadline, "get_lock") else nullcontext():
+                    deadline_value = float(deadline.value)
+                if deadline_value > 0 and time.monotonic() >= deadline_value:
+                    timeout = float(state.get("config", {}).get("callback_timeout_seconds", 30.0))
+                    message = f"策略执行超过 {timeout:g} 秒，已终止子进程"
+                    self._detach_runtime(account_id)
+                    sync = dict(state.get("sync", {}))
+                    sync.update({"phase": "error", "error": message, "updated_at": now_iso()})
+                    self.store.update_fields(account_id, {
+                        "status": "paused",
+                        "last_error": message,
+                        "sync": sync,
+                    })
+                    self.store.append_event(account_id, {"type": "error", "message": message})
+                    continue
             symbols = set(state.get("universe", []))
             if not symbols:
                 symbols.update(state.get("config", {}).get("symbols", []))
@@ -1171,9 +1224,8 @@ class PaperTradingSupervisor:
                     self.hub.unregister(account_id)
                 self.hub.update_symbols(account_id, symbols, held_symbols)
             except ValueError as exc:
-                state = self.pause_or_stop(account_id, "paused")
-                state["last_error"] = str(exc)
-                self.store.save(state)
+                self.pause_or_stop(account_id, "paused")
+                self.store.update_fields(account_id, {"last_error": str(exc)})
                 self.store.append_event(account_id, {"type": "error", "message": str(exc)})
 
     def _detach_runtime(self, account_id: str) -> None:
@@ -1181,6 +1233,7 @@ class PaperTradingSupervisor:
             self.hub.unregister(account_id)
             process = self._processes.pop(account_id, None)
             input_queue = self._queues.pop(account_id, None)
+            getattr(self, "_deadlines", {}).pop(account_id, None)
             if input_queue is not None:
                 _put_latest(input_queue, {"type": "stop", "account_id": account_id})
             if process and process.is_alive():
@@ -1195,9 +1248,10 @@ class PaperTradingSupervisor:
                 try:
                     self.start(str(state["id"]))
                 except Exception as exc:  # noqa: BLE001
-                    state["status"] = "paused"
-                    state["last_error"] = f"自动恢复失败: {exc}"
-                    self.store.save(state)
+                    self.store.update_fields(str(state["id"]), {
+                        "status": "paused",
+                        "last_error": f"自动恢复失败: {exc}",
+                    })
 
     def start(self, account_id: str) -> dict[str, Any]:
         with self._lock:
@@ -1205,21 +1259,12 @@ class PaperTradingSupervisor:
             mode = state_market_mode(state)
             if mode == "poll_3s" and self.hub.quote_service.get_min_interval() > 3:
                 raise ValueError(f"当前套餐最小行情间隔为 {self.hub.quote_service.get_min_interval():g} 秒，不能启动 3 秒行情")
-            symbols, execution_mode = inspect_account_runtime(state, self.store._path(account_id), self.data_dir)
-            if mode in QUOTE_MODES and execution_mode == "full_bar":
-                raise ValueError("3秒行情和 WebSocket 策略必须定义 on_quote(context, quotes) 或定时任务")
-            if mode.startswith("bar_") and execution_mode == "quote":
-                raise ValueError("K线模式策略必须定义 on_bar(context, bars) 或定时任务")
             previous_status = str(state.get("status", "stopped"))
-            state["status"] = "running"
-            state["execution_mode"] = execution_mode
-            state["universe"] = sorted(symbols)
-            state["last_error"] = None
             existing_sync = state.get("sync")
             if mode in QUOTE_MODES or not (
                 isinstance(existing_sync, dict) and existing_sync.get("phase") == "live"
             ):
-                phase = "live" if mode in QUOTE_MODES else "catching_up"
+                phase = "catching_up"
                 state["sync"] = {
                     "phase": phase,
                     "from": state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp"),
@@ -1230,46 +1275,41 @@ class PaperTradingSupervisor:
                     "missing_symbols": [],
                     "updated_at": now_iso(),
                 }
-            self.store.save(state)
+            state = self.store.update_fields(account_id, {
+                "status": "running",
+                "last_error": None,
+                "sync": state.get("sync"),
+            })
             process = self._processes.get(account_id)
             if process is None or not process.is_alive():
                 input_queue = self._ctx.Queue(maxsize=2)
-                process = self._ctx.Process(target=_paper_worker, args=(account_id, str(self.store.root), input_queue), daemon=True)
-                process.start()
+                callback_deadline = self._ctx.Value("d", 0.0)
+                process = self._ctx.Process(
+                    target=_paper_worker,
+                    args=(account_id, str(self.store.root), input_queue, callback_deadline),
+                    daemon=True,
+                )
+                try:
+                    process.start()
+                except Exception:
+                    self.store.update_fields(account_id, {"status": previous_status})
+                    raise
                 self._processes[account_id] = process
                 self._queues[account_id] = input_queue
-            if mode in QUOTE_MODES:
-                positions = state.get("positions", {}) or state.get("checkpoint", {}).get("account", {}).get("positions", {})
-                held_symbols = {symbol for symbol, quantity in positions.items() if float(quantity) > 0}
-                try:
-                    self.hub.register(
-                        account_id,
-                        mode,
-                        symbols,
-                        str(state.get("config", {}).get("asset_type", "stock")),
-                        self._queues[account_id],
-                        str(state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp") or ""),
-                        held_symbols,
-                    )
-                except Exception:
-                    self._detach_runtime(account_id)
-                    state["status"] = previous_status
-                    self.store.save(state)
-                    raise
+                if not hasattr(self, "_deadlines"):
+                    self._deadlines = {}
+                self._deadlines[account_id] = callback_deadline
             self.store.append_event(account_id, {"type": "start"})
             return self.store.get(account_id)
 
     def pause_or_stop(self, account_id: str, status: str) -> dict[str, Any]:
         with self._lock:
-            state = self.store.get(account_id)
             self._detach_runtime(account_id)
             state = self.store.get(account_id)
-            state["status"] = status
             sync = dict(state.get("sync", {}))
             sync.update({"phase": "idle", "updated_at": now_iso()})
-            state["sync"] = sync
             self.store.append_event(account_id, {"type": "pause" if status == "paused" else "stop"})
-            return self.store.save(state)
+            return self.store.update_fields(account_id, {"status": status, "sync": sync})
 
     def unlock_risk(self, account_id: str) -> dict[str, Any]:
         state = self.store.get(account_id)
@@ -1282,13 +1322,14 @@ class PaperTradingSupervisor:
             status["triggered_at"] = None
         risk["status"] = status
         checkpoint["risk"] = risk
-        state["checkpoint"] = checkpoint
-        state["risk_status"] = status
         target = self._queues.get(account_id)
         if target is not None:
             _put_latest(target, {"type": "unlock_risk", "account_id": account_id})
         self.store.append_event(account_id, {"type": "risk_unlocked"})
-        return self.store.save(state)
+        return self.store.update_fields(account_id, {
+            "checkpoint": checkpoint,
+            "risk_status": status,
+        })
 
     def is_alive(self, account_id: str) -> bool:
         process = self._processes.get(account_id)
@@ -1318,6 +1359,7 @@ class PaperTradingSupervisor:
         equity = cash + sum(positions[symbol] * float(snapshot["quotes"][symbol]["last_price"]) for symbol in positions)
         initial = float(state.get("config", {}).get("initial_capital") or 0)
         peak = max(float(state.get("equity_peak") or initial), equity)
+        drawdown_pct = ((peak - equity) / peak * 100) if peak else 0.0
         return {
             "live": True,
             "as_of": snapshot.get("as_of"),
@@ -1325,7 +1367,11 @@ class PaperTradingSupervisor:
             "missing_symbols": [],
             "equity": equity,
             "return_pct": (equity / initial - 1) * 100 if initial else 0.0,
-            "drawdown_pct": ((peak - equity) / peak * 100) if peak else 0.0,
+            "drawdown_pct": drawdown_pct,
+            "max_drawdown_pct": max(
+                float(state.get("max_drawdown_pct") or 0.0),
+                drawdown_pct,
+            ),
         }
 
     def status(self) -> dict[str, Any]:

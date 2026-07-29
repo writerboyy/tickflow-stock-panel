@@ -269,7 +269,7 @@ def test_supervisor_detaches_runtime_after_worker_pauses(tmp_path):
     assert supervisor._processes == {}  # noqa: SLF001
 
 
-def test_supervisor_restart_preserves_live_sync_until_worker_checks_bars(monkeypatch, tmp_path):
+def test_supervisor_start_defers_strategy_initialization_to_worker(tmp_path):
     class FakeProcess:
         def __init__(self):
             self.alive = False
@@ -284,6 +284,10 @@ def test_supervisor_restart_preserves_live_sync_until_worker_checks_bars(monkeyp
         @staticmethod
         def Queue(maxsize):
             return queue.Queue(maxsize=maxsize)
+
+        @staticmethod
+        def Value(_typecode, value):
+            return SimpleNamespace(value=value)
 
         @staticmethod
         def Process(*_args, **_kwargs):
@@ -315,11 +319,6 @@ def test_supervisor_restart_preserves_live_sync_until_worker_checks_bars(monkeyp
     supervisor._lock = threading.RLock()  # noqa: SLF001
     supervisor._processes = {}  # noqa: SLF001
     supervisor._queues = {}  # noqa: SLF001
-    monkeypatch.setattr(
-        "app.free_strategy.paper.inspect_account_runtime",
-        lambda *_args: ({"X"}, "full_bar"),
-    )
-
     result = supervisor.start("paper")
 
     assert result["sync"] == sync

@@ -102,6 +102,7 @@ function TableWrap({ children }: { children: React.ReactNode }) {
 
 function PerformanceView({ result }: { result: FreeBacktestResult }) {
   const performance = result.performance ?? {}
+  const capacity = result.capacity_analysis
   const drawdownPeriod = performance.max_drawdown_start && performance.max_drawdown_end
     ? `${performance.max_drawdown_start} 至 ${performance.max_drawdown_end}`
     : '—'
@@ -131,6 +132,12 @@ function PerformanceView({ result }: { result: FreeBacktestResult }) {
       <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">回撤区间</span><span>{drawdownPeriod}</span></div>
       <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">交易日</span><span>{result.daily_equity_curve?.length ?? 0}</span></div>
     </div>
+    {capacity ? <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-border pt-3 text-[11px] lg:grid-cols-4">
+      <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">容量覆盖</span><span>{capacity.covered_fills}/{capacity.total_fills} 笔</span></div>
+      <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">最大参与率</span><span>{percent(capacity.max_participation_pct)}</span></div>
+      <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">P95 参与率</span><span>{percent(capacity.p95_participation_pct)}</span></div>
+      <div className="flex justify-between border-b border-border py-1.5"><span className="text-muted">参与率 &gt; 10%</span><span>{capacity.fills_over_10_pct} 笔</span></div>
+    </div> : null}
   </div>
 }
 

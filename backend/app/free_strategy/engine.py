@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
 from .bars import Bar
+from app.market_time import cn_naive_now
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,9 @@ class Fill:
     value: float
     fee: float
     timestamp: str
+    market_amount: float | None = None
+    market_volume: float | None = None
+    participation_pct: float | None = None
 
 
 class Account:
@@ -408,7 +412,8 @@ class FreeStrategyEngine:
     def __init__(self, source: str, timeframe: str = "1d", config: FreeStrategyConfig | None = None,
                  state: dict[str, Any] | None = None,
                  instruments: Iterable[dict[str, Any]] | None = None,
-                 risk_config: RiskConfig | None = None) -> None:
+                 risk_config: RiskConfig | None = None,
+                 callback_deadline: Any = None) -> None:
         self.source = source
         self.timeframe = timeframe
         self.config = config or FreeStrategyConfig()
@@ -429,6 +434,7 @@ class FreeStrategyEngine:
         self._bought_dates: dict[str, date] = {}
         self._counter = 0
         self._callbacks: dict[str, Callable[..., Any]] = {}
+        self._callback_deadline = callback_deadline
         self._history_loader: Callable[[str, int, str, datetime], list[Bar]] | None = None
         self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
@@ -443,7 +449,7 @@ class FreeStrategyEngine:
         self._benchmark_curve: list[dict[str, Any]] = []
         self._session_equity_snapshot: dict[str, Any] | None = None
         self._session_benchmark_close: float | None = None
-        self._next_timestamp = datetime.now()
+        self._next_timestamp = cn_naive_now()
         self._order_times: deque[datetime] = deque()
         self._risk_peak_equity = float(self.config.initial_capital)
         self._risk_day: date | None = None
@@ -464,7 +470,10 @@ class FreeStrategyEngine:
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
-        exec(compile(source, "<free_strategy>", "exec"), namespace, namespace)
+        self._protected_call(
+            "策略加载",
+            lambda: exec(compile(source, "<free_strategy>", "exec"), namespace, namespace),
+        )
         callback_names = ("initialize", "before_trading_start", "on_bar", "on_quote", "after_trading_end")
         self._callbacks = {
             name: namespace[name]
@@ -472,7 +481,7 @@ class FreeStrategyEngine:
             if callable(namespace.get(name))
         }
         if "initialize" in self._callbacks:
-            self._callbacks["initialize"](self.context)
+            self._protected_call("initialize 回调", self._callbacks["initialize"], self.context)
         if "on_bar" not in self._callbacks and "on_quote" not in self._callbacks and not self.context._scheduled:
             raise ValueError("策略必须定义 on_bar(context, bars)、on_quote(context, quotes) 或通过 context.schedule 注册定时任务")
         self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
@@ -614,7 +623,7 @@ class FreeStrategyEngine:
         return (target or 0.0) > current
 
     def _reject_for_risk(self, order: Order) -> bool:
-        now = self.context.now or datetime.now()
+        now = self.context.now or cn_naive_now()
         cutoff = now.timestamp() - 60
         while self._order_times and self._order_times[0].timestamp() <= cutoff:
             self._order_times.popleft()
@@ -787,7 +796,20 @@ class FreeStrategyEngine:
             self.account.positions[order.symbol] = max(0.0, current - qty)
             self.account.available[order.symbol] = max(0.0, self.account.available.get(order.symbol, current) - qty)
         order.status = "filled"
-        self.account.fills.append(Fill(order.id, order.symbol, side, qty, price, gross, fee, timestamp.isoformat() if timestamp else ""))
+        market_volume = float(bar.volume) if bar.volume > 0 else None
+        self.account.fills.append(Fill(
+            order.id,
+            order.symbol,
+            side,
+            qty,
+            price,
+            gross,
+            fee,
+            timestamp.isoformat() if timestamp else "",
+            market_amount=float(bar.amount) if bar.amount > 0 else None,
+            market_volume=market_volume,
+            participation_pct=qty / market_volume * 100 if market_volume else None,
+        ))
 
     def _apply_splits(self, bars: BarsView, timestamp: datetime) -> None:
         for symbol, bar in bars.items():
@@ -820,22 +842,30 @@ class FreeStrategyEngine:
         callback = self._callbacks.get(name)
         if callback is None:
             return
-        started = time.monotonic()
         if name == "on_bar":
-            callback(self.context, bars)
+            self._protected_call(f"{name} 回调", callback, self.context, bars)
         else:
-            callback(self.context)
-        elapsed = time.monotonic() - started
-        if elapsed > self.config.callback_timeout_seconds:
-            raise TimeoutError(f"{name} 回调超过 {self.config.callback_timeout_seconds:g} 秒")
+            self._protected_call(f"{name} 回调", callback, self.context)
 
     def _run_scheduled_callback(self, callback: Callable[..., Any], at: str) -> None:
-        started = time.monotonic()
-        callback(self.context)
-        elapsed = time.monotonic() - started
-        if elapsed > self.config.callback_timeout_seconds:
-            raise TimeoutError(f"定时回调 {at} 超过 {self.config.callback_timeout_seconds:g} 秒")
+        self._protected_call(f"定时回调 {at}", callback, self.context)
         self.callbacks_executed += 1
+
+    def _protected_call(self, label: str, callback: Callable[..., Any], *args: Any) -> Any:
+        timeout = float(self.config.callback_timeout_seconds)
+        started = time.monotonic()
+        if self._callback_deadline is not None:
+            with self._callback_deadline.get_lock():
+                self._callback_deadline.value = started + timeout
+        try:
+            return callback(*args)
+        finally:
+            elapsed = time.monotonic() - started
+            if self._callback_deadline is not None:
+                with self._callback_deadline.get_lock():
+                    self._callback_deadline.value = 0.0
+            if elapsed > timeout:
+                raise TimeoutError(f"{label}超过 {timeout:g} 秒")
 
     def runtime_snapshot(self) -> dict[str, Any]:
         """保存模拟盘恢复所需的会话边界，避免盘后任务重复执行。"""
@@ -1100,10 +1130,7 @@ class FreeStrategyEngine:
             self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
         callback = self._callbacks.get("on_quote")
         if callback is not None:
-            started = time.monotonic()
-            callback(self.context, quote_view)
-            if time.monotonic() - started > self.config.callback_timeout_seconds:
-                raise TimeoutError(f"on_quote 回调超过 {self.config.callback_timeout_seconds:g} 秒")
+            self._protected_call("on_quote 回调", callback, self.context, quote_view)
             self.callbacks_executed += 1
         current_time = timestamp.strftime("%H:%M")
         for slot_index, (at, scheduled, done) in enumerate(self.context._scheduled):
@@ -1183,7 +1210,7 @@ class FreeStrategyEngine:
         else:
             stream = bars
         self._current_bar: Bar | None = None
-        self._next_timestamp = datetime.now()
+        self._next_timestamp = cn_naive_now()
         handled = False
         for timestamp, rows_at_time in groupby(stream, key=lambda bar: bar.timestamp):
             handled = True
@@ -1469,6 +1496,23 @@ class FreeStrategyEngine:
         daily_curve, performance = self._daily_performance()
         attribution, _ = self._attribution_rows()
         orders = [asdict(value) for value in self.account.orders]
+        participation = sorted(
+            float(fill.participation_pct)
+            for fill in self.account.fills
+            if fill.participation_pct is not None
+        )
+        percentile_index = max(0, math.ceil(len(participation) * 0.95) - 1)
+        capacity_analysis = {
+            "model": "bar_volume_participation",
+            "diagnostic_only": True,
+            "total_fills": len(self.account.fills),
+            "covered_fills": len(participation),
+            "max_participation_pct": max(participation, default=None),
+            "p95_participation_pct": participation[percentile_index] if participation else None,
+            "fills_over_1_pct": sum(value > 1 for value in participation),
+            "fills_over_5_pct": sum(value > 5 for value in participation),
+            "fills_over_10_pct": sum(value > 10 for value in participation),
+        }
         return {"initial_capital": self.config.initial_capital, "final_equity": values[-1] if values else self.config.initial_capital,
                 "return_pct": ((values[-1] / self.config.initial_capital) - 1) * 100 if values else 0.0,
                 "max_drawdown_pct": drawdown * 100, "equity_curve": curve,
@@ -1477,6 +1521,7 @@ class FreeStrategyEngine:
                 "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
                 "strategy_signals": self.signals,
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
+                "capacity_analysis": capacity_analysis,
                 "corporate_actions": self.account.corporate_actions,
                 "positions": self.account.positions, "logs": self.logs, "state": self.state,
                 "execution_mode": self.execution_mode,

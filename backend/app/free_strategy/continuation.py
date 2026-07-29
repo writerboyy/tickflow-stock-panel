@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.free_strategy.store import PaperAccountStore, now_iso
+from app.market_time import cn_today
 
 
 _EXECUTION_CONFIG_KEYS = (
@@ -96,7 +97,7 @@ def continue_account_from_backtest(
     shutil.copy2(store._path(account_id) / "state.json", backup_root / f"state-{stamp}.json")
 
     initial_capital = float(state["config"]["initial_capital"])
-    cutoff = (today or datetime.now().date()) - timedelta(days=365)
+    cutoff = (today or cn_today()) - timedelta(days=365)
     equity_rows = [
         {
             "timestamp": str(row["timestamp"]),
@@ -168,6 +169,10 @@ def continue_account_from_backtest(
         "equity": final_equity,
         "return_pct": (final_equity / initial_capital - 1) * 100,
         "drawdown_pct": (peak_equity - final_equity) / peak_equity * 100,
+        "max_drawdown_pct": max(
+            float(state.get("max_drawdown_pct", 0.0)),
+            float(result.get("max_drawdown_pct", 0.0)),
+        ),
         "positions": positions,
         "equity_peak": peak_equity,
         "risk_status": checkpoint["risk"]["status"],

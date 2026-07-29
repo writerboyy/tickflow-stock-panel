@@ -120,6 +120,9 @@ function decisionReasonText(event: PaperEvent) {
     return '当前持仓未进入当日候选范围，切换至排名更高的候选标的'
   }
   const reason = event.reason_code ?? event.reason
+  if (event.decision === 'hold' && reason === 'ranked_target') {
+    return '当前持仓仍为排名最高的合格标的'
+  }
   return reason ? (DECISION_REASON_LABEL[reason] ?? reason) : '已完成当日决策'
 }
 
@@ -493,6 +496,9 @@ export function PaperTrading() {
     .filter(Number.isFinite)
   if (useCurrentState && account?.drawdown_pct != null && Number.isFinite(Number(account.drawdown_pct))) {
     drawdownValues.push(Number(account.drawdown_pct))
+  }
+  if (useCurrentState && account?.max_drawdown_pct != null && Number.isFinite(Number(account.max_drawdown_pct))) {
+    drawdownValues.push(Number(account.max_drawdown_pct))
   }
   const selectedMaxDrawdown = drawdownValues.reduce<number | null>(
     (maximum, value) => maximum == null ? value : Math.max(maximum, value),

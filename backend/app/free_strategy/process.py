@@ -6,6 +6,8 @@ import logging
 import multiprocessing as mp
 import queue
 import shutil
+import threading
+import time as time_module
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -830,7 +832,7 @@ def advance_scheduled_session(
         engine.finish_session()
 
 
-def execute_backtest(payload: dict[str, Any], output: Any) -> None:
+def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: Any = None) -> None:
     try:
         from app.tickflow.repository import DataStore, KlineRepository
         output.put({"type": "progress", "message": "初始化策略并读取行情数据", "progress": 0.1})
@@ -854,7 +856,11 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
             repo, payload["asset_type"], payload["timeframe"], start, end,
         )
         engine = FreeStrategyEngine(
-            source, payload["timeframe"], config, instruments=instruments,
+            source,
+            payload["timeframe"],
+            config,
+            instruments=instruments,
+            callback_deadline=callback_deadline,
         )
         engine.set_run_window(start, end)
         fund_nav_data: dict[str, Any] = {}
@@ -1049,6 +1055,34 @@ def execute_backtest(payload: dict[str, Any], output: Any) -> None:
 def start_process(payload: dict[str, Any]) -> tuple[mp.Process, Any]:
     ctx = mp.get_context("spawn")
     output = ctx.Queue()
-    process = ctx.Process(target=execute_backtest, args=(payload, output), daemon=True)
+    callback_deadline = ctx.Value("d", 0.0)
+    process = ctx.Process(
+        target=execute_backtest,
+        args=(payload, output, callback_deadline),
+        daemon=True,
+    )
     process.start()
+    timeout = float(payload.get("config", {}).get("callback_timeout_seconds", 30.0))
+
+    def watch_deadline() -> None:
+        while process.is_alive():
+            with callback_deadline.get_lock():
+                deadline = float(callback_deadline.value)
+            if deadline > 0 and time_module.monotonic() >= deadline:
+                process.terminate()
+                process.join(timeout=2)
+                if payload.get("run_dir"):
+                    shutil.rmtree(Path(payload["run_dir"]), ignore_errors=True)
+                output.put({
+                    "type": "error",
+                    "error": f"策略执行超过 {timeout:g} 秒，已终止子进程",
+                })
+                return
+            time_module.sleep(0.02)
+
+    threading.Thread(
+        target=watch_deadline,
+        name=f"free-strategy-watchdog-{process.pid}",
+        daemon=True,
+    ).start()
     return process, output

@@ -1019,6 +1019,7 @@ export interface PaperAccount {
   equity?: number
   return_pct?: number
   drawdown_pct?: number
+  max_drawdown_pct?: number
   valuation?: {
     live: boolean
     as_of?: string | null
@@ -1027,6 +1028,7 @@ export interface PaperAccount {
     equity?: number
     return_pct?: number
     drawdown_pct?: number
+    max_drawdown_pct?: number
   }
   positions?: Record<string, number>
   config?: { initial_capital?: number }
@@ -1079,6 +1081,9 @@ export interface PaperFill {
   value: number
   fee: number
   timestamp: string
+  market_amount?: number | null
+  market_volume?: number | null
+  participation_pct?: number | null
 }
 
 export interface PaperEvent {
@@ -1137,6 +1142,17 @@ export interface FreeBacktestResult {
   final_equity: number
   return_pct: number
   max_drawdown_pct: number
+  capacity_analysis?: {
+    model: 'bar_volume_participation'
+    diagnostic_only: true
+    total_fills: number
+    covered_fills: number
+    max_participation_pct: number | null
+    p95_participation_pct: number | null
+    fills_over_1_pct: number
+    fills_over_5_pct: number
+    fills_over_10_pct: number
+  }
   equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
   daily_equity_curve?: Array<{
     date: string
