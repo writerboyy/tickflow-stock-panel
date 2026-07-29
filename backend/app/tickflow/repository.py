@@ -1284,7 +1284,7 @@ class KlineRepository:
             return pl.DataFrame()
         pattern = self._etf_enriched_glob if asset_type == "etf" else self._index_enriched_glob
         try:
-            frame = pl.scan_parquet(pattern)
+            frame = scan_enriched_parquet(pattern)
             available = set(frame.collect_schema().names())
             selected = [name for name in (columns or available) if name in available]
             if "symbol" not in selected:
@@ -1297,7 +1297,7 @@ class KlineRepository:
                 )
                 .select(selected)
                 .sort(["date", "symbol"])
-                .collect(streaming=True)
+                .collect(engine="streaming")
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("批量%s日K查询失败: %s", asset_type, exc)

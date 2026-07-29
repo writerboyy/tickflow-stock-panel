@@ -3,6 +3,7 @@ from datetime import date
 import polars as pl
 
 from app.parquet import scan_daily_parquet, scan_enriched_parquet
+from app.tickflow.repository import DataStore, KlineRepository
 
 
 def test_partitioned_daily_scan_tolerates_added_quote_ts(tmp_path):
@@ -79,3 +80,43 @@ def test_partitioned_enriched_scan_tolerates_added_quote_ts(tmp_path):
     assert df.schema["volume"] == pl.Float64
     assert df.schema["quote_ts"] == pl.Int64
     assert df["quote_ts"].to_list() == [None, 1783560600000]
+
+
+def test_etf_daily_batch_tolerates_added_quote_ts(tmp_path):
+    store = DataStore(tmp_path)
+    base = tmp_path / "kline_etf_enriched"
+    old_part = base / "date=2026-07-28" / "part.parquet"
+    new_part = base / "date=2026-07-29" / "part.parquet"
+    old_part.parent.mkdir(parents=True)
+    new_part.parent.mkdir(parents=True)
+
+    common = {
+        "symbol": ["159920.SZ"],
+        "open": [1.50],
+        "high": [1.53],
+        "low": [1.49],
+        "close": [1.52],
+        "volume": [1000.0],
+        "amount": [1520.0],
+        "raw_close": [1.52],
+        "raw_high": [1.53],
+        "raw_low": [1.49],
+    }
+    pl.DataFrame({**common, "date": [date(2026, 7, 28)]}).write_parquet(old_part)
+    pl.DataFrame({
+        **common,
+        "date": [date(2026, 7, 29)],
+        "quote_ts": [1785295800000],
+    }).write_parquet(new_part)
+
+    frame = KlineRepository(store).get_daily_asset_batch(
+        "etf",
+        ["159920.SZ"],
+        date(2026, 7, 28),
+        date(2026, 7, 29),
+        ["symbol", "date", "close", "quote_ts"],
+    )
+
+    assert frame.height == 2
+    assert frame["date"].to_list() == [date(2026, 7, 28), date(2026, 7, 29)]
+    assert frame["quote_ts"].to_list() == [None, 1785295800000]
