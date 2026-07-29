@@ -191,6 +191,47 @@ def test_strategy_capital_rolls_forward_after_sell_commission():
     assert context.orders == [("159915.SZ", 0)]
 
 
+def test_sell_keeps_top_ranked_holding_when_previous_nav_is_missing(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 20, 13, 9)
+    context.portfolio.positions = {"513690.SH": 80_000.0}
+    context.portfolio.available_positions = {"513690.SH": 80_000.0}
+    previous = bar(1.14)
+    previous.timestamp = datetime(2026, 7, 17, 15)
+    context.daily_rows["513690.SH"] = [previous]
+    seven.on_bar(context, {"513690.SH": bar(1.15)})
+    monkeypatch.setattr(
+        seven,
+        "_rank_candidates",
+        lambda _context: [{"symbol": "513690.SH", "score": 2.0}],
+    )
+
+    seven._sell_targets(context)
+
+    assert context.orders == []
+
+
+def test_sell_exits_top_ranked_holding_when_premium_exceeds_limit(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 20, 13, 9)
+    context.portfolio.positions = {"513690.SH": 80_000.0}
+    context.portfolio.available_positions = {"513690.SH": 80_000.0}
+    previous = bar(1.14)
+    previous.timestamp = datetime(2026, 7, 17, 15)
+    context.daily_rows["513690.SH"] = [previous]
+    context.nav_rows["513690.SH"] = [{"date": "2026-07-17", "value": 0.90}]
+    seven.on_bar(context, {"513690.SH": bar(1.15)})
+    monkeypatch.setattr(
+        seven,
+        "_rank_candidates",
+        lambda _context: [{"symbol": "513690.SH", "score": 2.0}],
+    )
+
+    seven._sell_targets(context)
+
+    assert context.orders == [("513690.SH", 0)]
+
+
 def test_buy_fails_closed_when_previous_nav_is_missing(monkeypatch):
     context = initialized_context()
     context.now = datetime(2026, 7, 20, 13, 10)

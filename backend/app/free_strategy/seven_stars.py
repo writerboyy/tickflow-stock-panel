@@ -366,11 +366,11 @@ def _previous_daily_row(context, symbol: str) -> Any | None:
     return rows[-1] if rows else None
 
 
-def _passes_premium_filter(context, symbol: str) -> bool:
+def _passes_premium_filter(context, symbol: str) -> bool | None:
     previous = _previous_daily_row(context, symbol)
     timestamp = getattr(previous, "timestamp", None) if previous is not None else None
     if previous is None or timestamp is None:
-        return False
+        return None
     previous_day = timestamp.date()
     nav_rows = context.extra_history(
         "unit_net_value",
@@ -379,10 +379,10 @@ def _passes_premium_filter(context, symbol: str) -> bool:
         end_date=previous_day,
     )
     if not nav_rows or nav_rows[-1].get("date") != previous_day.isoformat():
-        return False
+        return None
     nav = float(nav_rows[-1].get("value") or 0.0)
     if nav <= 0:
-        return False
+        return None
     premium = (_bar_price(previous) - nav) / nav
     return premium <= PREMIUM_THRESHOLD
 
@@ -456,7 +456,7 @@ def _sell_targets(context) -> None:
     for symbol in held:
         if symbol in sold or _available_quantity(context, symbol) <= 0:
             continue
-        if not _passes_premium_filter(context, symbol):
+        if _passes_premium_filter(context, symbol) is False:
             _exit_position(context, symbol)
 
 
@@ -469,7 +469,7 @@ def _eligible_targets(context, rankings: list[dict[str, Any]]) -> list[str]:
             continue
         if _profit_triggered(context, symbol):
             continue
-        if _passes_premium_filter(context, symbol):
+        if _passes_premium_filter(context, symbol) is True:
             return [symbol]
     return []
 
