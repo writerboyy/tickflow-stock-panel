@@ -4,11 +4,14 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
   CirclePause,
   CirclePlay,
   FileText,
   Gauge,
   ListOrdered,
+  Minus,
   Pencil,
   Plus,
   RefreshCw,
@@ -78,7 +81,29 @@ function syncClass(account: PaperAccount) {
 }
 
 function returnClass(value?: number) {
-  return Number(value ?? 0) >= 0 ? 'text-bull' : 'text-bear'
+  const normalized = Number(value ?? 0)
+  return normalized > 0 ? 'text-bull' : normalized < 0 ? 'text-bear' : 'text-muted'
+}
+
+function signedPercent(value: number) {
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function signedMoney(value: number) {
+  return `${value > 0 ? '+' : ''}${MONEY.format(value)}`
+}
+
+function dailyPerformance(rows: EquityPoint[], tradingDate: string, equity?: number, initialCapital?: number) {
+  if (equity == null || !Number.isFinite(equity)) return null
+  const previousClose = rows.filter(row => !tradingDate || row.timestamp.slice(0, 10) < tradingDate).at(-1)?.equity
+  const baseline = previousClose ?? initialCapital
+  if (baseline == null || !Number.isFinite(baseline) || baseline <= 0) return null
+  const amount = equity - baseline
+  return {
+    amount,
+    pct: amount / baseline * 100,
+    reference: previousClose == null ? 'initial' : 'previous-close',
+  } as const
 }
 
 function decisionReasonText(event: PaperEvent) {
@@ -456,6 +481,12 @@ export function PaperTrading() {
   const selectedDrawdown = useCurrentState
     ? Number(account?.drawdown_pct ?? 0)
     : selectedSnapshot ? Number(selectedSnapshot.drawdown_pct) : null
+  const initialCapital = account?.config?.initial_capital
+  const selectedDailyPerformance = dailyPerformance(equityRows, activeDate, selectedEquity, initialCapital)
+  const DailyReturnIcon = selectedDailyPerformance == null || selectedDailyPerformance.amount === 0
+    ? Minus
+    : selectedDailyPerformance.amount > 0 ? ArrowUpRight : ArrowDownRight
+  const dailyMetricLabel = selectedDate ? '当日收益' : '今日收益'
   const selectTradingDate = (value: string) => {
     const resolved = availableDates.includes(value)
       ? value
@@ -494,13 +525,32 @@ export function PaperTrading() {
         {account.last_error ? <div className="mx-4 mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"><AlertTriangle className="h-4 w-4 shrink-0" />{account.last_error}</div> : null}
         {(account.risk_status?.daily_loss_locked || account.risk_status?.drawdown_locked) ? <div className="mx-4 mt-3 flex items-center gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"><ShieldAlert className="h-4 w-4" /><span className="flex-1">{account.risk_status.reason ?? '风控锁定'}</span>{account.risk_status.drawdown_locked ? <button type="button" onClick={() => void action('unlock-risk')} className="rounded border border-warning/50 px-2 py-1 text-[11px]">确认恢复</button> : null}</div> : null}
 
-        <section className="grid grid-cols-4 border-b border-border max-lg:grid-cols-2">
-          {[
-            ['总资产', selectedEquity == null ? '—' : MONEY.format(selectedEquity), Activity, ''],
-            ['可用现金', selectedCash == null ? '—' : MONEY.format(selectedCash), WalletCards, ''],
-            ['累计收益', selectedReturn == null ? '—' : `${selectedReturn >= 0 ? '+' : ''}${selectedReturn.toFixed(2)}%`, Gauge, selectedReturn == null ? '' : returnClass(selectedReturn)],
-            ['当前回撤', selectedDrawdown == null ? '—' : selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%', ShieldAlert, selectedDrawdown != null && selectedDrawdown > 0 ? 'text-bear' : ''],
-          ].map(([label, value, Icon, tone], index) => <div key={String(label)} className={`px-4 py-3 ${index < 3 ? 'border-r border-border max-lg:odd:border-r' : ''} max-lg:border-b`}><div className="flex items-center gap-1.5 text-[10px] text-muted"><Icon className="h-3.5 w-3.5" />{label as string}</div><div className={`mt-1.5 font-mono text-[16px] tabular-nums ${tone as string}`}>{value as string}</div></div>)}
+        <section className="grid grid-cols-[1.15fr_1fr_1fr_1fr] border-b border-border max-lg:grid-cols-2">
+          <div className={`relative min-w-0 overflow-hidden border-r border-border px-4 py-3.5 max-lg:border-b ${selectedDailyPerformance == null || selectedDailyPerformance.amount === 0 ? '' : selectedDailyPerformance.amount > 0 ? 'bg-bull/[0.045]' : 'bg-bear/[0.045]'}`}>
+            {selectedDailyPerformance != null && selectedDailyPerformance.amount !== 0 ? <span className={`absolute inset-y-0 left-0 w-0.5 ${selectedDailyPerformance.amount > 0 ? 'bg-bull' : 'bg-bear'}`} /> : null}
+            <div className={`flex items-center gap-1.5 text-[10px] ${selectedDailyPerformance == null ? 'text-muted' : returnClass(selectedDailyPerformance.amount)}`}><DailyReturnIcon className="h-3.5 w-3.5" />{dailyMetricLabel}</div>
+            <div className={`mt-1 whitespace-nowrap font-mono text-xl font-semibold tabular-nums max-sm:text-lg ${returnClass(selectedDailyPerformance?.amount)}`}>
+              {selectedDailyPerformance == null ? '—' : signedMoney(selectedDailyPerformance.amount)}
+            </div>
+            <div className="mt-1 flex min-h-4 items-center gap-1.5 text-[10px] text-muted">
+              {selectedDailyPerformance == null ? '等待收益基准' : <><span className={`font-mono ${returnClass(selectedDailyPerformance.pct)}`}>{signedPercent(selectedDailyPerformance.pct)}</span><span>{selectedDailyPerformance.reference === 'previous-close' ? '较前一交易日' : '较初始资金'}</span></>}
+            </div>
+          </div>
+          <div className="min-w-0 border-r border-border px-4 py-3.5 max-lg:border-b max-lg:border-r-0">
+            <div className="flex items-center gap-1.5 text-[10px] text-muted"><Activity className="h-3.5 w-3.5" />总资产</div>
+            <div className="mt-1 font-mono text-lg tabular-nums">{selectedEquity == null ? '—' : MONEY.format(selectedEquity)}</div>
+            <div className="mt-1 min-h-4 truncate text-[10px] text-muted">可用现金 <span className="font-mono text-secondary">{selectedCash == null ? '—' : MONEY.format(selectedCash)}</span></div>
+          </div>
+          <div className="min-w-0 border-r border-border px-4 py-3.5">
+            <div className="flex items-center gap-1.5 text-[10px] text-muted"><Gauge className="h-3.5 w-3.5" />累计收益</div>
+            <div className={`mt-1 font-mono text-lg tabular-nums ${selectedReturn == null ? '' : returnClass(selectedReturn)}`}>{selectedReturn == null ? '—' : signedPercent(selectedReturn)}</div>
+            <div className="mt-1 min-h-4 truncate text-[10px] text-muted">初始资金 <span className="font-mono text-secondary">{initialCapital == null ? '—' : MONEY.format(initialCapital)}</span></div>
+          </div>
+          <div className="min-w-0 px-4 py-3.5">
+            <div className="flex items-center gap-1.5 text-[10px] text-muted"><ShieldAlert className="h-3.5 w-3.5" />当前回撤</div>
+            <div className={`mt-1 font-mono text-lg tabular-nums ${selectedDrawdown != null && selectedDrawdown > 0 ? 'text-bear' : 'text-muted'}`}>{selectedDrawdown == null ? '—' : selectedDrawdown > 0 ? `-${selectedDrawdown.toFixed(2)}%` : '0.00%'}</div>
+            <div className="mt-1 min-h-4 truncate text-[10px] text-muted">风控阈值 <span className="font-mono text-secondary">{account.risk_config?.max_drawdown_pct == null ? '—' : `${(account.risk_config.max_drawdown_pct * 100).toFixed(0)}%`}</span></div>
+          </div>
         </section>
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
