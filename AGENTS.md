@@ -79,8 +79,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 6. Parallel Development Workflow
 
-**When the user says development is parallel, isolate the task by default.**
+**When parallel development is detected in the current repository, isolate the task by default. Do not wait for the user to call it out.**
 
+- Before editing, inspect the current worktree, existing Git worktrees, and available task or agent state for parallel activity.
+- Treat another active task, agent, or worktree, and unrelated changes that clearly belong to other work, as evidence of parallel development.
 - Create a dedicated feature branch in a separate Git worktree from the target branch's latest committed HEAD.
 - Never carry, stash, revert, stage, or commit unrelated changes from the target worktree.
 - Verify and commit only the task's files on the feature branch.
