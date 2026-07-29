@@ -480,6 +480,10 @@ def _buy_targets(context) -> None:
     targets = _eligible_targets(context, rankings)
     state["target"] = targets
     held = _held_symbols(context)
+    if not targets and held:
+        state["target"] = held
+        _emit_decision(context, held, reason="hold_without_target")
+        return
     if targets and any(symbol not in targets for symbol in held):
         context.log("七星仍有非目标持仓未卖出，本次不新增仓位")
         _emit_decision(context, targets)
@@ -516,18 +520,18 @@ def _buy_targets(context) -> None:
     _emit_decision(context, targets)
 
 
-def _emit_decision(context, targets: list[str]) -> None:
+def _emit_decision(context, targets: list[str], *, reason: str | None = None) -> None:
     state = _state(context)
     previous = list(state.get("held_before_sell", []))
     if not targets and not previous:
         decision_type = "empty"
-        reason = "no_eligible_target"
+        reason = reason or "no_eligible_target"
     elif targets == previous:
         decision_type = "hold"
-        reason = "hold_top_rank"
+        reason = reason or "hold_top_rank"
     else:
         decision_type = "rebalance"
-        reason = "ranked_target" if targets else "exit_without_target"
+        reason = reason or ("ranked_target" if targets else "exit_without_target")
     day = context.now.date().isoformat()
     decision = {
         "date": day,

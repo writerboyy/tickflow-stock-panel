@@ -207,8 +207,13 @@ def test_sell_keeps_top_ranked_holding_when_previous_nav_is_missing(monkeypatch)
     )
 
     seven._sell_targets(context)
+    context.now = datetime(2026, 7, 20, 13, 10)
+    seven._buy_targets(context)
 
     assert context.orders == []
+    assert context.signals[-1]["decision"] == "hold"
+    assert context.signals[-1]["target_symbols"] == ["513690.SH"]
+    assert context.signals[-1]["reason"] == "hold_without_target"
 
 
 def test_sell_exits_top_ranked_holding_when_premium_exceeds_limit(monkeypatch):
