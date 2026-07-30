@@ -5,10 +5,12 @@ from datetime import datetime, time, timedelta
 from hashlib import sha256
 
 import polars as pl
+import pytest
 
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
+    _assert_performance_small_cap_financial_coverage,
     _aligned_warmup_bars,
     _load_financial_snapshot,
     _load_scheduled_history,
@@ -49,6 +51,12 @@ def daily_row(day, price: float) -> dict:
     }
 
 
+def _write_financial_table(tmp_path, table: str, rows: dict) -> None:
+    path = tmp_path / "financials" / table / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(rows).write_parquet(path)
+
+
 def test_financial_snapshot_uses_latest_announced_records_without_future_data(tmp_path):
     income_path = tmp_path / "financials" / "income" / "part.parquet"
     income_path.parent.mkdir(parents=True)
@@ -87,6 +95,37 @@ def test_financial_snapshot_uses_latest_announced_records_without_future_data(tm
     assert snapshot["X"]["net_income_attributable"] == 9_000_000.0
     assert snapshot["X"]["roe"] == 6.0
     assert snapshot["X"]["roa"] == 5.0
+
+
+def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_path):
+    rows = {
+        "symbol": ["X"],
+        "period_end": ["2024-03-31"],
+        "announce_date": ["2024-04-30"],
+    }
+    for table in ("income", "metrics", "balance_sheet"):
+        _write_financial_table(tmp_path, table, rows)
+
+    _assert_performance_small_cap_financial_coverage(
+        tmp_path,
+        datetime(2024, 7, 1).date(),
+    )
+
+
+def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):
+    rows = {
+        "symbol": ["X"],
+        "period_end": ["2024-06-30"],
+        "announce_date": ["2024-08-30"],
+    }
+    for table in ("income", "metrics", "balance_sheet"):
+        _write_financial_table(tmp_path, table, rows)
+
+    with pytest.raises(ValueError, match="绩优小市值回测需要.*income.*metrics.*balance_sheet"):
+        _assert_performance_small_cap_financial_coverage(
+            tmp_path,
+            datetime(2024, 7, 1).date(),
+        )
 
 
 def test_scheduled_daily_bar_cache_invalidates_when_row_changes():
