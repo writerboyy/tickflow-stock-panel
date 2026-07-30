@@ -17,17 +17,58 @@ from app.free_strategy.paper import (
     _Subscription,
     _append_engine_events,
     _catch_up_bars,
+    _engine_from_state,
     _equity_snapshot,
     _process_bar_rows,
 )
 from app.free_strategy.process import MarketData
 from app.free_strategy.store import PaperAccountStore
+from app.free_strategy.templates import TEMPLATES
 from app.market_time import cn_now
 from app.services.quote_service import QuoteService
 
 
 def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
+
+
+def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp_path):
+    requested_timeframes = []
+
+    def instrument_records(_repo, _asset_type, timeframe):
+        requested_timeframes.append(timeframe)
+        return [{
+            "symbol": "X",
+            "asset_type": "stock",
+            "has_minute": timeframe == "1d",
+        }]
+
+    monkeypatch.setattr("app.free_strategy.process._instrument_records", instrument_records)
+    account_root = tmp_path / "free_strategy_paper" / "paper"
+    account_root.mkdir(parents=True)
+    (account_root / "strategy.py").write_text(
+        TEMPLATES["small_cap_limitup"]["source"],
+        encoding="utf-8",
+    )
+
+    engine = _engine_from_state(
+        {
+            "config": {
+                "market_mode": "bar_1m",
+                "asset_type": "stock",
+                "benchmark_symbol": "X",
+            },
+        },
+        account_root,
+        tmp_path,
+    )
+
+    assert engine.execution_mode == "scheduled"
+    assert engine.universe == ["X"]
+    assert engine.scheduled_times == [
+        "09:05", "10:00", "10:15", "10:30", "14:20", "14:50", "14:55",
+    ]
+    assert requested_timeframes == ["1d"]
 
 
 def test_on_quote_current_and_next_quote_fill_rules():

@@ -558,7 +558,11 @@ def _engine_from_state(
         timeframe=timeframe,
         config=config,
         state=state.get("state", {}),
-        instruments=_instrument_records(repo, asset_type, timeframe),
+        instrument_loader=lambda execution_mode: _instrument_records(
+            repo,
+            asset_type,
+            "1d" if execution_mode == "scheduled" else timeframe,
+        ),
         risk_config=risk,
         callback_deadline=callback_deadline,
     )
