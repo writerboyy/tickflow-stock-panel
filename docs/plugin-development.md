@@ -138,3 +138,42 @@ class MyConfig:
 
 `backend/app/plugins/kaipanla/` 是这类插件的现有参考实现，具体表契约和调度见
 [开盘啦扩展数据接入](./plans/kaipanla-auction.md)。
+
+### EasyTDX 行业维度
+
+EasyTDX 按辅助采集插件接入，不创建 `plugin.yaml`，不会出现在主行情数据源列表。
+上游参考为 [handsomejustin/easy_tdx](https://github.com/handsomejustin/easy_tdx)
+`v1.20.4`（MIT），调用公开接口 `TdxClient.get_security_list_all()`。
+
+安装可选依赖：
+
+```bash
+cd backend
+uv sync --extra easy-tdx
+```
+
+采集结果写入 snapshot 扩展表 `ext_industry_tdx`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `symbol` / `code` | 标准化证券代码 / 6 位代码 |
+| `industry_sw` | EasyTDX 从 `tdxhy.cfg` 读取的申万行业代码 |
+| `industry_tdx` | EasyTDX 从 `tdxhy.cfg` 读取的通达信行业代码 |
+| `source` / `collected_at` | 来源标识 / 采集时间 |
+
+数据边界：
+
+- 只保留两个行业代码。EasyTDX 返回的名称、行情等字段不落库，避免与 TickFlow 重复。
+- 不采集竞价、涨停复盘、龙虎榜和监管数据，避免与开盘啦四张扩展表重复。
+- `get_security_list_all()` 当前只覆盖沪深 A 股；北交所不在快照内。
+- `industry_sw` 保留上游原始代码，不推断行业名称或自行截断层级。
+- 历史简称变更仍读取交易所权威快照 `instrument_name_history`，EasyTDX 不作为替代。
+
+运行时行为：
+
+- 复用主 scheduler，每个工作日 `08:30` 更新；首次启动或快照超过 24 小时时后台补采。
+- 同步 EasyTDX 调用通过工作线程执行，不阻塞应用事件循环。
+- 新快照先写入临时文件，再原子替换 `part.parquet`；空结果不会覆盖上一份有效快照。
+- 未安装依赖、连接失败或上游返回空数据都只记录日志，不影响应用启动和主行情数据源。
+- 依赖行业去重的“涨停基因小市值”策略在无有效快照或候选股缺少 `industry_sw`
+  时明确报不可计算，不会默认改成“每只股一个行业”。

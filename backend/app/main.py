@@ -133,6 +133,17 @@ async def lifespan(app: FastAPI):
         logger.warning("kaipanla collector not started: %s", e)
         app.state.kaipanla_collector = None
 
+    # EasyTDX 只补充 TickFlow/开盘啦均不提供的行业代码维度。
+    try:
+        from app.plugins.easy_tdx import EasyTdxCollector
+
+        easy_tdx_collector = EasyTdxCollector(store.data_dir)
+        easy_tdx_collector.start(app.state.scheduler)
+        app.state.easy_tdx_collector = easy_tdx_collector
+    except Exception as e:  # noqa: BLE001
+        logger.warning("EasyTDX collector not started: %s", e)
+        app.state.easy_tdx_collector = None
+
     # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
     try:
         depth_service.boot_check()
@@ -276,6 +287,9 @@ async def lifespan(app: FastAPI):
     kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
     if kaipanla_collector:
         kaipanla_collector.stop()
+    easy_tdx_collector = getattr(app.state, "easy_tdx_collector", None)
+    if easy_tdx_collector:
+        easy_tdx_collector.stop()
     if app.state.scheduler:
         app.state.scheduler.shutdown(wait=False)
     ps = getattr(app.state, "pull_scheduler", None)

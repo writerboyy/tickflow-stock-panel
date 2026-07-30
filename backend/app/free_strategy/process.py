@@ -13,12 +13,16 @@ from bisect import bisect_left, insort
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
 import polars as pl
+
+from app.services.security_dimensions import (
+    load_industry_dimensions,
+    load_instrument_name_changes,
+)
 
 from .bars import Bar, group_bars
 from .engine import FreeStrategyConfig, FreeStrategyEngine
@@ -121,40 +125,6 @@ def _previous_daily_row(
     return market.daily.get((symbol, dates[index]), {}) if index >= 0 else {}
 
 
-@lru_cache(maxsize=4)
-def _read_instrument_name_changes(
-    path: str,
-    modified_ns: int,
-) -> dict[str, tuple[tuple[date, str, str], ...]]:
-    del modified_ns
-    frame = pl.read_parquet(
-        path,
-        columns=["symbol", "change_date", "before_name", "after_name"],
-    ).sort(["symbol", "change_date"])
-    result: dict[str, list[tuple[date, str, str]]] = {}
-    for symbol, change_date, before_name, after_name in frame.iter_rows():
-        result.setdefault(str(symbol), []).append((
-            change_date,
-            str(before_name or ""),
-            str(after_name or ""),
-        ))
-    return {symbol: tuple(values) for symbol, values in result.items()}
-
-
-def _instrument_name_changes(repo: Any) -> dict[str, tuple[tuple[date, str, str], ...]]:
-    data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
-    if data_dir is None:
-        return {}
-    path = data_dir / "instrument_name_history" / "part.parquet"
-    if not path.exists():
-        return {}
-    try:
-        return _read_instrument_name_changes(str(path), path.stat().st_mtime_ns)
-    except (OSError, pl.exceptions.PolarsError) as exc:
-        logger.debug("股票简称变更快照读取跳过: %s", exc)
-        return {}
-
-
 def _name_on(
     current_name: str,
     changes: tuple[tuple[date, str, str], ...],
@@ -184,22 +154,8 @@ def _instrument_records(
     get_minute_symbols = getattr(repo, "get_minute_symbols", None)
     if timeframe != "1d" and callable(get_minute_symbols):
         minute_symbols = get_minute_symbols(asset_type, start, end)
-    name_changes = _instrument_name_changes(repo) if asset_type == "stock" else {}
-    industries: dict[str, str] = {}
-    if asset_type == "stock":
-        try:
-            industry_path = repo.store.data_dir / "ext_data" / "ext_hy_ths" / "part.parquet"
-            if industry_path.exists():
-                industry_frame = pl.read_parquet(
-                    industry_path,
-                    columns=["symbol", "所属同花顺行业"],
-                )
-                industries = {
-                    str(symbol): str(value or "")
-                    for symbol, value in industry_frame.iter_rows()
-                }
-        except (OSError, pl.exceptions.PolarsError) as exc:
-            logger.debug("小市值行业快照读取跳过: %s", exc)
+    name_changes = load_instrument_name_changes(repo) if asset_type == "stock" else {}
+    industries = load_industry_dimensions(repo) if asset_type == "stock" else {}
     records = []
     for raw in frame.iter_rows(named=True):
         item = dict(raw)
@@ -214,9 +170,10 @@ def _instrument_records(
             }
             for change_date, before_name, after_name in name_changes.get(item["symbol"], ())
         ]
-        industry = industries.get(item["symbol"], "")
-        item["industry"] = industry
-        item["industry_l2"] = industry.split("-")[1] if industry.count("-") >= 1 else industry
+        if asset_type == "stock":
+            industry = industries.get(item["symbol"], {})
+            item["industry_sw"] = industry.get("industry_sw", "")
+            item["industry_tdx"] = industry.get("industry_tdx", "")
         records.append(item)
     return records
 
@@ -230,7 +187,7 @@ def _load_market_data(
 ) -> MarketData:
     market = MarketData()
     if asset_type == "stock":
-        market.name_changes.update(_instrument_name_changes(repo))
+        market.name_changes.update(load_instrument_name_changes(repo))
     get_daily = getattr(repo, "get_daily_asset", None)
     if callable(get_daily):
         columns = [

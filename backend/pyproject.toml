@@ -61,6 +61,11 @@ desktop = [
     "pywebview>=5.0",
 ]
 
+# EasyTDX 仅用于补充申万/通达信行业代码，不作为主行情数据源。
+easy-tdx = [
+    "easy-tdx==1.20.4",
+]
+
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

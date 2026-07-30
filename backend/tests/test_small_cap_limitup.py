@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app.free_strategy.bars import Bar
 from app.free_strategy.small_cap_limitup import (
     INITIAL_POOL_SIZE,
@@ -10,6 +12,8 @@ from app.free_strategy.small_cap_limitup import (
     _history_limit_flags,
     _is_historical_st,
     _is_weekly_rebalance_day,
+    _get_stock_list,
+    _select_industries,
     _turnover_sell_symbols,
 )
 
@@ -492,3 +496,36 @@ def test_afternoon_scope_uses_daily_market_cap_pool_instead_of_full_market_minut
     assert len(symbols) == INITIAL_POOL_SIZE + 1
     assert records[-1]["symbol"] not in symbols
     assert [count for _symbols, count in history_calls] == [1, ST_STATUS_DAYS]
+
+
+def test_select_industries_deduplicates_with_easy_tdx_sw_code():
+    records = [
+        {"symbol": "A", "industry_sw": "X480101"},
+        {"symbol": "B", "industry_sw": "X480101"},
+        {"symbol": "C", "industry_sw": "X490101"},
+    ]
+
+    assert _select_industries(["A", "B", "C"], records) == ["A", "C"]
+
+
+def test_select_industries_fails_closed_when_ranked_symbol_has_no_sw_industry():
+    records = [
+        {"symbol": "A", "industry_sw": "X480101"},
+        {"symbol": "B", "industry_sw": ""},
+    ]
+
+    with pytest.raises(ValueError, match="EasyTDX 申万行业"):
+        _select_industries(["A", "B"], records)
+
+
+def test_stock_selection_is_not_computable_without_industry_snapshot():
+    context = SimpleNamespace(
+        state={"small_cap_limitup": {
+            "stock_list_cache_date": None,
+            "stock_list_cache": [],
+        }},
+        instruments=lambda _asset: [{"symbol": "000001.SZ"}],
+    )
+
+    with pytest.raises(ValueError, match="EasyTDX 申万行业快照"):
+        _get_stock_list(context)

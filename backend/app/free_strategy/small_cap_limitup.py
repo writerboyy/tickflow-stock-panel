@@ -17,6 +17,7 @@ NO_TRADING_MONTHS = {1, 4}
 STOPLOSS_LIMIT = 0.91
 MARKET_STOPLOSS_LIMIT = 0.93
 TRADE_CAPITAL_LIMIT = 130_000.0
+INDUSTRY_DATA_ERROR = "涨停基因小市值策略缺少 EasyTDX 申万行业快照，无法执行行业去重"
 
 
 def _state(context) -> dict[str, Any]:
@@ -550,13 +551,18 @@ def _select_industries(
     records: list[dict[str, Any]],
 ) -> list[str]:
     industry_by_symbol = {
-        str(item.get("symbol")): str(item.get("industry_l2") or item.get("industry") or "")
+        str(item.get("symbol")): str(item.get("industry_sw") or "").strip()
         for item in records
     }
+    missing = [symbol for symbol in ranked if not industry_by_symbol.get(symbol)]
+    if missing:
+        raise ValueError(
+            f"{INDUSTRY_DATA_ERROR}；缺失标的: {', '.join(missing[:3])}"
+        )
     selected: list[str] = []
     seen: set[str] = set()
     for symbol in ranked:
-        industry = industry_by_symbol.get(symbol) or symbol
+        industry = industry_by_symbol[symbol]
         if industry in seen:
             continue
         seen.add(industry)
@@ -569,6 +575,8 @@ def _select_industries(
 def _get_stock_list(context) -> list[str]:
     state = _state(context)
     records = _instrument_records(context)
+    if not any(str(item.get("industry_sw") or "").strip() for item in records):
+        raise ValueError(INDUSTRY_DATA_ERROR)
     previous_date = _previous_trading_date(context, records)
     cache_date = previous_date.isoformat()
     if state.get("stock_list_cache_date") == cache_date:
