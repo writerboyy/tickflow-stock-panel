@@ -85,13 +85,13 @@ def test_fetch_industry_rows_uses_easy_tdx_public_api(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "easy_tdx", SimpleNamespace(TdxClient=FakeClient))
 
-    assert fetch_industry_rows(timeout=15.0) == [{
+    assert fetch_industry_rows() == [{
         "symbol": "600000.SH",
         "code": "600000",
         "industry_sw": "X480101",
         "industry_tdx": "T01",
     }]
-    assert calls == [(15.0, 0)]
+    assert calls == [(5.0, 0)]
 
 
 def test_snapshot_replace_is_atomic_and_empty_rows_preserve_last_valid_data(tmp_path):

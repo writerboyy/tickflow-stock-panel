@@ -47,7 +47,7 @@ def normalize_industry_rows(rows: Iterable[Mapping[str, Any]]) -> list[dict[str,
     return result
 
 
-def fetch_industry_rows(timeout: float = 30.0) -> list[dict[str, str]]:
+def fetch_industry_rows(timeout: float = 5.0) -> list[dict[str, str]]:
     """Fetch the public EasyTDX security list without importing it at app startup."""
     from easy_tdx import TdxClient
 
