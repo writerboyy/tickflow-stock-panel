@@ -1115,6 +1115,54 @@ export interface FreeBacktestRunSummary {
   metadata?: Record<string, any>
 }
 
+export interface EtfDataIssue {
+  id: string
+  type: 'daily_missing' | 'minute_gap' | 'split_rounding' | 'factor_mismatch'
+  symbol: string
+  start: string
+  end: string
+  severity: 'error' | 'warning'
+  title: string
+  detail: string
+  action: string
+  missing_days: number
+  estimated_rows: number
+  requires_replace: boolean
+}
+
+export interface EtfDataScan {
+  scan_id: string | null
+  status: 'healthy' | 'issues' | 'not_applicable'
+  checked_at?: string
+  start?: string
+  end?: string
+  symbols?: string[]
+  symbol_count: number
+  require_minute?: boolean
+  verify_axdata?: boolean
+  execution_mode?: 'full_bar' | 'scheduled'
+  universe_source?: string
+  source?: { available: boolean | null; url: string; message: string }
+  issues: EtfDataIssue[]
+}
+
+export interface EtfRepairRecord {
+  id: string
+  status: 'succeeded' | 'failed'
+  started_at: string
+  source: string
+  scan_id: string
+  symbols: string[]
+  start: string
+  end: string
+  issue_types: string[]
+  issues_repaired?: number
+  daily_rows?: number
+  minute_rows?: number
+  replace_existing: boolean
+  error?: string
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
@@ -1138,6 +1186,13 @@ export const api = {
     request<{ job_id: string; name: string }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   deleteFreeBacktest: (jobId: string) =>
     request<{ ok: boolean }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
+  freeBacktestDataHealth: (
+    payload: Pick<FreeBacktestConfig, 'strategy_id' | 'asset_type' | 'timeframe'>
+      & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>
+      & { persist_scan?: boolean; verify_axdata?: boolean },
+  ) => request<EtfDataScan>('/api/free-strategies/backtest/data-health', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
   paperAccounts: () => request<{ accounts: PaperAccount[] }>('/api/free-strategies/paper/accounts'),
   paperStatus: () => request<PaperStatus>('/api/free-strategies/paper/status'),
   createPaperAccount: (payload: CreatePaperAccount) =>
@@ -1579,6 +1634,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ start_date: startDate }),
     }),
+  checkEtfData: (payload: {
+    symbols: string[]
+    start: string
+    end: string
+    require_minute: boolean
+    verify_axdata: boolean
+    persist_scan?: boolean
+  }) => request<EtfDataScan>('/api/kline/etf-data/check', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  repairEtfData: (payload: { scan_id: string; issue_ids: string[]; replace_existing: boolean }) =>
+    request<{ status: string; job_id: string }>('/api/kline/etf-data/repair', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  etfRepairHistory: () => request<{ records: EtfRepairRecord[] }>('/api/kline/etf-data/repairs'),
   rebuildEnriched: () =>
     request<{ status: string; job_id: string }>('/api/kline/rebuild_enriched', {
       method: 'POST',

@@ -52,6 +52,40 @@ def test_backtest_request_can_leave_universe_to_strategy_source(tmp_path):
     assert payload["symbols"] == []
 
 
+def test_data_health_uses_saved_strategy_universe(monkeypatch, tmp_path):
+    source = """def initialize(context):
+    context.set_universe([\"510300.SH\"])
+
+def on_bar(context, bars):
+    pass
+"""
+    strategy = FreeStrategyStore(tmp_path).save(None, "ETF预检", source, {})
+    captured = {}
+    monkeypatch.setattr(
+        "app.free_strategy.process._instrument_records",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "app.services.etf_data_repair.inspect_etf_data",
+        lambda _repo, symbols, *_args, **kwargs: captured.update(symbols=symbols, kwargs=kwargs) or {
+            "status": "healthy", "issues": [], "symbol_count": len(symbols), "scan_id": None,
+        },
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.state.repo = SimpleNamespace()
+    app.include_router(router)
+
+    response = TestClient(app).post("/api/free-strategies/backtest/data-health", json={
+        "strategy_id": strategy["id"], "asset_type": "etf", "timeframe": "1m",
+        "start": "2026-07-20", "end": "2026-07-21",
+    })
+
+    assert response.status_code == 200
+    assert captured["symbols"] == ["510300.SH"]
+    assert captured["kwargs"]["require_minute"] is True
+
+
 def test_job_payload_keeps_legacy_saved_universe_as_fallback(tmp_path):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         datastore=SimpleNamespace(data_dir=tmp_path),

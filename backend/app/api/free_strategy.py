@@ -144,6 +144,11 @@ class BacktestWrite(BaseModel):
     benchmark_symbol: str = "510300.SH"
 
 
+class DataHealthWrite(BacktestWrite):
+    persist_scan: bool = False
+    verify_axdata: bool = False
+
+
 class PaperRiskWrite(BaseModel):
     max_symbol_exposure_pct: float = Field(default=1.0, gt=0, le=1.0)
     daily_loss_pct: float = Field(default=0.10, gt=0, le=0.10)
@@ -336,7 +341,9 @@ def delete_strategy(strategy_id: str, request: Request):
 def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request) -> dict[str, Any]:
     end = req.end or date.today()
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
-    config = req.model_dump(exclude={"strategy_id", "symbols", "timeframe", "start", "end"})
+    config = req.model_dump(exclude={
+        "strategy_id", "symbols", "timeframe", "start", "end", "persist_scan", "verify_axdata",
+    })
     legacy_symbols = req.symbols or strategy.get("config", {}).get("symbols", [])
     source_digest = sha256(strategy["source"].encode("utf-8")).hexdigest()
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
@@ -344,6 +351,60 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
             "source_revision": strategy.get("revision"), "strategy_source_sha256": source_digest, "symbols": legacy_symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
             "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
+
+
+@router.post("/backtest/data-health")
+async def backtest_data_health(req: DataHealthWrite, request: Request):
+    """Resolve the saved strategy universe, then inspect its ETF backtest data."""
+    if req.asset_type != "etf":
+        return {"status": "not_applicable", "issues": [], "symbol_count": 0, "scan_id": None}
+    try:
+        strategy = _strategy_store(request).get(req.strategy_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="量化策略不存在") from None
+
+    from datetime import time
+
+    from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+    from app.free_strategy.process import _instrument_records, _resolve_symbols
+    from app.services.etf_data_repair import inspect_etf_data
+
+    payload = _job_payload(req, strategy, request)
+    repo = request.app.state.repo
+    try:
+        config = FreeStrategyConfig(**payload["config"])
+        instruments = _instrument_records(
+            repo,
+            payload["asset_type"],
+            payload["timeframe"],
+            date.fromisoformat(payload["start"]),
+            date.fromisoformat(payload["end"]),
+        )
+        engine = FreeStrategyEngine(
+            strategy["source"], payload["timeframe"], config, instruments=instruments,
+        )
+        symbols, universe_source = _resolve_symbols(engine, payload)
+        scheduled_intraday = engine.execution_mode == "scheduled" and any(
+            time.fromisoformat(value) < time(15, 0) for value in engine.scheduled_times
+        )
+        result = await asyncio.to_thread(
+            inspect_etf_data,
+            repo,
+            symbols,
+            date.fromisoformat(payload["start"]),
+            date.fromisoformat(payload["end"]),
+            require_minute=req.timeframe != "1d" or scheduled_intraday,
+            verify_axdata=req.verify_axdata,
+            axdata_url=settings.axdata_url,
+            persist_scan=req.persist_scan,
+        )
+        return {
+            **result,
+            "execution_mode": engine.execution_mode,
+            "universe_source": universe_source,
+        }
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/backtest")

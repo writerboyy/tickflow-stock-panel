@@ -5,7 +5,9 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
+  CheckCircle2,
   CirclePlay,
+  CircleAlert,
   Code2,
   History,
   LoaderCircle,
@@ -20,6 +22,7 @@ import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
+import { QK } from '@/lib/queryKeys'
 import { FreeStrategyResult } from './FreeStrategyResult'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
@@ -181,6 +184,19 @@ export function FreeStrategy() {
   const draft = useMemo<EditorSnapshot>(() => ({ name, source, config }), [name, source, config])
   const dirty = baseline === null || JSON.stringify(draft) !== JSON.stringify(baseline)
   const detailLoading = Boolean(selectedId) && (detail.isFetching || detail.data?.id !== selectedId)
+  const dataHealth = useQuery({
+    queryKey: QK.freeDataHealth(config.strategy_id, config.start, config.end, config.timeframe),
+    queryFn: () => api.freeBacktestDataHealth({
+      strategy_id: config.strategy_id,
+      asset_type: config.asset_type,
+      timeframe: config.timeframe,
+      start: config.start,
+      end: config.end,
+    }),
+    enabled: Boolean(config.strategy_id) && config.asset_type === 'etf' && !dirty,
+    staleTime: 60_000,
+    retry: false,
+  })
 
   useEffect(() => () => sourceRef.current?.close(), [])
   useEffect(() => {
@@ -287,6 +303,9 @@ export function FreeStrategy() {
       setError('请先保存策略，生成源码快照后再运行')
       return
     }
+    if (config.asset_type === 'etf') {
+      await dataHealth.refetch()
+    }
     sourceRef.current?.close()
     jobRef.current = null
     setResult(null); setError(''); setProgress('正在创建回测任务...'); setProgressPct(0); setRunningMode(''); setRunning(true); setSelectedRunId(''); setWorkspaceView('backtests'); setMobileRunDetail(true)
@@ -318,6 +337,17 @@ export function FreeStrategy() {
   const createPaper = () => {
     if (!config.strategy_id) { setError('请先保存策略'); return }
     navigate(`/paper-trading?create=1&strategy_id=${encodeURIComponent(config.strategy_id)}`)
+  }
+
+  const openDataRepair = () => {
+    const query = new URLSearchParams({
+      repair: 'etf',
+      strategy_id: config.strategy_id,
+      start: config.start || '',
+      end: config.end || '',
+      timeframe: config.timeframe,
+    })
+    navigate(`/data?${query.toString()}`)
   }
 
   const openRename = (target: RenameTarget) => {
@@ -436,6 +466,9 @@ export function FreeStrategy() {
           <label>手续费<input type="number" step="0.0001" className={INPUT} value={config.fees_pct} onChange={event => setConfig({ ...config, fees_pct: Number(event.target.value) })} /></label><label>滑点(bps)<input type="number" className={INPUT} value={config.slippage_bps} onChange={event => setConfig({ ...config, slippage_bps: Number(event.target.value) })} /></label>
           <label>结算<select className={INPUT} value={config.settlement} onChange={event => setConfig({ ...config, settlement: event.target.value as FreeBacktestConfig['settlement'] })}><option value="t1">T+1（默认）</option><option value="t0">T+0</option></select></label><label>成交<select className={INPUT} value={config.fill_policy} onChange={event => setConfig({ ...config, fill_policy: event.target.value as FreeBacktestConfig['fill_policy'] })}><option value="next_open">下一根开盘</option><option value="close">当前收盘</option></select></label>
         </div>
+        {config.asset_type === 'etf' && config.strategy_id && !dirty ? <div className="mt-3 border-t border-border pt-3 text-[11px]">
+          {dataHealth.isFetching ? <div className="inline-flex items-center gap-1.5 text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在检查回测数据…</div> : dataHealth.isError ? <div className="flex items-center justify-between gap-2 text-muted"><span className="inline-flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" />数据预检暂不可用，不阻止回测</span><button type="button" onClick={openDataRepair} className="text-accent hover:underline">前往检查</button></div> : dataHealth.data?.status === 'issues' ? <div className="flex items-center justify-between gap-2 text-warning"><span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3.5 w-3.5" />发现 {dataHealth.data.issues.length} 个数据问题，可能影响结果</span><button type="button" onClick={openDataRepair} className="shrink-0 text-accent hover:underline">查看并修复</button></div> : dataHealth.data?.status === 'healthy' ? <div className="inline-flex items-center gap-1.5 text-success"><CheckCircle2 className="h-3.5 w-3.5" />回测数据完整 · 已检查 {dataHealth.data.symbol_count} 只 ETF</div> : null}
+        </div> : null}
         {error ? <div className="mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
         <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading} title={dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
         {progress ? <div className="mt-2 text-[11px] text-muted">{progress}</div> : null}
