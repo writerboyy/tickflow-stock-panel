@@ -10,7 +10,7 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_EVEN
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +36,7 @@ def _decimal_places(value: Decimal) -> int:
 
 def _displayed(actual: Any, expected: Decimal) -> Decimal:
     quantum = Decimal(1).scaleb(-_decimal_places(expected))
-    return Decimal(str(actual)).quantize(quantum, rounding=ROUND_HALF_UP)
+    return Decimal(str(actual)).quantize(quantum, rounding=ROUND_HALF_EVEN)
 
 
 def _read_reference_text(path: Path) -> str:

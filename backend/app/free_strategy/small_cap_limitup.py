@@ -87,8 +87,36 @@ def _held_and_candidates(context, _timestamp: datetime) -> list[str]:
     ]))
 
 
+def _is_weekly_rebalance_day(context, timestamp: datetime | None = None) -> bool:
+    current = timestamp or context.now
+    state = _state(context)
+    cache = state.get("weekly_rebalance_check", {})
+    if cache.get("date") == current.date().isoformat():
+        return bool(cache.get("value"))
+    week_start = current.date() - timedelta(days=current.weekday())
+    symbols = [
+        str(item.get("symbol") or "")
+        for item in _instrument_records(context)
+        if item.get("symbol")
+    ]
+    symbols.sort(key=lambda symbol: (symbol != "000001.SZ", symbol))
+    history = context.history_batch(symbols[:16], count=5, timeframe="1d")
+    trading_days = {
+        bar.date
+        for values in history.values()
+        for bar in values
+        if week_start <= bar.date < current.date()
+    }
+    result = len(trading_days) == 1
+    state["weekly_rebalance_check"] = {
+        "date": current.date().isoformat(),
+        "value": result,
+    }
+    return result
+
+
 def _weekly_selection_symbols(context, timestamp: datetime) -> list[str]:
-    if timestamp.weekday() == 1 and timestamp.month not in NO_TRADING_MONTHS:
+    if _is_weekly_rebalance_day(context, timestamp) and timestamp.month not in NO_TRADING_MONTHS:
         return list(dict.fromkeys([
             *_held_symbols(context),
             *_selection_pool_symbols(context),
@@ -117,6 +145,7 @@ def initialize(context) -> None:
         "stock_list_cache": [],
         "selection_scope_key": None,
         "selection_scope_symbols": [],
+        "weekly_rebalance_check": {},
         "trade_capital_limit": TRADE_CAPITAL_LIMIT,
         "daily_reports": [],
         "decision": {},
@@ -284,19 +313,27 @@ def _selection_pool_symbols(context) -> list[str]:
             continue
         candidates.append((previous_close * total_shares, symbol))
     candidates.sort(key=lambda value: (value[0], value[1]))
+    has_name_history = {
+        str(item["symbol"]): bool(item.get("name_changes"))
+        for item in eligible_records
+    }
     symbols: list[str] = []
     for offset in range(0, len(candidates), INITIAL_POOL_SIZE):
         batch = [
             symbol
             for _market_cap, symbol in candidates[offset:offset + INITIAL_POOL_SIZE]
         ]
-        status_history = context.history_batch(
-            batch,
-            count=ST_STATUS_DAYS,
-            timeframe="1d",
+        status_symbols = [symbol for symbol in batch if not has_name_history[symbol]]
+        status_history = (
+            context.history_batch(
+                status_symbols,
+                count=ST_STATUS_DAYS,
+                timeframe="1d",
+            )
+            if status_symbols else {}
         )
         for symbol in batch:
-            if _is_historical_st(status_history.get(symbol, [])):
+            if not has_name_history[symbol] and _is_historical_st(status_history.get(symbol, [])):
                 continue
             symbols.append(symbol)
             if len(symbols) == INITIAL_POOL_SIZE:
@@ -318,12 +355,17 @@ def _afternoon_selection_symbols(context, _timestamp: datetime) -> list[str]:
 def _eligible_market_records(context) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     records = _instrument_records(context)
     bars = _current_bars(context)
+    state = _state(context)
+    selection_scope_ready = state.get("selection_scope_key") is not None
+    selection_scope = set(state.get("selection_scope_symbols", []))
     previous_date = _previous_trading_date(context, records)
     cutoff = previous_date - timedelta(days=375)
     held = set(_held_symbols(context))
     candidates: list[tuple[float, str, dict[str, Any], Any]] = []
     for item in records:
         symbol = str(item.get("symbol") or "")
+        if selection_scope_ready and symbol not in selection_scope:
+            continue
         code = symbol.split(".", 1)[0]
         name = _name_on(item, previous_date)
         listing_date = _parse_date(item.get("listing_date"))
@@ -355,13 +397,21 @@ def _eligible_market_records(context) -> tuple[list[dict[str, Any]], dict[str, A
     result: list[dict[str, Any]] = []
     for offset in range(0, len(candidates), INITIAL_POOL_SIZE):
         batch = candidates[offset:offset + INITIAL_POOL_SIZE]
-        status_history = context.history_batch(
-            [symbol for _market_cap, symbol, _item, _bar in batch],
-            count=ST_STATUS_DAYS,
-            timeframe="1d",
+        status_symbols = [
+            symbol
+            for _market_cap, symbol, item, _bar in batch
+            if not item.get("name_changes")
+        ]
+        status_history = (
+            context.history_batch(
+                status_symbols,
+                count=ST_STATUS_DAYS,
+                timeframe="1d",
+            )
+            if status_symbols else {}
         )
         for market_cap, symbol, item, _bar in batch:
-            if _is_historical_st(status_history.get(symbol, [])):
+            if not item.get("name_changes") and _is_historical_st(status_history.get(symbol, [])):
                 continue
             result.append({
                 **item,
@@ -373,7 +423,51 @@ def _eligible_market_records(context) -> tuple[list[dict[str, Any]], dict[str, A
     return result, bars
 
 
-def _history_limit_flags(values: list[Any]) -> list[bool]:
+def _historical_st_mask(values: list[Any]) -> list[bool]:
+    result = [False] * len(values)
+    state = False
+    observations = 0
+    pending_start: int | None = None
+    last_normal_index: int | None = None
+    last_normal_date: date | None = None
+    for index, bar in enumerate(values):
+        regime = _price_limit_regime(bar)
+        if regime is False:
+            state = False
+            observations = 0
+            pending_start = None
+            last_normal_index = index
+            last_normal_date = getattr(bar, "date", None)
+        elif regime is True:
+            if observations == 0:
+                pending_start = index
+            observations += 1
+            if not state and observations >= 2:
+                state = True
+                start = pending_start if pending_start is not None else index
+                for pending_index in range(start, index + 1):
+                    result[pending_index] = True
+        elif (
+            not state
+            and last_normal_index is not None
+            and last_normal_date is not None
+            and last_normal_date.month == 4
+            and last_normal_date.day >= 20
+            and index - last_normal_index >= 40
+        ):
+            state = True
+            for pending_index in range(last_normal_index + 1, index + 1):
+                result[pending_index] = True
+        if state:
+            result[index] = True
+    return result
+
+
+def _history_limit_flags(
+    values: list[Any],
+    *,
+    infer_historical_st: bool = True,
+) -> list[bool]:
     five_pct_flags = [
         (
             (previous_close := float(getattr(bar, "previous_close", 0.0) or 0.0)) > 0
@@ -386,9 +480,9 @@ def _history_limit_flags(values: list[Any]) -> list[bool]:
         )
         for bar in values
     ]
-    use_historical_st_limits = _is_historical_st(values) or any(
-        five_pct_flags[index] and five_pct_flags[index - 1]
-        for index in range(1, len(five_pct_flags))
+    historical_st = (
+        _historical_st_mask(values)
+        if infer_historical_st else [False] * len(values)
     )
     result = []
     for index, bar in enumerate(values):
@@ -396,7 +490,7 @@ def _history_limit_flags(values: list[Any]) -> list[bool]:
         previous_close = float(getattr(bar, "previous_close", 0.0) or 0.0)
         limit_up = getattr(bar, "limit_up", None)
         is_limit = _is_limit_up(bar) or (
-            use_historical_st_limits and five_pct_flags[index]
+            historical_st[index] and five_pct_flags[index]
         )
         if limit_up is None and previous_close > 0:
             is_limit = any(
@@ -415,11 +509,16 @@ def _history_limit_flags(values: list[Any]) -> list[bool]:
 def _rank_history_candidates(
     history: dict[str, list[Any]],
     bars: dict[str, Any],
+    reliable_limit_symbols: set[str] | None = None,
 ) -> list[str]:
+    reliable = reliable_limit_symbols or set()
     eligible: list[tuple[str, int, list[Any], list[bool]]] = []
     for symbol, values in history.items():
         values = list(values)[-HISTORY_DAYS:]
-        flags = _history_limit_flags(values)
+        flags = _history_limit_flags(
+            values,
+            infer_historical_st=symbol not in reliable,
+        )
         recent = flags[-LIANBAN_DAYS:]
         if not any(recent[index] and recent[index - 1] for index in range(1, len(recent))):
             continue
@@ -477,7 +576,12 @@ def _get_stock_list(context) -> list[str]:
     initial, bars = _eligible_market_records(context)
     symbols = [str(item["symbol"]) for item in initial]
     history = context.history_batch(symbols, count=HISTORY_DAYS, timeframe="1d")
-    ranked = _rank_history_candidates(history, bars)
+    reliable_limit_symbols = {
+        str(item["symbol"])
+        for item in initial
+        if item.get("name_changes")
+    }
+    ranked = _rank_history_candidates(history, bars, reliable_limit_symbols)
     final = _select_industries(ranked, initial)
     state["stock_list_cache_date"] = cache_date
     state["stock_list_cache"] = list(final)
@@ -544,7 +648,7 @@ def _buy_security(
 
 
 def _weekly_sell(context) -> None:
-    if context.now.weekday() != 1 or _state(context).get("no_trading_today"):
+    if not _is_weekly_rebalance_day(context) or _state(context).get("no_trading_today"):
         return
     state = _state(context)
     state["not_buy_again"] = []
@@ -562,7 +666,7 @@ def _weekly_sell(context) -> None:
 
 
 def _weekly_buy(context) -> None:
-    if context.now.weekday() != 1 or _state(context).get("no_trading_today"):
+    if not _is_weekly_rebalance_day(context) or _state(context).get("no_trading_today"):
         return
     state = _state(context)
     state["not_buy_again"] = []

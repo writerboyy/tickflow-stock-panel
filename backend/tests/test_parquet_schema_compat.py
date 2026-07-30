@@ -120,3 +120,50 @@ def test_etf_daily_batch_tolerates_added_quote_ts(tmp_path):
     assert frame.height == 2
     assert frame["date"].to_list() == [date(2026, 7, 28), date(2026, 7, 29)]
     assert frame["quote_ts"].to_list() == [None, 1785295800000]
+
+
+def test_stock_daily_queries_read_only_requested_date_partitions(tmp_path, monkeypatch):
+    base = tmp_path / "kline_daily_enriched"
+    first = base / "date=2026-07-28" / "part.parquet"
+    second = base / "date=2026-07-29" / "part.parquet"
+    unrelated = base / "date=2026-07-30" / "part.parquet"
+    for path in (first, second, unrelated):
+        path.parent.mkdir(parents=True)
+
+    common = {
+        "symbol": ["600000.SH"],
+        "open": [10.0],
+        "high": [10.5],
+        "low": [9.8],
+        "close": [10.2],
+        "volume": [1000.0],
+        "amount": [10200.0],
+        "raw_close": [10.2],
+        "raw_high": [10.5],
+        "raw_low": [9.8],
+    }
+    pl.DataFrame({**common, "date": [date(2026, 7, 28)]}).write_parquet(first)
+    pl.DataFrame({**common, "date": [date(2026, 7, 29)]}).write_parquet(second)
+    unrelated.write_bytes(b"")
+
+    scanned = []
+    original_scan = scan_enriched_parquet
+
+    def recording_scan(source, **kwargs):
+        scanned.append([str(path) for path in source])
+        return original_scan(source, **kwargs)
+
+    monkeypatch.setattr("app.tickflow.repository.scan_enriched_parquet", recording_scan)
+    repo = KlineRepository(DataStore(tmp_path))
+
+    symbol_frame = repo._scan_daily_symbol(
+        "600000.SH", date(2026, 7, 28), date(2026, 7, 29), None,
+    )
+    batch_frame = repo._scan_daily_batch(
+        ["600000.SH"], date(2026, 7, 28), date(2026, 7, 29), None,
+    )
+
+    expected = [str(first), str(second)]
+    assert symbol_frame["date"].to_list() == [date(2026, 7, 28), date(2026, 7, 29)]
+    assert batch_frame["date"].to_list() == [date(2026, 7, 28), date(2026, 7, 29)]
+    assert scanned == [expected, expected]

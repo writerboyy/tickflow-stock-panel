@@ -86,6 +86,75 @@ def test_scheduled_limits_use_name_valid_on_historical_date():
     assert risk_warning is not None and risk_warning.limit_up == 10.5
 
 
+def test_scheduled_stock_split_uses_share_change_instead_of_adjustment_scale():
+    previous_day = datetime(2026, 5, 28).date()
+    split_day = datetime(2026, 5, 29).date()
+    market = MarketData()
+    previous = {
+        **daily_row(previous_day, 16.1697146989273),
+        "raw_close": 19.7,
+        "total_shares": 190_182_182.0,
+    }
+    current = {
+        **daily_row(split_day, 16.5),
+        "raw_close": 16.5,
+        "total_shares": 228_218_618.0,
+    }
+    _set_daily_row(market, "003020.SZ", previous_day, previous)
+    _set_daily_row(market, "003020.SZ", split_day, current)
+
+    bar = _scheduled_daily_bar(market, "003020.SZ", split_day, "stock")
+
+    assert bar is not None and bar.split_ratio == 1.2
+    assert bar.cash_dividend == 0.3
+
+
+def test_scheduled_stock_cash_dividend_does_not_change_position_quantity():
+    previous_day = datetime(2026, 5, 28).date()
+    dividend_day = datetime(2026, 5, 29).date()
+    market = MarketData()
+    previous = {
+        **daily_row(previous_day, 9.8),
+        "raw_close": 10.0,
+        "total_shares": 100_000_000.0,
+    }
+    current = {
+        **daily_row(dividend_day, 9.8),
+        "raw_close": 9.8,
+        "total_shares": 100_000_000.0,
+    }
+    _set_daily_row(market, "X", previous_day, previous)
+    _set_daily_row(market, "X", dividend_day, current)
+
+    bar = _scheduled_daily_bar(market, "X", dividend_day, "stock")
+
+    assert bar is not None and bar.split_ratio == 1.0
+    assert bar.cash_dividend == 0.2
+
+
+def test_scheduled_stock_small_share_increase_is_not_a_distribution():
+    previous_day = datetime(2026, 5, 28).date()
+    issuance_day = datetime(2026, 5, 29).date()
+    market = MarketData()
+    previous = {
+        **daily_row(previous_day, 10.0),
+        "raw_close": 10.0,
+        "total_shares": 100_000_000.0,
+    }
+    current = {
+        **daily_row(issuance_day, 10.0),
+        "raw_close": 10.0,
+        "total_shares": 100_500_000.0,
+    }
+    _set_daily_row(market, "X", previous_day, previous)
+    _set_daily_row(market, "X", issuance_day, current)
+
+    bar = _scheduled_daily_bar(market, "X", issuance_day, "stock")
+
+    assert bar is not None and bar.split_ratio == 1.0
+    assert bar.cash_dividend == 0.0
+
+
 def test_minute_warmup_daily_prices_align_to_minute_adjustment_scale():
     market = MarketData(
         daily={
@@ -454,6 +523,12 @@ def test_scheduled_backtest_queries_events_without_full_minute_replay(monkeypatc
     class FakeRepository:
         def __init__(self, _store):
             pass
+
+        def get_instruments_asset(self, _asset_type):
+            return pl.DataFrame({"symbol": ["X"]})
+
+        def get_minute_symbols(self, *_args):
+            raise AssertionError("scheduled mode must not scan interval minute coverage")
 
         def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
             if symbol != "X":

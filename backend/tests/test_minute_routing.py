@@ -21,6 +21,7 @@ import pytest
 from app.plugins.stocksdk import provider as sp
 from app.plugins.stocksdk.provider import StockSDKProvider
 from app.services import kline_sync
+from app.tickflow.repository import DataStore, KlineRepository
 
 
 # ---------- 辅助 ----------
@@ -117,6 +118,58 @@ def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):
 
     assert written == 1
     assert stored["symbol"].to_list() == ["510300.SH"]
+
+
+def test_scheduled_minute_queries_read_only_explicit_date_partitions(tmp_path, monkeypatch):
+    rows = pl.DataFrame({
+        "symbol": ["600519.SH", "600519.SH", "600519.SH", "000001.SZ"],
+        "datetime": [
+            datetime(2026, 1, 15, 9, 59),
+            datetime(2026, 1, 15, 10, 0),
+            datetime(2026, 1, 15, 10, 1),
+            datetime(2026, 1, 15, 10, 0),
+        ],
+        "open": [99.0, 100.0, 101.0, 10.0],
+        "high": [99.0, 100.0, 101.0, 10.0],
+        "low": [99.0, 100.0, 101.0, 10.0],
+        "close": [99.0, 100.0, 101.0, 10.0],
+        "volume": [40.0, 60.0, 100.0, 100.0],
+        "amount": [3_960.0, 6_000.0, 10_100.0, 1_000.0],
+    })
+    target = tmp_path / "kline_minute" / "date=2026-01-15" / "part.parquet"
+    target.parent.mkdir(parents=True)
+    rows.write_parquet(target)
+    repo = KlineRepository(DataStore(tmp_path))
+    unrelated = tmp_path / "kline_minute" / "date=2026-01-16" / "part.parquet"
+    unrelated.parent.mkdir(parents=True)
+    unrelated.write_bytes(b"")
+
+    scanned: list[list[str]] = []
+    original_scan = pl.scan_parquet
+
+    def recording_scan(source, *args, **kwargs):
+        values = [str(item) for item in source] if isinstance(source, list) else [str(source)]
+        scanned.append(values)
+        return original_scan(source, *args, **kwargs)
+
+    monkeypatch.setattr(pl, "scan_parquet", recording_scan)
+
+    available = repo.get_minute_symbols("stock", date(2026, 1, 15), date(2026, 1, 15))
+    snapshot = repo.get_minute_snapshot(
+        ["600519.SH"], datetime(2026, 1, 15, 10, 0, 30), "stock",
+    )
+    following = repo.get_minute_next(
+        ["600519.SH"],
+        datetime(2026, 1, 15, 10, 0),
+        datetime(2026, 1, 15, 10, 2),
+        "stock",
+    )
+
+    assert available == {"600519.SH", "000001.SZ"}
+    assert snapshot["close"].to_list() == [100.0]
+    assert snapshot["session_volume"].to_list() == [100.0]
+    assert following["close"].to_list() == [101.0]
+    assert scanned == [[str(target)], [str(target)], [str(target)]]
 
 
 # ---------- 测试 1: 自定义源成功返回 1 分钟 K ----------

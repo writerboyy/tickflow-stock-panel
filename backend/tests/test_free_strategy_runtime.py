@@ -28,14 +28,15 @@ def test_minute_aggregation_respects_lunch_boundary():
 
 def test_minute_aggregation_preserves_raw_prices_and_market_state():
     rows = [
-        Bar("X", datetime(2024, 1, 2, 9, 30), 5, 6, 4, 5.5, raw_open=10, raw_high=12, raw_low=8, raw_close=11, limit_up=12, limit_down=8, split_ratio=2),
-        Bar("X", datetime(2024, 1, 2, 9, 31), 5.5, 6.5, 5, 6, raw_open=11, raw_high=13, raw_low=10, raw_close=12, limit_up=12, limit_down=8, split_ratio=2),
+        Bar("X", datetime(2024, 1, 2, 9, 30), 5, 6, 4, 5.5, raw_open=10, raw_high=12, raw_low=8, raw_close=11, limit_up=12, limit_down=8, split_ratio=2, cash_dividend=0.2),
+        Bar("X", datetime(2024, 1, 2, 9, 31), 5.5, 6.5, 5, 6, raw_open=11, raw_high=13, raw_low=10, raw_close=12, limit_up=12, limit_down=8, split_ratio=2, cash_dividend=0.2),
     ]
 
     result = aggregate_minute_bars(rows, 5)[0]
 
     assert (result.raw_open, result.raw_high, result.raw_low, result.raw_close) == (10, 13, 8, 12)
     assert (result.limit_up, result.limit_down, result.split_ratio) == (12, 8, 2)
+    assert result.cash_dividend == 0.2
 
 
 def test_daily_warmup_is_visible_without_running_callbacks_or_orders():
@@ -378,6 +379,36 @@ def on_bar(context, bars):
     assert [fill["price"] for fill in result["fills"]] == pytest.approx([100.969, 100.962])
 
 
+def test_stock_sell_fee_uses_decimal_trade_value():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=1500)
+    else:
+        context.sell('X', quantity=1500)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=100_000,
+            commission_pct=0.0001,
+            sell_commission_pct=0.0001,
+            min_commission=1,
+            stamp_tax_pct=0.0005,
+            slippage_bps=0,
+            price_tick=0.01,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, day, 15), 18.65, 18.65, 18.65, 18.65)
+        for day in (1, 2)
+    ])
+
+    assert result["fills"][1]["value"] == 27_975
+    assert result["fills"][1]["fee"] == 16.785
+
+
 def test_next_open_fill_and_t1_are_default():
     source = """
 def on_bar(context, bars):
@@ -390,6 +421,36 @@ def on_bar(context, bars):
     result = FreeStrategyEngine(source, config=FreeStrategyConfig(lot_size=100)).run(bars)
     assert [round(fill["price"], 4) for fill in result["fills"]] == [11.0055, 11.994]
     assert result["positions"] == {"X": 0.0}
+
+
+def test_reopened_position_uses_current_entry_order():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+        context.buy('Y', quantity=100)
+    elif context.now.day == 2:
+        context.sell('X', quantity=100)
+    elif context.now.day == 3:
+        context.buy('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            lot_size=100,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar(symbol, datetime(2024, 1, day, 15), 10, 10, 10, 10)
+        for day in (1, 2, 3)
+        for symbol in ("X", "Y")
+    ])
+
+    assert list(result["positions"]) == ["Y", "X"]
+    assert result["positions"] == {"Y": 100.0, "X": 100.0}
 
 
 def test_strategy_uses_adjusted_bar_but_fill_and_equity_use_raw_price():
@@ -443,6 +504,229 @@ def on_bar(context, bars):
         raw_open=10, raw_high=10, raw_low=10, raw_close=10, split_ratio=2,
     )])
     assert repeated["positions"] == {"X": 200.0}
+
+
+def test_stock_share_distribution_adjusts_quantity_and_average_cost():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=1500)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=100_000, asset_type="stock", fill_policy="close",
+            fees_pct=0, slippage_bps=0,
+        ),
+    )
+    engine.run([
+        Bar("X", datetime(2024, 1, 1, 15), 20, 20, 20, 20, raw_close=20),
+    ], finalize_session=False)
+
+    result = engine.run([
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 16, 16, 16, 16,
+            raw_close=16, split_ratio=1.2,
+        ),
+    ])
+
+    assert result["positions"] == {"X": 1800.0}
+    assert result["checkpoint"]["account"]["avg_cost"]["X"] == pytest.approx(20 / 1.2)
+
+
+def test_stock_cash_dividend_increases_cash_and_reduces_average_cost_once():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000, asset_type="stock", fill_policy="close",
+            fees_pct=0, min_commission=0, stamp_tax_pct=0, slippage_bps=0,
+        ),
+    )
+    engine.run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10),
+    ], finalize_session=False)
+
+    dividend_bar = Bar(
+        "X", datetime(2024, 1, 2, 9, 30), 9.8, 9.8, 9.8, 9.8,
+        raw_close=9.8, cash_dividend=0.2,
+    )
+    engine.run([dividend_bar], finalize_session=False, return_result=False)
+    result = engine.run([
+        Bar(
+            "X", datetime(2024, 1, 2, 10, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+    ])
+
+    assert result["positions"] == {"X": 100.0}
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_020)
+    assert result["checkpoint"]["account"]["avg_cost"]["X"] == pytest.approx(9.8)
+    assert result["corporate_actions"] == [{
+        "timestamp": "2024-01-02T09:30:00",
+        "symbol": "X",
+        "type": "cash_dividend",
+        "cash_per_share": 0.2,
+        "cash_received": 20.0,
+    }]
+
+
+def test_stock_cash_dividend_does_not_repeat_after_checkpoint_restore():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000, asset_type="stock", fill_policy="close",
+        fees_pct=0, min_commission=0, stamp_tax_pct=0, slippage_bps=0,
+    )
+    initial = FreeStrategyEngine(source, timeframe="1m", config=config)
+    initial.run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+    ], finalize_session=False, return_result=False)
+    checkpoint = initial.checkpoint()
+
+    resumed = FreeStrategyEngine(source, timeframe="1m", config=config)
+    resumed.restore_checkpoint(checkpoint)
+    result = resumed.run([
+        Bar(
+            "X", datetime(2024, 1, 2, 10, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+    ])
+
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_020)
+    assert len(result["corporate_actions"]) == 1
+
+
+def test_stock_sale_withholds_short_term_dividend_tax_outside_fill_fee():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    elif context.now.day == 20:
+        context.sell('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000, asset_type="stock", fill_policy="close",
+            fees_pct=0, min_commission=0, stamp_tax_pct=0, slippage_bps=0,
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+        Bar("X", datetime(2024, 1, 20, 15), 9.8, 9.8, 9.8, 9.8, raw_close=9.8),
+    ])
+
+    assert result["fills"][-1]["fee"] == 0
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_996)
+    assert result["corporate_actions"][-1] == {
+        "timestamp": "2024-01-20T15:00:00",
+        "symbol": "X",
+        "type": "dividend_tax",
+        "tax_withheld": 4.0,
+    }
+
+
+def test_stock_dividend_tax_lot_survives_checkpoint_restore():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100)
+    elif context.now.day == 20:
+        context.sell('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000, asset_type="stock", fill_policy="close",
+        fees_pct=0, min_commission=0, stamp_tax_pct=0, slippage_bps=0,
+    )
+    initial = FreeStrategyEngine(source, timeframe="1m", config=config)
+    initial.run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+    ], finalize_session=False, return_result=False)
+
+    resumed = FreeStrategyEngine(source, timeframe="1m", config=config)
+    resumed.restore_checkpoint(initial.checkpoint())
+    result = resumed.run([
+        Bar("X", datetime(2024, 1, 20, 15), 9.8, 9.8, 9.8, 9.8, raw_close=9.8),
+    ])
+
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_996)
+    assert result["corporate_actions"][-1]["tax_withheld"] == 4.0
+
+
+def test_stock_sale_after_one_year_does_not_withhold_dividend_tax():
+    source = """
+def on_bar(context, bars):
+    if context.now.year == 2024 and context.now.day == 1:
+        context.buy('X', quantity=100)
+    elif context.now.year == 2025:
+        context.sell('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000, asset_type="stock", fill_policy="close",
+            fees_pct=0, min_commission=0, stamp_tax_pct=0, slippage_bps=0,
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 9.8, 9.8, 9.8, 9.8,
+            raw_close=9.8, cash_dividend=0.2,
+        ),
+        Bar("X", datetime(2025, 1, 2, 15), 9.8, 9.8, 9.8, 9.8, raw_close=9.8),
+    ])
+
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(10_000)
+    assert [action["type"] for action in result["corporate_actions"]] == ["cash_dividend"]
+
+
+def test_stock_cash_dividend_and_share_distribution_apply_together():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=1500)
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=100_000, asset_type="stock", fill_policy="close",
+            fees_pct=0, slippage_bps=0,
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 20, 20, 20, 20, raw_close=20),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 30), 16, 16, 16, 16,
+            raw_close=16, split_ratio=1.2, cash_dividend=0.3,
+        ),
+    ])
+
+    assert result["positions"] == {"X": 1800.0}
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(70_450)
+    assert result["checkpoint"]["account"]["avg_cost"]["X"] == pytest.approx((20 - 0.3) / 1.2)
 
 
 def test_etf_split_keeps_realized_attribution_cost_basis_continuous():
@@ -632,6 +916,36 @@ def after_trading_end(context):
     ]
 
 
+def test_scheduled_callback_sees_new_t1_position_as_unavailable():
+    source = """
+def initialize(context):
+    context.schedule(buy, '10:30')
+    context.schedule(check_available, '14:20')
+
+def buy(context):
+    context.order_target('X', 100)
+
+def check_available(context):
+    context.state['available'] = context.portfolio.available_positions.get('X')
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            lot_size=100,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 2, 10, 30), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 2, 14, 20), 10, 10, 10, 10),
+    ])
+
+    assert result["state"]["available"] == 0
+
+
 def test_buy_fee_reservation_can_match_post_fill_commission_brokers():
     source = """
 def on_bar(context, bars):
@@ -662,6 +976,33 @@ def on_bar(context, bars):
     assert reserved["fills"] == []
     assert post_fill["fills"][0]["quantity"] == 100
     assert post_fill["checkpoint"]["account"]["cash"] == pytest.approx(-10)
+
+
+def test_target_buys_in_one_callback_share_the_pre_fill_cash_snapshot():
+    source = """
+def on_bar(context, bars):
+    context.order_target('X', 100)
+    context.order_target('Y', 100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_500,
+            commission_pct=0,
+            min_commission=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("Y", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+    ])
+
+    assert [(fill["symbol"], fill["quantity"]) for fill in result["fills"]] == [
+        ("X", 100),
+        ("Y", 100),
+    ]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(-500)
 
 
 def test_sell_commission_can_differ_from_buy_commission():

@@ -9,6 +9,7 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time as datetime_time, timedelta
+from decimal import Decimal
 from itertools import groupby
 from statistics import mean, pstdev
 from types import SimpleNamespace
@@ -449,6 +450,7 @@ class FreeStrategyEngine:
     def __init__(self, source: str, timeframe: str = "1d", config: FreeStrategyConfig | None = None,
                  state: dict[str, Any] | None = None,
                  instruments: Iterable[dict[str, Any]] | None = None,
+                 instrument_loader: Callable[[str], Iterable[dict[str, Any]]] | None = None,
                  risk_config: RiskConfig | None = None,
                  callback_deadline: Any = None) -> None:
         self.source = source
@@ -490,6 +492,7 @@ class FreeStrategyEngine:
         self._session_bars: dict[str, Bar] = {}
         self._session_daily_bars: dict[str, dict[str, Any]] = {}
         self._applied_splits: dict[str, date] = {}
+        self._position_lots: dict[str, list[dict[str, Any]]] = {}
         self._benchmark_curve: list[dict[str, Any]] = []
         self._session_equity_snapshot: dict[str, Any] | None = None
         self._session_benchmark_close: float | None = None
@@ -524,11 +527,13 @@ class FreeStrategyEngine:
             for name in callback_names
             if callable(namespace.get(name))
         }
+        self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
+        if instrument_loader is not None:
+            self._instruments = [dict(item) for item in instrument_loader(self.execution_mode)]
         if "initialize" in self._callbacks:
             self._protected_call("initialize 回调", self._callbacks["initialize"], self.context)
         if "on_bar" not in self._callbacks and "on_quote" not in self._callbacks and not self.context._scheduled:
             raise ValueError("策略必须定义 on_bar(context, bars)、on_quote(context, quotes) 或通过 context.schedule 注册定时任务")
-        self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
 
     @property
     def universe(self) -> list[str]:
@@ -769,7 +774,37 @@ class FreeStrategyEngine:
             return 0 if target is not None and target < current else 1
         return 1
 
-    def _fill_order(self, order: Order, bar: Bar | None, timestamp: datetime | None, field: str) -> None:
+    def _fill_immediate_orders(
+        self,
+        bars: BarsView,
+        timestamp: datetime,
+        field: str = "close",
+    ) -> None:
+        target_buy_cash: float | None = None
+        for order in sorted(self._immediate, key=self._sell_first):
+            cash_available = None
+            if order.side == "target" and self._order_increases_risk(order):
+                if target_buy_cash is None:
+                    target_buy_cash = self.account.cash
+                cash_available = target_buy_cash
+            self._fill_order(
+                order,
+                bars.get(order.symbol),
+                timestamp,
+                field,
+                cash_available=cash_available,
+            )
+        self._immediate.clear()
+
+    def _fill_order(
+        self,
+        order: Order,
+        bar: Bar | None,
+        timestamp: datetime | None,
+        field: str,
+        *,
+        cash_available: float | None = None,
+    ) -> None:
         if bar is None and self.config.allow_stale_fills and timestamp is not None:
             trades_today = (order.symbol, timestamp.date()) in self._tradable_dates
             price = self._current_close_prices.get(order.symbol, 0.0)
@@ -843,10 +878,11 @@ class FreeStrategyEngine:
                 self.account.equity(self._current_close_prices) * self.risk_config.max_symbol_exposure_pct
                 - current * raw_price,
             )
+            available = self.account.cash if cash_available is None else cash_available
             cash_gross = (
-                max(0.0, self.account.cash - self.config.min_commission) / (1 + commission_rate)
+                max(0.0, available - self.config.min_commission) / (1 + commission_rate)
                 if self.config.reserve_buy_fees
-                else max(0.0, self.account.cash)
+                else max(0.0, available)
             )
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
         if qty <= 0:
@@ -857,22 +893,55 @@ class FreeStrategyEngine:
                 order.status = "rejected"
                 order.reason = "数量不足、现金不足或 T+1 未结算"
             return
-        gross = qty * price
-        commission = max(self.config.min_commission, gross * commission_rate)
-        fee = commission + (gross * self.config.stamp_tax_pct if side == "sell" and self.config.asset_type == "stock" else 0.0)
+        price_decimal = Decimal(str(price))
+        if self.config.price_tick is not None:
+            price_decimal = price_decimal.quantize(Decimal(str(self.config.price_tick)))
+        gross_decimal = Decimal(str(qty)) * price_decimal
+        commission = max(
+            Decimal(str(self.config.min_commission)),
+            gross_decimal * Decimal(str(commission_rate)),
+        )
+        fee_decimal = commission + (
+            gross_decimal * Decimal(str(self.config.stamp_tax_pct))
+            if side == "sell" and self.config.asset_type == "stock"
+            else Decimal(0)
+        )
+        gross = float(gross_decimal)
+        fee = float(fee_decimal)
         if side == "buy":
             self.account.cash -= gross + fee
             old = self.account.positions.get(order.symbol, 0.0)
             self.account.avg_cost[order.symbol] = ((old * self.account.avg_cost.get(order.symbol, price)) + gross + fee) / (old + qty)
+            if old <= 0 and order.symbol in self.account.positions:
+                del self.account.positions[order.symbol]
             self.account.positions[order.symbol] = old + qty
+            acquired = timestamp.date() if timestamp else self.context.now.date()
+            self._position_lots.setdefault(order.symbol, []).append({
+                "quantity": qty,
+                "acquired": acquired,
+                "dividend_per_share": 0.0,
+            })
             if self.config.settlement == "t0" or order.symbol in self.config.t0_symbols:
                 self.account.available[order.symbol] = self.account.positions[order.symbol]
             else:
+                self.account.available.setdefault(order.symbol, 0.0)
                 self._bought_dates[order.symbol] = (timestamp.date() if timestamp else self.context.now.date())
         else:
-            self.account.cash += gross - fee
+            dividend_tax = self._consume_position_lots(
+                order.symbol,
+                qty,
+                timestamp.date() if timestamp else self.context.now.date(),
+            )
+            self.account.cash += gross - fee - dividend_tax
             self.account.positions[order.symbol] = max(0.0, current - qty)
             self.account.available[order.symbol] = max(0.0, self.account.available.get(order.symbol, current) - qty)
+            if dividend_tax > 0:
+                self.account.corporate_actions.append({
+                    "timestamp": timestamp.isoformat() if timestamp else "",
+                    "symbol": order.symbol,
+                    "type": "dividend_tax",
+                    "tax_withheld": dividend_tax,
+                })
         order.status = "filled"
         market_volume = float(bar.volume) if bar.volume > 0 else None
         self.account.fills.append(Fill(
@@ -889,10 +958,99 @@ class FreeStrategyEngine:
             participation_pct=qty / market_volume * 100 if market_volume else None,
         ))
 
+    @staticmethod
+    def _dividend_tax_rate(acquired: date, sold: date) -> float:
+        held_days = (sold - acquired).days
+        if held_days <= 30:
+            return 0.2
+        if held_days <= 365:
+            return 0.1
+        return 0.0
+
+    def _consume_position_lots(self, symbol: str, quantity: float, sold: date) -> float:
+        remaining = quantity
+        tax = 0.0
+        lots = self._position_lots.get(symbol, [])
+        while remaining > 1e-9 and lots:
+            lot = lots[0]
+            consumed = min(remaining, float(lot["quantity"]))
+            if self.config.asset_type == "stock":
+                tax += (
+                    consumed
+                    * float(lot.get("dividend_per_share", 0.0))
+                    * self._dividend_tax_rate(lot["acquired"], sold)
+                )
+            lot["quantity"] = float(lot["quantity"]) - consumed
+            remaining -= consumed
+            if float(lot["quantity"]) <= 1e-9:
+                lots.pop(0)
+        if not lots:
+            self._position_lots.pop(symbol, None)
+        return float(Decimal(str(tax)).quantize(Decimal("0.01")))
+
+    def _restore_position_lots(self) -> None:
+        self._position_lots = {}
+        events = [
+            (fill.timestamp, 1, "fill", fill)
+            for fill in self.account.fills
+        ] + [
+            (str(action.get("timestamp", "")), 0, "action", action)
+            for action in self.account.corporate_actions
+        ]
+        for timestamp, _, event_type, event in sorted(events, key=lambda item: (item[0], item[1])):
+            if event_type == "fill":
+                fill = event
+                if fill.side == "buy":
+                    self._position_lots.setdefault(fill.symbol, []).append({
+                        "quantity": float(fill.quantity),
+                        "acquired": datetime.fromisoformat(timestamp).date(),
+                        "dividend_per_share": 0.0,
+                    })
+                else:
+                    self._consume_position_lots(
+                        fill.symbol,
+                        float(fill.quantity),
+                        datetime.fromisoformat(timestamp).date(),
+                    )
+                continue
+            action = event
+            symbol = str(action.get("symbol", ""))
+            if action.get("type") == "cash_dividend":
+                cash_per_share = float(action.get("cash_per_share", 0.0))
+                for lot in self._position_lots.get(symbol, []):
+                    lot["dividend_per_share"] = (
+                        float(lot.get("dividend_per_share", 0.0)) + cash_per_share
+                    )
+            elif action.get("type") == "split":
+                ratio = float(action.get("ratio", 1.0))
+                if ratio <= 0:
+                    continue
+                for lot in self._position_lots.get(symbol, []):
+                    lot["quantity"] = float(lot["quantity"]) * ratio
+                    lot["dividend_per_share"] = (
+                        float(lot.get("dividend_per_share", 0.0)) / ratio
+                    )
+        for symbol, position in self.account.positions.items():
+            missing = float(position) - sum(
+                float(lot["quantity"])
+                for lot in self._position_lots.get(symbol, [])
+            )
+            if missing > 1e-9:
+                self._position_lots.setdefault(symbol, []).append({
+                    "quantity": missing,
+                    "acquired": date.min,
+                    "dividend_per_share": 0.0,
+                })
+
     def _apply_splits(self, bars: BarsView, timestamp: datetime) -> None:
         for symbol, bar in bars.items():
             ratio = float(bar.split_ratio)
-            if ratio <= 0 or math.isclose(ratio, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            cash_dividend = float(bar.cash_dividend)
+            has_split = ratio > 0 and not math.isclose(
+                ratio, 1.0, rel_tol=0.0, abs_tol=1e-9,
+            )
+            effective_ratio = ratio if has_split else 1.0
+            if not has_split and cash_dividend <= 0:
                 continue
             if self._applied_splits.get(symbol) == timestamp.date():
                 continue
@@ -900,21 +1058,44 @@ class FreeStrategyEngine:
             quantity = self.account.positions.get(symbol, 0.0)
             if quantity <= 0:
                 continue
-            self.account.positions[symbol] = quantity * ratio
-            self.account.available[symbol] = self.account.available.get(symbol, 0.0) * ratio
+            if cash_dividend > 0:
+                cash_received = quantity * cash_dividend
+                self.account.cash += cash_received
+                for lot in self._position_lots.get(symbol, []):
+                    lot["dividend_per_share"] = (
+                        float(lot.get("dividend_per_share", 0.0)) + cash_dividend
+                    )
+                self.account.corporate_actions.append({
+                    "timestamp": timestamp.isoformat(),
+                    "symbol": symbol,
+                    "type": "cash_dividend",
+                    "cash_per_share": cash_dividend,
+                    "cash_received": cash_received,
+                })
+            if has_split:
+                self.account.positions[symbol] = quantity * ratio
+                self.account.available[symbol] = self.account.available.get(symbol, 0.0) * ratio
+                for lot in self._position_lots.get(symbol, []):
+                    lot["quantity"] = float(lot["quantity"]) * ratio
+                    lot["dividend_per_share"] = (
+                        float(lot.get("dividend_per_share", 0.0)) / ratio
+                    )
             if symbol in self.account.avg_cost:
-                self.account.avg_cost[symbol] /= ratio
-            self.account.corporate_actions.append({
-                "timestamp": timestamp.isoformat(),
-                "symbol": symbol,
-                "type": "split",
-                "ratio": ratio,
-            })
-            self.logs.append({
-                "timestamp": timestamp.isoformat(),
-                "level": "INFO",
-                "message": f"{symbol} ETF拆分生效：持仓数量按 {ratio:g} 倍调整",
-            })
+                self.account.avg_cost[symbol] = (
+                    self.account.avg_cost[symbol] - cash_dividend
+                ) / effective_ratio
+            if has_split:
+                self.account.corporate_actions.append({
+                    "timestamp": timestamp.isoformat(),
+                    "symbol": symbol,
+                    "type": "split",
+                    "ratio": ratio,
+                })
+                self.logs.append({
+                    "timestamp": timestamp.isoformat(),
+                    "level": "INFO",
+                    "message": f"{symbol} 拆分/送转生效：持仓数量按 {ratio:g} 倍调整",
+                })
 
     def _run_callback(self, name: str, bars: BarsView) -> None:
         callback = self._callbacks.get(name)
@@ -982,6 +1163,16 @@ class FreeStrategyEngine:
             "benchmark_curve": self._benchmark_curve,
             "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
             "applied_splits": {symbol: value.isoformat() for symbol, value in self._applied_splits.items()},
+            "position_lots": {
+                symbol: [
+                    {
+                        **lot,
+                        "acquired": lot["acquired"].isoformat(),
+                    }
+                    for lot in lots
+                ]
+                for symbol, lots in self._position_lots.items()
+            },
             "pending_orders": [
                 {"order_id": order.id, "due_at": due_at.isoformat()}
                 for order, due_at in self.pending
@@ -1012,6 +1203,21 @@ class FreeStrategyEngine:
             symbol: date.fromisoformat(value)
             for symbol, value in raw.get("applied_splits", {}).items()
         }
+        if "position_lots" in raw:
+            self._position_lots = {
+                symbol: [
+                    {
+                        **lot,
+                        "quantity": float(lot["quantity"]),
+                        "acquired": date.fromisoformat(str(lot["acquired"])),
+                        "dividend_per_share": float(lot.get("dividend_per_share", 0.0)),
+                    }
+                    for lot in lots
+                ]
+                for symbol, lots in raw.get("position_lots", {}).items()
+            }
+        else:
+            self._restore_position_lots()
         orders_by_id = {order.id: order for order in self.account.orders}
         self.pending = [
             (orders_by_id[item["order_id"]], datetime.fromisoformat(item["due_at"]))
@@ -1085,6 +1291,7 @@ class FreeStrategyEngine:
                     "limit_up": bar.limit_up,
                     "limit_down": bar.limit_down,
                     "split_ratio": bar.split_ratio,
+                    "cash_dividend": bar.cash_dividend,
                 }
                 continue
             previous["timestamp"] = bar.timestamp
@@ -1101,6 +1308,7 @@ class FreeStrategyEngine:
             previous["limit_up"] = bar.limit_up if bar.limit_up is not None else previous["limit_up"]
             previous["limit_down"] = bar.limit_down if bar.limit_down is not None else previous["limit_down"]
             previous["split_ratio"] = max(previous["split_ratio"], bar.split_ratio)
+            previous["cash_dividend"] = max(previous["cash_dividend"], bar.cash_dividend)
 
     def begin_session(self, day: date) -> None:
         """在读取当日行情前执行盘前回调，供策略动态设置当日订阅标的。"""
@@ -1119,9 +1327,7 @@ class FreeStrategyEngine:
         self._run_scheduled_before(datetime.combine(self._active_session_date, datetime_time(23, 59)))
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
-        for order in sorted(self._immediate, key=self._sell_first):
-            self._fill_order(order, self._session_bars.get(order.symbol), timestamp, "close")
-        self._immediate.clear()
+        self._fill_immediate_orders(self._session_bars, timestamp)
         if self.timeframe != "1d":
             self.preload_history((Bar(**values) for values in self._session_daily_bars.values()), "1d")
         if self._session_equity_snapshot is not None:
@@ -1215,9 +1421,7 @@ class FreeStrategyEngine:
             if not done and current_time >= at:
                 self._run_scheduled_callback(scheduled, at)
                 self.context._scheduled[slot_index] = (at, scheduled, True)
-        for order in sorted(self._immediate, key=self._sell_first):
-            self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
-        self._immediate.clear()
+        self._fill_immediate_orders(bars_now, timestamp)
         self.context._sync(self._current_close_prices)
         self.state = copy.deepcopy(self.context.state)
 
@@ -1233,17 +1437,13 @@ class FreeStrategyEngine:
 
     def run_scheduled_event(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
         self.update_scheduled_market(timestamp, bars)
-        for order in sorted(self._immediate, key=self._sell_first):
-            self._fill_order(order, self._session_bars.get(order.symbol), timestamp, "close")
-        self._immediate.clear()
+        self._fill_immediate_orders(self._session_bars, timestamp)
         current_time = timestamp.strftime("%H:%M")
         for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
             if not done and at == current_time:
                 self._run_scheduled_callback(callback, at)
                 self.context._scheduled[slot_index] = (at, callback, True)
-        for order in sorted(self._immediate, key=self._sell_first):
-            self._fill_order(order, self._session_bars.get(order.symbol), timestamp, "close")
-        self._immediate.clear()
+        self._fill_immediate_orders(self._session_bars, timestamp)
         self.context._sync(self._current_close_prices)
 
     def process_fill_event(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
@@ -1326,9 +1526,7 @@ class FreeStrategyEngine:
                     del self.history[symbol][:-5_000]
             self._run_callback("on_bar", bars_now)
             self._run_scheduled_at(timestamp)
-            for order in sorted(self._immediate, key=self._sell_first):
-                self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
-            self._immediate.clear()
+            self._fill_immediate_orders(bars_now, timestamp)
             self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(self._current_close_prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
         if handled and finalize_session:
             self.finish_session(persist_state=return_result)

@@ -26,6 +26,7 @@ class Bar:
     limit_up: float | None = None
     limit_down: float | None = None
     split_ratio: float = 1.0
+    cash_dividend: float = 0.0
     previous_open: float | None = None
     previous_close: float | None = None
     turnover_rate: float | None = None
@@ -51,6 +52,7 @@ class Bar:
             "tradable": self.tradable, "suspended": self.suspended,
             "limit_up": self.limit_up, "limit_down": self.limit_down,
             "split_ratio": self.split_ratio,
+            "cash_dividend": self.cash_dividend,
             "previous_open": self.previous_open,
             "previous_close": self.previous_close,
             "turnover_rate": self.turnover_rate,
@@ -110,6 +112,7 @@ def aggregate_minute_bars(rows: Iterable[Bar], minutes: int) -> list[Bar]:
             limit_up=next((v.limit_up for v in reversed(values) if v.limit_up is not None), None),
             limit_down=next((v.limit_down for v in reversed(values) if v.limit_down is not None), None),
             split_ratio=max(v.split_ratio for v in values),
+            cash_dividend=max(v.cash_dividend for v in values),
             previous_open=next(
                 (v.previous_open for v in reversed(values) if v.previous_open is not None), None,
             ),
@@ -178,6 +181,7 @@ def rows_to_bars(rows: Iterable[Mapping[str, object]]) -> list[Bar]:
             limit_up=float(row["limit_up"]) if row.get("limit_up") is not None else None,
             limit_down=float(row["limit_down"]) if row.get("limit_down") is not None else None,
             split_ratio=float(row.get("split_ratio") or 1.0),
+            cash_dividend=float(row.get("cash_dividend") or 0.0),
             previous_open=(
                 float(row["previous_open"]) if row.get("previous_open") is not None else None
             ),

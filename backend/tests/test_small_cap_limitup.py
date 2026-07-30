@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from app.free_strategy.bars import Bar
@@ -9,6 +9,7 @@ from app.free_strategy.small_cap_limitup import (
     _eligible_market_records,
     _history_limit_flags,
     _is_historical_st,
+    _is_weekly_rebalance_day,
     _turnover_sell_symbols,
 )
 
@@ -57,6 +58,50 @@ def test_consecutive_five_pct_limits_enable_historical_st_limit_prices():
     ]
 
     assert _history_limit_flags(bars) == [True, True]
+
+
+def test_historical_st_limit_inference_ends_after_normal_limit_regime():
+    bars = [
+        Bar(
+            "X", datetime(2025, 3, 3, 15), 10, 10.5, 10, 10.5,
+            raw_high=10.5, raw_low=10, raw_close=10.5,
+            previous_close=10, limit_up=11,
+        ),
+        Bar(
+            "X", datetime(2025, 3, 4, 15), 10.5, 11.03, 10.5, 11.03,
+            raw_high=11.03, raw_low=10.5, raw_close=11.03,
+            previous_close=10.5, limit_up=11.55,
+        ),
+        Bar(
+            "X", datetime(2025, 3, 5, 15), 11.03, 11.8, 11.0, 11.7,
+            raw_high=11.8, raw_low=11.0, raw_close=11.7,
+            previous_close=11.03, limit_up=12.13,
+        ),
+        Bar(
+            "X", datetime(2025, 3, 6, 15), 11.7, 12.29, 11.7, 12.29,
+            raw_high=12.29, raw_low=11.7, raw_close=12.29,
+            previous_close=11.7, limit_up=12.87,
+        ),
+    ]
+
+    assert _history_limit_flags(bars) == [True, True, False, False]
+
+
+def test_authoritative_name_history_disables_inferred_st_limit_prices():
+    bars = [
+        Bar(
+            "X", datetime(2025, 3, 4, 15), 10, 10.5, 10, 10.5,
+            raw_high=10.5, raw_low=10, raw_close=10.5,
+            previous_close=10, limit_up=11,
+        ),
+        Bar(
+            "X", datetime(2025, 3, 5, 15), 10.5, 11.03, 10.5, 11.03,
+            raw_high=11.03, raw_low=10.5, raw_close=11.03,
+            previous_close=10.5, limit_up=11.55,
+        ),
+    ]
+
+    assert _history_limit_flags(bars, infer_historical_st=False) == [False, False]
 
 
 def test_historical_st_status_uses_latest_observed_price_limit_regime():
@@ -127,6 +172,42 @@ def test_turnover_uses_current_session_volume_without_minute_history_scan():
     assert _turnover_sell_symbols(context, ["X"]) == ["X"]
 
 
+def test_weekly_rebalance_uses_second_trading_day_after_holidays():
+    context = SimpleNamespace(
+        now=datetime(2025, 10, 10, 10, 15),
+        state={"small_cap_limitup": {}},
+        instruments=lambda _asset: [{"symbol": "X"}],
+        history_batch=lambda symbols, **_kwargs: {symbols[0]: [
+            SimpleNamespace(date=date(2025, 9, 30)),
+            SimpleNamespace(date=date(2025, 10, 9)),
+        ]},
+    )
+
+    assert _is_weekly_rebalance_day(context) is True
+
+    context.now = datetime(2026, 5, 7, 10, 15)
+    context.history_batch = lambda symbols, **_kwargs: {symbols[0]: [
+        SimpleNamespace(date=date(2026, 4, 30)),
+        SimpleNamespace(date=date(2026, 5, 6)),
+    ]}
+
+    assert _is_weekly_rebalance_day(context) is True
+
+
+def test_weekly_rebalance_rejects_third_trading_day():
+    context = SimpleNamespace(
+        now=datetime(2025, 10, 15, 10, 15),
+        state={"small_cap_limitup": {}},
+        instruments=lambda _asset: [{"symbol": "X"}],
+        history_batch=lambda symbols, **_kwargs: {symbols[0]: [
+            SimpleNamespace(date=date(2025, 10, 13)),
+            SimpleNamespace(date=date(2025, 10, 14)),
+        ]},
+    )
+
+    assert _is_weekly_rebalance_day(context) is False
+
+
 def test_market_candidates_only_load_st_history_until_pool_is_full():
     records = [
         {
@@ -169,6 +250,49 @@ def test_market_candidates_only_load_st_history_until_pool_is_full():
     assert len(result) == INITIAL_POOL_SIZE
     assert len(history_calls) == 1
     assert len(history_calls[0]) == INITIAL_POOL_SIZE
+
+
+def test_market_candidates_do_not_let_holdings_bypass_selection_pool():
+    records = [
+        {
+            "symbol": symbol,
+            "name": symbol,
+            "listing_date": date(2020, 1, 1),
+        }
+        for symbol in ("POOL", "HELD")
+    ]
+    bars = {
+        symbol: SimpleNamespace(
+            close=10,
+            raw_close=10,
+            previous_close=10,
+            total_shares=shares,
+            tradable=True,
+            suspended=False,
+            limit_up=11,
+            limit_down=9,
+        )
+        for symbol, shares in (("POOL", 2), ("HELD", 1))
+    }
+    context = SimpleNamespace(
+        now=datetime(2025, 10, 14, 10, 15),
+        state={"small_cap_limitup": {
+            "loss_black": {},
+            "selection_scope_key": ("2025-10-13", ()),
+            "selection_scope_symbols": ["POOL"],
+        }},
+        portfolio=SimpleNamespace(positions={"HELD": 100}),
+        instruments=lambda _asset: records,
+        current_bars=lambda: bars,
+        history_bars=lambda *_args, **_kwargs: [
+            SimpleNamespace(date=date(2025, 10, 13)),
+        ],
+        history_batch=lambda symbols, **_kwargs: {symbol: [] for symbol in symbols},
+    )
+
+    result, _bars = _eligible_market_records(context)
+
+    assert [item["symbol"] for item in result] == ["POOL"]
 
 
 def test_market_candidates_use_name_valid_on_historical_date():
@@ -222,6 +346,104 @@ def test_market_candidates_use_name_valid_on_historical_date():
     result, _bars = _eligible_market_records(context)
 
     assert [item["symbol"] for item in result] == ["002207.SZ"]
+
+
+def test_market_candidates_trust_historical_name_over_price_limit_inference():
+    record = {
+        "symbol": "000056.SZ",
+        "name": "*ST皇庭",
+        "listing_date": date(1996, 7, 8),
+        "name_changes": [{
+            "date": "2026-04-27",
+            "before": "皇庭国际",
+            "after": "*ST皇庭",
+        }],
+    }
+    current = SimpleNamespace(
+        close=2.31,
+        raw_close=2.31,
+        previous_close=2.31,
+        total_shares=1_182_528_220,
+        tradable=True,
+        suspended=False,
+        limit_up=2.43,
+        limit_down=2.19,
+    )
+    context = SimpleNamespace(
+        now=datetime(2025, 11, 25, 10, 15),
+        state={"small_cap_limitup": {"loss_black": {}}},
+        portfolio=SimpleNamespace(positions={}),
+        instruments=lambda _asset: [record],
+        current_bars=lambda: {"000056.SZ": current},
+        history_bars=lambda *_args, **_kwargs: [
+            SimpleNamespace(date=date(2025, 11, 24)),
+        ],
+        history_batch=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("authoritative name history must avoid ST price inference")
+        ),
+    )
+
+    result, _bars = _eligible_market_records(context)
+
+    assert [item["symbol"] for item in result] == ["000056.SZ"]
+
+
+def test_selection_pool_loads_st_history_only_for_symbols_without_name_history():
+    records = [
+        {
+            "symbol": "000001.SZ",
+            "name": "alpha",
+            "listing_date": date(2020, 1, 1),
+            "name_changes": [{
+                "date": "2025-01-01",
+                "before": "old-alpha",
+                "after": "alpha",
+            }],
+        },
+        {
+            "symbol": "000002.SZ",
+            "name": "beta",
+            "listing_date": date(2020, 1, 1),
+        },
+    ]
+    histories = {
+        item["symbol"]: [SimpleNamespace(
+            date=date(2025, 7, 28),
+            close=10,
+            raw_close=10,
+            raw_high=10,
+            raw_low=10,
+            previous_close=10,
+            total_shares=index + 1,
+        )]
+        for index, item in enumerate(records)
+    }
+    history_calls = []
+
+    def history_batch(symbols, *, count, **_kwargs):
+        history_calls.append((list(symbols), count))
+        return {symbol: histories[symbol] for symbol in symbols}
+
+    context = SimpleNamespace(
+        now=datetime(2025, 7, 29, 14, 20),
+        state={"small_cap_limitup": {
+            "loss_black": {},
+            "selection_scope_key": None,
+            "selection_scope_symbols": [],
+        }},
+        portfolio=SimpleNamespace(positions={}),
+        instruments=lambda _asset: records,
+        history_bars=lambda symbol, **_kwargs: histories.get(symbol, []),
+        history_batch=history_batch,
+    )
+
+    symbols = _afternoon_selection_symbols(context, context.now)
+
+    assert symbols == ["000001.SZ", "000002.SZ"]
+    assert history_calls == [
+        (["000001.SZ", "000002.SZ"], 1),
+        (["000002.SZ"], ST_STATUS_DAYS),
+    ]
 
 
 def test_afternoon_scope_uses_daily_market_cap_pool_instead_of_full_market_minutes():

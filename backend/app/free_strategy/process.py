@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import multiprocessing as mp
 import queue
 import shutil
@@ -368,14 +369,44 @@ def _round_limit(value: float, asset_type: str) -> float:
     return float(Decimal(str(value)).quantize(tick, rounding=ROUND_HALF_UP))
 
 
-def _split_ratio(previous_scale: float | None, current_scale: float, asset_type: str) -> float:
-    if asset_type != "etf" or previous_scale is None or current_scale <= 0:
+def _split_ratio(
+    previous_scale: float | None,
+    current_scale: float,
+    asset_type: str,
+    previous_shares: float | None = None,
+    current_shares: float | None = None,
+) -> float:
+    if previous_scale is None or current_scale <= 0:
         return 1.0
     observed = previous_scale / current_scale
-    nearest = round(observed)
-    if nearest >= 2 and abs(observed - nearest) / nearest <= 0.02:
-        return float(nearest)
+    if asset_type == "stock" and previous_shares and current_shares:
+        share_ratio = current_shares / previous_shares
+        if share_ratio > 1.01 and abs(observed - share_ratio) / share_ratio <= 0.02:
+            return round(share_ratio, 6)
+    if asset_type == "etf":
+        nearest = round(observed)
+        if nearest >= 2 and abs(observed - nearest) / nearest <= 0.02:
+            return float(nearest)
     return 1.0
+
+
+def _cash_dividend(
+    previous_scale: float | None,
+    current_scale: float,
+    previous_raw_close: float,
+    previous_adjusted_close: float,
+    split_ratio: float,
+) -> float:
+    if (
+        previous_scale is None
+        or current_scale <= 0
+        or math.isclose(previous_scale, current_scale, rel_tol=0.0, abs_tol=1e-6)
+    ):
+        return 0.0
+    inferred = previous_raw_close - previous_adjusted_close * current_scale * split_ratio
+    if inferred <= 0:
+        return 0.0
+    return float(Decimal(str(inferred)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def _observe_daily_price(
@@ -782,7 +813,16 @@ def _scheduled_price_metadata(
         previous_raw_close / previous_close
         if previous_close > 0 and previous_raw_close > 0 else None
     )
+    previous_shares = float(previous.get("total_shares") or 0) or None
+    current_shares = float(current.get("total_shares") or 0) or None
     reference = previous_close * scale if previous_close > 0 else None
+    split_ratio = _split_ratio(
+        previous_scale,
+        scale,
+        asset_type,
+        previous_shares,
+        current_shares,
+    )
     pct = _limit_pct(
         symbol,
         asset_type,
@@ -794,7 +834,14 @@ def _scheduled_price_metadata(
     )
     return {
         "scale": scale,
-        "split_ratio": _split_ratio(previous_scale, scale, asset_type),
+        "split_ratio": split_ratio,
+        "cash_dividend": _cash_dividend(
+            previous_scale,
+            scale,
+            previous_raw_close,
+            previous_close,
+            split_ratio,
+        ),
         "previous_open": previous_open,
         "previous_close": reference,
         "turnover_rate": previous.get("turnover_rate"),
@@ -838,6 +885,7 @@ def _scheduled_minute_bars(
             limit_up=metadata["limit_up"],
             limit_down=metadata["limit_down"],
             split_ratio=float(metadata["split_ratio"] or 1.0),
+            cash_dividend=float(metadata["cash_dividend"] or 0.0),
             previous_open=(
                 float(metadata["previous_open"])
                 if metadata["previous_open"] is not None else None
@@ -896,6 +944,7 @@ def _scheduled_daily_bar(
         limit_up=metadata["limit_up"],
         limit_down=metadata["limit_down"],
         split_ratio=float(metadata["split_ratio"] or 1.0),
+        cash_dividend=float(metadata["cash_dividend"] or 0.0),
         previous_open=(
             float(metadata["previous_open"])
             if metadata["previous_open"] is not None else None
@@ -1218,14 +1267,17 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
         config = FreeStrategyConfig(**payload["config"])
-        instruments = _instrument_records(
-            repo, payload["asset_type"], payload["timeframe"], start, end,
-        )
         engine = FreeStrategyEngine(
             source,
             payload["timeframe"],
             config,
-            instruments=instruments,
+            instrument_loader=lambda mode: _instrument_records(
+                repo,
+                payload["asset_type"],
+                "1d" if mode == "scheduled" else payload["timeframe"],
+                start,
+                end,
+            ),
             callback_deadline=callback_deadline,
         )
         engine.set_run_window(start, end)
@@ -1373,7 +1425,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             result = engine.result()
             trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
-        if payload["timeframe"] == "1d":
+        if payload["timeframe"] == "1d" or engine.execution_mode == "scheduled":
             available_symbols = symbols_seen
         else:
             get_minute_symbols = getattr(repo, "get_minute_symbols", None)
