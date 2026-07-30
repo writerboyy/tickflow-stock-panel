@@ -713,6 +713,17 @@ def _make_minute_config(**extra) -> CustomSourceConfig:
     )
 
 
+def _make_financial_config(**extra) -> CustomSourceConfig:
+    """构造带 financial dataset 的最小 CustomSourceConfig。"""
+    return CustomSourceConfig(
+        name="test_src",
+        display_name="Test Source",
+        datasets={"financial": DatasetConfig(
+            url="http://example.com/financial", field_map={"symbol": "symbol"}, **extra,
+        )},
+    )
+
+
 def _capture_request_rows(provider):
     """替换 _request_rows 为捕获 spy, 返回 captured dict。"""
     captured: dict = {}
@@ -762,6 +773,17 @@ def test_generic_http_get_minute_omits_params_when_not_configured():
     # override 为 None (空 dict → `override or None`), 不传上游
     assert captured["override_params"] is None
     assert captured["override_body"] is None
+
+
+def test_generic_http_get_financials_passes_latest_for_statement_tables():
+    """历史回测需要 custom financial 源能接收 latest=False。"""
+    provider = GenericHTTPProvider(_make_financial_config())
+    captured = _capture_request_rows(provider)
+
+    provider.get_financials("income", ["600519.SH"], latest_only=False)
+
+    assert captured["override_params"] == {"table": "income", "latest": False}
+    assert captured["override_body"] == {"table": "income", "latest": False}
 
 
 # ---------- 测试 18: sync_and_persist_minute resolver 异常时优雅返回 0 (观察项加固) ----------
