@@ -30,6 +30,8 @@ MARKET_MODES = {"bar_1m", "bar_1d", "poll_3s", "websocket"}
 LEGACY_MARKET_MODES = {"bar_5m", "bar_30m"}
 QUOTE_MODES = {"poll_3s", "websocket"}
 WS_SYMBOL_LIMIT = 100
+_WORKER_RESTART_LIMIT = 3
+_WORKER_RESTART_WINDOW_SECONDS = 300.0
 
 
 def state_market_mode(state: dict[str, Any]) -> str:
@@ -1493,6 +1495,7 @@ class PaperTradingSupervisor:
         self._processes: dict[str, mp.Process] = {}
         self._queues: dict[str, Any] = {}
         self._deadlines: dict[str, Any] = {}
+        self._restart_attempts: dict[str, deque[float]] = {}
         self._lock = threading.RLock()
         self._monitor_stop = threading.Event()
         self._monitor_thread = threading.Thread(target=self._monitor_accounts, name="paper-supervisor", daemon=True)
@@ -1506,44 +1509,64 @@ class PaperTradingSupervisor:
         with self._lock:
             account_ids = list(self._processes)
         for account_id in account_ids:
-            try:
-                state = self.store.get(account_id)
-            except FileNotFoundError:
-                self._detach_runtime(account_id)
-                continue
-            process = self._processes.get(account_id)
-            if state.get("status") != "running":
-                self._detach_runtime(account_id)
-                continue
-            if process is None or not process.is_alive():
-                self._detach_runtime(account_id)
-                message = "策略子进程已退出"
-                sync = dict(state.get("sync", {}))
-                sync.update({"phase": "error", "error": message, "updated_at": now_iso()})
-                self.store.update_fields(account_id, {
-                    "status": "paused",
-                    "last_error": message,
-                    "sync": sync,
-                })
-                self.store.append_event(account_id, {"type": "error", "message": message})
-                continue
-            deadline = getattr(self, "_deadlines", {}).get(account_id)
-            if deadline is not None:
-                with deadline.get_lock() if hasattr(deadline, "get_lock") else nullcontext():
-                    deadline_value = float(deadline.value)
-                if deadline_value > 0 and time.monotonic() >= deadline_value:
-                    timeout = float(state.get("config", {}).get("callback_timeout_seconds", 30.0))
-                    message = f"策略执行超过 {timeout:g} 秒，已终止子进程"
+            with self._lock:
+                try:
+                    state = self.store.get(account_id)
+                except FileNotFoundError:
                     self._detach_runtime(account_id)
-                    sync = dict(state.get("sync", {}))
-                    sync.update({"phase": "error", "error": message, "updated_at": now_iso()})
-                    self.store.update_fields(account_id, {
-                        "status": "paused",
-                        "last_error": message,
-                        "sync": sync,
-                    })
-                    self.store.append_event(account_id, {"type": "error", "message": message})
                     continue
+                process = self._processes.get(account_id)
+                if state.get("status") != "running":
+                    self._detach_runtime(account_id, expected_process=process)
+                    continue
+                if process is None or not process.is_alive():
+                    if not self._detach_runtime(account_id, expected_process=process):
+                        continue
+                    exit_code = getattr(process, "exitcode", None) if process is not None else None
+                    now = time.monotonic()
+                    restart_attempts = getattr(self, "_restart_attempts", None)
+                    if restart_attempts is None:
+                        restart_attempts = self._restart_attempts = {}
+                    attempts = restart_attempts.setdefault(account_id, deque())
+                    while attempts and attempts[0] <= now - _WORKER_RESTART_WINDOW_SECONDS:
+                        attempts.popleft()
+                    if len(attempts) < _WORKER_RESTART_LIMIT:
+                        attempts.append(now)
+                        self.store.append_event(account_id, {
+                            "type": "worker_restart",
+                            "attempt": len(attempts),
+                            "exit_code": exit_code,
+                        })
+                        try:
+                            self.start(account_id, reset_restart_attempts=False)
+                        except Exception as exc:  # noqa: BLE001
+                            self._pause_with_error(
+                                account_id,
+                                state,
+                                f"策略子进程自动恢复失败: {exc}",
+                            )
+                        continue
+                    detail = f"，退出码 {exit_code}" if exit_code is not None else ""
+                    self._pause_with_error(
+                        account_id,
+                        state,
+                        f"策略子进程在 5 分钟内连续异常退出{detail}，已暂停",
+                    )
+                    continue
+                deadline = getattr(self, "_deadlines", {}).get(account_id)
+                if deadline is not None:
+                    with deadline.get_lock() if hasattr(deadline, "get_lock") else nullcontext():
+                        deadline_value = float(deadline.value)
+                    if deadline_value > 0 and time.monotonic() >= deadline_value:
+                        timeout = float(state.get("config", {}).get("callback_timeout_seconds", 30.0))
+                        message = f"策略执行超过 {timeout:g} 秒，已终止子进程"
+                        if not self._detach_runtime(account_id, expected_process=process):
+                            continue
+                        self._pause_with_error(account_id, state, message)
+                        continue
+                input_queue = self._queues.get(account_id)
+            if input_queue is None:
+                continue
             symbols = set(state.get("universe", []))
             if not symbols:
                 symbols.update(state.get("config", {}).get("symbols", []))
@@ -1559,7 +1582,7 @@ class PaperTradingSupervisor:
                         state_market_mode(state),
                         symbols,
                         str(state.get("config", {}).get("asset_type", "stock")),
-                        self._queues[account_id],
+                        input_queue,
                         str(state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp") or ""),
                         held_symbols,
                         execution_mode=str(state.get("execution_mode") or "full_bar"),
@@ -1578,8 +1601,25 @@ class PaperTradingSupervisor:
                 self.store.update_fields(account_id, {"last_error": str(exc)})
                 self.store.append_event(account_id, {"type": "error", "message": str(exc)})
 
-    def _detach_runtime(self, account_id: str) -> None:
+    def _pause_with_error(
+        self,
+        account_id: str,
+        state: dict[str, Any],
+        message: str,
+    ) -> None:
+        sync = dict(state.get("sync", {}))
+        sync.update({"phase": "error", "error": message, "updated_at": now_iso()})
+        self.store.update_fields(account_id, {
+            "status": "paused",
+            "last_error": message,
+            "sync": sync,
+        })
+        self.store.append_event(account_id, {"type": "error", "message": message})
+
+    def _detach_runtime(self, account_id: str, *, expected_process: Any = ...) -> bool:
         with self._lock:
+            if expected_process is not ... and self._processes.get(account_id) is not expected_process:
+                return False
             self.hub.unregister(account_id)
             process = self._processes.pop(account_id, None)
             input_queue = self._queues.pop(account_id, None)
@@ -1591,6 +1631,7 @@ class PaperTradingSupervisor:
                 if process.is_alive():
                     process.terminate()
                     process.join(timeout=2)
+            return True
 
     def recover(self) -> None:
         for state in self.store.list():
@@ -1603,8 +1644,15 @@ class PaperTradingSupervisor:
                         "last_error": f"自动恢复失败: {exc}",
                     })
 
-    def start(self, account_id: str) -> dict[str, Any]:
+    def start(
+        self,
+        account_id: str,
+        *,
+        reset_restart_attempts: bool = True,
+    ) -> dict[str, Any]:
         with self._lock:
+            if reset_restart_attempts:
+                getattr(self, "_restart_attempts", {}).pop(account_id, None)
             state = self.store.get(account_id)
             mode = state_market_mode(state)
             if mode == "poll_3s" and self.hub.quote_service.get_min_interval() > 3:

@@ -2,6 +2,7 @@ import queue
 import sqlite3
 import threading
 import time
+from collections import deque
 from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -30,6 +31,54 @@ from app.services.quote_service import QuoteService
 
 def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
+
+
+class FakePaperProcess:
+    def __init__(self, alive=False, exitcode=None):
+        self.alive = alive
+        self.exitcode = exitcode
+        self.terminated = False
+        self.on_is_alive = None
+
+    def start(self):
+        self.alive = True
+
+    def is_alive(self):
+        if self.on_is_alive is not None:
+            callback, self.on_is_alive = self.on_is_alive, None
+            callback()
+        return self.alive
+
+    def join(self, timeout):
+        pass
+
+    def terminate(self):
+        self.alive = False
+        self.terminated = True
+
+
+class FakePaperHub:
+    def __init__(self):
+        self.unregistered = []
+
+    def unregister(self, account_id):
+        self.unregistered.append(account_id)
+
+
+class FakePaperContext:
+    def __init__(self, replacement):
+        self.replacement = replacement
+
+    @staticmethod
+    def Queue(maxsize):
+        return queue.Queue(maxsize=maxsize)
+
+    @staticmethod
+    def Value(_typecode, value):
+        return SimpleNamespace(value=value)
+
+    def Process(self, *_args, **_kwargs):
+        return self.replacement
 
 
 def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp_path):
@@ -335,6 +384,87 @@ def test_supervisor_detaches_runtime_after_worker_pauses(tmp_path):
     assert supervisor.hub.unregistered == ["paper"]
     assert process.terminated is True
     assert supervisor._processes == {}  # noqa: SLF001
+
+
+def test_supervisor_does_not_detach_concurrently_restarted_worker(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running", "config": {}})
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.store = store
+    supervisor.hub = FakePaperHub()
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    old_process = FakePaperProcess(False)
+    new_process = FakePaperProcess(True)
+    new_queue = queue.Queue(maxsize=2)
+    supervisor._processes = {"paper": old_process}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+
+    def replace_runtime():
+        supervisor._processes["paper"] = new_process  # noqa: SLF001
+        supervisor._queues["paper"] = new_queue  # noqa: SLF001
+
+    old_process.on_is_alive = replace_runtime
+
+    supervisor._monitor_once()  # noqa: SLF001
+
+    saved = store.get("paper")
+    assert supervisor._processes["paper"] is new_process  # noqa: SLF001
+    assert supervisor._queues["paper"] is new_queue  # noqa: SLF001
+    assert new_process.terminated is False
+    assert saved["status"] == "running"
+    assert saved.get("last_error") is None
+    assert store.events("paper") == []
+
+
+def test_supervisor_restarts_worker_after_unreported_exit(tmp_path):
+    replacement = FakePaperProcess()
+
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running", "config": {}})
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.data_dir = tmp_path
+    supervisor.store = store
+    supervisor.hub = FakePaperHub()
+    supervisor._ctx = FakePaperContext(replacement)  # noqa: SLF001
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {"paper": FakePaperProcess(exitcode=-15)}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    supervisor._deadlines = {}  # noqa: SLF001
+    supervisor._restart_attempts = {}  # noqa: SLF001
+
+    supervisor._monitor_once()  # noqa: SLF001
+
+    saved = store.get("paper")
+    assert supervisor._processes["paper"] is replacement  # noqa: SLF001
+    assert replacement.is_alive()
+    assert saved["status"] == "running"
+    assert saved.get("last_error") is None
+    assert [event["type"] for event in store.events("paper")] == ["worker_restart", "start"]
+    assert store.events("paper")[0]["exit_code"] == -15
+
+
+def test_supervisor_pauses_after_repeated_unreported_exits(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running", "config": {}})
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.store = store
+    supervisor.hub = FakePaperHub()
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {"paper": FakePaperProcess(exitcode=1)}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    supervisor._deadlines = {}  # noqa: SLF001
+    now = time.monotonic()
+    supervisor._restart_attempts = {  # noqa: SLF001
+        "paper": deque([now - 3, now - 2, now - 1]),
+    }
+
+    supervisor._monitor_once()  # noqa: SLF001
+
+    saved = store.get("paper")
+    assert saved["status"] == "paused"
+    assert "5 分钟内连续异常退出" in saved["last_error"]
+    assert "退出码 1" in saved["last_error"]
+    assert [event["type"] for event in store.events("paper")] == ["error"]
 
 
 def test_supervisor_start_defers_strategy_initialization_to_worker(tmp_path):
