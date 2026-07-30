@@ -1264,6 +1264,29 @@ def run(context):
     assert resumed.callbacks_executed == 1
 
 
+def test_scheduled_checkpoint_restores_context_time_for_dynamic_scope():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '14:20', symbols=scope)
+
+def scope(context, timestamp):
+    return ['X'] if context.now.date() == timestamp.date() else []
+
+def run(context):
+    pass
+"""
+    timestamp = datetime(2026, 7, 30, 10, 30)
+    initial = FreeStrategyEngine(source)
+    initial.update_scheduled_market(timestamp, [])
+    resumed = FreeStrategyEngine(source)
+
+    resumed.restore_checkpoint(initial.checkpoint())
+
+    assert resumed.context.now == timestamp
+    assert resumed.scheduled_snapshot_symbols(datetime(2026, 7, 30, 14, 20)) == ["X"]
+
+
 def test_paper_session_end_runs_once_with_standard_lifecycle():
     source = """
 def initialize(context):

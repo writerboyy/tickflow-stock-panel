@@ -1132,6 +1132,7 @@ class FreeStrategyEngine:
             "session_date": self._active_session_date.isoformat() if self._active_session_date else None,
             "session_finished": self._session_finished,
             "last_timestamp": self._last_timestamp.isoformat() if self._last_timestamp else None,
+            "context_time": self.context.now.isoformat() if self.context.now else None,
             "scheduled_completed": [done for _, _, done in self.context._scheduled],
             "callbacks_executed": self.callbacks_executed,
             "market_rows_consumed": self.market_rows_consumed,
@@ -1144,6 +1145,8 @@ class FreeStrategyEngine:
         self._active_session_date = date.fromisoformat(session_date) if session_date else None
         self._session_finished = bool(raw.get("session_finished", False))
         self._last_timestamp = datetime.fromisoformat(last_timestamp) if last_timestamp else None
+        context_time = raw.get("context_time") or last_timestamp
+        self.context.now = datetime.fromisoformat(context_time) if context_time else None
         completed = list(raw.get("scheduled_completed", []))
         if completed:
             self.context._scheduled = [
