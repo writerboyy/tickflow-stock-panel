@@ -1,0 +1,174 @@
+"""固定端点的开盘啦 HTTP 客户端。"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import httpx
+
+from app.plugins.kaipanla.credentials import KaipanlaCredentials, load_credentials
+
+_PATH = "/w1/api/index.php"
+_HEADERS = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; V2178A Build/UP1A.231005.007)",
+}
+
+_ROUTES: dict[int, tuple[str, str, dict[str, str]]] = {
+    115: (
+        "POST",
+        "apphwhq.longhuvip.com",
+        {
+            "Order": "1",
+            "a": "MorningBiddingList",
+            "c": "HomeDingPan",
+            "PidType": "0",
+            "Type": "4",
+        },
+    ),
+    30: (
+        "POST",
+        "apphis.longhuvip.com",
+        {
+            "Order": "1",
+            "a": "MorningBiddingList",
+            "c": "HisHomeDingPan",
+            "PidType": "0",
+            "Type": "4",
+        },
+    ),
+    31: ("POST", "apphwhq.longhuvip.com", {"a": "GetStockBid", "c": "StockL2Data"}),
+    15: (
+        "POST",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "GetPlateInfo_w38",
+            "c": "DailyLimitResumption",
+        },
+    ),
+    100: (
+        "POST",
+        "applhb.longhuvip.com",
+        {
+            "a": "GetStockList",
+            "c": "LongHuBang",
+            "Type": "2",
+        },
+    ),
+    101: (
+        "POST",
+        "applhb.longhuvip.com",
+        {
+            "a": "GetNewOneStockInfo",
+            "c": "Stock",
+            "Type": "0",
+        },
+    ),
+    108: (
+        "POST",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "GetYDTP_ZDJK_Today",
+            "c": "StockBidYiDong",
+        },
+    ),
+    109: (
+        "POST",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "GetPianLiZhi_Many",
+            "c": "StockBidYiDong",
+        },
+    ),
+}
+
+
+class KaipanlaRequestError(RuntimeError):
+    """不包含请求 URL 或凭据的上游请求错误。"""
+
+
+def _redact_payload(value: Any, credentials: KaipanlaCredentials) -> Any:
+    secret_names = {"token", "userid", "deviceid"}
+    secret_values = (credentials.token, credentials.userid, credentials.deviceid)
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]"
+            if str(key).casefold() in secret_names
+            else _redact_payload(item, credentials)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_payload(item, credentials) for item in value]
+    if isinstance(value, str):
+        result = value
+        for secret in secret_values:
+            if secret and len(secret) >= 6:
+                result = result.replace(secret, "[REDACTED]")
+        return result
+    return value
+
+
+class KaipanlaClient:
+    def __init__(
+        self,
+        credentials: KaipanlaCredentials | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        attempts: int = 3,
+    ) -> None:
+        self.credentials = credentials or load_credentials()
+        if self.credentials is None:
+            raise KaipanlaRequestError("开盘啦凭据未配置")
+        self._client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=False)
+        self._owns_client = http_client is None
+        self._attempts = max(1, attempts)
+
+    async def __aenter__(self) -> KaipanlaClient:
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def request(self, endpoint: int, params: dict[str, object] | None = None) -> dict:
+        route = _ROUTES.get(endpoint)
+        if route is None:
+            raise ValueError(f"不支持的开盘啦接口: /{endpoint}")
+        method, host, base_params = route
+        query = {**base_params, **{key: str(value) for key, value in (params or {}).items()}}
+        url = f"https://{host}{_PATH}"
+
+        for attempt in range(1, self._attempts + 1):
+            try:
+                response = await self._client.request(
+                    method,
+                    url,
+                    params=query,
+                    data=self.credentials.as_form(),
+                    headers=_HEADERS,
+                )
+            except (httpx.TimeoutException, httpx.TransportError):
+                if attempt == self._attempts:
+                    raise KaipanlaRequestError(f"开盘啦 /{endpoint} 请求失败") from None
+                await asyncio.sleep(0.5 * attempt)
+                continue
+
+            if response.status_code == 429 or response.status_code >= 500:
+                if attempt < self._attempts:
+                    await asyncio.sleep(0.5 * attempt)
+                    continue
+            if response.status_code != 200:
+                raise KaipanlaRequestError(f"开盘啦 /{endpoint} 返回 HTTP {response.status_code}")
+            try:
+                payload = response.json()
+            except ValueError:
+                raise KaipanlaRequestError(f"开盘啦 /{endpoint} 返回非 JSON 数据") from None
+            if not isinstance(payload, dict):
+                raise KaipanlaRequestError(f"开盘啦 /{endpoint} 返回结构无效")
+            payload = _redact_payload(payload, self.credentials)
+            errcode = payload.get("errcode")
+            if errcode not in (None, 0, "0"):
+                raise KaipanlaRequestError(f"开盘啦 /{endpoint} 返回业务错误")
+            return payload
+
+        raise KaipanlaRequestError(f"开盘啦 /{endpoint} 请求失败")

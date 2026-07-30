@@ -120,3 +120,21 @@ class MyConfig:
 
 注册后, 插件和用户 YAML 自定义源走**完全相同的路由路径**(services 层的
 `provider_has_dataset` / `get_provider` 调用), 无需额外集成代码。
+
+## 辅助采集插件
+
+并非所有外部数据都能替代 `daily`、`minute`、`realtime` 等标准行情数据集。只提供
+竞价、榜单、监管标签等扩展字段的来源，应作为辅助采集插件接入，而不是声明成
+`MarketDataProvider`：
+
+- 不创建 `plugin.yaml`，不进入 provider discovery，也不出现在主行情切换列表中。
+- 在 `app/plugins/<name>/` 内封装固定端点客户端、供应商字段解析、采集调度和失败隔离。
+- 输出通过 `ExtConfigStore` 注册为普通扩展表，配置的 `pull` 为空；不得为供应商需求修改
+  通用 `ext_data` 拉取器或映射器。
+- 复用应用现有调度器，不启动第二个 scheduler；未配置凭据或插件失败不得影响应用启动。
+- 凭据使用 `secrets_store` 分字段保存，请求主机和路径使用代码白名单，日志和响应不得包含
+  完整 URL 或凭据。
+- 多时点写入同一日行时，插件负责按稳定主键进行非空字段原子合并。
+
+`backend/app/plugins/kaipanla/` 是这类插件的现有参考实现，具体表契约和调度见
+[开盘啦扩展数据接入](./plans/kaipanla-auction.md)。

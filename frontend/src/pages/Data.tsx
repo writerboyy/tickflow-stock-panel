@@ -17,7 +17,7 @@ import {
   Info,
   WandSparkles,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
 import { api, type ExtDataConfig } from '@/lib/api'
 import {
@@ -40,7 +40,7 @@ import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ScheduleEditor } from '@/components/data/ScheduleEditor'
 import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
-import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
+import { RepairDataPanel } from '@/components/data/RepairDataPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
@@ -53,6 +53,7 @@ import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 
 export function Data() {
+  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const startTime = useRef<number | null>(null)
@@ -133,7 +134,7 @@ export function Data() {
   const [schemaTable, setSchemaTable] = useState<string | null>(null)
   const [showEndpointTest, setShowEndpointTest] = useState(false)
   const [showCreateExt, setShowCreateExt] = useState(false)
-  const [showRepair, setShowRepair] = useState(false)
+  const [showRepair, setShowRepair] = useState(() => searchParams.get('repair') === 'etf')
   const [editingExt, setEditingExt] = useState<ExtDataConfig | null>(null)
   const [indexBatchInput, setIndexBatchInput] = useState('100')
 
@@ -582,7 +583,7 @@ export function Data() {
               className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
             >
               <WandSparkles className="h-3.5 w-3.5" />
-              修正数据
+              检查与修复
             </button>
             <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1.5">
@@ -960,12 +961,17 @@ export function Data() {
 
       <AnimatePresence>
         {showRepair && (
-          <SettingsModal title="日 K · 修正 / 补数据" onClose={() => setShowRepair(false)}>
-            <RepairDailyPanel
+          <SettingsModal title="数据检查与修复" onClose={() => setShowRepair(false)} panelClassName="max-w-5xl">
+            <RepairDataPanel
               caps={caps.data}
               isRunning={!!activeJobId}
               latestDate={s?.daily?.latest_date ?? null}
-              onStart={() => setShowRepair(false)}
+              initialStrategyId={searchParams.get('strategy_id') ?? ''}
+              initialStart={searchParams.get('start') ?? undefined}
+              initialEnd={searchParams.get('end') ?? undefined}
+              initialTimeframe={(['1d', '30m', '5m', '1m'].includes(searchParams.get('timeframe') ?? '') ? searchParams.get('timeframe') : '1m') as '1d' | '30m' | '5m' | '1m'}
+              onDailyStart={() => setShowRepair(false)}
+              onJobStart={(jobId) => { setActiveJobId(jobId); setShowRepair(false) }}
             />
           </SettingsModal>
         )}

@@ -16,6 +16,7 @@ from app.api import analysis, auth as auth_api, backtest, data, ext_data, financ
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
+from app.plugins.kaipanla.router import router as kaipanla_router
 from app.services.quote_service import QuoteService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
@@ -120,6 +121,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
+
+    # 开盘啦辅助扩展数据: 复用主调度器，插件失败不影响主行情与通用扩展数据。
+    try:
+        from app.plugins.kaipanla import KaipanlaCollector
+
+        kaipanla_collector = KaipanlaCollector(store.data_dir)
+        kaipanla_collector.start(app.state.scheduler)
+        app.state.kaipanla_collector = kaipanla_collector
+    except Exception as e:  # noqa: BLE001
+        logger.warning("kaipanla collector not started: %s", e)
+        app.state.kaipanla_collector = None
 
     # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
     try:
@@ -261,6 +273,9 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
+    if kaipanla_collector:
+        kaipanla_collector.stop()
     if app.state.scheduler:
         app.state.scheduler.shutdown(wait=False)
     ps = getattr(app.state, "pull_scheduler", None)
@@ -367,6 +382,7 @@ app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(kaipanla_router)
 app.include_router(strategy.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
