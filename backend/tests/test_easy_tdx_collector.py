@@ -70,8 +70,8 @@ def test_fetch_industry_rows_uses_easy_tdx_public_api(monkeypatch):
 
     class FakeClient:
         @classmethod
-        def from_best_host(cls, *, timeout):
-            calls.append(timeout)
+        def from_best_host(cls, *, timeout, heartbeat_interval):
+            calls.append((timeout, heartbeat_interval))
             return cls()
 
         def __enter__(self):
@@ -91,7 +91,7 @@ def test_fetch_industry_rows_uses_easy_tdx_public_api(monkeypatch):
         "industry_sw": "X480101",
         "industry_tdx": "T01",
     }]
-    assert calls == [15.0]
+    assert calls == [(15.0, 0)]
 
 
 def test_snapshot_replace_is_atomic_and_empty_rows_preserve_last_valid_data(tmp_path):

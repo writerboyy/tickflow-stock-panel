@@ -51,7 +51,7 @@ def fetch_industry_rows(timeout: float = 30.0) -> list[dict[str, str]]:
     """Fetch the public EasyTDX security list without importing it at app startup."""
     from easy_tdx import TdxClient
 
-    with TdxClient.from_best_host(timeout=timeout) as client:
+    with TdxClient.from_best_host(timeout=timeout, heartbeat_interval=0) as client:
         frame = client.get_security_list_all()
     rows = frame.to_dict(orient="records")
     return normalize_industry_rows(rows)
