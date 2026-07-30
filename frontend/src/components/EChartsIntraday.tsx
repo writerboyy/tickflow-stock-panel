@@ -3,6 +3,7 @@ import * as echarts from 'echarts'
 import type { ECharts, EChartsOption } from 'echarts'
 import type { MinuteKlineRow, PriceLimitInfo } from '@/lib/api'
 import { useChartTheme, type ChartTheme } from '@/lib/theme'
+import { formatIntradayTimeKey } from '@/lib/intradayTime'
 
 type YMode = 'adaptive' | 'limit'
 
@@ -24,13 +25,6 @@ interface Props {
   onPriceHover?: (price: number | null) => void
   showLimitLines?: boolean
   showAvgLine?: boolean
-}
-
-function fmtTime(dt: string): string {
-  const match = dt.match(/(\d{2}):(\d{2})/)
-  if (!match) return dt.slice(11, 16)
-  const h = (parseInt(match[1]) + 8) % 24
-  return `${String(h).padStart(2, '0')}:${match[2]}`
 }
 
 function computeAvgPrice(data: MinuteKlineRow[]): number[] {
@@ -112,7 +106,7 @@ function buildOption(data: MinuteKlineRow[], prevClose: number | undefined, avgP
 
   const volNeutral = 'rgba(161,161,170,0.5)'
   for (let i = 0; i < data.length; i++) {
-    const timeKey = fmtTime(data[i].datetime)
+    const timeKey = formatIntradayTimeKey(data[i].datetime)
     const idx = timeIndexMap.get(timeKey)
     if (idx !== undefined) {
       closes[idx] = data[i].close
@@ -480,7 +474,7 @@ export function EChartsIntraday({ data, height = 320, prevClose, date, priceLimi
       const timeIndexMap = new Map(FULL_DAY_TIMES.map((t, i) => [t, i]))
       const mapping = new Map<number, number>()
       for (let i = 0; i < data.length; i++) {
-        const timeKey = fmtTime(data[i].datetime)
+        const timeKey = formatIntradayTimeKey(data[i].datetime)
         const fullDayIdx = timeIndexMap.get(timeKey)
         if (fullDayIdx !== undefined) {
           mapping.set(fullDayIdx, i)
