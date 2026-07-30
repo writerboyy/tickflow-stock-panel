@@ -10,6 +10,7 @@ from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
     _aligned_warmup_bars,
+    _load_financial_snapshot,
     _load_scheduled_history,
     _load_scheduled_history_batch,
     _prepare_market_data,
@@ -46,6 +47,46 @@ def daily_row(day, price: float) -> dict:
         "volume": 100.0,
         "amount": price * 100,
     }
+
+
+def test_financial_snapshot_uses_latest_announced_records_without_future_data(tmp_path):
+    income_path = tmp_path / "financials" / "income" / "part.parquet"
+    income_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["X", "X"],
+        "period_end": ["2024-03-31", "2024-06-30"],
+        "announce_date": ["2024-04-30", "2024-08-30"],
+        "revenue": [120_000_000.0, 80_000_000.0],
+        "net_income": [10_000_000.0, -1.0],
+        "net_income_attributable": [9_000_000.0, -1.0],
+    }).write_parquet(income_path)
+    metrics_path = tmp_path / "financials" / "metrics" / "part.parquet"
+    metrics_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["X", "X"],
+        "period_end": ["2024-03-31", "2024-06-30"],
+        "announce_date": ["2024-04-30", "2024-08-30"],
+        "roe": [6.0, -1.0],
+    }).write_parquet(metrics_path)
+    balance_path = tmp_path / "financials" / "balance_sheet" / "part.parquet"
+    balance_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["X", "X"],
+        "period_end": ["2024-03-31", "2024-06-30"],
+        "announce_date": ["2024-04-30", "2024-08-30"],
+        "total_assets": [200_000_000.0, 1.0],
+    }).write_parquet(balance_path)
+
+    snapshot = _load_financial_snapshot(
+        tmp_path,
+        ["X"],
+        datetime(2024, 7, 1).date(),
+    )
+
+    assert snapshot["X"]["revenue"] == 120_000_000.0
+    assert snapshot["X"]["net_income_attributable"] == 9_000_000.0
+    assert snapshot["X"]["roe"] == 6.0
+    assert snapshot["X"]["roa"] == 5.0
 
 
 def test_scheduled_daily_bar_cache_invalidates_when_row_changes():

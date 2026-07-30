@@ -232,6 +232,18 @@ class Context:
     def extra_history_requirements(self) -> set[str]:
         return set(self._extra_history_requirements)
 
+    @staticmethod
+    def _normalize_symbol(raw: Any) -> str:
+        symbol = str(raw).strip().upper()
+        for source_suffix, target_suffix in {
+            ".XSHG": ".SH",
+            ".XSHE": ".SZ",
+            ".XBSE": ".BJ",
+        }.items():
+            if symbol.endswith(source_suffix):
+                return f"{symbol[:-len(source_suffix)]}{target_suffix}"
+        return symbol
+
     def instruments(self, asset_type: str | None = None) -> list[dict[str, Any]]:
         asset = str(asset_type).strip().lower() if asset_type else None
         return [

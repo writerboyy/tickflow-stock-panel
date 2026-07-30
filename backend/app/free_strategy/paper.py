@@ -538,6 +538,7 @@ def _engine_from_state(
         MarketData,
         _instrument_records,
         _load_market_data,
+        _load_financial_snapshot,
         _load_scheduled_history_batch,
         _prepare_market_reference,
         _preload_tradable_dates,
@@ -577,6 +578,13 @@ def _engine_from_state(
         if runtime_timestamp else cn_today()
     )
     engine.set_run_window(run_start, cn_today())
+    engine.set_financial_snapshot_loader(
+        lambda symbols, cutoff: _load_financial_snapshot(
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
     if config.allow_stale_fills:
         _preload_tradable_dates(
             engine,

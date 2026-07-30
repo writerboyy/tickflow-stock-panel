@@ -67,6 +67,11 @@ def compact_paper_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
     if isinstance(five_fortunes, dict) and five_fortunes.get("daily"):
         five_fortunes["daily"] = {"__paper_history_loader__": []}
         five_fortunes["daily_reports"] = list(five_fortunes.get("daily_reports", []))[-30:]
+    performance_small_cap = checkpoint.get("state", {}).get("performance_small_cap")
+    if isinstance(performance_small_cap, dict):
+        performance_small_cap["daily_reports"] = list(
+            performance_small_cap.get("daily_reports", [])
+        )[-30:]
     return checkpoint
 
 
@@ -146,9 +151,14 @@ def continue_account_from_backtest(
         "order_times": [],
     }
     if not checkpoint.get("universe"):
-        strategy_state = checkpoint.get("state", {}).get("five_fortunes", {})
+        state_payload = checkpoint.get("state", {})
+        strategy_state = state_payload.get("five_fortunes", {})
+        if not strategy_state:
+            strategy_state = state_payload.get("performance_small_cap", {})
         checkpoint["universe"] = sorted(set(
             strategy_state.get("subscription_pool", [])
+            + strategy_state.get("sorted_stocks", [])
+            + strategy_state.get("selection_cache", [])
             + [
                 symbol
                 for symbol, quantity in account.get("positions", {}).items()

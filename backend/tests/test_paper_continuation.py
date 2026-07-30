@@ -169,3 +169,72 @@ def test_continue_account_rejects_mismatched_sell_commission(tmp_path):
 
     with pytest.raises(ValueError, match="sell_commission_pct"):
         continue_account_from_backtest(tmp_path, "paper", "run")
+
+
+def test_continue_account_compacts_performance_small_cap_state(tmp_path):
+    config = {**CONFIG, "asset_type": "stock", "benchmark_symbol": "399303.SZ"}
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "strategy_id": "performance-small-cap",
+        "source_hash": "source-hash",
+        "status": "paused",
+        "config": config,
+    })
+    run = tmp_path / "free_strategy_runs" / "run"
+    write_json(run / "manifest.json", {
+        "strategy_id": "performance-small-cap",
+        "strategy_source_sha256": "source-hash",
+        "payload": {"config": config},
+    })
+    reports = [{"date": f"2026-06-{day:02d}"} for day in range(1, 36)]
+    checkpoint = {
+        "account": {
+            "cash": 10,
+            "positions": {"000001.SZ": 100},
+            "available": {"000001.SZ": 100},
+            "avg_cost": {"000001.SZ": 9},
+            "orders": [],
+            "fills": [],
+            "corporate_actions": [],
+            "equity_curve": [],
+        },
+        "state": {"performance_small_cap": {
+            "sorted_stocks": ["000001.SZ", "000002.SZ"],
+            "selection_cache": ["000003.SZ"],
+            "daily_reports": reports,
+        }},
+        "runtime": {"last_timestamp": "2026-07-24T15:00:00"},
+        "pending_orders": [],
+        "order_counter": 1,
+        "risk": {},
+    }
+    write_json(run / "result.json", {
+        "checkpoint": checkpoint,
+        "initial_capital": 100_000,
+        "final_equity": 101_000,
+        "max_drawdown_pct": 2.5,
+        "daily_equity_curve": [
+            {"date": "2026-07-24", "timestamp": "2026-07-24T15:00:00",
+             "equity": 101_000, "cash": 10, "strategy_nav": 1.01,
+             "drawdown_pct": 0, "positions": {"000001.SZ": 100},
+             "avg_cost": {"000001.SZ": 9}},
+        ],
+    })
+
+    saved = continue_account_from_backtest(
+        tmp_path,
+        "paper",
+        "run",
+        today=date(2026, 7, 28),
+    )
+
+    assert saved["checkpoint"]["universe"] == [
+        "000001.SZ",
+        "000002.SZ",
+        "000003.SZ",
+        "399303.SZ",
+    ]
+    compacted = saved["checkpoint"]["state"]["performance_small_cap"]["daily_reports"]
+    assert len(compacted) == 30
+    assert compacted[0]["date"] == "2026-06-06"

@@ -10,7 +10,7 @@ from app.api import data as data_api
 from app.indicators import pipeline
 from app.share_capital import apply_point_in_time_shares
 from app.services import financial_sync
-from app.tickflow.capabilities import CapabilitySet
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
 def _write_instruments(data_dir, symbols: list[str]) -> None:
@@ -107,6 +107,66 @@ def test_custom_financial_provider_receives_shares_contract(monkeypatch):
 
     assert result.height == 1
     assert received == [("shares", ["600000.SH"], False)]
+
+
+def test_statement_sync_fetches_complete_history_for_backtests(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    calls: list[tuple[str, list[str], bool]] = []
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        calls.append((table, symbols, latest_only))
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600000.SH"],
+            "period_end": ["2023-12-31", "2024-03-31"],
+            "announce_date": ["2024-04-15", "2024-04-30"],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    assert financial_sync.sync_metrics(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_income(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_balance_sheet(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_cash_flow(tmp_path, CapabilitySet()) == 2
+
+    assert calls == [
+        ("metrics", ["600000.SH"], False),
+        ("income", ["600000.SH"], False),
+        ("balance_sheet", ["600000.SH"], False),
+        ("cash_flow", ["600000.SH"], False),
+    ]
+
+
+def test_sync_all_fetches_statement_history_not_latest_only(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    calls: list[tuple[str, bool]] = []
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        calls.append((table, latest_only))
+        return pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-03-31"],
+            "announce_date": ["2024-04-30"],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    capset = CapabilitySet({Cap.FINANCIAL: CapabilityLimits()})
+    result = financial_sync.sync_all(tmp_path, capset)
+
+    assert result == {
+        "metrics": 1,
+        "income": 1,
+        "balance_sheet": 1,
+        "cash_flow": 1,
+        "shares": 1,
+    }
+    assert calls == [
+        ("metrics", False),
+        ("income", False),
+        ("balance_sheet", False),
+        ("cash_flow", False),
+        ("shares", False),
+    ]
 
 
 def test_historical_turnover_uses_only_available_share_capital(monkeypatch):

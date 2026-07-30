@@ -1348,6 +1348,13 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             callback_deadline=callback_deadline,
         )
         engine.set_run_window(start, end)
+        engine.set_financial_snapshot_loader(
+            lambda symbols, cutoff: _load_financial_snapshot(
+                repo.store.data_dir,
+                symbols,
+                cutoff,
+            )
+        )
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data

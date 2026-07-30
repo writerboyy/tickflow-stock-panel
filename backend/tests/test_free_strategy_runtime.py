@@ -5,7 +5,7 @@ import pytest
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
-from app.free_strategy import five_fortunes, seven_stars, small_cap_limitup
+from app.free_strategy import five_fortunes, performance_small_cap, seven_stars, small_cap_limitup
 from app.free_strategy.five_fortunes import (
     DEFENSIVE_ETF,
     REGIME_FALLBACK_PROXIES,
@@ -214,6 +214,11 @@ def on_bar(context, bars):
             "asset_type": "stock",
             "has_minute": True,
         }]),
+        ("performance_small_cap", [{
+            "symbol": "000001.SZ",
+            "asset_type": "stock",
+            "has_minute": True,
+        }]),
     ],
 )
 def test_templates_define_universe_in_strategy_source(template_id, instruments):
@@ -248,6 +253,13 @@ def test_small_cap_template_is_a_self_contained_source_snapshot():
     source = TEMPLATES["small_cap_limitup"]["source"]
 
     assert source == Path(small_cap_limitup.__file__).read_text(encoding="utf-8")
+    assert "from jqdata import" not in source
+
+
+def test_performance_small_cap_template_is_a_self_contained_source_snapshot():
+    source = TEMPLATES["performance_small_cap"]["source"]
+
+    assert source == Path(performance_small_cap.__file__).read_text(encoding="utf-8")
     assert "from jqdata import" not in source
 
 
@@ -349,6 +361,63 @@ def test_small_cap_template_uses_reference_capital_for_paper_continuation():
         "settlement": "t1",
         "fill_policy": "close",
     }
+
+
+def test_performance_small_cap_template_uses_reference_backtest_parameters():
+    assert TEMPLATES["performance_small_cap"]["config"] == {
+        "timeframe": "1m",
+        "asset_type": "stock",
+        "initial_capital": 100_000,
+        "fees_pct": 0.0001,
+        "commission_pct": 0.0001,
+        "min_commission": 5,
+        "stamp_tax_pct": 0.001,
+        "slippage_bps": 0,
+        "price_tick": 0.01,
+        "benchmark_symbol": "399303.SZ",
+        "settlement": "t1",
+        "fill_policy": "close",
+    }
+
+
+def test_performance_small_cap_template_runs_as_scheduled_strategy():
+    engine = FreeStrategyEngine(
+        TEMPLATES["performance_small_cap"]["source"],
+        timeframe="1m",
+        instruments=[{
+            "symbol": "000001.SZ",
+            "asset_type": "stock",
+            "has_minute": True,
+        }],
+    )
+
+    assert engine.execution_mode == "scheduled"
+    assert engine.scheduled_times == ["09:00", "09:30", "14:00"]
+    assert engine.market_history_requirements == {("index", "1d"): 235}
+
+
+def test_financial_snapshot_normalizes_symbols_and_uses_previous_day_cutoff():
+    source = """
+def initialize(context):
+    context.set_universe(["600000.XSHG"])
+
+def on_bar(context, bars):
+    context.state["snapshot"] = context.financial_snapshot(["600000.XSHG"])
+"""
+    engine = FreeStrategyEngine(source)
+    calls = []
+
+    def load(symbols, cutoff):
+        calls.append((symbols, cutoff))
+        return {symbols[0]: {"revenue": 100}}
+
+    engine.set_financial_snapshot_loader(load)
+    result = engine.run([
+        Bar("600000.SH", datetime(2024, 5, 6, 9, 30), 10, 10, 10, 10),
+    ])
+
+    assert calls == [(["600000.SH"], datetime(2024, 5, 5).date())]
+    assert result["state"]["snapshot"] == {"600000.SH": {"revenue": 100}}
 
 
 def test_five_fortunes_template_matches_reference_slippage_fills():

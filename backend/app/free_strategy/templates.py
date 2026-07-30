@@ -33,6 +33,7 @@ MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
 SMALL_CAP_LIMITUP_SOURCE = Path(__file__).with_name("small_cap_limitup.py").read_text(encoding="utf-8")
+PERFORMANCE_SMALL_CAP_SOURCE = Path(__file__).with_name("performance_small_cap.py").read_text(encoding="utf-8")
 
 
 TEMPLATES = {
@@ -147,5 +148,23 @@ def on_bar(context, bars):
             "fill_policy": "close",
         },
         "source": SMALL_CAP_LIMITUP_SOURCE,
+    },
+    "performance_small_cap": {
+        "name": "绩优小市值",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "stock",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0001,
+            "commission_pct": 0.0001,
+            "min_commission": 5,
+            "stamp_tax_pct": 0.001,
+            "slippage_bps": 0,
+            "price_tick": 0.01,
+            "benchmark_symbol": "399303.SZ",
+            "settlement": "t1",
+            "fill_policy": "close",
+        },
+        "source": PERFORMANCE_SMALL_CAP_SOURCE,
     },
 }
