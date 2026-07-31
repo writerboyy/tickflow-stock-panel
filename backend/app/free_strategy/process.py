@@ -1598,6 +1598,8 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             result = engine.result()
             trading_days = days_with_bars
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
+        five_fortunes_v2 = result.get("state", {}).get("five_fortunes_v2", {})
+        strategy_metadata = five_fortunes or five_fortunes_v2
         if payload["timeframe"] == "1d" or engine.execution_mode == "scheduled":
             available_symbols = symbols_seen
         else:
@@ -1624,9 +1626,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             "scheduled_times": engine.scheduled_times,
             "callbacks_executed": engine.callbacks_executed,
             "market_rows_consumed": engine.market_rows_consumed,
-            "nav_filter": five_fortunes.get("nav_filter"),
-            "excluded_no_minute_symbols": five_fortunes.get("excluded_no_minute_symbols", []),
-            "liquidity_scope": five_fortunes.get("liquidity_scope"),
+            "nav_filter": strategy_metadata.get("nav_filter"),
+            "excluded_no_minute_symbols": strategy_metadata.get("excluded_no_minute_symbols", []),
+            "liquidity_scope": strategy_metadata.get("liquidity_scope"),
             "data_coverage": {
                 "rows": replayed_rows,
                 "first_bar": first_bar.isoformat() if first_bar else None,

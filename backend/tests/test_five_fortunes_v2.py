@@ -69,7 +69,8 @@ def test_template_uses_wufu2_scheduled_buy_retry_times():
         "14:55",
         "15:10",
     ]
-    assert engine.context.state["five_fortunes"]["version"] == "2.0"
+    assert engine.context.state["five_fortunes_v2"]["version"] == "2.0"
+    assert "five_fortunes" not in engine.context.state
 
 
 def test_volume_price_divergence_matches_reference_rule():
@@ -89,7 +90,7 @@ def test_choose_targets_retains_existing_candidate_without_correlation_guard():
     class Context:
         now = datetime(2026, 7, 28, 13, 10)
         portfolio = Portfolio()
-        state = {"five_fortunes": {"decision": {}, "rank_streak": {}}}
+        state = {"five_fortunes_v2": {"decision": {}, "rank_streak": {}}}
 
     rows = [{"symbol": "B", "score": 5.0}, {"symbol": "A", "score": 4.9}]
 
@@ -103,7 +104,7 @@ def test_choose_targets_uses_reference_score_without_stale_quote_adjustment():
     class Context:
         now = datetime(2025, 8, 21, 13, 10)
         portfolio = Portfolio()
-        state = {"five_fortunes": {"decision": {}, "rank_streak": {}}}
+        state = {"five_fortunes_v2": {"decision": {}, "rank_streak": {}}}
 
     rows = [
         {"symbol": "588890.SH", "score": 4.997, "entry_score": 5.001},
@@ -147,7 +148,7 @@ def test_buy_target_uses_reference_commission_and_slippage_sizing():
         portfolio = Portfolio()
         orders = []
         state = {
-            "five_fortunes": {
+            "five_fortunes_v2": {
                 "target": ["588760.SH"],
                 "rebuy_cooldown": {},
                 "decision": {},
@@ -188,7 +189,7 @@ def test_minute_stop_loss_uses_reference_fixed_threshold():
     class Context:
         now = datetime(2025, 10, 10, 10, 0)
         portfolio = Portfolio()
-        state = {"five_fortunes": {"regime": "正常期", "rebuy_cooldown": {}}}
+        state = {"five_fortunes_v2": {"regime": "正常期", "rebuy_cooldown": {}}}
         orders = []
 
         @classmethod
@@ -202,7 +203,7 @@ def test_minute_stop_loss_uses_reference_fixed_threshold():
     five._minute_stop_loss(Context(), {"510300.SH": Bar()})
 
     assert Context.orders == [("510300.SH", 0.0)]
-    assert Context.state["five_fortunes"]["rebuy_cooldown"] == {}
+    assert Context.state["five_fortunes_v2"]["rebuy_cooldown"] == {}
 
 
 def test_minute_stop_loss_stops_after_reference_trading_window():
@@ -218,7 +219,7 @@ def test_minute_stop_loss_stops_after_reference_trading_window():
     class Context:
         now = datetime(2025, 10, 10, 15, 0)
         portfolio = Portfolio()
-        state = {"five_fortunes": {"regime": "正常期", "rebuy_cooldown": {}}}
+        state = {"five_fortunes_v2": {"regime": "正常期", "rebuy_cooldown": {}}}
         orders = []
 
         @classmethod
@@ -238,7 +239,7 @@ def test_dynamic_weak_lookback_signal_updates_outside_weak_regime(monkeypatch):
     class Context:
         now = datetime(2026, 1, 23, 9, 40)
         state = {
-            "five_fortunes": {
+            "five_fortunes_v2": {
                 "is_a_share_weak": False,
                 "is_choppy": False,
                 "weak_enter_streak": 0,
@@ -271,7 +272,7 @@ def test_liquidity_refresh_keeps_source_lofs_subscribed_for_history(monkeypatch)
         portfolio = Portfolio()
         universe = []
         state = {
-            "five_fortunes": {
+            "five_fortunes_v2": {
                 "market_symbols": ["510300.SH"],
                 "fixed_pool": ["501018.SH"],
                 "global_pool": ["501018.SH"],
@@ -307,7 +308,7 @@ def test_liquidity_refresh_keeps_source_lofs_subscribed_for_history(monkeypatch)
 
     five._refresh_liquidity_pools(Context())
 
-    assert "501018.SH" not in Context.state["five_fortunes"]["normal_liquidity_pool"]
+    assert "501018.SH" not in Context.state["five_fortunes_v2"]["normal_liquidity_pool"]
     assert "501018.SH" in Context.universe
 
 
@@ -322,7 +323,7 @@ def test_liquidity_refresh_caps_dynamic_pool_to_source_configured_limit(monkeypa
         portfolio = Portfolio()
         universe = []
         state = {
-            "five_fortunes": {
+            "five_fortunes_v2": {
                 "market_symbols": symbols,
                 "fixed_pool": [],
                 "global_pool": [],
@@ -357,7 +358,7 @@ def test_liquidity_refresh_caps_dynamic_pool_to_source_configured_limit(monkeypa
 
     five._refresh_liquidity_pools(Context())
 
-    dynamic_pool = Context.state["five_fortunes"]["dynamic_pool"]
+    dynamic_pool = Context.state["five_fortunes_v2"]["dynamic_pool"]
     assert len(dynamic_pool) == five.DYNAMIC_POOL_TOP_N
     assert symbols[:five.DYNAMIC_POOL_TOP_N] == dynamic_pool
     assert symbols[five.DYNAMIC_POOL_TOP_N] not in dynamic_pool

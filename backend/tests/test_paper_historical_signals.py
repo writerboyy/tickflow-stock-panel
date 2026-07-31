@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.api.free_strategy import router
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+from app.free_strategy.paper import _append_five_fortunes_v2_decision
 from app.free_strategy.store import PaperAccountStore
 
 
@@ -87,8 +88,7 @@ def test_paper_signals_label_five_fortunes_v2_from_historical_state(tmp_path):
     report = _report("2026-07-28", "A", ["B"])
     report["decision"]["reason"] = "trend_pending"
     (run_dir / "result.json").write_text(json.dumps({
-        "state": {"five_fortunes": {
-            "version": "2.0",
+        "state": {"five_fortunes_v2": {
             "daily_reports": [report],
         }},
     }), encoding="utf-8")
@@ -96,7 +96,6 @@ def test_paper_signals_label_five_fortunes_v2_from_historical_state(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({
         "id": "paper-1",
-        "strategy_id": "saved-template-copy",
         "continuation": {"job_id": "source-run"},
     })
 
@@ -107,6 +106,30 @@ def test_paper_signals_label_five_fortunes_v2_from_historical_state(tmp_path):
 
     assert response.status_code == 200
     signal = response.json()["signals"][0]
+    assert signal["id"] == "signal:five_fortunes_v2:2026-07-28:decision"
+    assert signal["strategy"] == "five_fortunes_v2"
+    assert signal["reason"] == "目标标的盘中趋势未确认，等待复检"
+
+
+def test_paper_runtime_emits_five_fortunes_v2_decision_signal(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper-1"})
+    engine = SimpleNamespace(
+        context=SimpleNamespace(state={"five_fortunes_v2": {
+            "decision": {
+                "date": "2026-07-28",
+                "reason": "trend_pending",
+                "target": ["159509.SZ"],
+            },
+            "target": ["159509.SZ"],
+            "candidate_rows": [{"symbol": "159509.SZ", "score": 1.5}],
+        }}),
+        account=SimpleNamespace(positions={}),
+    )
+
+    _append_five_fortunes_v2_decision(store, "paper-1", engine, datetime(2026, 7, 28, 13, 10))
+
+    signal = store.events("paper-1")[0]
     assert signal["id"] == "signal:five_fortunes_v2:2026-07-28:decision"
     assert signal["strategy"] == "five_fortunes_v2"
     assert signal["reason"] == "目标标的盘中趋势未确认，等待复检"

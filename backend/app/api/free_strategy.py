@@ -102,11 +102,11 @@ def _paper_account_view(account: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _five_fortunes_report_signal(
+def _daily_report_signal(
     report: dict[str, Any],
     *,
-    strategy_id: str,
-    state_version: str,
+    strategy: str,
+    decision_reason_payload,
 ) -> dict[str, Any] | None:
     trading_date = str(report.get("date") or "")
     if not trading_date:
@@ -118,26 +118,12 @@ def _five_fortunes_report_signal(
     if decision.get("reason") == "pending" and holdings == target:
         decision["reason"] = "hold_top_rank"
     decision_type = "empty" if not target and not holdings else "hold" if target == holdings else "rebalance"
-    is_v2 = (
-        strategy_id == "five_fortunes_v2"
-        or state_version == "2.0"
-        or str(report.get("version") or "") == "2.0"
-    )
-    if is_v2:
-        from app.free_strategy.five_fortunes_v2 import decision_reason_payload
-
-        signal_strategy = "five_fortunes_v2"
-    else:
-        from app.free_strategy.five_fortunes import decision_reason_payload
-
-        signal_strategy = "five_fortunes"
-
     return {
-        "id": f"signal:{signal_strategy}:{trading_date}:decision",
+        "id": f"signal:{strategy}:{trading_date}:decision",
         "type": "signal",
         "timestamp": f"{trading_date}T13:10:00",
         "signal_type": "daily_decision",
-        "strategy": signal_strategy,
+        "strategy": strategy,
         "trading_date": trading_date,
         "decision": decision_type,
         "regime": report.get("regime"),
@@ -153,8 +139,28 @@ def _five_fortunes_report_signal(
     }
 
 
+def _five_fortunes_report_signal(report: dict[str, Any]) -> dict[str, Any] | None:
+    from app.free_strategy.five_fortunes import decision_reason_payload
+
+    return _daily_report_signal(
+        report,
+        strategy="five_fortunes",
+        decision_reason_payload=decision_reason_payload,
+    )
+
+
+def _five_fortunes_v2_report_signal(report: dict[str, Any]) -> dict[str, Any] | None:
+    from app.free_strategy.five_fortunes_v2 import decision_reason_payload
+
+    return _daily_report_signal(
+        report,
+        strategy="five_fortunes_v2",
+        decision_reason_payload=decision_reason_payload,
+    )
+
+
 def _paper_historical_signals(state: dict[str, Any], request: Request) -> list[dict[str, Any]]:
-    reports_by_date: dict[str, tuple[dict[str, Any], str]] = {}
+    reports_by_id: dict[str, dict[str, Any]] = {}
     result: dict[str, Any] = {}
     job_id = str(state.get("continuation", {}).get("job_id") or "")
     if job_id:
@@ -168,27 +174,28 @@ def _paper_historical_signals(state: dict[str, Any], request: Request) -> list[d
         result.get("state", {}),
         state.get("checkpoint", {}).get("state", {}),
     ):
-        five_fortunes = source.get("five_fortunes") if isinstance(source, dict) else None
-        if not isinstance(five_fortunes, dict):
+        if not isinstance(source, dict):
             continue
-        state_version = str(five_fortunes.get("version") or "")
+        five_fortunes = source.get("five_fortunes")
+        if not isinstance(five_fortunes, dict):
+            five_fortunes = {}
         for report in five_fortunes.get("daily_reports", []):
-            if isinstance(report, dict) and report.get("date"):
-                reports_by_date[str(report["date"])] = (report, state_version)
+            if isinstance(report, dict) and (signal := _five_fortunes_report_signal(report)) is not None:
+                reports_by_id[str(signal["id"])] = signal
 
-    signals = [
-        signal
-        for report, state_version in reports_by_date.values()
-        if (signal := _five_fortunes_report_signal(
-            report,
-            strategy_id=str(state.get("strategy_id") or ""),
-            state_version=state_version,
-        )) is not None
-    ]
+        five_fortunes_v2 = source.get("five_fortunes_v2")
+        if not isinstance(five_fortunes_v2, dict):
+            five_fortunes_v2 = {}
+        for report in five_fortunes_v2.get("daily_reports", []):
+            if isinstance(report, dict) and (signal := _five_fortunes_v2_report_signal(report)) is not None:
+                reports_by_id[str(signal["id"])] = signal
+
+    signals = list(reports_by_id.values())
+    report_dates = {str(signal["trading_date"]) for signal in signals}
     for raw in result.get("strategy_signals", []):
         if not isinstance(raw, dict) or not raw.get("timestamp"):
             continue
-        if raw.get("signal_type") == "daily_decision" and str(raw["timestamp"])[:10] in reports_by_date:
+        if raw.get("signal_type") == "daily_decision" and str(raw["timestamp"])[:10] in report_dates:
             continue
         payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
         signals.append({

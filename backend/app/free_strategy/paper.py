@@ -885,6 +885,60 @@ def _append_five_fortunes_decision(
     })
 
 
+def _append_five_fortunes_v2_decision(
+    store: PaperAccountStore,
+    account_id: str,
+    engine: FreeStrategyEngine,
+    timestamp: datetime,
+) -> None:
+    if timestamp.strftime("%H:%M") != "13:10":
+        return
+    state = engine.context.state.get("five_fortunes_v2")
+    if not isinstance(state, dict):
+        return
+    decision = dict(state.get("decision", {}))
+    trading_date = str(decision.get("date") or timestamp.date().isoformat())
+    target = list(decision.get("target") or state.get("target") or [])
+    held_value = decision.get("held")
+    holdings = [str(held_value)] if held_value else [
+        symbol
+        for symbol, quantity in engine.account.positions.items()
+        if float(quantity) > 0
+    ]
+    decision_type = "empty" if not target and not holdings else "hold" if target == holdings else "rebalance"
+    from app.free_strategy.five_fortunes_v2 import decision_reason_payload
+
+    store.append_event_once(account_id, {
+        "id": f"signal:five_fortunes_v2:{trading_date}:decision",
+        "type": "signal",
+        "timestamp": timestamp.isoformat(),
+        "signal_type": "daily_decision",
+        "strategy": "five_fortunes_v2",
+        "trading_date": trading_date,
+        "decision": decision_type,
+        "regime": state.get("regime"),
+        "raw_regime": state.get("raw_regime"),
+        "target_symbols": target,
+        "holding_symbols": holdings,
+        "candidates": [
+            {"symbol": row.get("symbol"), "score": row.get("score")}
+            for row in list(state.get("candidate_rows", []))[:10]
+            if row.get("symbol")
+        ],
+        **decision_reason_payload(decision),
+    })
+
+
+def _append_five_fortunes_decisions(
+    store: PaperAccountStore,
+    account_id: str,
+    engine: FreeStrategyEngine,
+    timestamp: datetime,
+) -> None:
+    _append_five_fortunes_decision(store, account_id, engine, timestamp)
+    _append_five_fortunes_v2_decision(store, account_id, engine, timestamp)
+
+
 def _process_bar_rows(
     store: PaperAccountStore,
     account_id: str,
@@ -908,7 +962,7 @@ def _process_bar_rows(
     snapshots: list[dict[str, Any]] = []
     for timestamp, rows in groupby(bars, key=lambda bar: bar.timestamp):
         engine.run(list(rows), finalize_session=False, return_result=False)
-        _append_five_fortunes_decision(store, account_id, engine, timestamp)
+        _append_five_fortunes_decisions(store, account_id, engine, timestamp)
         snapshots.append(_equity_snapshot(engine, current, timestamp))
     last_timestamp = max((bar.timestamp for bar in bars), default=None)
     if last_timestamp is not None and last_timestamp.time() >= clock_time(15, 0):
@@ -1008,7 +1062,7 @@ def _process_scheduled_day(
     timestamp = engine._last_timestamp  # noqa: SLF001
     if timestamp is None:
         return current
-    _append_five_fortunes_decision(store, account_id, engine, timestamp)
+    _append_five_fortunes_decisions(store, account_id, engine, timestamp)
     _append_engine_events(
         store,
         account_id,

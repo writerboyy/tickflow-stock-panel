@@ -144,7 +144,7 @@ SPECIAL_GROUPS = (
 
 
 def _state(context) -> dict[str, Any]:
-    return context.state["five_fortunes"]
+    return context.state["five_fortunes_v2"]
 
 
 def decision_reason_payload(decision: dict[str, Any]) -> dict[str, Any]:
@@ -239,7 +239,7 @@ def initialize(context) -> None:
     context.require_market_history(asset_type="etf", timeframe="1d", bars=61)
     context.require_market_history(asset_type="index", timeframe="1d", bars=21)
     context.require_extra_history("unit_net_value")
-    context.state.setdefault("five_fortunes", {
+    context.state.setdefault("five_fortunes_v2", {
         "daily": {},
         "intraday": {
             "date": None, "close": {}, "raw_close": {}, "volume": {}, "amount": {},
