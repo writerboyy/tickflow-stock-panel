@@ -48,6 +48,7 @@ class MarketData:
     name_changes: dict[str, tuple[tuple[date, str, str], ...]] = field(default_factory=dict)
     previous_scale: dict[str, float] = field(default_factory=dict)
     previous_adjusted_close: dict[str, float] = field(default_factory=dict)
+    cash_dividends: dict[tuple[str, date], float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.daily_dates and self.daily:
@@ -116,6 +117,7 @@ def _merge_market_data(target: MarketData, source: MarketData) -> None:
         _set_daily_row(target, symbol, day, row)
     target.names.update(source.names)
     target.name_changes.update(source.name_changes)
+    target.cash_dividends.update(source.cash_dividends)
     for symbol, ranges in source.loaded_daily_ranges.items():
         for start, end in ranges:
             _record_loaded_daily_range(target, symbol, start, end)
@@ -399,6 +401,10 @@ def _load_market_data(
     market = MarketData()
     if asset_type == "stock":
         market.name_changes.update(load_instrument_name_changes(repo))
+        data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+        if data_dir is not None:
+            from app.services.stock_dividends import load_cash_dividends
+            market.cash_dividends = load_cash_dividends(data_dir)
     get_daily = getattr(repo, "get_daily_asset", None)
     if callable(get_daily):
         columns = [
@@ -1003,13 +1009,13 @@ def _scheduled_price_metadata(
     return {
         "scale": scale,
         "split_ratio": split_ratio,
-        "cash_dividend": _cash_dividend(
+        "cash_dividend": market.cash_dividends.get((symbol, day), _cash_dividend(
             previous_scale,
             scale,
             previous_raw_close,
             previous_close,
             split_ratio,
-        ),
+        )),
         "previous_open": previous_open,
         "previous_close": reference,
         "turnover_rate": previous.get("turnover_rate"),
