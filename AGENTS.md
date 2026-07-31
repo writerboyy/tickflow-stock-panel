@@ -88,7 +88,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Verify and commit only the task's files on the feature branch.
 - Before merging back, update against the latest target branch and rerun the relevant checks.
 - Merge only when the target worktree is safe. If it is still dirty or the merge would overwrite parallel work, report the blocker instead of forcing the merge.
-- After a successful merge, remove the temporary worktree and delete the merged local feature branch. Do not push unless the user asks.
+- After a successful merge into `custom`, remove the corresponding temporary worktree and delete the merged local feature branch in the same task. Never delete `main`, `custom`, remote branches, or any branch checked out by an active worktree. Do not push unless the user asks.
 
 ---
 
