@@ -8,7 +8,7 @@ import pytest
 from app.plugins.kaipanla import collector as collector_module
 from app.plugins.kaipanla.collector import KaipanlaCollector
 from app.plugins.kaipanla.credentials import KaipanlaCredentials
-from app.plugins.kaipanla.storage import AUCTION_TABLE, LHB_TABLE, REGULATORY_TABLE
+from app.plugins.kaipanla.storage import AUCTION_TABLE, FUNDS_TABLE, LHB_TABLE, REGULATORY_TABLE
 
 
 AUCTION_ROW = [
@@ -147,6 +147,81 @@ async def test_regulatory_endpoints_fail_independently(tmp_path, monkeypatch):
     assert stored["pre_monitor_category"] is None
 
 
+@pytest.mark.asyncio
+async def test_fund_collection_pages_market_flow_and_fans_out_all_stock_codes(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+    calls = []
+    responses = {
+        "fund_interval": {
+            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
+        },
+        "fund_capital_net": {"trend": [["15:00", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]},
+        "fund_large_order_statistics": {
+            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
+        },
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
+
+    rows = await collector.collect_funds(date(2026, 7, 10))
+
+    assert rows == 2
+    assert [endpoint for endpoint, _ in calls] == [
+        "fund_interval",
+        "fund_capital_net",
+        "fund_large_order_statistics",
+    ]
+    path = tmp_path / "ext_data" / FUNDS_TABLE / "timeseries" / "date=2026-07-10" / "part.parquet"
+    stored = pl.read_parquet(path).to_dicts()[0]
+    assert stored["main_net"] == 60
+    assert stored["capital_net_close"] == 2
+    assert stored["main_net_amount_over_300k"] == 50
+
+
+@pytest.mark.asyncio
+async def test_fund_detail_endpoints_fail_independently(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+    responses = {
+        "fund_interval": {
+            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
+        },
+        "fund_capital_net": RuntimeError("unavailable"),
+        "fund_large_order_statistics": {
+            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
+        },
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
+
+    await collector.collect_funds(date(2026, 7, 10))
+
+    path = tmp_path / "ext_data" / FUNDS_TABLE / "timeseries" / "date=2026-07-10" / "part.parquet"
+    stored = pl.read_parquet(path).to_dicts()[0]
+    assert stored["capital_net_close"] is None
+    assert stored["main_net_amount_over_300k"] == 50
+
+
+def test_fund_stock_pool_requires_current_code_and_type_schema(tmp_path):
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({"code": ["600126", "510300"], "type": ["stock", "etf"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+    collector = KaipanlaCollector(tmp_path)
+
+    assert collector._stock_codes() == ["600126"]
+
+    pl.DataFrame({"code": ["600126"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+    assert collector._stock_codes() == []
+
+
 def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     tmp_path, monkeypatch
 ):
@@ -163,5 +238,6 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 8
+    assert len(scheduler.jobs) == 9
+    assert "kaipanla_funds" in scheduler.jobs
     assert collector._bootstrap_task is None

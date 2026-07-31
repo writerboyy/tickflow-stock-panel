@@ -61,6 +61,96 @@ def parse_trade_date(value: object) -> date | None:
     raise ResponseShapeError("交易日期格式无效")
 
 
+def parse_interval_stock(payload: dict) -> list[dict]:
+    """解析 /区间股票统计 的全市场主力资金排名。"""
+    result: list[dict] = []
+    for index, row in enumerate(_rows(payload, "List")):
+        if not isinstance(row, list) or len(row) < 14:
+            raise ResponseShapeError(f"List[{index}] 至少需要 14 列")
+        code = _text(row[0], f"List[{index}].code", required=True)
+        result.append(
+            {
+                "symbol": code,
+                "code": code,
+                "name": _text(row[1], f"List[{index}].name"),
+                "price": _float(row[2], "price"),
+                "change_pct": _float(row[3], "change_pct"),
+                "main_buy": _float(row[4], "main_buy"),
+                "main_sell": _float(row[5], "main_sell"),
+                "main_net": _float(row[6], "main_net"),
+                "turnover_pct": _float(row[7], "turnover_rate"),
+                "amount": _float(row[8], "amount"),
+                "market_cap": _float(row[9], "market_cap"),
+                "themes": _text(row[10], "themes"),
+                "main_type": _text(row[12], "main_type"),
+                "net_inflow_days": _int(row[13], "net_inflow_days"),
+            }
+        )
+    return result
+
+
+def parse_capital_net(payload: dict, code: str) -> dict:
+    """保留分时大单净额，并将最后一个采样点作为日频收盘快照。"""
+    points: list[dict[str, object]] = []
+    for index, row in enumerate(_rows(payload, "trend")):
+        if not isinstance(row, list) or len(row) != 13:
+            raise ResponseShapeError(f"trend[{index}] 必须恰好包含 13 列")
+        points.append(
+            {
+                "time": _text(row[0], f"trend[{index}].time", required=True),
+                "trade_count": _int(row[1], "trade_count"),
+                "big_order_net": _float(row[2], "big_order_net"),
+                "intraday_buy": _float(row[3], "intraday_buy"),
+                "intraday_sell": _float(row[4], "intraday_sell"),
+                "large_buy": _float(row[7], "large_buy"),
+                "large_sell": _float(row[8], "large_sell"),
+                "medium_buy": _float(row[9], "medium_buy"),
+                "medium_sell": _float(row[10], "medium_sell"),
+                "small_buy": _float(row[11], "small_buy"),
+                "small_sell": _float(row[12], "small_sell"),
+            }
+        )
+    last = points[-1] if points else {}
+    return {
+        "symbol": code,
+        "code": code,
+        "capital_net_points_json": _json(points),
+        "capital_net_points": len(points),
+        "capital_net_last_time": last.get("time"),
+        "capital_net_close": last.get("big_order_net"),
+        "capital_buy_close": last.get("intraday_buy"),
+        "capital_sell_close": last.get("intraday_sell"),
+    }
+
+
+def parse_large_order_statistics(payload: dict, code: str, trade_date: date) -> dict | None:
+    """取目标交易日的日度大单净额；不把历史数组的最后一项假定为当天。"""
+    dates = _rows({"List": payload.get("Date")}, "List")
+    values = {name: _rows({"List": payload.get(key)}, "List") for name, key in (
+        ("tdjl_net_amount", "TDJL"),
+        ("ddjl_net_amount", "DDJL"),
+        ("zdjl_net_amount", "ZDJL"),
+        ("xdjl_net_amount", "XDJL"),
+    )}
+    if any(len(rows) != len(dates) for rows in values.values()):
+        raise ResponseShapeError("大单统计日期与金额数组长度不一致")
+    for index, value in enumerate(dates):
+        if parse_trade_date(value) != trade_date:
+            continue
+        tdjl = _float(values["tdjl_net_amount"][index], "TDJL")
+        ddjl = _float(values["ddjl_net_amount"][index], "DDJL")
+        return {
+            "symbol": code,
+            "code": code,
+            "tdjl_net_amount": tdjl,
+            "ddjl_net_amount": ddjl,
+            "zdjl_net_amount": _float(values["zdjl_net_amount"][index], "ZDJL"),
+            "xdjl_net_amount": _float(values["xdjl_net_amount"][index], "XDJL"),
+            "main_net_amount_over_300k": tdjl + ddjl if tdjl is not None and ddjl is not None else None,
+        }
+    return None
+
+
 def parse_auction(payload: dict) -> list[dict]:
     """解析 /115、/30 的 17 列数组，未文档化位置不进入标准表。"""
     result: list[dict] = []

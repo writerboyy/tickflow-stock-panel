@@ -26,7 +26,8 @@ AUCTION_TABLE = "ext_kpl_auction"
 LIMITUP_TABLE = "ext_kpl_limitup"
 LHB_TABLE = "ext_kpl_lhb"
 REGULATORY_TABLE = "ext_kpl_regulatory"
-TABLE_IDS = (AUCTION_TABLE, LIMITUP_TABLE, LHB_TABLE, REGULATORY_TABLE)
+FUNDS_TABLE = "ext_kpl_funds"
+TABLE_IDS = (AUCTION_TABLE, LIMITUP_TABLE, LHB_TABLE, REGULATORY_TABLE, FUNDS_TABLE)
 
 _DTYPES = {
     "string": pl.String,
@@ -190,8 +191,45 @@ def _regulatory_config() -> ExtConfig:
     )
 
 
+def _funds_config() -> ExtConfig:
+    return ExtConfig(
+        id=FUNDS_TABLE,
+        label="开盘啦资金流",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("collected_at", "string", "采集时间"),
+            ExtField("price", "float", "收盘价"),
+            ExtField("change_pct", "float", "涨跌幅（%）"),
+            ExtField("main_buy", "float", "主力买入额"),
+            ExtField("main_sell", "float", "主力卖出额"),
+            ExtField("main_net", "float", "主力净额"),
+            ExtField("turnover_pct", "float", "换手率（%）"),
+            ExtField("amount", "float", "成交额"),
+            ExtField("market_cap", "float", "市值"),
+            ExtField("themes", "string", "题材"),
+            ExtField("main_type", "string", "主力类型"),
+            ExtField("net_inflow_days", "int", "连续净流入天数"),
+            ExtField("capital_net_points_json", "string", "分时大单净额"),
+            ExtField("capital_net_points", "int", "分时点数"),
+            ExtField("capital_net_last_time", "string", "最后分时"),
+            ExtField("capital_net_close", "float", "收盘大单净额"),
+            ExtField("capital_buy_close", "float", "收盘累计买入额"),
+            ExtField("capital_sell_close", "float", "收盘累计卖出额"),
+            ExtField("tdjl_net_amount", "float", "特大单净额"),
+            ExtField("ddjl_net_amount", "float", "大单净额"),
+            ExtField("zdjl_net_amount", "float", "中单净额"),
+            ExtField("xdjl_net_amount", "float", "小单净额"),
+            ExtField("main_net_amount_over_300k", "float", "30万以上大单净额"),
+        ],
+        description="开盘啦全市场区间主力资金、大单净额及分时大单净额收盘快照",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
 def configs() -> list[ExtConfig]:
-    return [_auction_config(), _limitup_config(), _lhb_config(), _regulatory_config()]
+    return [_auction_config(), _limitup_config(), _lhb_config(), _regulatory_config(), _funds_config()]
 
 
 def ensure_configs(data_dir: Path) -> None:
@@ -279,7 +317,7 @@ def has_auction_0925(data_dir: Path, trade_date: date) -> bool:
 
 def archive_raw(
     data_dir: Path,
-    endpoint: int,
+    endpoint: int | str,
     trade_date: date,
     payload: dict,
     context: str = "",

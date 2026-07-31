@@ -14,10 +14,13 @@ from app.market_time import cn_now, cn_today
 from app.plugins.kaipanla.client import KaipanlaClient
 from app.plugins.kaipanla.credentials import load_credentials
 from app.plugins.kaipanla.parsers import (
+    parse_capital_net,
     parse_auction,
     parse_bid_detail,
     parse_lhb_detail,
     parse_lhb_list,
+    parse_interval_stock,
+    parse_large_order_statistics,
     parse_limitup,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
@@ -26,6 +29,7 @@ from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     LHB_TABLE,
     LIMITUP_TABLE,
+    FUNDS_TABLE,
     REGULATORY_TABLE,
     archive_raw,
     atomic_upsert,
@@ -100,6 +104,18 @@ class KaipanlaCollector:
                 ),
                 id="kaipanla_auction_catch_up",
                 misfire_grace_time=7200,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_funds,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=15,
+                    minute=6,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_funds",
+                misfire_grace_time=14400,
                 replace_existing=True,
             )
             scheduler.add_job(
@@ -186,6 +202,92 @@ class KaipanlaCollector:
 
     async def _scheduled_catch_up(self) -> int:
         return await self._run_safely("auction_catch_up", self.catch_up_auction)
+
+    async def _scheduled_funds(self) -> int:
+        return await self._run_safely("funds", self.collect_funds, cn_today())
+
+    def _stock_codes(self) -> list[str]:
+        path = self.data_dir / "instruments" / "instruments.parquet"
+        if not path.exists():
+            return []
+        try:
+            import polars as pl
+
+            available = set(pl.read_parquet_schema(path))
+            if not {"code", "type"}.issubset(available):
+                logger.warning("开盘啦资金池缺少 code/type 列")
+                return []
+            frame = pl.read_parquet(path, columns=["code", "type"])
+            frame = frame.filter(pl.col("type") == "stock")
+            return sorted({str(code) for code in frame["code"].to_list() if code})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("开盘啦资金池读取失败 (%s)", type(exc).__name__)
+            return []
+
+    async def collect_funds(self, trade_date: date) -> int:
+        """盘后采集全市场资金排名，并补全逐股大单日频快照。"""
+        collected_at = cn_now().isoformat()
+        interval_rows: list[dict] = []
+        async with self._client_factory() as client:
+            for index in range(_MAX_PAGES):
+                payload = await client.request(
+                    "fund_interval",
+                    {
+                        "DStart": trade_date.strftime("%Y-%m-%d"),
+                        "DEnd": trade_date.strftime("%Y-%m-%d"),
+                        "Index": index,
+                        "st": 1000,
+                    },
+                )
+                archive_raw(self.data_dir, "fund_interval", trade_date, payload, f"page-{index}")
+                parsed = parse_interval_stock(payload)
+                interval_rows.extend(parsed)
+                if len(parsed) < 1000:
+                    break
+            else:
+                raise RuntimeError("开盘啦资金排名分页超过安全上限")
+
+            codes = self._stock_codes()
+            semaphore = asyncio.Semaphore(16)
+
+            async def collect_one(code: str) -> dict | None:
+                async with semaphore:
+                    row: dict = {}
+                    try:
+                        capital = await client.request(
+                            "fund_capital_net",
+                            {"StockID": code, "Date": trade_date.strftime("%Y-%m-%d")},
+                        )
+                        archive_raw(self.data_dir, "fund_capital_net", trade_date, capital, code)
+                        row.update(parse_capital_net(capital, code))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦分时大单采集失败 (%s)", type(exc).__name__)
+                    try:
+                        stats = await client.request(
+                            "fund_large_order_statistics",
+                            {"StockID": code, "Index": 0, "st": 120},
+                        )
+                        archive_raw(
+                            self.data_dir,
+                            "fund_large_order_statistics",
+                            trade_date,
+                            stats,
+                            code,
+                        )
+                        row.update(parse_large_order_statistics(stats, code, trade_date) or {})
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦日度大单采集失败 (%s)", type(exc).__name__)
+                    return row or None
+
+            details = [row for row in await asyncio.gather(*(collect_one(code) for code in codes)) if row]
+
+        count = atomic_upsert(
+            self.data_dir,
+            FUNDS_TABLE,
+            trade_date,
+            [{**row, "collected_at": collected_at} for row in interval_rows + details],
+        )
+        return count
 
     async def _fetch_pages(
         self,

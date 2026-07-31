@@ -13,10 +13,11 @@ from app.plugins.kaipanla.storage import (
 from app.services.ext_data import ExtConfigStore
 
 
-def test_plugin_registers_exactly_four_timeseries_configs_without_generic_pull(tmp_path):
+def test_plugin_registers_timeseries_configs_without_generic_pull(tmp_path):
     ensure_configs(tmp_path)
     configs = [ExtConfigStore(tmp_path).get(table_id) for table_id in TABLE_IDS]
     assert all(config is not None for config in configs)
+    assert len(configs) == 5
     assert all(config.mode == "timeseries" for config in configs if config)
     assert all(config.pull is None for config in configs if config)
 

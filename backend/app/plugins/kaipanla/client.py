@@ -15,7 +15,7 @@ _HEADERS = {
     "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 14; V2178A Build/UP1A.231005.007)",
 }
 
-_ROUTES: dict[int, tuple[str, str, dict[str, str]]] = {
+_ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
     115: (
         "POST",
         "apphwhq.longhuvip.com",
@@ -81,6 +81,33 @@ _ROUTES: dict[int, tuple[str, str, dict[str, str]]] = {
             "c": "StockBidYiDong",
         },
     ),
+    "fund_interval": (
+        "POST",
+        "apphis.longhuvip.com",
+        {
+            "a": "GetInterviewsByDateStock",
+            "c": "StockLineData",
+            "Type": "2",
+            "FilterBJS": "1",
+            "Order": "1",
+        },
+    ),
+    "fund_capital_net": (
+        "POST",
+        "apphis.longhuvip.com",
+        {
+            "a": "GetMainMonitor_Trend_w30",
+            "c": "StockL2History",
+            "Money": "0",
+            "IsBS": "0",
+            "apiv": "w42",
+        },
+    ),
+    "fund_large_order_statistics": (
+        "POST",
+        "apphis.longhuvip.com",
+        {"a": "GetDaDanKLine2", "c": "StockLineData"},
+    ),
 }
 
 
@@ -130,7 +157,7 @@ class KaipanlaClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def request(self, endpoint: int, params: dict[str, object] | None = None) -> dict:
+    async def request(self, endpoint: int | str, params: dict[str, object] | None = None) -> dict:
         route = _ROUTES.get(endpoint)
         if route is None:
             raise ValueError(f"不支持的开盘啦接口: /{endpoint}")

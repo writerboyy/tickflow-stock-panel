@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 
@@ -8,6 +9,9 @@ from app.plugins.kaipanla.parsers import (
     ResponseShapeError,
     parse_auction,
     parse_bid_detail,
+    parse_capital_net,
+    parse_interval_stock,
+    parse_large_order_statistics,
     parse_lhb_detail,
     parse_lhb_list,
     parse_limitup,
@@ -182,3 +186,23 @@ def test_regulatory_array_lengths_and_fields_are_strict():
 
     with pytest.raises(ResponseShapeError, match="11 列"):
         parse_regulatory_anomaly({"List": [["002208", "合肥城建"]]})
+
+
+def test_fund_parsers_keep_main_flow_and_big_order_contracts_separate():
+    interval = parse_interval_stock(
+        {"List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]}
+    )[0]
+    capital = parse_capital_net(
+        {"trend": [["09:30", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]},
+        "600126",
+    )
+    statistics = parse_large_order_statistics(
+        {"Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]},
+        "600126",
+        date(2026, 7, 10),
+    )
+    assert interval["main_net"] == 60
+    assert capital["capital_net_close"] == 2
+    assert capital["capital_net_points"] == 1
+    assert statistics is not None
+    assert statistics["main_net_amount_over_300k"] == 50

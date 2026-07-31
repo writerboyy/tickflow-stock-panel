@@ -93,6 +93,9 @@ def test_connection_api_persists_fields_only_and_returns_masked_status(tmp_path,
         (101, "applhb.longhuvip.com"),
         (108, "apphwshhq.longhuvip.com"),
         (109, "apphwshhq.longhuvip.com"),
+        ("fund_interval", "apphis.longhuvip.com"),
+        ("fund_capital_net", "apphis.longhuvip.com"),
+        ("fund_large_order_statistics", "apphis.longhuvip.com"),
     ],
 )
 @pytest.mark.asyncio
