@@ -81,6 +81,37 @@ def test_paper_signals_merge_backtest_checkpoint_and_live_events(tmp_path):
     assert payload["signals"][1]["decision"] == "hold"
 
 
+def test_paper_signals_label_five_fortunes_v2_from_historical_state(tmp_path):
+    run_dir = tmp_path / "free_strategy_runs" / "source-run"
+    run_dir.mkdir(parents=True)
+    report = _report("2026-07-28", "A", ["B"])
+    report["decision"]["reason"] = "trend_pending"
+    (run_dir / "result.json").write_text(json.dumps({
+        "state": {"five_fortunes": {
+            "version": "2.0",
+            "daily_reports": [report],
+        }},
+    }), encoding="utf-8")
+
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper-1",
+        "strategy_id": "saved-template-copy",
+        "continuation": {"job_id": "source-run"},
+    })
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    response = TestClient(app).get("/api/free-strategies/paper/accounts/paper-1/signals")
+
+    assert response.status_code == 200
+    signal = response.json()["signals"][0]
+    assert signal["id"] == "signal:five_fortunes_v2:2026-07-28:decision"
+    assert signal["strategy"] == "five_fortunes_v2"
+    assert signal["reason"] == "目标标的盘中趋势未确认，等待复检"
+
+
 def test_backtest_result_preserves_structured_strategy_signals():
     source = """
 def on_bar(context, bars):
