@@ -25,6 +25,7 @@ from app.free_strategy.process import (
     advance_scheduled_session,
     execute_backtest,
 )
+from app.services.stock_dividends import import_xdxr_cash_dividends, load_cash_dividends
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -57,6 +58,28 @@ def _write_financial_table(tmp_path, table: str, rows: dict) -> None:
     path = tmp_path / "financials" / table / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(rows).write_parquet(path)
+
+
+def test_axdata_xdxr_cash_dividend_import_overrides_price_inference(tmp_path):
+    source = tmp_path / "xdxr.parquet"
+    pl.DataFrame({
+        "instrument_id": ["X", "X", "X"],
+        "event_date": ["20240102", "20240102", "20240103"],
+        "c1": [2.5, 0.0, 1.0],
+        "record_hex": ["a", "b", "c"],
+    }).write_parquet(source)
+
+    assert import_xdxr_cash_dividends(source, tmp_path) == 2
+    market = MarketData(cash_dividends=load_cash_dividends(tmp_path))
+    first = datetime(2024, 1, 1).date()
+    second = datetime(2024, 1, 2).date()
+    _set_daily_row(market, "X", first, daily_row(first, 10.0))
+    _set_daily_row(market, "X", second, daily_row(second, 9.0))
+
+    bar = _scheduled_daily_bar(market, "X", second, "stock")
+
+    assert bar is not None
+    assert bar.cash_dividend == 0.25
 
 
 def test_financial_snapshot_uses_latest_announced_records_without_future_data(tmp_path):
