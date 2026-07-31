@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 
+STRATEGY_KIND = "performance_small_cap"
 STOCK_COUNT = 10
 MAX_STOCK_PRICE = 9.0
 SMALLCAP_INDEX_SIZE = 400

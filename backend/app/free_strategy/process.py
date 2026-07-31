@@ -30,7 +30,7 @@ from .engine import FreeStrategyConfig, FreeStrategyEngine
 logger = logging.getLogger(__name__)
 
 MARKET_METADATA_CALENDAR_DAYS = 30
-PERFORMANCE_SMALL_CAP_STRATEGY_ID = "performance_small_cap"
+PERFORMANCE_SMALL_CAP_SOURCE_MARKER = 'STRATEGY_KIND = "performance_small_cap"'
 PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES = (
     "income",
     "metrics",
@@ -383,6 +383,10 @@ def _assert_performance_small_cap_financial_coverage(
         f"当前 start={start.isoformat()} 前缺少可用表: {', '.join(details)}。"
         "请先同步完整历史 financial 数据或配置支持 latest=false 的自定义 financial provider。"
     )
+
+
+def _is_performance_small_cap_source(source: str) -> bool:
+    return PERFORMANCE_SMALL_CAP_SOURCE_MARKER in source
 
 
 def _load_market_data(
@@ -1430,7 +1434,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             source = snapshot
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
-        if payload.get("strategy_id") == PERFORMANCE_SMALL_CAP_STRATEGY_ID:
+        if _is_performance_small_cap_source(source):
             _assert_performance_small_cap_financial_coverage(repo.store.data_dir, start)
         config = FreeStrategyConfig(**payload["config"])
         engine = FreeStrategyEngine(

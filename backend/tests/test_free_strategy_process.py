@@ -12,6 +12,7 @@ from app.free_strategy.process import (
     MarketData,
     _assert_performance_small_cap_financial_coverage,
     _aligned_warmup_bars,
+    _is_performance_small_cap_source,
     _load_financial_snapshot,
     _load_scheduled_history,
     _load_scheduled_history_batch,
@@ -24,6 +25,7 @@ from app.free_strategy.process import (
     advance_scheduled_session,
     execute_backtest,
 )
+from app.free_strategy.templates import TEMPLATES
 
 
 class DailyRepository:
@@ -126,6 +128,30 @@ def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_p
             tmp_path,
             datetime(2024, 7, 1).date(),
         )
+
+
+def test_performance_small_cap_financial_preflight_uses_template_source(tmp_path):
+    source = TEMPLATES["performance_small_cap"]["source"]
+
+    assert _is_performance_small_cap_source(source) is True
+    assert _is_performance_small_cap_source("def on_bar(context, bars):\n    pass\n") is False
+
+    output: queue.SimpleQueue = queue.SimpleQueue()
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "source": source,
+        "strategy_id": "saved-template-copy",
+        "timeframe": "1m",
+        "asset_type": "stock",
+        "start": "2025-07-24",
+        "end": "2025-07-24",
+        "config": {},
+    }, output)
+
+    assert output.get_nowait()["type"] == "progress"
+    error = output.get_nowait()
+    assert error["type"] == "error"
+    assert "绩优小市值回测需要首个回测日前已公告的历史财务数据" in error["error"]
 
 
 def test_scheduled_daily_bar_cache_invalidates_when_row_changes():
