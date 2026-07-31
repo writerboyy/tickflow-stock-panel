@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -429,6 +430,119 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
     assert engine.execution_mode == "scheduled"
     assert engine.scheduled_times == ["09:00", "09:30", "14:00"]
     assert engine.market_history_requirements == {("index", "1d"): 235}
+
+
+def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selection():
+    previous_day = datetime(2025, 7, 23)
+    symbols = [f"00{index:04d}.SZ" for index in range(1, 49)]
+    histories = {
+        symbol: [
+            Bar(
+                symbol,
+                previous_day - timedelta(days=259 - offset),
+                1.0 + index * 0.01,
+                1.0 + index * 0.01,
+                1.0 + index * 0.01,
+                1.0 + index * 0.01,
+                raw_close=1.0 + index * 0.01,
+                cash_dividend=1.0,
+                total_shares=1_000_000 + index,
+            )
+            for offset in range(260)
+        ]
+        for index, symbol in enumerate(symbols, start=1)
+    }
+    history_calls = []
+
+    def history_batch(requested, *, count, **_kwargs):
+        history_calls.append((list(requested), count))
+        return {symbol: histories[symbol][-count:] for symbol in requested}
+
+    context = SimpleNamespace(
+        now=datetime(2025, 7, 24, 9, 30),
+        previous_date=previous_day.date(),
+        state={"performance_small_cap": {
+            "candidate_cache_key": None,
+            "candidate_cache": [],
+            "selection_cache_key": None,
+            "selection_cache": [],
+            "high_limit_list": [],
+            "first_rebalance_done": False,
+        }},
+        portfolio=SimpleNamespace(positions={}, cash=100_000),
+        instruments=lambda _asset="stock": [
+            {"symbol": symbol, "name": f"股票{index}", "asset_type": "stock"}
+            for index, symbol in enumerate(symbols, start=1)
+        ],
+        history_bars=lambda symbol, **_kwargs: histories[symbol][-1:],
+        history_batch=history_batch,
+        financial_snapshot=lambda requested, _cutoff: {
+            symbol: {
+                "revenue": 200_000_000,
+                "net_income": 10_000_000,
+                "net_income_attributable": 10_000_000,
+                "roe": 1,
+                "roa": 1,
+            }
+            for symbol in requested
+        },
+    )
+
+    scope = performance_small_cap._held_and_selection_symbols(context, context.now)
+    first, eleventh = scope[0], scope[10]
+    current = {
+        symbol: Bar(
+            symbol,
+            context.now,
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            raw_close=10.0,
+            limit_up=10.0 if symbol == first else 11.0,
+            limit_down=1.0,
+            total_shares=1_000_000,
+        )
+        for symbol in scope
+    }
+    context.current_bars = lambda: current
+
+    selected = performance_small_cap._select_stocks(context, require_snapshot=True)
+
+    assert len(scope) == 12
+    assert eleventh in selected
+    assert first not in selected
+    assert [count for _symbols, count in history_calls] == [260, 1]
+
+    history_calls.clear()
+    context.state["performance_small_cap"]["first_rebalance_done"] = True
+    context.state["performance_small_cap"]["candidate_cache_key"] = None
+    context.state["performance_small_cap"]["candidate_cache"] = []
+    context.portfolio.positions = {"HELD.SZ": 100}
+    context.now = datetime(2025, 7, 25, 9, 30)
+
+    assert performance_small_cap._held_and_selection_symbols(context, context.now) == ["HELD.SZ"]
+    assert history_calls == []
+
+
+def test_performance_small_cap_previous_trading_date_uses_latest_visible_sample():
+    records = [
+        {"symbol": "000001.SZ", "name": "停牌样本"},
+        {"symbol": "000002.SZ", "name": "活跃样本"},
+    ]
+    stale = Bar("000001.SZ", datetime(2025, 7, 31, 15), 1, 1, 1, 1)
+    fresh = Bar("000002.SZ", datetime(2025, 8, 1, 15), 1, 1, 1, 1)
+
+    context = SimpleNamespace(
+        now=datetime(2025, 8, 4, 9, 30),
+        history_batch=lambda symbols, **_kwargs: {
+            "000001.SZ": [stale],
+            "000002.SZ": [fresh],
+        },
+        history_bars=lambda symbol, **_kwargs: [stale if symbol == "000001.SZ" else fresh],
+    )
+
+    assert performance_small_cap._previous_trading_date(context, records) == fresh.date
 
 
 def test_financial_snapshot_normalizes_symbols_and_uses_previous_day_cutoff():
