@@ -81,6 +81,24 @@ def _current_bars(context) -> dict[str, Any]:
 
 
 def _previous_trading_date(context, records: list[dict[str, Any]]) -> date:
+    explicit = _parse_date(getattr(context, "previous_date", None))
+    if explicit is not None:
+        return explicit
+    batch_loader = getattr(context, "history_batch", None)
+    if callable(batch_loader):
+        sample = [
+            str(item.get("symbol") or "")
+            for item in records[:128]
+            if item.get("symbol")
+        ]
+        history = batch_loader(sample, count=1, timeframe="1d") if sample else {}
+        dates = [
+            values[-1].date
+            for values in history.values()
+            if values and values[-1].date < context.now.date()
+        ]
+        if dates:
+            return max(dates)
     for item in records:
         symbol = str(item.get("symbol") or "")
         if not symbol:
@@ -202,28 +220,22 @@ def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> 
     return [symbol for _ratio, symbol in ranked[:cutoff]]
 
 
-def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
-    records = _instrument_records(context)
-    previous_date = _previous_trading_date(context, records)
+def _candidate_symbols(context, previous_date: date) -> list[str]:
     state = _state(context)
-    cache_key = (previous_date.isoformat(), bool(require_snapshot))
-    if state.get("selection_cache_key") == cache_key:
-        return list(state.get("selection_cache", []))
+    cache_key = previous_date.isoformat()
+    if state.get("candidate_cache_key") == cache_key:
+        return list(state.get("candidate_cache", []))
 
     by_symbol = {str(item["symbol"]): item for item in _eligible_records(context, previous_date)}
     symbols = list(by_symbol)
     symbols = _dividend_ratio_ranked(context, symbols, previous_date)
     symbols = _financially_qualified(context, symbols, previous_date)
     history = context.history_batch(symbols, count=1, timeframe="1d")
-    current = _current_bars(context) if require_snapshot else {}
     held = set(_held_symbols(context))
     candidates: list[tuple[float, str]] = []
     for symbol in symbols:
         latest = (history.get(symbol) or [None])[-1]
-        bar = current.get(symbol) if require_snapshot else latest
-        if latest is None or bar is None:
-            continue
-        if require_snapshot and not _tradable_at_snapshot(symbol, bar, allow_held=symbol in held):
+        if latest is None:
             continue
         price = _bar_price(latest)
         if symbol not in held and price >= MAX_STOCK_PRICE:
@@ -233,17 +245,53 @@ def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
             continue
         candidates.append((market_cap, symbol))
     candidates.sort(key=lambda item: (item[0], item[1]))
-    selected = [symbol for _market_cap, symbol in candidates[:STOCK_COUNT]]
+    result = [symbol for _market_cap, symbol in candidates]
+    state["candidate_cache_key"] = cache_key
+    state["candidate_cache"] = result
+    return result
+
+
+def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
+    records = _instrument_records(context)
+    previous_date = _previous_trading_date(context, records)
+    state = _state(context)
+    snapshot_time = context.now.strftime("%H:%M") if require_snapshot else ""
+    cache_key = (previous_date.isoformat(), bool(require_snapshot), snapshot_time)
+    if state.get("selection_cache_key") == cache_key:
+        return list(state.get("selection_cache", []))
+
+    symbols = _candidate_symbols(context, previous_date)
+    current = _current_bars(context) if require_snapshot else {}
+    selected: list[str] = []
+    for symbol in symbols:
+        if require_snapshot and not _tradable_at_snapshot(symbol, current.get(symbol)):
+            continue
+        selected.append(symbol)
+        if len(selected) >= STOCK_COUNT:
+            break
     state["selection_cache_key"] = cache_key
     state["selection_cache"] = selected
     return selected
 
 
+def _selection_pool(context) -> list[str]:
+    records = _instrument_records(context)
+    previous_date = _previous_trading_date(context, records)
+    return _candidate_symbols(context, previous_date)
+
+
 def _selection_symbols(context, _timestamp: datetime) -> list[str]:
-    return list(dict.fromkeys([*_held_symbols(context), *_select_stocks(context, require_snapshot=False)]))
+    return list(dict.fromkeys([*_held_symbols(context), *_selection_pool(context)]))
 
 
 def _held_and_selection_symbols(context, timestamp: datetime) -> list[str]:
+    state = _state(context)
+    if not state.get("high_limit_list") and timestamp.strftime("%H:%M") == "14:00":
+        return _held_symbols(context)
+    records = _instrument_records(context)
+    previous_date = _previous_trading_date(context, records)
+    if timestamp.strftime("%H:%M") == "09:30" and not _should_monthly_adjust(context, previous_date):
+        return _held_symbols(context)
     return _selection_symbols(context, timestamp)
 
 
@@ -265,6 +313,8 @@ def initialize(context) -> None:
         "smallcap_index_value": None,
         "ban_trade_start_date": None,
         "first_rebalance_done": False,
+        "candidate_cache_key": None,
+        "candidate_cache": [],
         "selection_cache_key": None,
         "selection_cache": [],
         "daily_reports": [],
@@ -300,6 +350,7 @@ def _prepare_stock_list(context) -> None:
     state = _state(context)
     state["just_sold"] = []
     state["risk_control_executed"] = False
+    state["candidate_cache_key"] = None
     state["selection_cache_key"] = None
     held = _held_symbols(context)
     history = context.history_batch(held, count=1, timeframe="1d") if held else {}
