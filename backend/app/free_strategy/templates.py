@@ -31,6 +31,7 @@ MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
     "098dd281478b43527ecf706f2f140a19b21f4e7b9e2c6744d8120fcf64279380",
 })
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
+FIVE_FORTUNES_V2_SOURCE = Path(__file__).with_name("five_fortunes_v2.py").read_text(encoding="utf-8")
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
 SMALL_CAP_LIMITUP_SOURCE = Path(__file__).with_name("small_cap_limitup.py").read_text(encoding="utf-8")
 PERFORMANCE_SMALL_CAP_SOURCE = Path(__file__).with_name("performance_small_cap.py").read_text(encoding="utf-8")
@@ -106,6 +107,26 @@ def on_bar(context, bars):
             "fill_policy": "close",
         },
         "source": FIVE_FORTUNES_SOURCE,
+    },
+    "five_fortunes_v2": {
+        "name": "五福2.0",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "etf",
+            "initial_capital": 100_000,
+            "paper_initial_capital": 100_000,
+            "fees_pct": 0.0001,
+            "commission_pct": 0.0001,
+            "min_commission": 5,
+            "stamp_tax_pct": 0,
+            # PriceRelatedSlippage(0.0001) is a full spread; each side pays half.
+            "slippage_bps": 0.5,
+            "price_tick": 0.001,
+            "benchmark_symbol": "510300.SH",
+            "settlement": "t1",
+            "fill_policy": "close",
+        },
+        "source": FIVE_FORTUNES_V2_SOURCE,
     },
     "seven_stars": {
         "name": "七星策略",

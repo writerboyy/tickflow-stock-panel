@@ -5,7 +5,13 @@ import pytest
 
 from app.free_strategy.bars import Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
-from app.free_strategy import five_fortunes, performance_small_cap, seven_stars, small_cap_limitup
+from app.free_strategy import (
+    five_fortunes,
+    five_fortunes_v2,
+    performance_small_cap,
+    seven_stars,
+    small_cap_limitup,
+)
 from app.free_strategy.five_fortunes import (
     DEFENSIVE_ETF,
     REGIME_FALLBACK_PROXIES,
@@ -208,6 +214,7 @@ def on_bar(context, bars):
         ("dual_ma", []),
         ("etf_rotation", []),
         ("five_fortunes", []),
+        ("five_fortunes_v2", []),
         ("seven_stars", []),
         ("small_cap_limitup", [{
             "symbol": "000001.SZ",
@@ -238,6 +245,14 @@ def test_five_fortunes_template_is_a_self_contained_source_snapshot():
 
     assert source == Path(five_fortunes.__file__).read_text(encoding="utf-8")
     assert "from app.free_strategy.five_fortunes import" not in source
+    assert "from jqdata import" not in source
+
+
+def test_five_fortunes_v2_template_is_a_self_contained_source_snapshot():
+    source = TEMPLATES["five_fortunes_v2"]["source"]
+
+    assert source == Path(five_fortunes_v2.__file__).read_text(encoding="utf-8")
+    assert "from app.free_strategy.five_fortunes_v2 import" not in source
     assert "from jqdata import" not in source
 
 
@@ -312,6 +327,26 @@ def test_five_fortunes_template_uses_reference_backtest_parameters():
         "timeframe": "1m",
         "asset_type": "etf",
         "initial_capital": 100_000,
+        "fees_pct": 0.0001,
+        "commission_pct": 0.0001,
+        "min_commission": 5,
+        "stamp_tax_pct": 0,
+        "slippage_bps": 0.5,
+        "price_tick": 0.001,
+        "benchmark_symbol": "510300.SH",
+        "settlement": "t1",
+        "fill_policy": "close",
+    }
+
+
+def test_five_fortunes_v2_template_uses_reference_backtest_and_paper_parameters():
+    config = TEMPLATES["five_fortunes_v2"]["config"]
+
+    assert config == {
+        "timeframe": "1m",
+        "asset_type": "etf",
+        "initial_capital": 100_000,
+        "paper_initial_capital": 100_000,
         "fees_pct": 0.0001,
         "commission_pct": 0.0001,
         "min_commission": 5,
