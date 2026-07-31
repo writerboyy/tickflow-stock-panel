@@ -8,7 +8,17 @@ import pytest
 from app.plugins.kaipanla import collector as collector_module
 from app.plugins.kaipanla.collector import KaipanlaCollector
 from app.plugins.kaipanla.credentials import KaipanlaCredentials
-from app.plugins.kaipanla.storage import AUCTION_TABLE, FUNDS_TABLE, LHB_TABLE, REGULATORY_TABLE
+from app.plugins.kaipanla.storage import (
+    AUCTION_TABLE,
+    FUNDS_TABLE,
+    LHB_DETAIL_TABLE,
+    LHB_MOVEMENT_TABLE,
+    LHB_TABLE,
+    NORTHBOUND_SECTOR_TABLE,
+    NORTHBOUND_STOCK_TABLE,
+    REGULATORY_TABLE,
+    SHAREHOLDER_COUNT_TABLE,
+)
 
 
 AUCTION_ROW = [
@@ -111,17 +121,64 @@ async def test_lhb_collection_automatically_fans_out_seat_details(tmp_path, monk
             "BuyList": [{"Name": "席位甲", "Buy": "100", "Sell": "20"}],
             "SellList": [{"Name": "席位乙", "Buy": "10", "Sell": "80"}],
         },
+        "dragon_tiger_movement": {
+            "List": [{"BID": "P1", "BName": "席位甲", "Buy": [], "Sell": []}]
+        },
+        "dragon_tiger_details": {
+            "List": [
+                {
+                    "BuyList": [{"ID": "D1", "Name": "席位甲", "Buy": 100, "Sell": 20, "PX": 1, "GroupIcon": []}],
+                    "SellList": [],
+                }
+            ]
+        },
     }
     collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
 
     rows = await collector.collect_lhb()
 
     assert rows == 1
-    assert [endpoint for endpoint, _ in calls] == [100, 101]
+    assert [endpoint for endpoint, _ in calls] == [100, 101, "dragon_tiger_movement", "dragon_tiger_details"]
     path = tmp_path / "ext_data" / LHB_TABLE / "timeseries" / "date=2026-05-15" / "part.parquet"
     stored = pl.read_parquet(path).to_dicts()[0]
     assert stored["buy_seat_count"] == 1
     assert stored["sell_list_sell_amount"] == 80
+    movement_path = tmp_path / "ext_data" / LHB_MOVEMENT_TABLE / "timeseries" / "date=2026-05-15" / "part.parquet"
+    assert not movement_path.exists()
+    detail_path = tmp_path / "ext_data" / LHB_DETAIL_TABLE / "timeseries" / "date=2026-05-15" / "part.parquet"
+    assert pl.read_parquet(detail_path).to_dicts()[0]["department_id"] == "D1"
+
+
+@pytest.mark.asyncio
+async def test_lhb_reference_collects_department_details_when_movement_fails(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                "dragon_tiger_movement": RuntimeError("unavailable"),
+                "dragon_tiger_details": {
+                    "List": [
+                        {
+                            "BuyList": [
+                                {"ID": "D1", "Name": "席位甲", "Buy": 100, "Sell": 20, "PX": 1, "GroupIcon": []}
+                            ],
+                            "SellList": [],
+                        }
+                    ]
+                },
+            },
+            calls,
+        ),
+    )
+
+    rows = await collector.collect_lhb_reference(date(2026, 5, 15), ["002208"])
+
+    assert rows == 1
+    assert [endpoint for endpoint, _ in calls] == ["dragon_tiger_movement", "dragon_tiger_details"]
+    detail_path = tmp_path / "ext_data" / LHB_DETAIL_TABLE / "timeseries" / "date=2026-05-15" / "part.parquet"
+    assert pl.read_parquet(detail_path).to_dicts()[0]["department_id"] == "D1"
 
 
 @pytest.mark.asyncio
@@ -181,6 +238,65 @@ async def test_fund_collection_pages_market_flow_and_fans_out_all_stock_codes(tm
     assert stored["main_net"] == 60
     assert stored["capital_net_close"] == 2
     assert stored["main_net_amount_over_300k"] == 50
+
+
+@pytest.mark.asyncio
+async def test_northbound_collection_writes_report_period_sector_and_stock_records(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                "northbound_sector_latest": {
+                    "Date": "20260630",
+                    "Sum_ZCJE": 10,
+                    "Sum_ZCC": 20,
+                    "List": [["P1", "板块", 1, 2, 3, 4, 5, 6, 7]],
+                },
+                "northbound_stocks_latest": {
+                    "Date": "20260630",
+                    "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
+                },
+            },
+            calls,
+        ),
+    )
+
+    rows = await collector.collect_northbound()
+
+    assert rows == 2
+    assert [endpoint for endpoint, _ in calls] == ["northbound_sector_latest", "northbound_stocks_latest"]
+    sector_path = tmp_path / "ext_data" / NORTHBOUND_SECTOR_TABLE / "timeseries" / "date=2026-06-30" / "part.parquet"
+    stock_path = tmp_path / "ext_data" / NORTHBOUND_STOCK_TABLE / "timeseries" / "date=2026-06-30" / "part.parquet"
+    assert pl.read_parquet(sector_path).to_dicts()[0]["holding_amount"] == 3
+    assert pl.read_parquet(stock_path).to_dicts()[0]["symbol"] == "600126.SH"
+
+
+@pytest.mark.asyncio
+async def test_shareholder_counts_expands_documented_date_windows(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    calls = []
+
+    def response(params):
+        if params["StratDate"] == "2026-07-31":
+            return {"DateList": [{"StratDate": "2026-07-16", "EndDate": "2026-07-31"}]}
+        return {
+            "DateList": [],
+            "List": [{"Day": "20260731", "StockID": "600126", "Name": "杭钢股份", "LTZB": 1, "CMJZ": 2, "JSQBH": 3, "UpdateDay": "20260801", "IsNew": 1}],
+        }
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"shareholder_count_changes": response}, calls),
+    )
+
+    rows = await collector.collect_shareholder_counts(date(2026, 7, 31), date(2026, 7, 31))
+
+    assert rows == 1
+    assert [params["StratDate"] for _, params in calls] == ["2026-07-31", "2026-07-16"]
+    path = tmp_path / "ext_data" / SHAREHOLDER_COUNT_TABLE / "timeseries" / "date=2026-07-31" / "part.parquet"
+    assert pl.read_parquet(path).to_dicts()[0]["chip_concentration"] == 2
 
 
 @pytest.mark.asyncio
@@ -259,6 +375,9 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 9
+    assert len(scheduler.jobs) == 12
     assert "kaipanla_funds" in scheduler.jobs
+    assert "kaipanla_northbound" in scheduler.jobs
+    assert "kaipanla_shareholder_counts" in scheduler.jobs
+    assert "kaipanla_sector_constituents" in scheduler.jobs
     assert collector._bootstrap_task is None

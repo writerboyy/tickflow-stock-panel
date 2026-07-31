@@ -17,22 +17,38 @@ from app.plugins.kaipanla.parsers import (
     parse_capital_net,
     parse_auction,
     parse_bid_detail,
+    parse_dragon_tiger_details,
+    parse_dragon_tiger_movement,
     parse_lhb_detail,
     parse_lhb_list,
     parse_interval_stock,
     parse_large_order_statistics,
     parse_limitup,
+    parse_northbound_sector,
+    parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
+    parse_sector_constituents,
+    parse_sector_strength,
+    parse_shareholder_changes,
+    parse_shareholder_count_changes,
 )
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     LHB_TABLE,
     LIMITUP_TABLE,
     FUNDS_TABLE,
+    LHB_DETAIL_TABLE,
+    LHB_MOVEMENT_TABLE,
+    NORTHBOUND_SECTOR_TABLE,
+    NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
+    SECTOR_CONSTITUENT_TABLE,
+    SHAREHOLDER_COUNT_TABLE,
+    SHAREHOLDER_TABLE,
     archive_raw,
     atomic_upsert,
+    atomic_upsert_records,
     ensure_configs,
     has_auction_0925,
     recent_trading_dates,
@@ -44,6 +60,23 @@ _PAGE_SIZE = {115: 200, 30: 200, 100: 500}
 _ROW_KEY = {115: "info", 30: "info", 100: "list"}
 _MAX_PAGES = 100
 _FUND_INTERVAL_PAGE_SIZE = 1000
+_REFERENCE_PAGE_SIZE = 1000
+
+
+def _shareholder_count_windows(payload: dict) -> list[tuple[date, date]]:
+    values = payload.get("DateList")
+    if not isinstance(values, list):
+        raise ValueError("开盘啦股东人数窗口不是数组")
+    windows = []
+    for index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError(f"开盘啦股东人数窗口 {index} 不是对象")
+        start = value.get("StratDate")
+        end = value.get("EndDate")
+        if not isinstance(start, str) or not isinstance(end, str):
+            raise ValueError(f"开盘啦股东人数窗口 {index} 缺少日期")
+        windows.append((date.fromisoformat(start), date.fromisoformat(end)))
+    return windows
 
 
 class KaipanlaCollector:
@@ -116,6 +149,42 @@ class KaipanlaCollector:
                     timezone="Asia/Shanghai",
                 ),
                 id="kaipanla_funds",
+                misfire_grace_time=14400,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_northbound,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=18,
+                    minute=10,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_northbound",
+                misfire_grace_time=14400,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_shareholder_counts,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=18,
+                    minute=20,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_shareholder_counts",
+                misfire_grace_time=14400,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_sector_constituents,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=18,
+                    minute=30,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_sector_constituents",
                 misfire_grace_time=14400,
                 replace_existing=True,
             )
@@ -207,6 +276,19 @@ class KaipanlaCollector:
     async def _scheduled_funds(self) -> int:
         return await self._run_safely("funds", self.collect_funds, cn_today())
 
+    async def _scheduled_northbound(self) -> int:
+        return await self._run_safely("northbound", self.collect_northbound)
+
+    async def _scheduled_shareholder_counts(self) -> int:
+        return await self._run_safely(
+            "shareholder_counts", self.collect_shareholder_counts, cn_today(), cn_today()
+        )
+
+    async def _scheduled_sector_constituents(self) -> int:
+        return await self._run_safely(
+            "sector_constituents", self.collect_sector_constituents, cn_today(), self._northbound_plate_ids()
+        )
+
     def _stock_codes(self) -> list[str]:
         path = self.data_dir / "instruments" / "instruments.parquet"
         if not path.exists():
@@ -223,6 +305,20 @@ class KaipanlaCollector:
             return sorted({str(code) for code in frame["code"].to_list() if code})
         except Exception as exc:  # noqa: BLE001
             logger.warning("开盘啦资金池读取失败 (%s)", type(exc).__name__)
+            return []
+
+    def _northbound_plate_ids(self) -> list[str]:
+        root = self.data_dir / "ext_data" / NORTHBOUND_SECTOR_TABLE / "timeseries"
+        partitions = sorted(root.glob("date=*/part.parquet"))
+        if not partitions:
+            return []
+        try:
+            import polars as pl
+
+            frame = pl.read_parquet(partitions[-1], columns=["plate_id"])
+            return sorted({str(value) for value in frame["plate_id"].to_list() if value})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("开盘啦北向板块池读取失败 (%s)", type(exc).__name__)
             return []
 
     async def collect_funds(self, trade_date: date) -> int:
@@ -298,6 +394,233 @@ class KaipanlaCollector:
             [{**row, "collected_at": collected_at} for row in interval_rows + details],
         )
         return count
+
+    def _write_records(
+        self,
+        table_id: str,
+        rows: list[dict],
+        key_fields: tuple[str, ...],
+    ) -> int:
+        buckets: dict[date, list[dict]] = {}
+        for row in rows:
+            report_date = row.get("report_date")
+            if not isinstance(report_date, str):
+                raise ValueError(f"{table_id} 记录缺少报告期")
+            value = date.fromisoformat(report_date)
+            buckets.setdefault(value, []).append({**row, "collected_at": cn_now().isoformat()})
+        return sum(
+            atomic_upsert_records(self.data_dir, table_id, value, values, key_fields)
+            for value, values in buckets.items()
+        )
+
+    async def collect_northbound(self, report_date: date | None = None) -> int:
+        """采集北向季度板块及个股持仓，不混作每日资金流。"""
+        sector_endpoint = "northbound_sector_history" if report_date else "northbound_sector_latest"
+        stock_endpoint = "northbound_stocks_history" if report_date else "northbound_stocks_latest"
+        sector_rows: list[dict] = []
+        seen_plates: set[str] = set()
+        async with self._client_factory() as client:
+            for offset in range(0, _MAX_PAGES * 20, 20):
+                params = {"Index": offset, "st": 20}
+                if report_date:
+                    params["Date"] = report_date.isoformat()
+                payload = await client.request(sector_endpoint, params)
+                archive_raw(self.data_dir, sector_endpoint, report_date or cn_today(), payload, f"offset-{offset}")
+                _, parsed = parse_northbound_sector(payload)
+                fresh = [row for row in parsed if row["plate_id"] not in seen_plates]
+                if not fresh:
+                    break
+                seen_plates.update(row["plate_id"] for row in fresh)
+                sector_rows.extend(fresh)
+                if len(parsed) < 20:
+                    break
+            else:
+                raise RuntimeError("开盘啦北向板块分页超过安全上限")
+
+            semaphore = asyncio.Semaphore(8)
+
+            async def collect_plate(plate_id: str) -> list[dict]:
+                async with semaphore:
+                    try:
+                        params = {"IndexID": plate_id, "Index": 0, "st": _REFERENCE_PAGE_SIZE}
+                        if report_date:
+                            params["Date"] = report_date.isoformat()
+                        payload = await client.request(stock_endpoint, params)
+                        archive_raw(self.data_dir, stock_endpoint, report_date or cn_today(), payload, plate_id)
+                        _, parsed = parse_northbound_stocks(payload, plate_id)
+                        return parsed
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦北向个股采集失败 (%s)", type(exc).__name__)
+                        return []
+
+            stock_rows = [
+                row
+                for rows in await asyncio.gather(*(collect_plate(code) for code in sorted(seen_plates)))
+                for row in rows
+            ]
+        return self._write_records(NORTHBOUND_SECTOR_TABLE, sector_rows, ("plate_id",)) + self._write_records(
+            NORTHBOUND_STOCK_TABLE, stock_rows, ("plate_id", "symbol")
+        )
+
+    async def collect_shareholder_counts(self, start_date: date, end_date: date) -> int:
+        """采集指定统计区间的股东人数变更，日期取上游每行 Day。"""
+        rows: list[dict] = []
+        async with self._client_factory() as client:
+            window_payload = await client.request(
+                "shareholder_count_changes",
+                {
+                    "StratDate": start_date.isoformat(),
+                    "EndDate": end_date.isoformat(),
+                    "Index": 0,
+                    "st": _REFERENCE_PAGE_SIZE,
+                },
+            )
+            archive_raw(self.data_dir, "shareholder_count_changes", end_date, window_payload, "windows")
+            windows = _shareholder_count_windows(window_payload)
+            for window_start, window_end in windows:
+                for offset in range(0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE):
+                    payload = await client.request(
+                        "shareholder_count_changes",
+                        {
+                            "StratDate": window_start.isoformat(),
+                            "EndDate": window_end.isoformat(),
+                            "Index": offset,
+                            "st": _REFERENCE_PAGE_SIZE,
+                        },
+                    )
+                    archive_raw(
+                        self.data_dir,
+                        "shareholder_count_changes",
+                        window_end,
+                        payload,
+                        f"offset-{offset}",
+                    )
+                    parsed = parse_shareholder_count_changes(payload)
+                    rows.extend(parsed)
+                    if len(parsed) < _REFERENCE_PAGE_SIZE:
+                        break
+                else:
+                    raise RuntimeError("开盘啦股东人数分页超过安全上限")
+        return self._write_records(SHAREHOLDER_COUNT_TABLE, rows, ("symbol",))
+
+    async def collect_shareholder_changes(self, report_date: date) -> int:
+        """按报告期采集全 A 股十大流通股东。"""
+        semaphore = asyncio.Semaphore(8)
+
+        async with self._client_factory() as client:
+            async def collect_one(code: str) -> list[dict]:
+                async with semaphore:
+                    try:
+                        payload = await client.request(
+                            "shareholder_changes", {"StockID": code, "Day": report_date.isoformat()}
+                        )
+                        archive_raw(self.data_dir, "shareholder_changes", report_date, payload, code)
+                        return parse_shareholder_changes(payload, code, report_date)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦十大流通股东采集失败 (%s)", type(exc).__name__)
+                        return []
+
+            rows = [
+                row
+                for values in await asyncio.gather(*(collect_one(code) for code in self._stock_codes()))
+                for row in values
+            ]
+        return self._write_records(
+            SHAREHOLDER_TABLE, rows, ("symbol", "snapshot_kind", "shareholder_id")
+        )
+
+    async def collect_sector_constituents(
+        self, trade_date: date, plate_ids: list[str] | None = None
+    ) -> int:
+        """由板块强度榜发现板块，再抓取目标日完整历史成分。"""
+        async with self._client_factory() as client:
+            if plate_ids is None:
+                payload = await client.request(
+                    "sector_strength", {"Day": trade_date.isoformat(), "Index": 0, "st": _REFERENCE_PAGE_SIZE}
+                )
+                archive_raw(self.data_dir, "sector_strength", trade_date, payload)
+                plate_ids = [row["plate_id"] for row in parse_sector_strength(payload)]
+            semaphore = asyncio.Semaphore(8)
+
+            async def collect_one(plate_id: str) -> list[dict]:
+                async with semaphore:
+                    try:
+                        rows = []
+                        seen_codes: set[str] = set()
+                        for offset in range(
+                            0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE
+                        ):
+                            payload = await client.request(
+                                "sector_constituents",
+                                {
+                                    "PlateID": plate_id,
+                                    "Date": trade_date.isoformat(),
+                                    "Index": offset,
+                                    "st": _REFERENCE_PAGE_SIZE,
+                                },
+                            )
+                            archive_raw(
+                                self.data_dir,
+                                "sector_constituents",
+                                trade_date,
+                                payload,
+                                f"{plate_id}-{offset}",
+                            )
+                            parsed = parse_sector_constituents(payload, plate_id)
+                            fresh = [row for row in parsed if row["code"] not in seen_codes]
+                            if not fresh:
+                                break
+                            seen_codes.update(row["code"] for row in fresh)
+                            rows.extend(fresh)
+                            if len(parsed) < _REFERENCE_PAGE_SIZE:
+                                break
+                        return rows
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦板块成分采集失败 (%s)", type(exc).__name__)
+                        return []
+
+            rows = [
+                row
+                for values in await asyncio.gather(*(collect_one(plate_id) for plate_id in sorted(set(plate_ids))))
+                for row in values
+            ]
+        stamped = [{**row, "report_date": trade_date.isoformat()} for row in rows]
+        return self._write_records(SECTOR_CONSTITUENT_TABLE, stamped, ("plate_id", "symbol"))
+
+    async def collect_lhb_reference(self, trade_date: date, codes: list[str]) -> int:
+        """补充龙虎榜游资动向和股票席位明细。"""
+        async with self._client_factory() as client:
+            movement_rows: list[dict] = []
+            try:
+                movement_payload = await client.request(
+                    "dragon_tiger_movement", {"Date": trade_date.isoformat()}
+                )
+                archive_raw(self.data_dir, "dragon_tiger_movement", trade_date, movement_payload)
+                movement_rows = parse_dragon_tiger_movement(movement_payload, trade_date)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("开盘啦龙虎榜游资动向采集失败 (%s)", type(exc).__name__)
+            semaphore = asyncio.Semaphore(8)
+
+            async def collect_one(code: str) -> list[dict]:
+                async with semaphore:
+                    try:
+                        payload = await client.request(
+                            "dragon_tiger_details", {"StockID": code, "Time": trade_date.isoformat()}
+                        )
+                        archive_raw(self.data_dir, "dragon_tiger_details", trade_date, payload, code)
+                        return parse_dragon_tiger_details(payload, code)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("开盘啦龙虎榜席位采集失败 (%s)", type(exc).__name__)
+                        return []
+
+            detail_rows = [
+                row for values in await asyncio.gather(*(collect_one(code) for code in sorted(set(codes)))) for row in values
+            ]
+        movement = [{**row, "report_date": trade_date.isoformat()} for row in movement_rows]
+        details = [{**row, "report_date": trade_date.isoformat()} for row in detail_rows]
+        return self._write_records(
+            LHB_MOVEMENT_TABLE, movement, ("participant_id", "side", "symbol")
+        ) + self._write_records(LHB_DETAIL_TABLE, details, ("symbol", "side", "rank"))
 
     async def _fetch_pages(
         self,
@@ -407,6 +730,13 @@ class KaipanlaCollector:
             )
             if rows:
                 await self._collect_lhb_details(client, trade_date, rows)
+            try:
+                await self.collect_lhb_reference(
+                    trade_date,
+                    [str(row["code"]) for row in rows if row.get("code")],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("开盘啦扩展龙虎榜采集失败 (%s)", type(exc).__name__)
             return count
 
     async def _collect_lhb_details(

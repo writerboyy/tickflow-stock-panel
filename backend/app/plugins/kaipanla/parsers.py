@@ -151,6 +151,221 @@ def parse_large_order_statistics(payload: dict, code: str, trade_date: date) -> 
     return None
 
 
+def parse_northbound_sector(payload: dict) -> tuple[date, list[dict]]:
+    """解析北向季度板块持仓，报告期必须由上游 Date 声明。"""
+    report_date = parse_trade_date(payload.get("Date"))
+    if report_date is None:
+        raise ResponseShapeError("北向板块持仓缺少报告期")
+    rows = []
+    for index, row in enumerate(_rows(payload, "List")):
+        if not isinstance(row, list) or len(row) != 9:
+            raise ResponseShapeError(f"List[{index}] 必须恰好包含 9 列")
+        rows.append(
+            {
+                "report_date": report_date.isoformat(),
+                "plate_id": _text(row[0], f"List[{index}].plate_id", required=True),
+                "plate_name": _text(row[1], f"List[{index}].plate_name"),
+                "increase_amount": _float(row[2], "increase_amount"),
+                "increase_ratio": _float(row[3], "increase_ratio"),
+                "holding_amount": _float(row[4], "holding_amount"),
+                "holding_ratio": _float(row[5], "holding_ratio"),
+                "market_ratio": _float(row[6], "market_ratio"),
+                "market_cap": _float(row[7], "market_cap"),
+                "state": _int(row[8], "state"),
+                "total_increase_amount": _float(payload.get("Sum_ZCJE"), "Sum_ZCJE"),
+                "total_holding_amount": _float(payload.get("Sum_ZCC"), "Sum_ZCC"),
+            }
+        )
+    return report_date, rows
+
+
+def parse_northbound_stocks(payload: dict, plate_id: str) -> tuple[date, list[dict]]:
+    """解析一个北向板块下的季度个股持仓。"""
+    report_date = parse_trade_date(payload.get("Date"))
+    if report_date is None:
+        raise ResponseShapeError("北向个股持仓缺少报告期")
+    rows = []
+    for index, row in enumerate(_rows(payload, "List")):
+        if not isinstance(row, list) or len(row) != 12:
+            raise ResponseShapeError(f"List[{index}] 必须恰好包含 12 列")
+        code = _text(row[0], f"List[{index}].code", required=True)
+        rows.append(
+            {
+                "report_date": report_date.isoformat(),
+                "plate_id": plate_id,
+                "symbol": code,
+                "code": code,
+                "name": _text(row[1], f"List[{index}].name"),
+                "increase_amount": _float(row[2], "increase_amount"),
+                "increase_ratio": _float(row[3], "increase_ratio"),
+                "holding_amount": _float(row[4], "holding_amount"),
+                "holding_shares": _float(row[5], "holding_shares"),
+                "total_shares": _float(row[6], "total_shares"),
+                "market_cap": _float(row[7], "market_cap"),
+                "holding_ratio": _float(row[8], "holding_ratio"),
+                "market_ratio": _float(row[9], "market_ratio"),
+                "float_market_cap": _float(row[10], "float_market_cap"),
+                "state": _int(row[11], "state"),
+            }
+        )
+    return report_date, rows
+
+
+def parse_shareholder_changes(payload: dict, code: str, report_date: date) -> list[dict]:
+    """解析指定报告期的本期及上期十大流通股东。"""
+    rows = []
+    for snapshot_kind, key in (("current", "LTGDData"), ("previous", "LTGDData_SQ")):
+        for index, item in enumerate(_rows(payload, key)):
+            if not isinstance(item, dict):
+                raise ResponseShapeError(f"{key}[{index}] 必须是对象")
+            shareholder_id = _text(item.get("JGID"), f"{key}[{index}].JGID", required=True)
+            change = _text(item.get("SJJZC"), f"{key}[{index}].SJJZC")
+            rows.append(
+                {
+                    "report_date": report_date.isoformat(),
+                    "symbol": code,
+                    "code": code,
+                    "snapshot_kind": snapshot_kind,
+                    "shareholder_id": shareholder_id,
+                    "shareholder_name": _text(item.get("JG"), f"{key}[{index}].JG"),
+                    "holding_10k_shares": _float(item.get("CYSL"), "CYSL"),
+                    "holding_ratio_pct": _float(item.get("ZLTBL"), "ZLTBL"),
+                    "holding_change": change,
+                    "holding_change_pct": None if change in {"新进", "不变"} else _float(change, "SJJZC"),
+                    "shareholder_tag": _int(item.get("NiuSan"), "NiuSan"),
+                    "relation_color": _int(item.get("Color"), "Color"),
+                }
+            )
+    return rows
+
+
+def parse_shareholder_count_changes(payload: dict) -> list[dict]:
+    """解析股东人数变更列表，每行 Day 是实际统计日期。"""
+    rows = []
+    for index, item in enumerate(_rows(payload, "List")):
+        if not isinstance(item, dict):
+            raise ResponseShapeError(f"List[{index}] 必须是对象")
+        report_date = parse_trade_date(item.get("Day"))
+        if report_date is None:
+            raise ResponseShapeError(f"List[{index}].Day 缺失")
+        code = _text(item.get("StockID"), f"List[{index}].StockID", required=True)
+        updated_date = parse_trade_date(item.get("UpdateDay"))
+        rows.append(
+            {
+                "report_date": report_date.isoformat(),
+                "symbol": code,
+                "code": code,
+                "name": _text(item.get("Name"), f"List[{index}].Name"),
+                "float_holding_ratio": _float(item.get("LTZB"), "LTZB"),
+                "chip_concentration": _float(item.get("CMJZ"), "CMJZ"),
+                "shareholder_change_pct": _float(item.get("JSQBH"), "JSQBH"),
+                "updated_date": updated_date.isoformat() if updated_date else None,
+                "is_new": bool(_int(item.get("IsNew"), "IsNew")),
+            }
+        )
+    return rows
+
+
+def parse_dragon_tiger_movement(payload: dict, trade_date: date) -> list[dict]:
+    """解析龙虎榜游资、机构的单日买卖动向。"""
+    rows = []
+    for participant_index, participant in enumerate(_rows(payload, "List")):
+        if not isinstance(participant, dict):
+            raise ResponseShapeError(f"List[{participant_index}] 必须是对象")
+        participant_id = _text(participant.get("BID"), f"List[{participant_index}].BID", required=True)
+        for side, field in (("buy", "Buy"), ("sell", "Sell")):
+            values = participant.get(field)
+            if not isinstance(values, list):
+                raise ResponseShapeError(f"List[{participant_index}].{field} 不是数组")
+            for index, item in enumerate(values):
+                if not isinstance(item, dict):
+                    raise ResponseShapeError(f"{field}[{index}] 必须是对象")
+                code = _text(item.get("Sto"), f"{field}[{index}].Sto", required=True)
+                rows.append(
+                    {
+                        "symbol": code,
+                        "code": code,
+                        "name": _text(item.get("StoN"), f"{field}[{index}].StoN"),
+                        "participant_id": participant_id,
+                        "participant_name": _text(participant.get("BName"), "BName"),
+                        "side": side,
+                        "amount": _float(item.get("Money"), "Money"),
+                        "three_day": _int(item.get("Three"), "Three") == 1,
+                    }
+                )
+    return rows
+
+
+def parse_dragon_tiger_details(payload: dict, code: str) -> list[dict]:
+    """解析一个龙虎榜股票的买卖营业部明细。"""
+    rows = []
+    for group_index, group in enumerate(_rows(payload, "List")):
+        if not isinstance(group, dict):
+            raise ResponseShapeError(f"List[{group_index}] 必须是对象")
+        for side, field in (("buy", "BuyList"), ("sell", "SellList")):
+            for index, item in enumerate(_rows(group, field)):
+                if not isinstance(item, dict):
+                    raise ResponseShapeError(f"{field}[{index}] 必须是对象")
+                tags = _rows(item, "GroupIcon")
+                rows.append(
+                    {
+                        "symbol": code,
+                        "code": code,
+                        "department_id": _text(item.get("ID"), f"{field}[{index}].ID", required=True),
+                        "department_name": _text(item.get("Name"), f"{field}[{index}].Name"),
+                        "side": side,
+                        "buy_amount": _float(item.get("Buy"), "Buy"),
+                        "sell_amount": _float(item.get("Sell"), "Sell"),
+                        "rank": _int(item.get("PX"), "PX"),
+                        "tags_json": _json(tags),
+                    }
+                )
+    return rows
+
+
+def parse_sector_strength(payload: dict) -> list[dict]:
+    """解析板块强度榜，仅用于发现板块成分采集所需的 plate_id。"""
+    rows = []
+    for index, row in enumerate(_rows(payload, "list")):
+        if not isinstance(row, list) or len(row) < 11:
+            raise ResponseShapeError(f"list[{index}] 至少需要 11 列")
+        rows.append(
+            {
+                "plate_id": _text(row[0], f"list[{index}].plate_id", required=True),
+                "plate_name": _text(row[1], f"list[{index}].plate_name"),
+            }
+        )
+    return rows
+
+
+def parse_sector_constituents(payload: dict, plate_id: str) -> list[dict]:
+    """解析一个开盘啦板块在目标交易日的完整成分。"""
+    rows = []
+    for index, row in enumerate(_rows(payload, "list")):
+        if not isinstance(row, list) or len(row) < 41:
+            raise ResponseShapeError(f"list[{index}] 至少需要 41 列")
+        code = _text(row[0], f"list[{index}].code", required=True)
+        rows.append(
+            {
+                "plate_id": plate_id,
+                "symbol": code,
+                "code": code,
+                "name": _text(row[1], f"list[{index}].name"),
+                "tags": _text(row[4], "tags"),
+                "last_price": _float(row[5], "last_price"),
+                "change_pct": _float(row[6], "change_pct"),
+                "amount": _float(row[7], "amount"),
+                "turnover_rate": _float(row[8], "turnover_rate"),
+                "float_market_value": _float(row[10], "float_market_value"),
+                "main_net": _float(row[13], "main_net"),
+                "limit_tag": _text(row[23], "limit_tag"),
+                "rank_tag": _text(row[24], "rank_tag"),
+                "limit_count": _int(row[40], "limit_count"),
+            }
+        )
+    return rows
+
+
 def parse_auction(payload: dict) -> list[dict]:
     """解析 /115、/30 的 17 列数组，未文档化位置不进入标准表。"""
     result: list[dict] = []

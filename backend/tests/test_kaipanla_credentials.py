@@ -83,23 +83,33 @@ def test_connection_api_persists_fields_only_and_returns_masked_status(tmp_path,
 
 
 @pytest.mark.parametrize(
-    ("endpoint", "host"),
+    ("endpoint", "host", "method"),
     [
-        (115, "apphwhq.longhuvip.com"),
-        (30, "apphis.longhuvip.com"),
-        (31, "apphwhq.longhuvip.com"),
-        (15, "apphwshhq.longhuvip.com"),
-        (100, "applhb.longhuvip.com"),
-        (101, "applhb.longhuvip.com"),
-        (108, "apphwshhq.longhuvip.com"),
-        (109, "apphwshhq.longhuvip.com"),
-        ("fund_interval", "apphis.longhuvip.com"),
-        ("fund_capital_net", "apphis.longhuvip.com"),
-        ("fund_large_order_statistics", "apphis.longhuvip.com"),
+        (115, "apphwhq.longhuvip.com", "POST"),
+        (30, "apphis.longhuvip.com", "POST"),
+        (31, "apphwhq.longhuvip.com", "POST"),
+        (15, "apphwshhq.longhuvip.com", "POST"),
+        (100, "applhb.longhuvip.com", "POST"),
+        (101, "applhb.longhuvip.com", "POST"),
+        (108, "apphwshhq.longhuvip.com", "POST"),
+        (109, "apphwshhq.longhuvip.com", "POST"),
+        ("fund_interval", "apphis.longhuvip.com", "POST"),
+        ("fund_capital_net", "apphis.longhuvip.com", "POST"),
+        ("fund_large_order_statistics", "apphis.longhuvip.com", "POST"),
+        ("northbound_sector_latest", "apphis.longhuvip.com", "GET"),
+        ("northbound_sector_history", "apphis.longhuvip.com", "GET"),
+        ("northbound_stocks_latest", "apphis.longhuvip.com", "GET"),
+        ("northbound_stocks_history", "apphis.longhuvip.com", "GET"),
+        ("shareholder_changes", "apphis.longhuvip.com", "POST"),
+        ("shareholder_count_changes", "applhb.longhuvip.com", "GET"),
+        ("dragon_tiger_movement", "apphis.longhuvip.com", "POST"),
+        ("dragon_tiger_details", "applhb.longhuvip.com", "POST"),
+        ("sector_strength", "apphis.longhuvip.com", "POST"),
+        ("sector_constituents", "apphis.longhuvip.com", "POST"),
     ],
 )
 @pytest.mark.asyncio
-async def test_client_uses_fixed_endpoint_and_keeps_credentials_out_of_url(endpoint, host):
+async def test_client_uses_fixed_endpoint_and_redacts_credentials(endpoint, host, method):
     credentials = KaipanlaCredentials(
         token="test-token-123456",
         userid="2675923",
@@ -126,12 +136,15 @@ async def test_client_uses_fixed_endpoint_and_keeps_credentials_out_of_url(endpo
         payload = await client.request(endpoint, {"StockID": "000785"})
 
     request = seen[0]
-    assert request.method == "POST"
+    assert request.method == method
     assert request.url.host == host
     assert request.url.path == "/w1/api/index.php"
-    assert "test-token-123456" not in str(request.url)
-    form = parse_qs(request.content.decode())
-    assert form["Token"] == ["test-token-123456"]
+    if method == "POST":
+        assert "test-token-123456" not in str(request.url)
+        form = parse_qs(request.content.decode())
+        assert form["Token"] == ["test-token-123456"]
+    else:
+        assert request.url.params["Token"] == "test-token-123456"
     assert request.url.params["StockID"] == "000785"
     assert payload["Token"] == "[REDACTED]"
     assert payload["message"] == "[REDACTED]"

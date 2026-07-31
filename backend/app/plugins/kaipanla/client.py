@@ -108,6 +108,117 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
         "apphis.longhuvip.com",
         {"a": "GetDaDanKLine2", "c": "StockLineData"},
     ),
+    "northbound_sector_latest": (
+        "GET",
+        "apphis.longhuvip.com",
+        {
+            "a": "GGList_BXZJ",
+            "c": "ZhuLiChiCang",
+            "Order": "1",
+            "st": "20",
+            "Index": "0",
+            "Date": "",
+            "Type": "1",
+            "apiv": "w44",
+            "VerSion": "5.23.0.4",
+        },
+    ),
+    "northbound_sector_history": (
+        "GET",
+        "apphis.longhuvip.com",
+        {
+            "a": "GGList_BXZJ",
+            "c": "ZhuLiChiCang",
+            "Order": "1",
+            "st": "20",
+            "Index": "0",
+            "Type": "1",
+            "apiv": "w44",
+            "VerSion": "5.23.0.4",
+        },
+    ),
+    "northbound_stocks_latest": (
+        "GET",
+        "apphis.longhuvip.com",
+        {
+            "a": "GGList_BXZJ_Stocks",
+            "c": "ZhuLiChiCang",
+            "Order": "1",
+            "st": "20",
+            "Index": "0",
+            "Date": "",
+            "Type": "1",
+            "apiv": "w44",
+            "VerSion": "5.23.0.4",
+        },
+    ),
+    "northbound_stocks_history": (
+        "GET",
+        "apphis.longhuvip.com",
+        {
+            "a": "GGList_BXZJ_Stocks",
+            "c": "ZhuLiChiCang",
+            "Order": "1",
+            "st": "20",
+            "Index": "0",
+            "Type": "1",
+            "apiv": "w44",
+            "VerSion": "5.23.0.4",
+        },
+    ),
+    "shareholder_changes": (
+        "POST",
+        "apphis.longhuvip.com",
+        {"a": "GetGuDongInfoTenByDate", "c": "YiDianCangWei"},
+    ),
+    "shareholder_count_changes": (
+        "GET",
+        "applhb.longhuvip.com",
+        {
+            "a": "GuDongRenShu",
+            "c": "YiDianCangWei",
+            "Order": "10",
+            "ShowDate": "0",
+            "IsNew": "0",
+            "JiangFu": "1",
+            "Tag": "0",
+            "apiv": "w44",
+            "VerSion": "5.23.0.4",
+        },
+    ),
+    "dragon_tiger_movement": (
+        "POST",
+        "apphis.longhuvip.com",
+        {"a": "GetYTFP_LHBDX", "c": "FuPanLa"},
+    ),
+    "dragon_tiger_details": (
+        "POST",
+        "applhb.longhuvip.com",
+        {"a": "GetNewOneStockInfo", "c": "Stock", "Type": "0"},
+    ),
+    "sector_strength": (
+        "POST",
+        "apphis.longhuvip.com",
+        {"a": "RealRankingInfo", "c": "ZhiShuRanking", "Type": "1", "Order": "1", "ZSType": "7"},
+    ),
+    "sector_constituents": (
+        "POST",
+        "apphis.longhuvip.com",
+        {
+            "a": "ZhiShuStockList_W8",
+            "c": "ZhiShuRanking",
+            "Order": "1",
+            "st": "1000",
+            "Index": "0",
+            "old": "1",
+            "Type": "6",
+            "IsZZ": "0",
+            "IsKZZType": "0",
+            "TSZB": "0",
+            "TSZB_Type": "0",
+            "filterType": "0",
+        },
+    ),
 }
 
 
@@ -167,13 +278,21 @@ class KaipanlaClient:
 
         for attempt in range(1, self._attempts + 1):
             try:
-                response = await self._client.request(
-                    method,
-                    url,
-                    params=query,
-                    data=self.credentials.as_form(),
-                    headers=_HEADERS,
-                )
+                if method == "GET":
+                    response = await self._client.request(
+                        method,
+                        url,
+                        params={**query, **self.credentials.as_form()},
+                        headers=_HEADERS,
+                    )
+                else:
+                    response = await self._client.request(
+                        method,
+                        url,
+                        params=query,
+                        data=self.credentials.as_form(),
+                        headers=_HEADERS,
+                    )
             except (httpx.TimeoutException, httpx.TransportError):
                 if attempt == self._attempts:
                     raise KaipanlaRequestError(f"开盘啦 /{endpoint} 请求失败") from None

@@ -10,13 +10,20 @@ from app.plugins.kaipanla.parsers import (
     parse_auction,
     parse_bid_detail,
     parse_capital_net,
+    parse_dragon_tiger_movement,
     parse_interval_stock,
     parse_large_order_statistics,
     parse_lhb_detail,
     parse_lhb_list,
     parse_limitup,
+    parse_northbound_sector,
+    parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
+    parse_sector_constituents,
+    parse_sector_strength,
+    parse_shareholder_changes,
+    parse_shareholder_count_changes,
 )
 
 
@@ -206,3 +213,42 @@ def test_fund_parsers_keep_main_flow_and_big_order_contracts_separate():
     assert capital["capital_net_points"] == 1
     assert statistics is not None
     assert statistics["main_net_amount_over_300k"] == 50
+
+
+def test_reference_parsers_keep_report_periods_and_composite_rows():
+    report_date, sectors = parse_northbound_sector(
+        {"Date": "20260630", "Sum_ZCJE": 10, "Sum_ZCC": 20, "List": [["P1", "板块", 1, 2, 3, 4, 5, 6, 7]]}
+    )
+    _, stocks = parse_northbound_stocks(
+        {"Date": "20260630", "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]},
+        "P1",
+    )
+    shareholders = parse_shareholder_changes(
+        {
+            "LTGDData": [{"JGID": "H1", "JG": "股东甲", "CYSL": 2, "ZLTBL": 3, "SJJZC": "新进", "NiuSan": 1, "Color": 2}],
+            "LTGDData_SQ": [],
+        },
+        "600126",
+        date(2026, 6, 30),
+    )
+    counts = parse_shareholder_count_changes(
+        {"List": [{"Day": "20260630", "StockID": "600126", "Name": "杭钢股份", "LTZB": 1, "CMJZ": 2, "JSQBH": 3, "UpdateDay": "20260701", "IsNew": 1}]}
+    )
+    movements = parse_dragon_tiger_movement(
+        {"List": [{"BID": "P", "BName": "席位", "Buy": [{"Sto": "600126", "StoN": "杭钢股份", "Money": 1, "Three": 0}], "Sell": []}]},
+        date(2026, 7, 10),
+    )
+    constituent_row = [None] * 41
+    constituent_row[0], constituent_row[1], constituent_row[40] = "600126", "杭钢股份", 2
+    constituents = parse_sector_constituents({"list": [constituent_row]}, "P1")
+    strength_row = ["P1", "板块"] + [0] * 9
+    strengths = parse_sector_strength({"list": [strength_row]})
+
+    assert report_date == date(2026, 6, 30)
+    assert sectors[0]["holding_amount"] == 3
+    assert stocks[0]["symbol"] == "600126"
+    assert shareholders[0]["holding_change_pct"] is None
+    assert counts[0]["updated_date"] == "2026-07-01"
+    assert movements[0]["side"] == "buy"
+    assert constituents[0]["limit_count"] == 2
+    assert strengths[0]["plate_id"] == "P1"

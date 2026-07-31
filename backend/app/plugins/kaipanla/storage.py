@@ -27,7 +27,27 @@ LIMITUP_TABLE = "ext_kpl_limitup"
 LHB_TABLE = "ext_kpl_lhb"
 REGULATORY_TABLE = "ext_kpl_regulatory"
 FUNDS_TABLE = "ext_kpl_funds"
-TABLE_IDS = (AUCTION_TABLE, LIMITUP_TABLE, LHB_TABLE, REGULATORY_TABLE, FUNDS_TABLE)
+NORTHBOUND_SECTOR_TABLE = "ext_kpl_northbound_sector"
+NORTHBOUND_STOCK_TABLE = "ext_kpl_northbound_stock"
+SHAREHOLDER_TABLE = "ext_kpl_shareholder_changes"
+SHAREHOLDER_COUNT_TABLE = "ext_kpl_shareholder_counts"
+LHB_MOVEMENT_TABLE = "ext_kpl_lhb_movement"
+LHB_DETAIL_TABLE = "ext_kpl_lhb_detail"
+SECTOR_CONSTITUENT_TABLE = "ext_kpl_sector_constituents"
+TABLE_IDS = (
+    AUCTION_TABLE,
+    LIMITUP_TABLE,
+    LHB_TABLE,
+    REGULATORY_TABLE,
+    FUNDS_TABLE,
+    NORTHBOUND_SECTOR_TABLE,
+    NORTHBOUND_STOCK_TABLE,
+    SHAREHOLDER_TABLE,
+    SHAREHOLDER_COUNT_TABLE,
+    LHB_MOVEMENT_TABLE,
+    LHB_DETAIL_TABLE,
+    SECTOR_CONSTITUENT_TABLE,
+)
 
 _DTYPES = {
     "string": pl.String,
@@ -228,8 +248,186 @@ def _funds_config() -> ExtConfig:
     )
 
 
+def _northbound_sector_config() -> ExtConfig:
+    return ExtConfig(
+        id=NORTHBOUND_SECTOR_TABLE,
+        label="开盘啦北向板块持仓",
+        mode="timeseries",
+        fields=[
+            ExtField("report_date", "string", "报告期"),
+            ExtField("plate_id", "string", "板块代码"),
+            ExtField("plate_name", "string", "板块名称"),
+            ExtField("increase_amount", "float", "增持金额"),
+            ExtField("increase_ratio", "float", "增持比例"),
+            ExtField("holding_amount", "float", "北向持仓金额"),
+            ExtField("holding_ratio", "float", "北向持仓占比"),
+            ExtField("market_ratio", "float", "市场占比"),
+            ExtField("market_cap", "float", "板块市值"),
+            ExtField("state", "int", "状态"),
+            ExtField("total_increase_amount", "float", "全市场增持金额"),
+            ExtField("total_holding_amount", "float", "全市场持仓金额"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦北向资金季度板块持仓，不是每日北向净买入",
+    )
+
+
+def _northbound_stock_config() -> ExtConfig:
+    return ExtConfig(
+        id=NORTHBOUND_STOCK_TABLE,
+        label="开盘啦北向个股持仓",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("report_date", "string", "报告期"),
+            ExtField("plate_id", "string", "板块代码"),
+            ExtField("increase_amount", "float", "增持金额"),
+            ExtField("increase_ratio", "float", "增持比例"),
+            ExtField("holding_amount", "float", "北向持仓金额"),
+            ExtField("holding_shares", "float", "北向持股数"),
+            ExtField("total_shares", "float", "总股本"),
+            ExtField("market_cap", "float", "市值"),
+            ExtField("holding_ratio", "float", "北向持股比例"),
+            ExtField("market_ratio", "float", "市场占比"),
+            ExtField("float_market_cap", "float", "流通市值"),
+            ExtField("state", "int", "状态"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦北向资金季度板块个股持仓，不是每日北向净买入",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
+def _shareholder_config() -> ExtConfig:
+    return ExtConfig(
+        id=SHAREHOLDER_TABLE,
+        label="开盘啦十大流通股东",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("report_date", "string", "报告期"),
+            ExtField("snapshot_kind", "string", "本期或上期快照"),
+            ExtField("shareholder_id", "string", "股东 ID"),
+            ExtField("shareholder_name", "string", "股东名称"),
+            ExtField("holding_10k_shares", "float", "持股数（万股）"),
+            ExtField("holding_ratio_pct", "float", "占流通股比例（%）"),
+            ExtField("holding_change", "string", "持股变动"),
+            ExtField("holding_change_pct", "float", "持股变动比例（%）"),
+            ExtField("shareholder_tag", "int", "牛散标签"),
+            ExtField("relation_color", "int", "关系标记"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦指定报告期的本期及上期十大流通股东快照",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
+def _shareholder_count_config() -> ExtConfig:
+    return ExtConfig(
+        id=SHAREHOLDER_COUNT_TABLE,
+        label="开盘啦股东人数变更",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("report_date", "string", "统计日期"),
+            ExtField("float_holding_ratio", "float", "流通持股比例"),
+            ExtField("chip_concentration", "float", "筹码集中度"),
+            ExtField("shareholder_change_pct", "float", "股东人数变动（%）"),
+            ExtField("updated_date", "string", "更新日期"),
+            ExtField("is_new", "bool", "是否新披露"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦股东人数变更列表",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
+def _lhb_movement_config() -> ExtConfig:
+    return ExtConfig(
+        id=LHB_MOVEMENT_TABLE,
+        label="开盘啦龙虎榜游资动向",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("participant_id", "string", "游资或机构 ID"),
+            ExtField("participant_name", "string", "游资或机构名称"),
+            ExtField("side", "string", "买卖方向"),
+            ExtField("amount", "float", "金额"),
+            ExtField("three_day", "bool", "三日榜"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦龙虎榜游资及机构买卖动向",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
+def _lhb_detail_config() -> ExtConfig:
+    return ExtConfig(
+        id=LHB_DETAIL_TABLE,
+        label="开盘啦龙虎榜席位明细",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("department_id", "string", "营业部 ID"),
+            ExtField("department_name", "string", "营业部名称"),
+            ExtField("side", "string", "买卖方向"),
+            ExtField("buy_amount", "float", "买入金额"),
+            ExtField("sell_amount", "float", "卖出金额"),
+            ExtField("rank", "int", "排名"),
+            ExtField("tags_json", "string", "席位标签"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦龙虎榜单股买卖席位明细",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
+def _sector_constituent_config() -> ExtConfig:
+    return ExtConfig(
+        id=SECTOR_CONSTITUENT_TABLE,
+        label="开盘啦历史板块成分",
+        mode="timeseries",
+        fields=_base_fields()
+        + [
+            ExtField("plate_id", "string", "板块代码"),
+            ExtField("tags", "string", "标签"),
+            ExtField("last_price", "float", "收盘价"),
+            ExtField("change_pct", "float", "涨跌幅（%）"),
+            ExtField("amount", "float", "成交额"),
+            ExtField("turnover_rate", "float", "换手率（%）"),
+            ExtField("float_market_value", "float", "流通市值"),
+            ExtField("main_net", "float", "主力净额"),
+            ExtField("limit_tag", "string", "涨停标签"),
+            ExtField("rank_tag", "string", "排名标签"),
+            ExtField("limit_count", "int", "连板数"),
+            ExtField("collected_at", "string", "采集时间"),
+        ],
+        description="开盘啦板块历史成分及对应交易日行情，不是官方指数 PIT 成分",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "mapped", "col": "code"},
+    )
+
+
 def configs() -> list[ExtConfig]:
-    return [_auction_config(), _limitup_config(), _lhb_config(), _regulatory_config(), _funds_config()]
+    return [
+        _auction_config(),
+        _limitup_config(),
+        _lhb_config(),
+        _regulatory_config(),
+        _funds_config(),
+        _northbound_sector_config(),
+        _northbound_stock_config(),
+        _shareholder_config(),
+        _shareholder_count_config(),
+        _lhb_movement_config(),
+        _lhb_detail_config(),
+        _sector_constituent_config(),
+    ]
 
 
 def ensure_configs(data_dir: Path) -> None:
@@ -293,6 +491,51 @@ def atomic_upsert(data_dir: Path, table_id: str, trade_date: date, rows: list[di
             current = dict(merged.get(symbol, {}))
             current.update({key: value for key, value in row.items() if value is not None})
             merged[symbol] = current
+        frame = _to_frame([merged[key] for key in sorted(merged)], config)
+        tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            frame.write_parquet(tmp)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+    return len(incoming)
+
+
+def atomic_upsert_records(
+    data_dir: Path,
+    table_id: str,
+    trade_date: date,
+    rows: list[dict],
+    key_fields: tuple[str, ...],
+) -> int:
+    """按声明的复合主键合并记录，不对非股票记录强行补全 symbol。"""
+    if not rows:
+        return 0
+    if not key_fields:
+        raise ValueError("开盘啦记录表缺少主键")
+    ensure_configs(data_dir)
+    config = ExtConfigStore(data_dir).get(table_id)
+    if config is None:
+        raise ValueError(f"未知开盘啦扩展表: {table_id}")
+    incoming = _normalize_rows(rows, data_dir) if any("symbol" in row or "code" in row for row in rows) else rows
+    for row in incoming:
+        if any(row.get(field) in (None, "") for field in key_fields):
+            raise ValueError(f"开盘啦记录表 {table_id} 缺少主键字段")
+    path = _partition_path(data_dir, table_id, trade_date)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record_key(row: dict) -> tuple[str, ...]:
+        return tuple(str(row[field]) for field in key_fields)
+
+    with _path_lock(path):
+        existing_rows = pl.read_parquet(path).to_dicts() if path.exists() else []
+        merged = {record_key(row): row for row in existing_rows if all(row.get(field) not in (None, "") for field in key_fields)}
+        for row in incoming:
+            key = record_key(row)
+            current = dict(merged.get(key, {}))
+            current.update({field: value for field, value in row.items() if value is not None})
+            merged[key] = current
         frame = _to_frame([merged[key] for key in sorted(merged)], config)
         tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
