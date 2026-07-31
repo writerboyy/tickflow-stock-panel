@@ -801,6 +801,7 @@ def _append_engine_events(
     before_fills: int,
     before_logs: int,
     before_risk: dict[str, Any],
+    strategy_id: str | None = None,
     notify: Any = None,
 ) -> None:
     fills_by_order = {
@@ -826,8 +827,12 @@ def _append_engine_events(
         store.append_event_once(account_id, {"id": _log_event_id(item), "type": "log", **item})
     for signal in engine.drain_signals():
         payload = dict(signal.pop("payload", {}))
+        signal_id = str(signal.pop("id"))
+        if strategy_id == "five_fortunes_v2" and signal_id.startswith("five_fortunes:"):
+            signal_id = f"five_fortunes_v2:{signal_id.removeprefix('five_fortunes:')}"
+            payload["strategy"] = "five_fortunes_v2"
         store.append_event_once(account_id, {
-            "id": f"signal:{signal.pop('id')}",
+            "id": f"signal:{signal_id}",
             "type": "signal",
             **signal,
             **payload,
@@ -975,6 +980,7 @@ def _process_bar_rows(
         before_fills=before_fills,
         before_logs=before_logs,
         before_risk=before_risk,
+        strategy_id=str(current.get("strategy_id") or ""),
         notify=notify,
     )
     if last_timestamp is not None:
@@ -1071,6 +1077,7 @@ def _process_scheduled_day(
         before_fills=before_fills,
         before_logs=before_logs,
         before_risk=before_risk,
+        strategy_id=str(current.get("strategy_id") or ""),
         notify=notify,
     )
     current["last_bar"] = timestamp.isoformat()
@@ -1509,6 +1516,7 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                     before_fills=before_fills,
                     before_logs=before_logs,
                     before_risk=before_risk,
+                    strategy_id=str(current.get("strategy_id") or ""),
                     notify=notify,
                 )
                 timestamp = engine._last_timestamp or cn_naive_now()  # noqa: SLF001

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.api.free_strategy import router
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
-from app.free_strategy.paper import _append_five_fortunes_v2_decision
+from app.free_strategy.paper import _append_engine_events, _append_five_fortunes_v2_decision
 from app.free_strategy.store import PaperAccountStore
 
 
@@ -133,6 +133,37 @@ def test_paper_runtime_emits_five_fortunes_v2_decision_signal(tmp_path):
     assert signal["id"] == "signal:five_fortunes_v2:2026-07-28:decision"
     assert signal["strategy"] == "five_fortunes_v2"
     assert signal["reason"] == "目标标的盘中趋势未确认，等待复检"
+
+
+def test_paper_runtime_normalizes_legacy_v2_source_signal_identity(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper-1"})
+    engine = SimpleNamespace(
+        account=SimpleNamespace(orders=[], fills=[]),
+        logs=[],
+        risk_status={},
+        drain_signals=lambda: [{
+            "id": "five_fortunes:2026-07-28:decision",
+            "timestamp": "2026-07-28T13:10:00",
+            "signal_type": "daily_decision",
+            "payload": {"strategy": "five_fortunes"},
+        }],
+    )
+
+    _append_engine_events(
+        store,
+        "paper-1",
+        engine,
+        before_orders=0,
+        before_fills=0,
+        before_logs=0,
+        before_risk={},
+        strategy_id="five_fortunes_v2",
+    )
+
+    signal = store.events("paper-1")[0]
+    assert signal["id"] == "signal:five_fortunes_v2:2026-07-28:decision"
+    assert signal["strategy"] == "five_fortunes_v2"
 
 
 def test_backtest_result_preserves_structured_strategy_signals():

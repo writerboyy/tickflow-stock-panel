@@ -742,7 +742,7 @@ def _prepare_and_sell(context) -> None:
     context.emit_signal(
         "daily_decision",
         {
-            "strategy": "five_fortunes",
+            "strategy": "five_fortunes_v2",
             "trading_date": day,
             "decision": decision_type,
             "regime": state["regime"],
@@ -755,7 +755,7 @@ def _prepare_and_sell(context) -> None:
             ],
             **decision_reason_payload(state["decision"]),
         },
-        event_id=f"five_fortunes:{day}:decision",
+        event_id=f"five_fortunes_v2:{day}:decision",
     )
     context.log(
         f"五福2.0 13:10：状态={state['regime']}，过筛={len(filtered_rows)}，候选={len(candidate_rows)}，"

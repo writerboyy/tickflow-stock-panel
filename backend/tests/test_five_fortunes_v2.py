@@ -114,6 +114,51 @@ def test_choose_targets_uses_reference_score_without_stale_quote_adjustment():
     assert five._choose_targets(Context(), rows, rows) == ["588890.SH"]
 
 
+def test_daily_decision_signal_uses_the_v2_identity(monkeypatch):
+    emitted = []
+
+    class Portfolio:
+        cash = 100_000
+        positions = {}
+
+    class Context:
+        now = datetime(2026, 7, 28, 13, 10)
+        portfolio = Portfolio()
+        state = {"five_fortunes_v2": {
+            "regime": "正常期",
+            "raw_regime": "正常期",
+            "regime_changed_today": False,
+            "decision": {},
+            "intraday": {"raw_close": {}},
+        }}
+
+        @staticmethod
+        def order_target_percent(_symbol, _target):
+            pass
+
+        @staticmethod
+        def emit_signal(signal_type, payload, *, event_id):
+            emitted.append((signal_type, payload, event_id))
+
+        @staticmethod
+        def log(_message):
+            pass
+
+    rows = [{"symbol": "159985.SZ", "score": 1.5}]
+    monkeypatch.setattr(five, "_rank_candidates", lambda _context: rows)
+    monkeypatch.setattr(five, "_candidate_pool", lambda _rows, _regime: rows)
+    monkeypatch.setattr(five, "_choose_targets", lambda *_args: ["159985.SZ"])
+    monkeypatch.setattr(five, "_held_symbols", lambda _context: [])
+    monkeypatch.setattr(five, "_buy_targets", lambda *_args, **_kwargs: None)
+
+    five._prepare_and_sell(Context())
+
+    signal_type, payload, event_id = emitted[0]
+    assert signal_type == "daily_decision"
+    assert payload["strategy"] == "five_fortunes_v2"
+    assert event_id == "five_fortunes_v2:2026-07-28:decision"
+
+
 def test_historical_names_keep_reference_medical_etfs_in_separate_groups():
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588700.SH"]) == "科创组:生物"
     assert five._dynamic_group(five.WUFU_GROUP_NAME_OVERRIDES["588860.SH"]) == "科创组:医药"
