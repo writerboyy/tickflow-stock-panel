@@ -178,6 +178,116 @@ def _instrument_records(
     return records
 
 
+def _date_column_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
+    dtype = frame.schema.get(column)
+    if dtype == pl.Date:
+        return pl.col(column)
+    if dtype == pl.Datetime:
+        return pl.col(column).dt.date()
+    return pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, strict=False)
+
+
+def _latest_announced_records(
+    data_dir: Path,
+    table: str,
+    symbols: list[str],
+    cutoff: date,
+) -> dict[str, dict[str, Any]]:
+    from app.services.financial_sync import get_financial_df
+
+    frame = get_financial_df(data_dir, table)
+    if frame.is_empty() or "symbol" not in frame.columns or not symbols:
+        return {}
+    date_column = "announce_date" if "announce_date" in frame.columns else "period_end"
+    if date_column not in frame.columns:
+        return {}
+    period_expr = (
+        _date_column_expr(frame, "period_end")
+        if "period_end" in frame.columns else pl.lit(None, dtype=pl.Date)
+    )
+    frame = (
+        frame
+        .filter(pl.col("symbol").is_in(symbols))
+        .with_columns([
+            _date_column_expr(frame, date_column).alias("_available_date"),
+            period_expr.alias("_period_date"),
+        ])
+        .filter(
+            pl.col("_available_date").is_not_null()
+            & (pl.col("_available_date") <= cutoff)
+        )
+        .sort(["symbol", "_available_date", "_period_date"], nulls_last=True)
+    )
+    if frame.is_empty():
+        return {}
+    return {
+        str(row["symbol"]): {
+            key: value
+            for key, value in row.items()
+            if key not in {"_available_date", "_period_date"}
+        }
+        for row in frame.group_by("symbol", maintain_order=True).tail(1).iter_rows(named=True)
+    }
+
+
+def _as_float(row: dict[str, Any], *columns: str) -> float | None:
+    for column in columns:
+        value = row.get(column)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            return numeric
+    return None
+
+
+def _load_financial_snapshot(
+    data_dir: Path,
+    symbols: list[str],
+    cutoff: date,
+) -> dict[str, dict[str, Any]]:
+    symbols = list(dict.fromkeys(symbols))
+    income = _latest_announced_records(data_dir, "income", symbols, cutoff)
+    metrics = _latest_announced_records(data_dir, "metrics", symbols, cutoff)
+    balance = _latest_announced_records(data_dir, "balance_sheet", symbols, cutoff)
+    result: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        income_row = income.get(symbol, {})
+        metrics_row = metrics.get(symbol, {})
+        balance_row = balance.get(symbol, {})
+        revenue = _as_float(income_row, "revenue", "operating_revenue")
+        net_income = _as_float(income_row, "net_income")
+        attributable = _as_float(
+            income_row,
+            "net_income_attributable",
+            "np_parent_company_owners",
+        )
+        roe = _as_float(metrics_row, "roe", "roe_diluted")
+        roa = _as_float(metrics_row, "roa")
+        if roa is None:
+            assets = _as_float(balance_row, "total_assets")
+            if net_income is not None and assets and assets > 0:
+                roa = net_income / assets * 100
+        rows = [row for row in (income_row, metrics_row, balance_row) if row]
+        if not rows:
+            continue
+        result[symbol] = {
+            "revenue": revenue,
+            "net_income": net_income,
+            "net_income_attributable": attributable,
+            "roe": roe,
+            "roa": roa,
+            "income_period_end": income_row.get("period_end"),
+            "income_announce_date": income_row.get("announce_date"),
+            "metrics_period_end": metrics_row.get("period_end"),
+            "metrics_announce_date": metrics_row.get("announce_date"),
+        }
+    return result
+
+
 def _load_market_data(
     repo: Any,
     symbols: list[str],

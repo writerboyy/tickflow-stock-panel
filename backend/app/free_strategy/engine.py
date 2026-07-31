@@ -240,6 +240,31 @@ class Context:
             if asset is None or item.get("asset_type") == asset
         ]
 
+    def financial_snapshot(
+        self,
+        symbols: Iterable[str],
+        end_date: date | datetime | str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        normalized = list(dict.fromkeys(
+            self._normalize_symbol(symbol)
+            for symbol in symbols
+            if str(symbol).strip()
+        ))
+        if not normalized or self.now is None:
+            return {}
+        if isinstance(end_date, datetime):
+            requested_end = end_date.date()
+        elif isinstance(end_date, date):
+            requested_end = end_date
+        elif end_date is not None:
+            requested_end = date.fromisoformat(str(end_date))
+        else:
+            requested_end = self.now.date() - timedelta(days=1)
+        cutoff = min(requested_end, self.now.date() - timedelta(days=1))
+        if self._engine._financial_snapshot_loader is None:
+            return {}
+        return self._engine._financial_snapshot_loader(normalized, cutoff)
+
     def market_history_bars(
         self,
         symbol: str,
@@ -392,10 +417,7 @@ class Context:
         if count <= 0 or self.now is None:
             return []
         normalized = str(symbol).strip().upper()
-        for source, target in {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}.items():
-            if normalized.endswith(source):
-                normalized = f"{normalized[:-len(source)]}{target}"
-                break
+        normalized = self._normalize_symbol(normalized)
         if isinstance(end_date, datetime):
             requested_end = end_date.date()
         elif isinstance(end_date, date):
@@ -420,6 +442,14 @@ class Context:
             {"date": day.isoformat(), "value": float(value)}
             for day, value in rows[-count:]
         ]
+
+    @staticmethod
+    def _normalize_symbol(raw: Any) -> str:
+        symbol = str(raw).strip().upper()
+        for source, target in {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}.items():
+            if symbol.endswith(source):
+                return f"{symbol[:-len(source)]}{target}"
+        return symbol
 
     def log(self, message: str, level: str = "INFO") -> None:
         self._engine.logs.append({"timestamp": self.now.isoformat() if self.now else "", "level": level, "message": str(message)})
@@ -513,6 +543,7 @@ class FreeStrategyEngine:
         self.run_end: date | None = None
         self.extra_history: dict[str, dict[str, dict[date, float]]] = {}
         self._extra_history_loader: Callable[[str, list[str], date, date], None] | None = None
+        self._financial_snapshot_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
@@ -630,6 +661,12 @@ class FreeStrategyEngine:
         loader: Callable[[str, list[str], date, date], None] | None,
     ) -> None:
         self._extra_history_loader = loader
+
+    def set_financial_snapshot_loader(
+        self,
+        loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None,
+    ) -> None:
+        self._financial_snapshot_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
