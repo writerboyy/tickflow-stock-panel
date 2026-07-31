@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle,
   CheckCircle2,
   CircleAlert,
   DatabaseZap,
@@ -37,7 +36,6 @@ const ISSUE_LABELS: Record<EtfDataIssue['type'], string> = {
   daily_missing: '日K缺失',
   minute_gap: '分钟K缺口',
   split_rounding: '拆分比例',
-  factor_mismatch: '分红复权',
 }
 
 export function RepairDataPanel({
@@ -68,10 +66,7 @@ export function RepairDataPanel({
   const [start, setStart] = useState(initialStart || daysAgo(30))
   const [end, setEnd] = useState(initialEnd || dateString(new Date()))
   const [requireMinute, setRequireMinute] = useState(initialTimeframe !== '1d')
-  const [verifyAxdata, setVerifyAxdata] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
-  const [confirmReplace, setConfirmReplace] = useState(false)
-  const [showConfirmation, setShowConfirmation] = useState(false)
 
   const history = useQuery({
     queryKey: QK.etfRepairHistory,
@@ -92,28 +87,21 @@ export function RepairDataPanel({
           start,
           end,
           persist_scan: true,
-          verify_axdata: false,
         })
       : api.checkEtfData({
           symbols: scope === 'symbols' ? parsedSymbols : [],
           start,
           end,
           require_minute: requireMinute,
-          verify_axdata: scope === 'symbols' && verifyAxdata,
           persist_scan: true,
         }),
-    onSuccess: data => {
-      setSelected(data.issues.map(issue => issue.id))
-      setConfirmReplace(false)
-      setShowConfirmation(false)
-    },
+    onSuccess: data => setSelected(data.issues.filter(issue => issue.repairable).map(issue => issue.id)),
   })
 
   const repair = useMutation({
     mutationFn: () => api.repairEtfData({
       scan_id: check.data?.scan_id || '',
       issue_ids: selected,
-      replace_existing: confirmReplace,
     }),
     onSuccess: data => {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
@@ -122,8 +110,7 @@ export function RepairDataPanel({
     },
   })
 
-  const selectedIssues = check.data?.issues.filter(issue => selected.includes(issue.id)) ?? []
-  const needsReplacement = selectedIssues.some(issue => issue.requires_replace)
+  const repairableIssues = check.data?.issues.filter(issue => issue.repairable) ?? []
   const canCheck = !isRunning && !check.isPending && start <= end
     && (scope !== 'symbols' || parsedSymbols.length > 0)
     && (scope !== 'strategy' || Boolean(initialStrategyId))
@@ -132,16 +119,6 @@ export function RepairDataPanel({
     setSelected(values => values.includes(issueId)
       ? values.filter(value => value !== issueId)
       : [...values, issueId])
-    setConfirmReplace(false)
-    setShowConfirmation(false)
-  }
-
-  const requestRepair = () => {
-    if (needsReplacement) {
-      setShowConfirmation(true)
-      return
-    }
-    repair.mutate()
   }
 
   return <div className="min-h-[420px]">
@@ -188,7 +165,6 @@ export function RepairDataPanel({
         </label> : null}
         <div className="flex flex-wrap items-center gap-5 md:col-span-2">
           <label className="inline-flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={requireMinute} disabled={scope === 'strategy'} onChange={event => setRequireMinute(event.target.checked)} className="accent-accent" />检查分钟K缺口</label>
-          <label className={`inline-flex items-center gap-2 text-xs ${scope === 'symbols' ? 'text-secondary' : 'text-muted'}`}><input type="checkbox" checked={verifyAxdata} disabled={scope !== 'symbols'} onChange={event => setVerifyAxdata(event.target.checked)} className="accent-accent" />核对分红与拆分</label>
           <button
             type="button"
             disabled={!canCheck}
@@ -207,17 +183,16 @@ export function RepairDataPanel({
             <span>{check.data.status === 'healthy' ? '所选范围数据完整' : `发现 ${check.data.issues.length} 个问题`}</span>
             <span className="text-muted">检查 {check.data.symbol_count} 只 ETF</span>
           </div>
-          <span className={check.data.source?.available ? 'text-success' : 'text-muted'}>{check.data.source?.message}</span>
         </div>
 
         {check.data.issues.length ? <div className="overflow-x-auto rounded border border-border">
           <table className="w-full min-w-[720px] table-fixed text-left text-[11px]">
             <thead className="bg-elevated text-muted"><tr>
-              <th className="w-10 px-3 py-2"><input aria-label="选择全部问题" type="checkbox" checked={selected.length === check.data.issues.length} onChange={event => setSelected(event.target.checked ? check.data!.issues.map(issue => issue.id) : [])} className="accent-accent" /></th>
+              <th className="w-10 px-3 py-2"><input aria-label="选择全部可补齐问题" type="checkbox" disabled={!repairableIssues.length} checked={repairableIssues.length > 0 && repairableIssues.every(issue => selected.includes(issue.id))} onChange={event => setSelected(event.target.checked ? repairableIssues.map(issue => issue.id) : [])} className="accent-accent disabled:opacity-40" /></th>
               <th className="w-28 px-2 py-2 font-medium">标的</th><th className="w-28 px-2 py-2 font-medium">问题</th><th className="w-44 px-2 py-2 font-medium">日期</th><th className="px-2 py-2 font-medium">处理方式</th>
             </tr></thead>
             <tbody className="divide-y divide-border">{check.data.issues.map(issue => <tr key={issue.id} className="hover:bg-elevated/40">
-              <td className="px-3 py-2.5"><input aria-label={`选择 ${issue.symbol} ${issue.title}`} type="checkbox" checked={selected.includes(issue.id)} onChange={() => toggleIssue(issue.id)} className="accent-accent" /></td>
+              <td className="px-3 py-2.5"><input aria-label={`选择 ${issue.symbol} ${issue.title}`} type="checkbox" disabled={!issue.repairable} checked={selected.includes(issue.id)} onChange={() => toggleIssue(issue.id)} className="accent-accent disabled:opacity-40" /></td>
               <td className="px-2 py-2.5 font-mono text-foreground">{issue.symbol}</td>
               <td className={`px-2 py-2.5 ${issue.severity === 'error' ? 'text-danger' : 'text-warning'}`}>{ISSUE_LABELS[issue.type]}</td>
               <td className="px-2 py-2.5 font-mono text-muted">{issue.start === issue.end ? issue.start : `${issue.start} 至 ${issue.end}`}</td>
@@ -226,19 +201,14 @@ export function RepairDataPanel({
           </table>
         </div> : null}
 
-        {showConfirmation && needsReplacement ? <div className="border-l-2 border-warning bg-warning/8 px-3 py-2.5">
-          <div className="flex gap-2 text-xs text-warning"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>所选修复会替换对应标的在 {start} 至 {end} 的已有分钟数据，并使旧回测结果需要重新运行。</span></div>
-          <label className="mt-2 inline-flex items-center gap-2 text-xs text-secondary"><input type="checkbox" checked={confirmReplace} onChange={event => setConfirmReplace(event.target.checked)} className="accent-warning" />我确认使用 AxData 替换上述数据</label>
-        </div> : null}
-
         {check.data.issues.length ? <div className="flex items-center justify-between gap-3">
           <button type="button" onClick={() => check.mutate()} disabled={check.isPending} className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-foreground"><RefreshCw className="h-3.5 w-3.5" />重新检查</button>
           <button
             type="button"
-            disabled={!selected.length || repair.isPending || isRunning || (showConfirmation && needsReplacement && !confirmReplace)}
-            onClick={showConfirmation && needsReplacement ? () => repair.mutate() : requestRepair}
+            disabled={!selected.length || repair.isPending || isRunning}
+            onClick={() => repair.mutate()}
             className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
-          >{repair.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}{repair.isPending ? '请求中…' : showConfirmation && needsReplacement ? '确认并开始修复' : `修复选中项 (${selected.length})`}</button>
+          >{repair.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}{repair.isPending ? '请求中…' : `补齐选中项 (${selected.length})`}</button>
         </div> : null}
         {repair.isError ? <div className="rounded border border-danger/30 bg-danger/8 px-3 py-2 text-xs text-danger">{repair.error.message}</div> : null}
       </> : <div className="py-16 text-center text-xs text-muted">选择范围并开始检查，检查过程不会修改本地行情。</div>}

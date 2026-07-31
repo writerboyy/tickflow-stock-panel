@@ -355,7 +355,6 @@ class BacktestWrite(BaseModel):
 
 class DataHealthWrite(BacktestWrite):
     persist_scan: bool = False
-    verify_axdata: bool = False
 
 
 class PaperRiskWrite(BaseModel):
@@ -572,7 +571,7 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
     end = req.end or cn_today()
     start = req.start or (end - timedelta(days=365 * 3 if req.timeframe == "1d" else 90))
     config = req.model_dump(exclude={
-        "strategy_id", "symbols", "timeframe", "start", "end", "persist_scan", "verify_axdata",
+        "strategy_id", "symbols", "timeframe", "start", "end", "persist_scan",
     })
     legacy_symbols = req.symbols or strategy.get("config", {}).get("symbols", [])
     source_digest = sha256(strategy["source"].encode("utf-8")).hexdigest()
@@ -624,8 +623,6 @@ async def backtest_data_health(req: DataHealthWrite, request: Request):
             date.fromisoformat(payload["start"]),
             date.fromisoformat(payload["end"]),
             require_minute=req.timeframe != "1d" or scheduled_intraday,
-            verify_axdata=req.verify_axdata,
-            axdata_url=settings.axdata_url,
             persist_scan=req.persist_scan,
         )
         return {

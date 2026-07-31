@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -37,102 +37,101 @@ def _repo(tmp_path) -> KlineRepository:
     return KlineRepository(store)
 
 
-def test_inspection_detects_minute_gap_and_approximate_split(monkeypatch, tmp_path):
-    repo = _repo(tmp_path)
-    monkeypatch.setattr(
-        repair,
-        "axdata_status",
-        lambda _url: {"available": True, "url": "http://axdata", "message": "AxData 可用"},
-    )
+def _minute_frame(symbol: str, day: date) -> pl.DataFrame:
+    morning = [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=30) + timedelta(minutes=index) for index in range(120)]
+    afternoon = [datetime.combine(day, datetime.min.time()).replace(hour=13) + timedelta(minutes=index) for index in range(120)]
+    times = morning + afternoon
+    prices = [4.1 + index * 0.0001 for index in range(len(times))]
+    return pl.DataFrame({
+        "symbol": [symbol] * len(times), "datetime": times,
+        "open": prices, "high": prices, "low": prices, "close": prices,
+        "volume": [100.0] * len(times), "amount": [41_000.0] * len(times),
+    })
 
-    result = repair.inspect_etf_data(
+
+def _scan(repo: KlineRepository) -> dict:
+    return repair.inspect_etf_data(
         repo,
         ["510300.SH"],
         date(2026, 7, 20),
         date(2026, 7, 21),
         require_minute=True,
-        verify_axdata=False,
-        axdata_url="http://axdata",
         persist_scan=True,
     )
 
+
+def test_inspection_marks_only_minute_gap_as_repairable(tmp_path):
+    repo = _repo(tmp_path)
+
+    result = _scan(repo)
+
     assert result["status"] == "issues"
-    assert {issue["type"] for issue in result["issues"]} == {"minute_gap", "split_rounding"}
-    minute_issue = next(issue for issue in result["issues"] if issue["type"] == "minute_gap")
-    assert minute_issue["missing_days"] == 1
-    assert minute_issue["start"] == "2026-07-21"
+    issues = {issue["type"]: issue for issue in result["issues"]}
+    assert issues["minute_gap"]["repairable"] is True
+    assert issues["minute_gap"]["missing_dates"] == ["2026-07-21"]
+    assert issues["split_rounding"]["repairable"] is False
     assert (tmp_path / "etf_data_repairs" / "scans" / f"{result['scan_id']}.json").exists()
 
 
-def test_replacement_issue_requires_confirmation_and_records_success(monkeypatch, tmp_path):
+def test_repair_uses_configured_minute_source_without_overwriting_existing(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
-    monkeypatch.setattr(
-        repair,
-        "axdata_status",
-        lambda _url: {"available": True, "url": "http://axdata", "message": "AxData 可用"},
-    )
-    scan = repair.inspect_etf_data(
-        repo,
-        ["510300.SH"],
-        date(2026, 7, 20),
-        date(2026, 7, 21),
-        require_minute=True,
-        verify_axdata=False,
-        axdata_url="http://axdata",
-        persist_scan=True,
-    )
-    split = next(issue for issue in scan["issues"] if issue["type"] == "split_rounding")
+    scan = _scan(repo)
+    minute_issue = next(issue for issue in scan["issues"] if issue["type"] == "minute_gap")
+    captured = {}
 
-    with pytest.raises(PermissionError, match="明确确认覆盖"):
-        repair.validate_repair_request(
-            tmp_path, scan["scan_id"], [split["id"]], replace_existing=False,
-        )
+    def fetch(symbols, **kwargs):
+        captured["symbols"] = symbols
+        captured.update(kwargs)
+        return _minute_frame("510300.SH", date(2026, 7, 21))
 
-    calls = []
-    monkeypatch.setattr(
-        repair,
-        "import_symbol",
-        lambda **kwargs: calls.append(kwargs) or (2, 480),
-    )
-    result = repair.repair_etf_data(
-        repo,
-        scan["scan_id"],
-        [split["id"]],
-        replace_existing=True,
-        axdata_url="http://axdata",
-    )
+    monkeypatch.setattr(repair.kline_sync, "sync_minute_batch", fetch)
+
+    result = repair.repair_etf_data(repo, scan["scan_id"], [minute_issue["id"]])
 
     assert result["status"] == "succeeded"
-    assert result["minute_rows"] == 480
-    assert calls[0]["replace_minute"] is True
+    assert result["minute_rows"] == 240
+    assert result["source"] == "configured_minute_provider"
+    assert captured["symbols"] == ["510300.SH"]
+    assert captured["asset_type"] == "etf"
+    stored = pl.read_parquet(tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet")
+    assert stored.filter(pl.col("symbol") == "510300.SH").height == 240
     assert repair.list_repair_records(tmp_path)[0]["scan_id"] == scan["scan_id"]
 
 
-def test_repair_api_rejects_unconfirmed_replacement(monkeypatch, tmp_path):
+def test_repair_fails_closed_when_current_source_returns_incomplete_day(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
+    scan = _scan(repo)
+    minute_issue = next(issue for issue in scan["issues"] if issue["type"] == "minute_gap")
     monkeypatch.setattr(
-        repair,
-        "axdata_status",
-        lambda _url: {"available": True, "url": "http://axdata", "message": "AxData 可用"},
+        repair.kline_sync,
+        "sync_minute_batch",
+        lambda *_args, **_kwargs: _minute_frame("510300.SH", date(2026, 7, 21)).head(1),
     )
-    scan = repair.inspect_etf_data(
-        repo,
-        ["510300.SH"],
-        date(2026, 7, 20),
-        date(2026, 7, 21),
-        require_minute=True,
-        verify_axdata=False,
-        axdata_url="http://axdata",
-        persist_scan=True,
-    )
+
+    with pytest.raises(RuntimeError, match="完整交易日"):
+        repair.repair_etf_data(repo, scan["scan_id"], [minute_issue["id"]])
+
+    assert not (tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet").exists()
+    assert repair.list_repair_records(tmp_path)[0]["status"] == "failed"
+
+
+def test_repair_api_rejects_non_repairable_issue(tmp_path):
+    repo = _repo(tmp_path)
+    scan = _scan(repo)
     split = next(issue for issue in scan["issues"] if issue["type"] == "split_rounding")
+
+    class Capabilities:
+        def has(self, _cap):
+            return True
+
     app = FastAPI()
     app.state.repo = repo
+    app.state.capabilities = Capabilities()
     app.include_router(router)
 
     response = TestClient(app).post("/api/kline/etf-data/repair", json={
-        "scan_id": scan["scan_id"], "issue_ids": [split["id"]], "replace_existing": False,
+        "scan_id": scan["scan_id"], "issue_ids": [split["id"]],
     })
 
-    assert response.status_code == 409
-    assert "明确确认覆盖" in response.json()["detail"]
+    assert response.status_code == 400
+    assert "当前分钟数据源" in response.json()["detail"]

@@ -26,7 +26,6 @@ class EtfDataCheckWrite(BaseModel):
     start: date
     end: date
     require_minute: bool = True
-    verify_axdata: bool = False
     persist_scan: bool = True
 
     @model_validator(mode="after")
@@ -41,7 +40,6 @@ class EtfDataCheckWrite(BaseModel):
 class EtfDataRepairWrite(BaseModel):
     scan_id: str = Field(min_length=1, max_length=32)
     issue_ids: list[str] = Field(min_length=1, max_length=200)
-    replace_existing: bool = False
 
 
 def _normalize_minute_sync_request(days: int, extend: object) -> tuple[int, bool]:
@@ -1108,10 +1106,9 @@ async def repair_daily(request: Request):
 
 @router.post("/etf-data/check")
 async def check_etf_backtest_data(req: EtfDataCheckWrite, request: Request):
-    """Read-only ETF daily/minute/factor inspection with optional AxData comparison."""
+    """Read-only ETF daily/minute/factor inspection."""
     import asyncio
 
-    from app.config import settings
     from app.services.etf_data_repair import inspect_etf_data
 
     try:
@@ -1124,8 +1121,6 @@ async def check_etf_backtest_data(req: EtfDataCheckWrite, request: Request):
                 req.start,
                 req.end,
                 require_minute=req.require_minute,
-                verify_axdata=req.verify_axdata,
-                axdata_url=settings.axdata_url,
                 persist_scan=req.persist_scan,
             ),
         )
@@ -1142,11 +1137,10 @@ def etf_data_repair_history(request: Request, limit: int = Query(30, ge=1, le=10
 
 @router.post("/etf-data/repair")
 async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
-    """Repair only issues from a persisted scan; replacement requires explicit confirmation."""
+    """Repair persisted ETF minute gaps through the configured data source."""
     import asyncio
 
     from app.api.data import invalidate_storage_cache
-    from app.config import settings
     from app.services.etf_data_repair import repair_etf_data, validate_repair_request
     from app.services.pipeline_jobs import (
         LONG_JOB_TIMEOUT_S,
@@ -1156,17 +1150,16 @@ async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
     )
 
     repo = request.app.state.repo
+    if not _minute_allowed(request.app.state.capabilities):
+        raise HTTPException(status_code=403, detail="当前数据源不支持分钟K补齐")
     try:
         validate_repair_request(
             repo.store.data_dir,
             req.scan_id,
             req.issue_ids,
-            replace_existing=req.replace_existing,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1190,9 +1183,8 @@ async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
                 repo,
                 req.scan_id,
                 req.issue_ids,
-                replace_existing=req.replace_existing,
-                axdata_url=settings.axdata_url,
                 on_progress=progress,
+                should_cancel=lambda: not job_store.is_active(job_id),
             )
             if quote_service:
                 with quote_service.paused():
@@ -1201,12 +1193,11 @@ async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
 
         try:
             job_store.start(job_id)
-            job_store.progress(job_id, "repair_etf_data", 5, "正在连接 AxData")
+            job_store.progress(job_id, "repair_etf_data", 5, "正在连接当前分钟数据源")
             result = await loop.run_in_executor(_long_task_executor, run_repair)
             from app.jobs.daily_pipeline import _refresh_single_view
 
-            for table in ("kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "adj_factor_etf"):
-                _refresh_single_view(repo, table)
+            _refresh_single_view(repo, "kline_etf_minute")
             repo.refresh_cache()
             job_store.succeed(job_id, {**result, "repair_type": "etf_data"})
             invalidate_storage_cache()

@@ -60,7 +60,7 @@ def _write_financial_table(tmp_path, table: str, rows: dict) -> None:
     pl.DataFrame(rows).write_parquet(path)
 
 
-def test_axdata_xdxr_cash_dividend_import_overrides_price_inference(tmp_path):
+def test_xdxr_cash_dividend_import_overrides_price_inference(tmp_path):
     source = tmp_path / "xdxr.parquet"
     pl.DataFrame({
         "instrument_id": ["X", "X", "X"],

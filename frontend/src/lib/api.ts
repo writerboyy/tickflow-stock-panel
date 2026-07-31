@@ -1206,7 +1206,7 @@ export interface FreeBacktestRunSummary {
 
 export interface EtfDataIssue {
   id: string
-  type: 'daily_missing' | 'minute_gap' | 'split_rounding' | 'factor_mismatch'
+  type: 'daily_missing' | 'minute_gap' | 'split_rounding'
   symbol: string
   start: string
   end: string
@@ -1214,9 +1214,8 @@ export interface EtfDataIssue {
   title: string
   detail: string
   action: string
-  missing_days: number
-  estimated_rows: number
-  requires_replace: boolean
+  repairable: boolean
+  missing_dates?: string[]
 }
 
 export interface EtfDataScan {
@@ -1228,10 +1227,8 @@ export interface EtfDataScan {
   symbols?: string[]
   symbol_count: number
   require_minute?: boolean
-  verify_axdata?: boolean
   execution_mode?: 'full_bar' | 'scheduled'
   universe_source?: string
-  source?: { available: boolean | null; url: string; message: string }
   issues: EtfDataIssue[]
 }
 
@@ -1246,9 +1243,7 @@ export interface EtfRepairRecord {
   end: string
   issue_types: string[]
   issues_repaired?: number
-  daily_rows?: number
   minute_rows?: number
-  replace_existing: boolean
   error?: string
 }
 
@@ -1278,7 +1273,7 @@ export const api = {
   freeBacktestDataHealth: (
     payload: Pick<FreeBacktestConfig, 'strategy_id' | 'asset_type' | 'timeframe'>
       & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>
-      & { persist_scan?: boolean; verify_axdata?: boolean },
+      & { persist_scan?: boolean },
   ) => request<EtfDataScan>('/api/free-strategies/backtest/data-health', {
     method: 'POST', body: JSON.stringify(payload),
   }),
@@ -1739,12 +1734,11 @@ export const api = {
     start: string
     end: string
     require_minute: boolean
-    verify_axdata: boolean
     persist_scan?: boolean
   }) => request<EtfDataScan>('/api/kline/etf-data/check', {
     method: 'POST', body: JSON.stringify(payload),
   }),
-  repairEtfData: (payload: { scan_id: string; issue_ids: string[]; replace_existing: boolean }) =>
+  repairEtfData: (payload: { scan_id: string; issue_ids: string[] }) =>
     request<{ status: string; job_id: string }>('/api/kline/etf-data/repair', {
       method: 'POST', body: JSON.stringify(payload),
     }),
