@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE = {115: 200, 30: 200, 100: 500}
 _ROW_KEY = {115: "info", 30: "info", 100: "list"}
 _MAX_PAGES = 100
+_FUND_INTERVAL_PAGE_SIZE = 1000
 
 
 class KaipanlaCollector:
@@ -228,21 +229,30 @@ class KaipanlaCollector:
         """盘后采集全市场资金排名，并补全逐股大单日频快照。"""
         collected_at = cn_now().isoformat()
         interval_rows: list[dict] = []
+        interval_codes: set[str] = set()
         async with self._client_factory() as client:
-            for index in range(_MAX_PAGES):
+            for offset in range(0, _MAX_PAGES * _FUND_INTERVAL_PAGE_SIZE, _FUND_INTERVAL_PAGE_SIZE):
                 payload = await client.request(
                     "fund_interval",
                     {
                         "DStart": trade_date.strftime("%Y-%m-%d"),
                         "DEnd": trade_date.strftime("%Y-%m-%d"),
-                        "Index": index,
-                        "st": 1000,
+                        "Index": offset,
+                        "st": _FUND_INTERVAL_PAGE_SIZE,
                     },
                 )
-                archive_raw(self.data_dir, "fund_interval", trade_date, payload, f"page-{index}")
+                archive_raw(self.data_dir, "fund_interval", trade_date, payload, f"offset-{offset}")
                 parsed = parse_interval_stock(payload)
-                interval_rows.extend(parsed)
-                if len(parsed) < 1000:
+                fresh = []
+                for row in parsed:
+                    code = row["code"]
+                    if code not in interval_codes:
+                        interval_codes.add(code)
+                        fresh.append(row)
+                if not fresh:
+                    break
+                interval_rows.extend(fresh)
+                if len(parsed) < _FUND_INTERVAL_PAGE_SIZE:
                     break
             else:
                 raise RuntimeError("开盘啦资金排名分页超过安全上限")

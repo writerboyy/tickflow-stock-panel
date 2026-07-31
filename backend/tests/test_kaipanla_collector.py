@@ -47,6 +47,8 @@ class FakeClient:
     async def request(self, endpoint, params=None):
         self.calls.append((endpoint, params or {}))
         value = self.responses[endpoint]
+        if callable(value):
+            value = value(params or {})
         if isinstance(value, Exception):
             raise value
         return value
@@ -179,6 +181,25 @@ async def test_fund_collection_pages_market_flow_and_fans_out_all_stock_codes(tm
     assert stored["main_net"] == 60
     assert stored["capital_net_close"] == 2
     assert stored["main_net_amount_over_300k"] == 50
+
+
+@pytest.mark.asyncio
+async def test_fund_interval_uses_offsets_and_stops_on_a_duplicate_page(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    calls = []
+    rows = [[f"{600000 + index:06d}", "测试", 1, 1, 1, 1, 0, 1, 1, 1, "", "", "", 0] for index in range(1000)]
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"fund_interval": lambda _params: {"List": rows}}, calls),
+    )
+
+    count = await collector.collect_funds(date(2026, 7, 10))
+
+    assert count == 1000
+    assert [(endpoint, params["Index"]) for endpoint, params in calls] == [
+        ("fund_interval", 0),
+        ("fund_interval", 1000),
+    ]
 
 
 @pytest.mark.asyncio
