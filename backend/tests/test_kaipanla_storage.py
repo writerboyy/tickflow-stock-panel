@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import json
 from datetime import date
 
 import polars as pl
@@ -8,6 +10,7 @@ from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     NORTHBOUND_SECTOR_TABLE,
     TABLE_IDS,
+    archive_raw,
     atomic_upsert,
     atomic_upsert_records,
     ensure_configs,
@@ -103,3 +106,33 @@ def test_atomic_upsert_records_keeps_multiple_plate_rows(tmp_path):
     assert rows[0]["plate_name"] == "板块甲"
     assert rows[0]["holding_amount"] == 12.5
     assert rows[1]["plate_name"] == "板块乙"
+
+
+def test_archive_raw_defaults_to_gzip_without_storing_request_parameters(tmp_path):
+    path = archive_raw(
+        tmp_path,
+        "fund_interval",
+        date(2026, 7, 31),
+        {"ok": True},
+        "offset=0&token=secret",
+    )
+
+    assert path.suffix == ".gz"
+    assert "token" not in path.name
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert payload["endpoint"] == "/fund_interval"
+    assert payload["response"] == {"ok": True}
+
+
+def test_archive_raw_can_keep_plain_json_for_operator_debug(tmp_path):
+    path = archive_raw(
+        tmp_path,
+        15,
+        date(2026, 7, 31),
+        {"rows": []},
+        compress=False,
+    )
+
+    assert path.suffix == ".json"
+    assert json.loads(path.read_text(encoding="utf-8"))["endpoint"] == "/15"

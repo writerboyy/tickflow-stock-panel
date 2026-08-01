@@ -26,6 +26,9 @@ def test_money_flow_preset_declares_latest_snapshot_contract():
     assert config.mode == "snapshot"
     assert config.pull.url.endswith("/market_flow/exports/money-flow")
     assert config.pull.enabled is True
+    assert config.authority == "deprecated-overlap"
+    assert config.canonical_dataset == "tickflow.realtime_quotes"
+    assert config.overlap_policy == "overlapping_quote_fields_are_display_context_only"
     assert [(field.name, field.dtype) for field in config.fields] == [
         ("symbol", "string"),
         ("code", "string"),

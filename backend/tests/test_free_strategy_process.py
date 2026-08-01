@@ -25,7 +25,11 @@ from app.free_strategy.process import (
     advance_scheduled_session,
     execute_backtest,
 )
-from app.services.stock_dividends import import_xdxr_cash_dividends, load_cash_dividends
+from app.services.stock_dividends import (
+    import_xdxr_cash_dividends,
+    load_cash_dividends,
+    load_record_date_cash_dividends,
+)
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -170,6 +174,21 @@ def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
     ) == ["D"]
+
+
+def test_record_date_dividend_loader_filters_future_reference_rows(tmp_path):
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "A"],
+        "record_date": ["2024-01-02", "2024-01-05"],
+        "cash_per_share": [1.0, 9.0],
+        "progress_code": ["036003", "036003"],
+    }).write_parquet(dividend_path)
+
+    assert load_record_date_cash_dividends(tmp_path, as_of=date(2024, 1, 3)) == {
+        ("A", date(2024, 1, 2)): 1.0,
+    }
 
 
 def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close():

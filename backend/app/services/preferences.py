@@ -353,6 +353,11 @@ def get_depth_polling_interval() -> float:
     return float(load().get("depth_polling_interval", 10.0))
 
 
+def get_kaipanla_raw_archive_compression() -> bool:
+    """开盘啦原始响应归档是否 gzip 压缩。默认压缩, 不删除历史文件。"""
+    return bool(load().get("kaipanla_raw_archive_compression", True))
+
+
 def set_depth_polling_interval(interval: float) -> float:
     """保存 depth 轮询间隔。套餐范围 clamp 由 depth_service 按档位做。"""
     interval = max(1.0, min(600.0, float(interval)))

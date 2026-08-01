@@ -328,7 +328,10 @@ def _load_dividend_ratio_ranked(
 
     dividends = [
         {"symbol": symbol, "date": day, "cash_dividend": cash}
-        for (symbol, day), cash in load_record_date_cash_dividends(data_dir).items()
+        for (symbol, day), cash in load_record_date_cash_dividends(
+            data_dir,
+            as_of=previous_date,
+        ).items()
         if symbol in symbols and start <= day <= previous_date
     ]
     dividend_frame = pl.DataFrame(

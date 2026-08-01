@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
@@ -57,6 +58,9 @@ _DTYPES = {
 }
 _LOCKS: dict[Path, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
+_SENSITIVE_CONTEXT_RE = re.compile(
+    r"(?i)(authorization|cookie|device_?id|password|pwd|secret|session|token|user_?id)"
+)
 
 
 def _base_fields() -> list[ExtField]:
@@ -564,14 +568,31 @@ def archive_raw(
     trade_date: date,
     payload: dict,
     context: str = "",
+    *,
+    compress: bool | None = None,
 ) -> Path:
     """保存已由客户端脱敏的原始响应，不保存请求参数或 URL。"""
     now = cn_now()
-    safe_context = re.sub(r"[^A-Za-z0-9_.-]+", "-", context).strip("-")[:80]
+    context_parts = re.split(r"[&?;\s]+", context)
+    safe_context = "-".join(
+        cleaned
+        for part in context_parts
+        if part and not _SENSITIVE_CONTEXT_RE.search(part)
+        for cleaned in (re.sub(r"[^A-Za-z0-9_.-]+", "-", part).strip("-"),)
+        if cleaned
+    )[:80]
     suffix = f"-{safe_context}" if safe_context else ""
     out_dir = data_dir / "ext_data" / "_kaipanla_raw" / f"date={trade_date}" / str(endpoint)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{now.strftime('%H%M%S-%f')}{suffix}.json"
+    if compress is None:
+        try:
+            from app.services import preferences
+
+            compress = preferences.get_kaipanla_raw_archive_compression()
+        except Exception:  # noqa: BLE001
+            compress = True
+    ext = ".json.gz" if compress else ".json"
+    path = out_dir / f"{now.strftime('%H%M%S-%f')}{suffix}{ext}"
     tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     content = {
         "endpoint": f"/{endpoint}",
@@ -579,7 +600,11 @@ def archive_raw(
         "response": payload,
     }
     try:
-        tmp.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        if compress:
+            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                json.dump(content, fh, ensure_ascii=False)
+        else:
+            tmp.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, path)
     finally:
         if tmp.exists():

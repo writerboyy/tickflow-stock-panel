@@ -115,6 +115,7 @@ class ExtConfig:
     __slots__ = (
         "id", "label", "mode", "fields", "description",
         "symbol_map", "code_map",
+        "authority", "canonical_dataset", "overlap_policy", "allowed_usage",
         "created_at", "updated_at", "pull",
     )
 
@@ -127,10 +128,17 @@ class ExtConfig:
         description: str = "",
         symbol_map: dict | None = None,
         code_map: dict | None = None,
+        authority: str | None = None,
+        canonical_dataset: str | None = None,
+        overlap_policy: str | None = None,
+        allowed_usage: list[str] | None = None,
         created_at: str | None = None,
         updated_at: str | None = None,
         pull: PullConfig | None = None,
     ) -> None:
+        from app.services.data_authority import extension_config_metadata
+
+        authority_defaults = extension_config_metadata(id)
         self.id = id
         self.label = label
         self.mode = mode
@@ -139,6 +147,22 @@ class ExtConfig:
         # 映射关系: {"type": "mapped", "col": "原始列名"} 或 {"type": "computed", "from": "symbol|code", "method": "strip_exchange|append_exchange"}
         self.symbol_map = symbol_map or {}
         self.code_map = code_map or {}
+        self.authority = authority if authority is not None else authority_defaults.get("authority")
+        self.canonical_dataset = (
+            canonical_dataset
+            if canonical_dataset is not None
+            else authority_defaults.get("canonical_dataset")
+        )
+        self.overlap_policy = (
+            overlap_policy
+            if overlap_policy is not None
+            else authority_defaults.get("overlap_policy")
+        )
+        self.allowed_usage = list(
+            allowed_usage
+            if allowed_usage is not None
+            else authority_defaults.get("allowed_usage", [])
+        )
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
         self.pull = pull
@@ -155,6 +179,14 @@ class ExtConfig:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.authority:
+            d["authority"] = self.authority
+        if self.canonical_dataset:
+            d["canonical_dataset"] = self.canonical_dataset
+        if self.overlap_policy:
+            d["overlap_policy"] = self.overlap_policy
+        if self.allowed_usage:
+            d["allowed_usage"] = self.allowed_usage
         if self.pull:
             d["pull"] = self.pull.to_dict()
         return d
@@ -169,6 +201,10 @@ class ExtConfig:
             description=d.get("description", ""),
             symbol_map=d.get("symbol_map"),
             code_map=d.get("code_map"),
+            authority=d.get("authority"),
+            canonical_dataset=d.get("canonical_dataset"),
+            overlap_policy=d.get("overlap_policy"),
+            allowed_usage=d.get("allowed_usage"),
             created_at=d.get("created_at"),
             updated_at=d.get("updated_at"),
             pull=PullConfig.from_dict(d["pull"]) if d.get("pull") else None,

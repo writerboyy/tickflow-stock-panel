@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable
 
 from .bars import Bar
 from app.market_time import cn_naive_now
+from app.services.data_authority import normalize_reference_asset
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,20 @@ class Context:
         self._market_history_requirements[key] = max(
             bars, self._market_history_requirements.get(key, 0),
         )
+
+    def reference_asset(
+        self,
+        symbol: str,
+        *,
+        asset_type: str = "etf",
+        timeframe: str = "1d",
+    ) -> dict[str, str]:
+        """Return an explicit reference K-line handle without stock aliasing."""
+        return normalize_reference_asset({
+            "symbol": symbol,
+            "asset_type": asset_type,
+            "timeframe": timeframe,
+        }).to_dict()
 
     @property
     def market_history_requirements(self) -> dict[tuple[str, str], int]:

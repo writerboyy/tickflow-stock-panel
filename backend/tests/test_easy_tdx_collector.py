@@ -200,6 +200,8 @@ def test_config_has_no_generic_pull_and_does_not_register_as_market_provider(tmp
     assert config is not None
     assert config.mode == "snapshot"
     assert config.pull is None
+    assert config.authority == "extension"
+    assert config.canonical_dataset == "tdx_industry_dimension"
     assert [field.name for field in config.fields] == [
         "symbol",
         "code",

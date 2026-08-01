@@ -164,6 +164,32 @@ def on_bar(context, bars):
     assert engine.context.state == {"visible": [1], "name": "测试ETF"}
 
 
+def test_reference_asset_helper_declares_etf_daily_and_minute_handles():
+    source = """
+def initialize(context):
+    context.state['daily_ref'] = context.reference_asset('510300.XSHG', asset_type='etf', timeframe='1d')
+    context.state['minute_ref'] = context.reference_asset('510300.XSHG', asset_type='etf', timeframe='1m')
+
+def on_bar(context, bars):
+    pass
+"""
+
+    engine = FreeStrategyEngine(source)
+
+    assert engine.context.state["daily_ref"] == {
+        "symbol": "510300.SH",
+        "asset_type": "etf",
+        "timeframe": "1d",
+        "canonical_dataset": "kline_etf_daily",
+    }
+    assert engine.context.state["minute_ref"] == {
+        "symbol": "510300.SH",
+        "asset_type": "etf",
+        "timeframe": "1m",
+        "canonical_dataset": "kline_etf_minute",
+    }
+
+
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [

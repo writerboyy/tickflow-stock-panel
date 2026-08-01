@@ -77,8 +77,16 @@ def load_cash_dividends(data_dir: Path) -> dict[tuple[str, date], float]:
     return result
 
 
-def load_record_date_cash_dividends(data_dir: Path) -> dict[tuple[str, date], float]:
-    """Load implemented TDX F10 cash dividends keyed by their record date."""
+def load_record_date_cash_dividends(
+    data_dir: Path,
+    as_of: date | None = None,
+) -> dict[tuple[str, date], float]:
+    """Load implemented TDX F10 cash dividends keyed by record date.
+
+    ext_tdx_dividend_history is reference context, not the event-date
+    corporate-action replay table. as_of prevents backtests from seeing
+    announced future registration dates.
+    """
     directory = data_dir / RECORD_DATE_DIVIDEND_PATH
     if not directory.exists():
         return {}
@@ -98,6 +106,11 @@ def load_record_date_cash_dividends(data_dir: Path) -> dict[tuple[str, date], fl
                 day = date.fromisoformat(day)
             except ValueError:
                 continue
-        if isinstance(day, date) and cash is not None and str(progress_code) == "036003":
+        if (
+            isinstance(day, date)
+            and cash is not None
+            and str(progress_code) == "036003"
+            and (as_of is None or day <= as_of)
+        ):
             result[(str(symbol), day)] = result.get((str(symbol), day), 0.0) + float(cash)
     return result
