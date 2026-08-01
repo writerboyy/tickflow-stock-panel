@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from app.services.stock_dividends import cash_per_share_from_plan
+
 
 def _text(value: Any) -> str:
     if value is None:
@@ -87,9 +89,6 @@ _FORECAST = re.compile(
     r"(?P<yoy_low>-?[\d.]+)%(?:至(?P<yoy_high>-?[\d.]+)%)?",
     re.S,
 )
-_CASH_DIVIDEND = re.compile(
-    r"(?P<shares>\d+(?:\.\d+)?)\s*(?:股)?派(?:发)?\s*(?P<cash>\d+(?:\.\d+)?)\s*元"
-)
 _TQLEX_URL = "http://static.tdx.com.cn:7615/TQLEX"
 
 
@@ -108,12 +107,7 @@ def _date_text(value: Any) -> str | None:
 
 
 def _cash_per_share(plan: Any) -> float | None:
-    match = _CASH_DIVIDEND.search(_text(plan))
-    if match is None:
-        return None
-    shares = float(match.group("shares"))
-    cash = float(match.group("cash"))
-    return cash / shares if shares > 0 and cash > 0 else None
+    return cash_per_share_from_plan(_text(plan))
 
 
 def _section(text: str, marker: str) -> str | None:

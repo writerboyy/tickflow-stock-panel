@@ -553,6 +553,87 @@ def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selectio
     assert history_calls == []
 
 
+def test_performance_small_cap_applies_name_filter_at_current_snapshot():
+    previous_day = datetime(2025, 7, 23)
+    symbols = [f"00{index:04d}.SZ" for index in range(1, 13)]
+    histories = {
+        symbol: [
+            Bar(
+                symbol,
+                previous_day,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                raw_close=1.0,
+                total_shares=1_000 + index,
+            )
+        ]
+        for index, symbol in enumerate(symbols)
+    }
+    blocked = symbols[0]
+
+    context = SimpleNamespace(
+        now=datetime(2025, 7, 24, 9, 30),
+        previous_date=previous_day.date(),
+        state={"performance_small_cap": {
+            "candidate_cache_key": None,
+            "candidate_cache": [],
+            "selection_cache_key": None,
+            "selection_cache": [],
+        }},
+        portfolio=SimpleNamespace(positions={}, cash=100_000),
+        instruments=lambda _asset="stock": [
+            {
+                "symbol": symbol,
+                "name": "ST样本" if symbol == blocked else f"股票{index}",
+                "asset_type": "stock",
+            }
+            for index, symbol in enumerate(symbols)
+        ],
+        history_bars=lambda symbol, **_kwargs: histories[symbol],
+        history_batch=lambda requested, *, count, **_kwargs: {
+            symbol: histories[symbol][-count:] for symbol in requested
+        },
+        dividend_ratio_ranked=lambda requested, _cutoff: list(requested),
+        financial_snapshot=lambda requested, _cutoff: {
+            symbol: {
+                "revenue": 200_000_000,
+                "net_income": 10_000_000,
+                "net_income_attributable": 10_000_000,
+                "roe": 1,
+                "roa": 1,
+            }
+            for symbol in requested
+        },
+    )
+    current = {
+        symbol: Bar(symbol, context.now, 1, 1, 1, 1, raw_close=1, limit_up=2, limit_down=0.5)
+        for symbol in symbols
+    }
+    context.current_bars = lambda: current
+
+    assert performance_small_cap._candidate_symbols(context, previous_day.date())[0] == blocked
+
+    selected = performance_small_cap._select_stocks(context, require_snapshot=True)
+
+    assert blocked not in selected
+    assert symbols[10] in selected
+
+
+def test_performance_small_cap_close_position_submits_to_match_order_target_semantics():
+    submitted = []
+    context = SimpleNamespace(
+        portfolio=SimpleNamespace(positions={"000001.SZ": 100}),
+        state={"performance_small_cap": {"just_sold": []}},
+        order_target=lambda symbol, quantity: submitted.append((symbol, quantity)),
+    )
+
+    assert performance_small_cap._close_position(context, "000001.SZ") is True
+    assert submitted == [("000001.SZ", 0)]
+    assert context.state["performance_small_cap"]["just_sold"] == ["000001.SZ"]
+
+
 def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position():
     now = datetime(2025, 7, 24, 9, 30)
     submitted = []

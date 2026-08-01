@@ -176,6 +176,70 @@ def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path
     ) == ["D"]
 
 
+def test_dividend_ratio_loader_uses_calendar_year_window(tmp_path):
+    from app.free_strategy.process import _load_dividend_ratio_ranked
+
+    class Repo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            rows = []
+            for symbol in symbols:
+                for day in (date(2024, 7, 22), date(2025, 7, 23)):
+                    rows.append({
+                        "symbol": symbol,
+                        "date": day,
+                        "close": 10.0,
+                        "raw_close": 10.0,
+                        "total_shares": 100.0,
+                    })
+            return pl.DataFrame(rows)
+
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2025-01-02" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D", "E"],
+        "record_date": ["2024-07-22", "2025-01-02", "2025-01-02", "2025-01-02", "2025-01-02"],
+        "cash_per_share": [100.0, 1.0, 2.0, 3.0, 4.0],
+        "progress_code": ["036003"] * 5,
+    }).write_parquet(dividend_path)
+
+    assert _load_dividend_ratio_ranked(
+        Repo(), tmp_path, ["A", "B", "C", "D", "E"], date(2025, 7, 23),
+    ) == ["E"]
+
+
+def test_dividend_ratio_loader_counts_record_date_without_daily_bar(tmp_path):
+    from app.free_strategy.process import _load_dividend_ratio_ranked
+
+    class Repo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            rows = []
+            for symbol in symbols:
+                for day in (date(2024, 1, 1), date(2024, 1, 3)):
+                    rows.append({
+                        "symbol": symbol,
+                        "date": day,
+                        "close": 10.0,
+                        "raw_close": 10.0,
+                        "total_shares": 100.0,
+                    })
+            return pl.DataFrame(rows)
+
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D"],
+        "record_date": ["2024-01-02"] * 4,
+        "cash_per_share": [1.0, 2.0, 3.0, 4.0],
+        "progress_code": ["036003"] * 4,
+    }).write_parquet(dividend_path)
+
+    assert _load_dividend_ratio_ranked(
+        Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
+    ) == ["D"]
+
+
 def test_record_date_dividend_loader_filters_future_reference_rows(tmp_path):
     dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
     dividend_path.parent.mkdir(parents=True)
@@ -188,6 +252,22 @@ def test_record_date_dividend_loader_filters_future_reference_rows(tmp_path):
 
     assert load_record_date_cash_dividends(tmp_path, as_of=date(2024, 1, 3)) == {
         ("A", date(2024, 1, 2)): 1.0,
+    }
+
+
+def test_record_date_dividend_loader_reparses_transfer_plan_cash_base(tmp_path):
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2025-05-28" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000715.SZ"],
+        "record_date": ["2025-05-28"],
+        "cash_per_share": [1 / 3],
+        "progress_code": ["036003"],
+        "plan": ["10转增3股派1元(含税)"],
+    }).write_parquet(dividend_path)
+
+    assert load_record_date_cash_dividends(tmp_path, as_of=date(2025, 7, 23)) == {
+        ("000715.SZ", date(2025, 5, 28)): 0.1,
     }
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import re
 
 import polars as pl
 
@@ -10,10 +11,29 @@ import polars as pl
 DIVIDEND_PATH = Path("corporate_actions") / "stock_dividends.parquet"
 RECORD_DATE_DIVIDEND_PATH = Path("ext_data") / "ext_tdx_dividend_history" / "timeseries"
 _REQUIRED_COLUMNS = {"instrument_id", "event_date", "c1", "record_hex"}
+_LEADING_CASH_DIVIDEND = re.compile(
+    r"^\s*(?:每)?(?P<shares>\d+(?:\.\d+)?)\s*(?:股)?[^派]*?派(?:发)?\s*"
+    r"(?P<cash>\d+(?:\.\d+)?)\s*元"
+)
+_CASH_DIVIDEND = re.compile(
+    r"(?P<shares>\d+(?:\.\d+)?)\s*(?:股)?派(?:发)?\s*"
+    r"(?P<cash>\d+(?:\.\d+)?)\s*元"
+)
 
 
 def dividend_path(data_dir: Path) -> Path:
     return data_dir / DIVIDEND_PATH
+
+
+def cash_per_share_from_plan(plan: object) -> float | None:
+    """Parse cash dividend per original share from an F10 distribution plan."""
+    text = "" if plan is None else str(plan).strip()
+    match = _LEADING_CASH_DIVIDEND.search(text) or _CASH_DIVIDEND.search(text)
+    if match is None:
+        return None
+    shares = float(match.group("shares"))
+    cash = float(match.group("cash"))
+    return cash / shares if shares > 0 and cash > 0 else None
 
 
 def normalize_xdxr_cash_dividends(events: pl.DataFrame) -> pl.DataFrame:
@@ -98,14 +118,22 @@ def load_record_date_cash_dividends(
     if frame.is_empty() or not required <= set(frame.columns):
         return {}
     result: dict[tuple[str, date], float] = {}
-    for symbol, day, cash, progress_code in frame.select(
-        "symbol", "record_date", "cash_per_share", "progress_code"
-    ).iter_rows():
+    columns = ["symbol", "record_date", "cash_per_share", "progress_code"]
+    if "plan" in frame.columns:
+        columns.append("plan")
+    for row in frame.select(columns).iter_rows(named=True):
+        symbol = row["symbol"]
+        day = row["record_date"]
+        cash = row["cash_per_share"]
+        progress_code = row["progress_code"]
         if isinstance(day, str):
             try:
                 day = date.fromisoformat(day)
             except ValueError:
                 continue
+        parsed_cash = cash_per_share_from_plan(row.get("plan"))
+        if parsed_cash is not None:
+            cash = parsed_cash
         if (
             isinstance(day, date)
             and cash is not None

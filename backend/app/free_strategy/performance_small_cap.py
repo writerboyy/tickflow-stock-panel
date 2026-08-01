@@ -47,6 +47,13 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
+def _one_year_before(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
 def _instrument_records(context, asset_type: str = "stock") -> list[dict[str, Any]]:
     return list(getattr(context, "instruments", lambda _asset=None: [])(asset_type))
 
@@ -154,7 +161,7 @@ def _eligible_records(context, previous_date: date) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for item in _instrument_records(context):
         symbol = str(item.get("symbol") or "")
-        if not symbol or _is_kcbj(symbol) or not _valid_name(item, previous_date):
+        if not symbol or _is_kcbj(symbol):
             continue
         result.append(item)
     return result
@@ -208,7 +215,7 @@ def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> 
         market_cap = _market_cap(symbol, latest)
         if market_cap is None:
             continue
-        one_year = previous_date - timedelta(days=366)
+        one_year = _one_year_before(previous_date)
         dividend = 0.0
         for bar in values:
             if bar.date < one_year or bar.date > previous_date:
@@ -266,14 +273,17 @@ def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
         return list(state.get("selection_cache", []))
 
     symbols = _candidate_symbols(context, previous_date)
-    current = _current_bars(context) if require_snapshot else {}
-    selected: list[str] = []
-    for symbol in symbols:
-        if require_snapshot and not _tradable_at_snapshot(symbol, current.get(symbol)):
-            continue
-        selected.append(symbol)
-        if len(selected) >= STOCK_COUNT:
-            break
+    if require_snapshot:
+        current = _current_bars(context)
+        by_symbol = {str(item.get("symbol") or ""): item for item in records}
+        current_day = context.now.date()
+        symbols = [
+            symbol
+            for symbol in symbols
+            if _valid_name(by_symbol.get(symbol, {}), current_day)
+            and _tradable_at_snapshot(symbol, current.get(symbol))
+        ]
+    selected = symbols[:STOCK_COUNT]
     state["selection_cache_key"] = cache_key
     state["selection_cache"] = selected
     return selected
@@ -585,11 +595,8 @@ def _monthly_adjustment(context) -> None:
 
 
 def _close_position(context, symbol: str) -> bool:
-    bar = _current_bars(context).get(symbol)
     quantity = float(context.portfolio.positions.get(symbol, 0.0))
-    if quantity <= 0 or bar is None:
-        return False
-    if not _tradable_at_snapshot(symbol, bar, allow_held=True):
+    if quantity <= 0:
         return False
     context.order_target(symbol, 0)
     state = _state(context)

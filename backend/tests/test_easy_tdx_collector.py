@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 
 from app.plugins.easy_tdx.client import (
+    _cash_per_share,
     fetch_dividend_history_rows,
     fetch_industry_rows,
     normalize_industry_rows,
@@ -129,6 +130,11 @@ def test_fetch_dividend_history_keeps_only_implemented_cash_records(monkeypatch)
         "progress_code": "036003",
         "source": "tdx_7615_f10",
     }]
+
+
+def test_cash_per_share_uses_original_share_base_for_transfer_plans():
+    assert _cash_per_share("10转增3股派1元(含税)") == 0.1
+    assert _cash_per_share("10送5股派2元(含税)") == 0.2
 
 
 def test_parse_f10_reference_requires_explicit_sections():

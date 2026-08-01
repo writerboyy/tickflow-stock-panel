@@ -9,7 +9,7 @@ import queue
 import shutil
 import threading
 import time as time_module
-from bisect import bisect_left, insort
+from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -195,6 +195,13 @@ def _date_column_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
     return pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, strict=False)
 
 
+def _one_year_before(day: date) -> date:
+    try:
+        return day.replace(year=day.year - 1)
+    except ValueError:
+        return day.replace(year=day.year - 1, day=28)
+
+
 def _latest_announced_records(
     data_dir: Path,
     table: str,
@@ -302,53 +309,63 @@ def _load_dividend_ratio_ranked(
     symbols: list[str],
     previous_date: date,
 ) -> list[str]:
-    """Return the original 260-session dividend-yield top quartile without Bar expansion."""
+    """Return the original one-calendar-year dividend-yield top quartile."""
     if not symbols:
         return []
     get_batch = getattr(repo, "get_daily_asset_batch", None)
     if not callable(get_batch):
         return []
-    start = previous_date - timedelta(days=260 * 2 + 14)
+    time0 = _one_year_before(previous_date)
+    start = time0 - timedelta(days=45)
     columns = ["symbol", "date", "close", "raw_close", "total_shares"]
     frame = get_batch("stock", symbols, start, previous_date, columns)
     required = {"symbol", "date", "close", "total_shares"}
     if frame.is_empty() or not required.issubset(frame.columns):
         return []
-    frame = (
+    values = (
         frame
         .filter(pl.col("date") <= previous_date)
         .sort(["symbol", "date"])
-        .group_by("symbol", maintain_order=True)
-        .tail(260)
-        .filter(pl.col("date") >= previous_date - timedelta(days=366))
+        .with_columns(pl.col("total_shares").shift(1).over("symbol").alias("_shares"))
     )
-    if frame.is_empty():
+    if values.is_empty():
         return []
     from app.services.stock_dividends import load_record_date_cash_dividends
 
-    dividends = [
-        {"symbol": symbol, "date": day, "cash_dividend": cash}
-        for (symbol, day), cash in load_record_date_cash_dividends(
-            data_dir,
-            as_of=previous_date,
-        ).items()
-        if symbol in symbols and start <= day <= previous_date
-    ]
-    dividend_frame = pl.DataFrame(
-        dividends,
-        schema={"symbol": pl.String, "date": pl.Date, "cash_dividend": pl.Float64},
+    share_rows: dict[str, list[tuple[date, float]]] = {}
+    for symbol, day, shares, same_day_shares in values.select(
+        "symbol",
+        "date",
+        "_shares",
+        "total_shares",
+    ).iter_rows():
+        usable_shares = shares if shares is not None else same_day_shares
+        if isinstance(day, date) and usable_shares is not None and float(usable_shares) > 0:
+            share_rows.setdefault(str(symbol), []).append((day, float(usable_shares)))
+    symbol_set = set(symbols)
+    dividend_totals: dict[str, float] = {}
+    for (symbol, day), cash in load_record_date_cash_dividends(
+        data_dir,
+        as_of=previous_date,
+    ).items():
+        if symbol not in symbol_set or not (time0 <= day <= previous_date):
+            continue
+        rows = share_rows.get(symbol)
+        if not rows:
+            continue
+        index = bisect_right(rows, (day, math.inf)) - 1
+        if index < 0:
+            continue
+        dividend_totals[symbol] = dividend_totals.get(symbol, 0.0) + float(cash) * rows[index][1]
+    dividend = pl.DataFrame(
+        [{"symbol": symbol, "_dividend": value} for symbol, value in dividend_totals.items()],
+        schema={"symbol": pl.String, "_dividend": pl.Float64},
     )
-    values = frame.join(dividend_frame, on=["symbol", "date"], how="left").with_columns(
-        pl.col("cash_dividend").fill_null(0.0),
-        pl.coalesce([pl.col("raw_close"), pl.col("close")]).alias("_price"),
-        pl.col("total_shares").shift(1).over("symbol").alias("_shares"),
-    )
-    dividend = values.group_by("symbol").agg(
-        (pl.col("cash_dividend") * pl.col("_shares")).sum().alias("_dividend")
-    )
+    if dividend.is_empty():
+        return []
     latest = values.group_by("symbol", maintain_order=True).tail(1).select(
         "symbol",
-        (pl.col("_price") * pl.col("_shares")).alias("_market_cap"),
+        (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_market_cap"),
     )
     ranked = (
         dividend
