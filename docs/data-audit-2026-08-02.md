@@ -526,7 +526,7 @@ PYTHONPATH=. .venv/bin/python scripts/check_ingestion_health.py \
 git diff --check custom...HEAD
 ```
 
-隔离工作树使用 `uv sync --extra dev --extra easy-tdx` 建立独立环境。已进入 `custom` 的上一整改提交结果为 `954 passed, 13 warnings in 11.93s`；补充维护启动、开盘啦全端点门禁和初版归档回放后为 `963 passed, 13 warnings in 23.72s`；本轮强化 schema/主键回放、龙虎榜修复、剩余基础端点 manifest 和健康门禁后为 `978 passed, 13 warnings in 23.95s`。Ruff 对 `app tests scripts` 全部通过，`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。没有新增公开 API；canonical schema 和前端类型不变，唯一 schema 变更是辅助扩展表 `ext_kpl_lhb_detail` 从 v1 升级到 v2。
+隔离工作树使用 `uv sync --extra dev --extra easy-tdx` 建立独立环境。已进入 `custom` 的上一整改提交结果为 `954 passed, 13 warnings in 11.93s`；补充维护启动、开盘啦全端点门禁和初版归档回放后为 `963 passed, 13 warnings in 23.72s`；本轮强化 schema/主键回放、龙虎榜修复、剩余基础端点 manifest 和健康门禁后为 `978 passed, 13 warnings in 23.95s`，快进到 `custom` 后复跑为 `978 passed, 13 warnings in 16.67s`。Ruff 对 `app tests scripts` 全部通过，`git diff --check` 通过，合并后严格回放仍为 20,112/20,112 归档和 12/12 表通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。没有新增公开 API；canonical schema 和前端类型不变，唯一 schema 变更是辅助扩展表 `ext_kpl_lhb_detail` 从 v1 升级到 v2。
 
 ### 11.5 生产整改与外部阻塞证据
 
