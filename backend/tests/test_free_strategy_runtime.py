@@ -699,6 +699,49 @@ def test_performance_small_cap_candidate_sort_prefers_valuation_market_cap():
     ]
 
 
+def test_performance_small_cap_candidate_sort_excludes_missing_valuation():
+    previous_day = datetime(2025, 7, 23)
+    symbols = ["000001.SZ", "000002.SZ"]
+    histories = {
+        symbol: [Bar(symbol, previous_day, 5, 5, 5, 5, raw_close=5, total_shares=100)]
+        for symbol in symbols
+    }
+    context = SimpleNamespace(
+        now=datetime(2025, 7, 24, 9, 30),
+        previous_date=previous_day.date(),
+        state={"performance_small_cap": {
+            "candidate_cache_key": None,
+            "candidate_cache": [],
+        }},
+        portfolio=SimpleNamespace(positions={}),
+        instruments=lambda _asset="stock": [
+            {"symbol": symbol, "name": symbol, "asset_type": "stock"}
+            for symbol in symbols
+        ],
+        history_batch=lambda requested, *, count, **_kwargs: {
+            symbol: histories[symbol][-count:] for symbol in requested
+        },
+        dividend_ratio_ranked=lambda requested, _cutoff: list(requested),
+        financial_snapshot=lambda requested, _cutoff: {
+            symbol: {
+                "revenue": 200_000_000,
+                "net_income": 10_000_000,
+                "net_income_attributable": 10_000_000,
+                "roe": 1,
+                "roa": 1,
+            }
+            for symbol in requested
+        },
+        valuation_market_caps=lambda _requested, _cutoff: {
+            "000001.SZ": 1_000.0,
+        },
+    )
+
+    assert performance_small_cap._candidate_symbols(context, previous_day.date()) == [
+        "000001.SZ",
+    ]
+
+
 def test_performance_small_cap_previous_trading_date_uses_latest_visible_sample():
     records = [
         {"symbol": "000001.SZ", "name": "停牌样本"},
