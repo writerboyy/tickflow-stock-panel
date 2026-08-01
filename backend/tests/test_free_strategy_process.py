@@ -164,6 +164,23 @@ def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path
     ) == ["D"]
 
 
+def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close():
+    from app.free_strategy.process import _load_smallcap_index_value
+
+    class Repo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            return pl.DataFrame({
+                "symbol": ["A", "A", "B", "B"],
+                "date": [date(2024, 1, 2), date(2024, 1, 3)] * 2,
+                "close": [8.0, 10.0, 16.0, 20.0],
+                "raw_close": [8.0, 10.0, 16.0, 20.0],
+                "total_shares": [100.0, 1.0, 10.0, 1.0],
+            })
+
+    assert _load_smallcap_index_value(Repo(), ["A", "B"], date(2024, 1, 3)) == 15.0
+
+
 def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):
     rows = {
         "symbol": ["X"],

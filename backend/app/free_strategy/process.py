@@ -362,6 +362,46 @@ def _load_dividend_ratio_ranked(
     return ranked["symbol"].to_list()[: int(ranked.height * 0.25)]
 
 
+def _load_smallcap_index_value(
+    repo: Any,
+    symbols: list[str],
+    previous_date: date,
+) -> float | None:
+    if not symbols:
+        return None
+    get_batch = getattr(repo, "get_daily_asset_batch", None)
+    if not callable(get_batch):
+        return None
+    frame = get_batch(
+        "stock",
+        symbols,
+        previous_date - timedelta(days=16),
+        previous_date,
+        ["symbol", "date", "close", "raw_close", "total_shares"],
+    )
+    required = {"symbol", "date", "close", "total_shares"}
+    if frame.is_empty() or not required.issubset(frame.columns):
+        return None
+    latest = (
+        frame
+        .filter(pl.col("date") <= previous_date)
+        .sort(["symbol", "date"])
+        .with_columns(pl.col("total_shares").shift(1).over("symbol").alias("_shares"))
+        .group_by("symbol", maintain_order=True)
+        .tail(1)
+        .with_columns(
+            (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_market_cap")
+        )
+        .filter(pl.col("_market_cap").is_finite() & (pl.col("_market_cap") > 0))
+        .sort(["_market_cap", "symbol"])
+        .head(400)
+    )
+    if latest.is_empty():
+        return None
+    closes = latest.filter(pl.col("close") > 0)["close"]
+    return round(float(closes.mean()), 4) if len(closes) else None
+
+
 def _financial_coverage(
     data_dir: Path,
     table: str,
@@ -1537,6 +1577,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 symbols,
                 cutoff,
             )
+        )
+        engine.set_smallcap_index_loader(
+            lambda symbols, cutoff: _load_smallcap_index_value(repo, symbols, cutoff)
         )
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:

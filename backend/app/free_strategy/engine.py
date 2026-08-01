@@ -291,6 +291,20 @@ class Context:
         ))
         return self._engine._dividend_ratio_loader(normalized, previous_date)
 
+    def smallcap_index_value(
+        self,
+        symbols: Iterable[str],
+        previous_date: date,
+    ) -> float | None:
+        if self._engine._smallcap_index_loader is None:
+            return None
+        normalized = list(dict.fromkeys(
+            self._normalize_symbol(symbol)
+            for symbol in symbols
+            if str(symbol).strip()
+        ))
+        return self._engine._smallcap_index_loader(normalized, previous_date)
+
     def market_history_bars(
         self,
         symbol: str,
@@ -571,6 +585,7 @@ class FreeStrategyEngine:
         self._extra_history_loader: Callable[[str, list[str], date, date], None] | None = None
         self._financial_snapshot_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None
         self._dividend_ratio_loader: Callable[[list[str], date], list[str]] | None = None
+        self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
@@ -700,6 +715,12 @@ class FreeStrategyEngine:
         loader: Callable[[list[str], date], list[str]] | None,
     ) -> None:
         self._dividend_ratio_loader = loader
+
+    def set_smallcap_index_loader(
+        self,
+        loader: Callable[[list[str], date], float | None] | None,
+    ) -> None:
+        self._smallcap_index_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""

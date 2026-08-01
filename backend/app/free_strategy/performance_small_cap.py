@@ -393,6 +393,11 @@ def _smallcap_index_value(context) -> float | None:
         ):
             continue
         by_symbol[symbol] = item
+    loader = getattr(context, "smallcap_index_value", None)
+    if callable(loader):
+        value = loader(list(by_symbol), previous_date)
+        if value is not None:
+            return float(value)
     history = context.history_batch(list(by_symbol), count=1, timeframe="1d")
     ranked: list[tuple[float, str, Any]] = []
     for symbol in by_symbol:

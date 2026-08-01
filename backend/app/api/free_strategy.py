@@ -717,6 +717,7 @@ def _paper_loop(account_id: str, root: str) -> None:
         _instrument_records,
         _load_market_data,
         _load_dividend_ratio_ranked,
+        _load_smallcap_index_value,
         _load_scheduled_history,
         _load_scheduled_history_batch,
         _merge_market_data,
@@ -755,6 +756,9 @@ def _paper_loop(account_id: str, root: str) -> None:
                 symbols,
                 cutoff,
             )
+        )
+        engine.set_smallcap_index_loader(
+            lambda symbols, cutoff: _load_smallcap_index_value(repo, symbols, cutoff)
         )
         symbols, universe_source = _resolve_symbols(engine, {"symbols": legacy_symbols})
         state["universe"] = symbols
