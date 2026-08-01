@@ -120,6 +120,9 @@ def load_fund_nav_history(
         if selected:
             visible[symbol] = selected
     engine.set_extra_history("unit_net_value", visible)
+    from app.services.fund_nav_schema import write_fund_nav_schema_registry
+
+    write_fund_nav_schema_registry(data_dir)
     return {
         "provider": "eastmoney.fund",
         "requested_symbols": len(symbols),

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 import polars as pl
 
@@ -115,6 +117,7 @@ class ExtConfig:
     __slots__ = (
         "id", "label", "mode", "fields", "description",
         "symbol_map", "code_map",
+        "schema_version",
         "authority", "canonical_dataset", "overlap_policy", "allowed_usage",
         "created_at", "updated_at", "pull",
     )
@@ -128,6 +131,7 @@ class ExtConfig:
         description: str = "",
         symbol_map: dict | None = None,
         code_map: dict | None = None,
+        schema_version: int = 1,
         authority: str | None = None,
         canonical_dataset: str | None = None,
         overlap_policy: str | None = None,
@@ -147,6 +151,7 @@ class ExtConfig:
         # 映射关系: {"type": "mapped", "col": "原始列名"} 或 {"type": "computed", "from": "symbol|code", "method": "strip_exchange|append_exchange"}
         self.symbol_map = symbol_map or {}
         self.code_map = code_map or {}
+        self.schema_version = int(schema_version)
         self.authority = authority if authority is not None else authority_defaults.get("authority")
         self.canonical_dataset = (
             canonical_dataset
@@ -176,6 +181,7 @@ class ExtConfig:
             "description": self.description,
             "symbol_map": self.symbol_map,
             "code_map": self.code_map,
+            "schema_version": self.schema_version,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -201,6 +207,7 @@ class ExtConfig:
             description=d.get("description", ""),
             symbol_map=d.get("symbol_map"),
             code_map=d.get("code_map"),
+            schema_version=d.get("schema_version", 1),
             authority=d.get("authority"),
             canonical_dataset=d.get("canonical_dataset"),
             overlap_policy=d.get("overlap_policy"),
@@ -224,6 +231,35 @@ class ExtConfigStore:
     def _config_path(self, config_id: str) -> Path:
         return self._base / config_id / "config.json"
 
+    @staticmethod
+    def _migrate_config_metadata(path: Path, raw: dict, config: ExtConfig) -> None:
+        desired = config.to_dict()
+        keys = (
+            "schema_version",
+            "authority",
+            "canonical_dataset",
+            "overlap_policy",
+            "allowed_usage",
+        )
+        updates = {
+            key: desired[key]
+            for key in keys
+            if key not in raw and key in desired
+        }
+        if not updates:
+            return
+        migrated = {**raw, **updates}
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(migrated, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
     def load_all(self) -> list[ExtConfig]:
         # 兼容旧版: 如果目录为空且旧配置文件存在则迁移
         if not self._base.exists() or not any(self._base.iterdir()):
@@ -240,7 +276,9 @@ class ExtConfigStore:
             if d.is_dir() and cp.exists():
                 try:
                     raw = json.loads(cp.read_text(encoding="utf-8"))
-                    configs.append(ExtConfig.from_dict(raw))
+                    config = ExtConfig.from_dict(raw)
+                    self._migrate_config_metadata(cp, raw, config)
+                    configs.append(config)
                 except Exception as e:
                     logger.warning("扩展表配置解析失败 %s: %s", cp, e)
         return configs
@@ -251,7 +289,9 @@ class ExtConfigStore:
             return None
         try:
             raw = json.loads(cp.read_text(encoding="utf-8"))
-            return ExtConfig.from_dict(raw)
+            config = ExtConfig.from_dict(raw)
+            self._migrate_config_metadata(cp, raw, config)
+            return config
         except Exception:
             return None
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.services.data_authority import (
@@ -10,7 +12,7 @@ from app.services.data_authority import (
     extension_config_metadata,
     normalize_reference_asset,
 )
-from app.services.ext_data import ExtConfig, ExtField
+from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 
 
 def test_tickflow_primary_datasets_cover_etf_daily_and_minute_tables():
@@ -44,6 +46,7 @@ def test_ext_config_backfills_authority_metadata_without_rewriting_legacy_config
     )
 
     payload = config.to_dict()
+    assert payload["schema_version"] == 1
     assert payload["authority"] == "deprecated-overlap"
     assert payload["canonical_dataset"] == "tickflow.realtime_quotes"
     assert payload["overlap_policy"] == "overlapping_quote_fields_are_display_context_only"
@@ -60,6 +63,25 @@ def test_unknown_user_extension_has_no_forced_authority_metadata():
 
     assert "authority" not in config.to_dict()
     assert extension_config_metadata("user_custom_factor") == {}
+
+
+def test_legacy_extension_config_persists_schema_and_authority_metadata(tmp_path):
+    path = tmp_path / "ext_data" / "ext_money_flow" / "config.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "id": "ext_money_flow",
+        "label": "资金流向",
+        "mode": "snapshot",
+        "fields": [{"name": "change_pct", "dtype": "float", "label": "涨跌幅"}],
+    }), encoding="utf-8")
+
+    config = ExtConfigStore(tmp_path).get("ext_money_flow")
+
+    assert config is not None
+    migrated = json.loads(path.read_text(encoding="utf-8"))
+    assert migrated["schema_version"] == 1
+    assert migrated["authority"] == "deprecated-overlap"
+    assert migrated["canonical_dataset"] == "tickflow.realtime_quotes"
 
 
 def test_extension_overlap_fields_cannot_be_requested_as_canonical_inputs():
