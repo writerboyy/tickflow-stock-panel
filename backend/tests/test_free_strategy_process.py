@@ -134,11 +134,6 @@ def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_
     }
     for table in ("income", "metrics", "balance_sheet"):
         _write_financial_table(tmp_path, table, rows)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["X"],
-        "date": ["2024-06-28"],
-        "market_cap": [10.0],
-    })
 
     _assert_performance_small_cap_financial_coverage(
         tmp_path,
@@ -146,7 +141,7 @@ def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_
     )
 
 
-def test_dividend_ratio_loader_matches_top_quartile_with_valuation_market_cap(tmp_path):
+def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path):
     from app.free_strategy.process import _load_dividend_ratio_ranked
 
     class Repo:
@@ -175,43 +170,10 @@ def test_dividend_ratio_loader_matches_top_quartile_with_valuation_market_cap(tm
         "event_date": [date(2024, 1, 2)],
         "cash_per_share": [100.0],
     }).write_parquet(xdxr_path)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["A", "B", "C", "D"],
-        "date": ["2024-01-03"] * 4,
-        "market_cap": [10.0] * 4,
-    })
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
     ) == ["D"]
-
-
-def test_dividend_ratio_loader_does_not_infer_missing_valuation(tmp_path):
-    from app.free_strategy.process import _load_dividend_ratio_ranked
-
-    class Repo:
-        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
-            assert asset_type == "stock"
-            return pl.DataFrame({
-                "symbol": ["A", "A"],
-                "date": [date(2024, 1, 1), date(2024, 1, 3)],
-                "close": [10.0, 10.0],
-                "raw_close": [10.0, 10.0],
-                "total_shares": [100.0, 100.0],
-            })
-
-    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
-    dividend_path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["A"],
-        "record_date": ["2024-01-02"],
-        "cash_per_share": [1.0],
-        "progress_code": ["036003"],
-    }).write_parquet(dividend_path)
-
-    assert _load_dividend_ratio_ranked(
-        Repo(), tmp_path, ["A"], date(2024, 1, 3),
-    ) == []
 
 
 def test_dividend_ratio_loader_uses_calendar_year_window(tmp_path):
@@ -240,11 +202,6 @@ def test_dividend_ratio_loader_uses_calendar_year_window(tmp_path):
         "cash_per_share": [100.0, 1.0, 2.0, 3.0, 4.0],
         "progress_code": ["036003"] * 5,
     }).write_parquet(dividend_path)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["A", "B", "C", "D", "E"],
-        "date": ["2025-07-23"] * 5,
-        "market_cap": [10.0] * 5,
-    })
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D", "E"], date(2025, 7, 23),
@@ -277,11 +234,6 @@ def test_dividend_ratio_loader_counts_record_date_without_daily_bar(tmp_path):
         "cash_per_share": [1.0, 2.0, 3.0, 4.0],
         "progress_code": ["036003"] * 4,
     }).write_parquet(dividend_path)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["A", "B", "C", "D"],
-        "date": ["2024-01-03"] * 4,
-        "market_cap": [10.0] * 4,
-    })
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
@@ -392,7 +344,7 @@ def test_dividend_ratio_loader_prefers_valuation_market_cap(tmp_path):
     ) == ["D"]
 
 
-def test_smallcap_index_loader_uses_valuation_market_cap_and_adjusted_close(tmp_path):
+def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close(tmp_path):
     from app.free_strategy.process import _load_smallcap_index_value
 
     class Repo:
@@ -402,30 +354,11 @@ def test_smallcap_index_loader_uses_valuation_market_cap_and_adjusted_close(tmp_
                 "symbol": ["A", "A", "B", "B"],
                 "date": [date(2024, 1, 2), date(2024, 1, 3)] * 2,
                 "close": [8.0, 10.0, 16.0, 20.0],
+                "raw_close": [8.0, 10.0, 16.0, 20.0],
+                "total_shares": [100.0, 1.0, 10.0, 1.0],
             })
-
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["A", "B"],
-        "date": ["2024-01-03"] * 2,
-        "market_cap": [20.0, 10.0],
-    })
 
     assert _load_smallcap_index_value(Repo(), tmp_path, ["A", "B"], date(2024, 1, 3)) == 15.0
-
-
-def test_smallcap_index_loader_does_not_infer_missing_valuation(tmp_path):
-    from app.free_strategy.process import _load_smallcap_index_value
-
-    class Repo:
-        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
-            assert asset_type == "stock"
-            return pl.DataFrame({
-                "symbol": ["A"],
-                "date": [date(2024, 1, 3)],
-                "close": [10.0],
-            })
-
-    assert _load_smallcap_index_value(Repo(), tmp_path, ["A"], date(2024, 1, 3)) is None
 
 
 def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):
@@ -436,50 +369,8 @@ def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_p
     }
     for table in ("income", "metrics", "balance_sheet"):
         _write_financial_table(tmp_path, table, rows)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["X"],
-        "date": ["2024-08-30"],
-        "market_cap": [10.0],
-    })
 
-    with pytest.raises(ValueError, match="绩优小市值回测需要.*income.*metrics.*balance_sheet.*valuation"):
-        _assert_performance_small_cap_financial_coverage(
-            tmp_path,
-            datetime(2024, 7, 1).date(),
-        )
-
-
-def test_performance_small_cap_financial_coverage_requires_valuation_table(tmp_path):
-    rows = {
-        "symbol": ["X"],
-        "period_end": ["2024-06-30"],
-        "announce_date": ["2024-06-30"],
-    }
-    for table in ("income", "metrics", "balance_sheet"):
-        _write_financial_table(tmp_path, table, rows)
-
-    with pytest.raises(ValueError, match="绩优小市值回测需要.*valuation"):
-        _assert_performance_small_cap_financial_coverage(
-            tmp_path,
-            datetime(2024, 7, 1).date(),
-        )
-
-
-def test_performance_small_cap_financial_coverage_requires_usable_valuation(tmp_path):
-    rows = {
-        "symbol": ["X"],
-        "period_end": ["2024-06-30"],
-        "announce_date": ["2024-06-30"],
-    }
-    for table in ("income", "metrics", "balance_sheet"):
-        _write_financial_table(tmp_path, table, rows)
-    _write_financial_table(tmp_path, "valuation", {
-        "symbol": ["X"],
-        "date": ["2024-06-28"],
-        "market_cap": [None],
-    })
-
-    with pytest.raises(ValueError, match="绩优小市值回测需要.*valuation"):
+    with pytest.raises(ValueError, match="绩优小市值回测需要.*income.*metrics.*balance_sheet"):
         _assert_performance_small_cap_financial_coverage(
             tmp_path,
             datetime(2024, 7, 1).date(),
@@ -507,8 +398,7 @@ def test_performance_small_cap_financial_preflight_uses_template_source(tmp_path
     assert output.get_nowait()["type"] == "progress"
     error = output.get_nowait()
     assert error["type"] == "error"
-    assert "绩优小市值回测需要首个回测日前可用的历史财务数据" in error["error"]
-    assert "PIT valuation.market_cap" in error["error"]
+    assert "绩优小市值回测需要首个回测日前已公告的历史财务数据" in error["error"]
 
 
 def test_scheduled_daily_bar_cache_invalidates_when_row_changes():

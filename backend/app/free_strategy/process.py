@@ -35,7 +35,6 @@ PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES = (
     "income",
     "metrics",
     "balance_sheet",
-    "valuation",
 )
 
 
@@ -433,16 +432,26 @@ def _load_dividend_ratio_ranked(
     )
     if dividend.is_empty():
         return []
-    valuation_caps = _load_valuation_market_caps(data_dir, symbols, previous_date)
-    if not valuation_caps:
-        return []
-    valuation = pl.DataFrame(
-        [{"symbol": symbol, "_market_cap": value} for symbol, value in valuation_caps.items()],
-        schema={"symbol": pl.String, "_market_cap": pl.Float64},
+    latest = values.group_by("symbol", maintain_order=True).tail(1).with_columns(
+        (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_fallback_market_cap")
+    ).select(
+        "symbol",
+        "_fallback_market_cap",
     )
+    valuation_caps = _load_valuation_market_caps(data_dir, symbols, previous_date)
+    if valuation_caps:
+        valuation = pl.DataFrame(
+            [{"symbol": symbol, "_valuation_market_cap": value} for symbol, value in valuation_caps.items()],
+            schema={"symbol": pl.String, "_valuation_market_cap": pl.Float64},
+        )
+        latest = latest.join(valuation, on="symbol", how="left").with_columns(
+            pl.coalesce([pl.col("_valuation_market_cap"), pl.col("_fallback_market_cap")]).alias("_market_cap")
+        )
+    else:
+        latest = latest.with_columns(pl.col("_fallback_market_cap").alias("_market_cap"))
     ranked = (
         dividend
-        .join(valuation, on="symbol", how="inner")
+        .join(latest, on="symbol", how="inner")
         .filter(
             pl.col("_dividend").is_finite()
             & (pl.col("_dividend") > 0)
@@ -471,27 +480,35 @@ def _load_smallcap_index_value(
         symbols,
         previous_date - timedelta(days=16),
         previous_date,
-        ["symbol", "date", "close"],
+        ["symbol", "date", "close", "raw_close", "total_shares"],
     )
-    required = {"symbol", "date", "close"}
+    required = {"symbol", "date", "close", "total_shares"}
     if frame.is_empty() or not required.issubset(frame.columns):
         return None
     latest = (
         frame
         .filter(pl.col("date") <= previous_date)
         .sort(["symbol", "date"])
+        .with_columns(pl.col("total_shares").shift(1).over("symbol").alias("_shares"))
         .group_by("symbol", maintain_order=True)
         .tail(1)
+        .with_columns(
+            (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_fallback_market_cap")
+        )
     )
     valuation_caps = _load_valuation_market_caps(data_dir, symbols, previous_date)
-    if not valuation_caps:
-        return None
-    valuation = pl.DataFrame(
-        [{"symbol": symbol, "_market_cap": value} for symbol, value in valuation_caps.items()],
-        schema={"symbol": pl.String, "_market_cap": pl.Float64},
-    )
+    if valuation_caps:
+        valuation = pl.DataFrame(
+            [{"symbol": symbol, "_valuation_market_cap": value} for symbol, value in valuation_caps.items()],
+            schema={"symbol": pl.String, "_valuation_market_cap": pl.Float64},
+        )
+        latest = latest.join(valuation, on="symbol", how="left").with_columns(
+            pl.coalesce([pl.col("_valuation_market_cap"), pl.col("_fallback_market_cap")]).alias("_market_cap")
+        )
+    else:
+        latest = latest.with_columns(pl.col("_fallback_market_cap").alias("_market_cap"))
     latest = (
-        latest.join(valuation, on="symbol", how="inner")
+        latest
         .filter(pl.col("_market_cap").is_finite() & (pl.col("_market_cap") > 0))
         .sort(["_market_cap", "symbol"])
         .head(400)
@@ -521,23 +538,8 @@ def _financial_coverage(
             "symbols_before_cutoff": 0,
             "latest_before_cutoff": None,
         }
-    if table == "valuation":
-        date_column = next(
-            (
-                column
-                for column in ("date", "trade_date", "day", "stat_date")
-                if column in frame.columns
-            ),
-            None,
-        )
-    else:
-        date_column = "announce_date" if "announce_date" in frame.columns else "period_end"
-    market_cap = _valuation_market_cap_column(frame) if table == "valuation" else None
-    if (
-        date_column is None
-        or date_column not in frame.columns
-        or (table == "valuation" and market_cap is None)
-    ):
+    date_column = "announce_date" if "announce_date" in frame.columns else "period_end"
+    if date_column not in frame.columns:
         return {
             "table": table,
             "rows": frame.height,
@@ -548,21 +550,11 @@ def _financial_coverage(
             "symbols_before_cutoff": 0,
             "latest_before_cutoff": None,
         }
-    value_expressions = [_date_column_expr(frame, date_column).alias("_available_date")]
-    if market_cap is not None:
-        value_column, scale = market_cap
-        value_expressions.append(
-            (pl.col(value_column).cast(pl.Float64, strict=False) * scale).alias("_market_cap")
-        )
     dated = (
         frame
-        .with_columns(value_expressions)
+        .with_columns(_date_column_expr(frame, date_column).alias("_available_date"))
         .filter(pl.col("_available_date").is_not_null())
     )
-    if market_cap is not None:
-        dated = dated.filter(
-            pl.col("_market_cap").is_finite() & (pl.col("_market_cap") > 0)
-        )
     if dated.is_empty():
         return {
             "table": table,
@@ -612,9 +604,9 @@ def _assert_performance_small_cap_financial_coverage(
             f"latest={latest.isoformat() if latest else 'none'})"
         )
     raise ValueError(
-        "绩优小市值回测需要首个回测日前可用的历史财务数据和 PIT valuation.market_cap；"
+        "绩优小市值回测需要首个回测日前已公告的历史财务数据；"
         f"当前 start={start.isoformat()} 前缺少可用表: {', '.join(details)}。"
-        "请先同步完整历史 financial/valuation 数据或配置支持历史估值的自定义 financial provider。"
+        "请先同步完整历史 financial 数据或配置支持 latest=false 的自定义 financial provider。"
     )
 
 

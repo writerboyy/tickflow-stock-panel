@@ -221,16 +221,13 @@ def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> 
             return list(ranked)
     history = context.history_batch(symbols, count=260, timeframe="1d")
     valuation_caps = _valuation_market_caps(context, symbols, previous_date)
-    require_valuation = callable(getattr(context, "valuation_market_caps", None))
     ranked: list[tuple[float, str]] = []
     for symbol in symbols:
         values = history.get(symbol, [])
         if not values:
             continue
         latest = values[-1]
-        market_cap = valuation_caps.get(symbol)
-        if market_cap is None and not require_valuation:
-            market_cap = _market_cap(symbol, latest)
+        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, latest)
         if market_cap is None:
             continue
         one_year = _one_year_before(previous_date)
@@ -262,7 +259,6 @@ def _candidate_symbols(context, previous_date: date) -> list[str]:
     symbols = _financially_qualified(context, symbols, previous_date)
     history = context.history_batch(symbols, count=1, timeframe="1d")
     valuation_caps = _valuation_market_caps(context, symbols, previous_date)
-    require_valuation = callable(getattr(context, "valuation_market_caps", None))
     held = set(_held_symbols(context))
     candidates: list[tuple[float, str]] = []
     for symbol in symbols:
@@ -272,9 +268,7 @@ def _candidate_symbols(context, previous_date: date) -> list[str]:
         price = _bar_price(latest)
         if symbol not in held and price >= MAX_STOCK_PRICE:
             continue
-        market_cap = valuation_caps.get(symbol)
-        if market_cap is None and not require_valuation:
-            market_cap = _market_cap(symbol, latest)
+        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, latest)
         if market_cap is None:
             continue
         candidates.append((market_cap, symbol))
@@ -432,16 +426,13 @@ def _smallcap_index_value(context) -> float | None:
             return float(value)
     history = context.history_batch(list(by_symbol), count=1, timeframe="1d")
     valuation_caps = _valuation_market_caps(context, list(by_symbol), previous_date)
-    require_valuation = callable(getattr(context, "valuation_market_caps", None))
     ranked: list[tuple[float, str, Any]] = []
     for symbol in by_symbol:
         values = history.get(symbol, [])
         if not values:
             continue
         bar = values[-1]
-        market_cap = valuation_caps.get(symbol)
-        if market_cap is None and not require_valuation:
-            market_cap = _market_cap(symbol, bar)
+        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, bar)
         if market_cap is None:
             continue
         ranked.append((market_cap, symbol, bar))
