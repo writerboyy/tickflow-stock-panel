@@ -11,7 +11,7 @@
 3. EasyTDX 分红历史有 7,259 / 51,390 行 `cash_per_share` 不能由当前分红方案解析公式复现，影响 3,421 个标的。该表只能作为辅助记录日上下文，不能用于权威复权或事件回放。
 4. 指数日线有 495 行负成交量，覆盖 7 个指数；`000691.SH` 同时出现约 `1e18` 的异常成交额，符合有符号 32 位溢出/字段解码错误特征。
 
-整改后当前状态：前 3 组 P1 已完成代码修复和生产重算；股票 enriched、valuation 仍各为 6,160,370 个唯一键，EasyTDX 分红 7,259 行差异已归零并从 4,005 个文件压缩为 27 个年度文件，股票分钟 149,179 行空 OHLC 已清除。第 4 组指数异常仍存在：同源在线重拉的 8,477 行与本地逐字段一致，远端本身仍返回异常值，现行入口门禁会拒绝再次发布。财务 8 组冲突也仍存在，当前账号没有 TickFlow financial 能力，无法取得 revision 证据，禁止按文件顺序猜测修复。分钟历史覆盖不足、指数分钟缺失和 depth5 历史不可回补仍是能力边界。
+整改后当前状态：前 3 组 P1 已完成代码修复和生产重算；股票 enriched、valuation 仍各为 6,160,370 个唯一键，EasyTDX 分红 7,259 行差异已归零并从 4,005 个文件压缩为 27 个年度文件，股票分钟 149,179 行空 OHLC 已清除。严格强化开盘啦归档回放后又发现龙虎榜席位明细旧主键会覆盖同股同方向不同上榜原因的记录，现已将主键升级为 `(symbol,side,log_id)` 并从原始归档恢复 78 行，720 行修复为 798 行。指数异常仍存在：同源在线重拉的 8,477 行与本地逐字段一致，远端本身仍返回异常值，现行入口门禁会拒绝再次发布。财务 8 组冲突也仍存在，当前账号没有 TickFlow financial 能力，无法取得 revision 证据，禁止按文件顺序猜测修复。分钟历史覆盖不足、指数分钟缺失和 depth5 历史不可回补仍是能力边界。
 
 原始只读审计阶段没有启动应用、collector、刷新或重建任务。原因是应用启动会注册并可能触发后台采集，不符合“审计前后市场数据不变”的约束。后续生产整改及其数据变更单独记录在 11.2.1 和 11.5，不能与原始只读基线混为一谈。
 
@@ -89,7 +89,7 @@
 | `ext_kpl_funds` | 日频；`symbol`；5,537 行 | 开盘啦资金结构；价格/涨幅/成交额/市值不得替代 TickFlow | 通过 |
 | `ext_kpl_limitup` | 日频；`symbol`；100 行 | 开盘啦涨停原因上下文；连板/市值不得替代 enriched | 通过 |
 | `ext_kpl_lhb` | 日频；`symbol`；72 行 | 开盘啦龙虎榜汇总 | 通过 |
-| `ext_kpl_lhb_detail` | 日频；`symbol,side,rank`；720 行 | 开盘啦席位明细 | 通过 |
+| `ext_kpl_lhb_detail` | 日频；`symbol,side,log_id`；798 行；schema v2 | 开盘啦席位明细；`reason_type`、`rank` 保留为属性 | 通过：从 72 份归档恢复旧主键覆盖的 78 行 |
 | `ext_kpl_lhb_movement` | 日频；`participant_id,side,symbol`；69 行 | 开盘啦游资/机构动向 | 通过 |
 | `ext_kpl_regulatory` | 日频；`symbol`；14 行 | 开盘啦监管事件 | 通过 |
 | `ext_kpl_northbound_sector` | 季频；`report_date,plate_id`；96 行 | 开盘啦季度北向持仓，不是每日净流入 | 通过 |
@@ -234,10 +234,12 @@ income:  300500.SZ/2024-12-31/2025-12-31
 
 - 所有 JSON/Gzip 均可读取；20,112 / 20,112 可由对应 parser 解析，异常 0；
 - `/30` 共 2,681 份响应，全部显式包含 list 类型的空 `info`，parser 输出 0 行。因此 `ext_kpl_auction` 为空是合理空数据，不是采集或落盘缺口；
-- 其余表重放并按声明主键合并后，主键集合与 Parquet 完全一致，字段值错配为 0；
-- 典型对账：资金 5,537/5,537、涨停 100/100、龙虎榜 72/72、北向个股 3,807/3,807、十大股东 54,662/54,662、股东人数 17,614/17,614、板块成分 30,667/30,667。
+- 初版回放只比较 Parquet 已存在字段，不能发现落盘 schema 丢列；强化后同时校验配置字段/类型/label hash、Parquet 缺失或额外字段、分区日期、重复主键、回放缺值和确定性 revision；
+- 强化回放发现 `dragon_tiger_details` 原始 parser 产生 798 行，旧表只有 720 行。8 份归档内出现相同 `(symbol,side,rank)`，因为同一股票的多个上榜原因组可各自从 rank 1 开始；旧 `atomic_upsert_records` 因此静默覆盖 78 行，并带来 218 个字段值错配；
+- 798 个上游 `LogID` 全部唯一。修复将主键改为 `(symbol,side,log_id)`，新增 `reason_type`，以 72 份原始归档影子重建并原子发布 schema v2；旧 Parquet 和配置保留为回滚副本；
+- 修复后严格回放状态为 `passed`：12 张扩展表均为 schema/类型/分区/重复主键/缺失主键/额外主键/字段值错配 0。典型对账：资金 5,537/5,537、涨停 100/100、龙虎榜汇总 72/72、龙虎榜席位 798/798、北向个股 3,807/3,807、十大股东 54,662/54,662、股东人数 17,614/17,614、板块成分 30,667/30,667。
 
-隔离候选分支 `codex/data-audit-completion-20260802` 已将该检查产品化为只读门禁：
+整改实现已将该检查产品化为只读门禁：
 
 ```bash
 cd backend
@@ -245,7 +247,7 @@ PYTHONPATH=. .venv/bin/python scripts/replay_kaipanla_archives.py \
   --data-dir ../data --output /tmp/tickflow-kaipanla-replay.json
 ```
 
-候选分支实际结果为 `status=passed`、20,112/20,112 解析成功、错误 0；11 张有数据表均为 `missing_in_parquet=0`、`missing_in_replay=0`、`field_mismatches=0`。输出只写显式指定的隔离路径，不调用在线 client、collector 或生产 storage。该 CLI 尚未进入 `custom`，本次报告提交也不包含它。
+实际结果为 `status=passed`、20,112/20,112 解析成功、错误 0；12 张表全部通过，其中竞价表为有原始证据的合理空表。输出只写显式指定的隔离路径，不调用在线 client、collector 或生产 storage。
 
 ### 7.3 EasyTDX 在线只读抽样
 
@@ -325,7 +327,7 @@ fetch
 
 #### 7.4.5 整改分支落地状态
 
-本节分别记录已进入 `custom` 的整改、已完成的数据验收，以及尚未合入的 `codex/data-audit-completion-20260802` 候选实现。隔离分支开发和测试没有运行 EasyTDX/开盘啦 collector；生产数据修复只使用已有原始数据走影子校验和原子切换。首次整改合并到仍运行且启用 `uvicorn --reload` 的 `custom` 后曾触发既有启动任务，例外见 11.2.1。本次交付只合入 Markdown，候选实现必须另行复审后才能进入 `custom`。
+本节记录已进入 `custom` 的前序整改、本轮 `codex/data-audit-implementation-20260802` 实现及生产数据验收。隔离分支开发和测试没有运行 EasyTDX/开盘啦 collector；龙虎榜修复只使用已有原始归档走影子校验和原子切换。首次整改合并到仍运行且启用 `uvicorn --reload` 的 `custom` 后曾触发既有启动任务，例外见 11.2.1；本轮执行前确认应用端口无监听，并先合入维护启动开关。
 
 | 能力 | 状态 | 已验证内容 | 尚未完成/不能宣称 |
 | --- | --- | --- | --- |
@@ -333,12 +335,14 @@ fetch
 | EasyTDX 空数据判定 | `custom` 已落地 | F10 批次必须返回全部请求标的，缺标的记 `source_error`；分红底层逐标的失败会使整批失败；正式章节缺失才可记 `section_absent` | 北交所行业仍是既有能力边界，未新增其数据；真实快报首次出现后的落盘仍待在线验收 |
 | EasyTDX 分红修复 | 生产数据已验收 | 51,390 行影子重算后原子切换；7,259 行差异归零；4,005 个日期文件压缩为 27 个年度文件；旧目录和 manifest 可回滚 | 权威复权仍只使用 TickFlow `corporate_actions`；未把辅助分红记录升级为除权事件 |
 | 开盘啦分页与竞价 | `custom` 已落地 | `/115`、`/30`、`/100` 统一分页上限、逐页归档和 manifest；分页失败不发布；竞价三检查点与 `/31` 记录组件完成状态；`/31` 任一标的失败时不发布该批明细 | 竞价仍无业务行，但 2,681 份 `/30` 原始响应均已证明为 `valid_empty` |
-| 开盘啦扩展端点 | 候选分支，未合入 | 资金分时/日度组件、北向个股、十大股东、板块成分、龙虎榜主/扩展明细和监管端点均记录独立批次；不完整组件不覆盖上一有效数据 | 尚未进行全市场真实故障恢复演练或建设外部告警面板 |
-| 开盘啦归档回放 | 候选分支，未合入 | 产品化只读回放器兼容旧 envelope 和带 hash/parser version 的新 envelope；20,112/20,112 解析成功，11 张表主键集合和字段值与 Parquet 完全一致 | 现存旧归档没有 parser version/hash 字段，只能在后续新归档中逐步建立版本链 |
-| 维护启动 | 候选分支，未合入 | `TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 跳过 EasyTDX bootstrap、开盘啦 catch-up 和通用扩展即时首拉，同时保留定时任务注册 | 该开关不禁用到点执行的正常 cron；合入前不能依赖此变量保护 `custom` 启动 |
+| 开盘啦扩展端点 | 本轮已落地 | 资金榜/分时/日度、北向板块/个股、股东人数窗口/分页、十大股东、板块发现/成分、涨停、龙虎榜主/扩展明细和监管端点均记录独立批次；请求失败、解析拒绝、合理空、分页上限和完整发布可区分；不完整组件不覆盖上一有效数据 | 尚未进行全市场真实故障恢复演练 |
+| 开盘啦归档回放 | 本轮已落地并验收 | 产品化只读回放器兼容旧 envelope 和带 hash/parser version 的新 envelope；20,112/20,112 解析成功，严格校验 12 张表 schema、类型、分区、主键和字段值 | 现存旧归档没有 parser version/hash 字段，只能在后续新归档中逐步建立版本链 |
+| 开盘啦龙虎榜修复 | 本轮生产数据已验收 | 识别旧 `(symbol,side,rank)` 冲突；以 72 份归档恢复 78 行；schema v2 的 798 行主键唯一，严格回放全部通过 | 这是扩展表内部 schema 升级；旧配置和旧 Parquet 保留用于回滚，不改变 canonical schema |
+| 维护启动 | 本轮已落地 | `TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 跳过 EasyTDX bootstrap、开盘啦 catch-up 和通用扩展即时首拉，同时保留定时任务注册 | 该开关不禁用到点执行的正常 cron，维护窗口仍需避开 cron 或停止调度器 |
+| 入库健康门禁 | 本轮已落地 | 只读 CLI 汇总每源/数据集最新 manifest，输出批次状态、失败批、发布/拒绝行数；损坏、路径契约错位和失败状态均非零退出；没有新增公开 API | 活动 `_ingestion` 目录在只读审计后已清理，当前结果为 `no_data`；待下一次受控采集生成 manifest 后接入外部告警 |
 | 数据所有权 | `custom` 已落地 | 扩展配置持久化 `schema_version`、authority、canonical dataset、overlap policy 与 allowed usage；负向测试保持 EasyTDX/开盘啦不能替代 TickFlow 权威字段 | 未改变公开 API 或 canonical schema；消费者新增扩展用途时仍需同步增加 authority 测试 |
 
-EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 A 已完成生产修复和回滚留存；阶段 B 的核心采集骨架已进入 `custom`；阶段 C 的主分页门禁已进入 `custom`，逐端点隔离和产品化全归档回放已完成候选代码与离线验收但尚未合入；阶段 D 的外部告警面板和全市场真实中断恢复演练仍未完成。
+EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 A 已完成生产修复和回滚留存；阶段 B 的核心采集骨架已落地；阶段 C 的逐端点隔离、完整分页、严格全归档回放和龙虎榜迁移已完成代码及生产验收；阶段 D 已具备 manifest、机器可读健康门禁和 EasyTDX 分红 compaction，但外部告警接入、开盘啦小文件 compaction 和全市场真实中断恢复演练仍未完成。
 
 ## 8. 指标公式与独立验证
 
@@ -398,7 +402,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 
 - BOLL 常见实现既有 `ddof=0` 也有 `ddof=1`；项目批量冻结为 `ddof=1`。
 - RSI 常见实现有 Wilder 初始 SMA、递推平滑和简单滚动均值；项目使用从首日 0 gain/loss 开始的 `alpha=1/N` EWM，恒定价格得到 0 而不是部分平台的 50。
-- KDJ 常见实现从 K/D=50 开始；项目从首个有效 RSV 开始。零波动区间得到 NaN 是项目边界缺陷，不应解释为正常平台差异。
+- KDJ 常见实现从 K/D=50 开始；项目从首个有效 RSV 开始。整改前零波动区间得到 NaN，现已冻结为中性 RSV=50，窗口未满仍保持 null。
 - 60 日“新高/新低”可以定义为收盘极值或日内 high/low；项目批量冻结为 close 极值，因此增量路径必须一致。
 
 ## 9. 已确认问题与修复顺序
@@ -415,6 +419,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 | 已解决 P2 | 股本源刷新后派生漂移 | enriched/valuation 已按固定 source snapshot 全量重建并保留旧目录 |
 | 部分解决 P2 | 股票分钟空 OHLC 和分钟覆盖不足 | 149,179 行空 OHLC 已清除；覆盖 manifest/fail-closed 已落地，历史覆盖不足仍保留为能力边界 |
 | 已解决 P2 | KDJ 零区间为 NaN | 批量与增量统一中性 RSV 并补恒定价格测试 |
+| 已解决 P2 | 开盘啦龙虎榜明细旧主键覆盖 78 行 | 主键升级为 `symbol,side,log_id`，保留上榜原因和 rank；72 份归档影子重建为 798 行并严格回放 |
 | P3 | `fund_nav` 两种 schema、旧扩展配置缺 authority 持久字段 | 在不改变公开 schema 的前提下登记 schema version；迁移配置元数据或在审计中持续校验 runtime 补全 |
 | 已解决 P3 | EasyTDX 分红 4,005 个小分区 | 已按年 compaction 为 27 个文件并维护 repair manifest，逻辑主键和行数不变 |
 
@@ -427,6 +432,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 - 当前 pools、行业和 instruments 是快照，不能证明历史 PIT 成分或历史行业归属。
 - EasyTDX 业绩快报全表为空；全市场采集结果和 30 标的在线样本均没有正式快报章节，因此判为合理空数据，但不能证明未来出现快报时的实际落盘行为；parser/collector 定向测试承担该契约验证。
 - 在线抽样只能证明审计时点的 30 个标的和两个开盘啦端点，不等于供应商所有代码、所有历史日期的 SLA。
+- 入库健康 CLI 当前为 `no_data`，因为活动 `_ingestion` 在只读审计后已清理；门禁行为已由故障注入测试证明，但真实告警必须等下一次受控采集产生 manifest 后验收。
 - 财务 8 组冲突和指数源异常仍保留在数据湖中；其余“已解决”项均有生产 repair manifest、source snapshot 或回滚目录证明，不能仅以测试通过替代数据验收。
 
 ## 11. 证据与验证记录
@@ -501,22 +507,26 @@ PYTHONPATH=. .venv/bin/python -m pytest \
   tests/test_backfill_easy_tdx_dividends.py -q
 ```
 
-原只读审计报告提交时的实际结果为 `134 passed, 4 warnings in 5.49s`。最终报告合入后在 `custom` 复跑同一组命令，实际结果为 `154 passed, 6 warnings in 4.73s`；新增用例来自当前测试文件扩充，6 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。报告本身不改变公开 API、schema、类型、采集代码或运行时行为。
+原只读审计报告提交时的实际结果为 `134 passed, 4 warnings in 5.49s`。最终报告合入后在 `custom` 复跑同一组命令，实际结果为 `154 passed, 6 warnings in 4.73s`；新增用例来自当前测试文件扩充，6 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。该结果对应原报告提交，不代表后续整改没有运行时改动；本轮实现验证见 11.4。
 
 ### 11.4 整改实现验证
 
-已进入 `custom` 的整改覆盖历史名称 PIT、批量/盘中指标逐列一致、KDJ 零波动、财务同键冲突拒绝、派生 source snapshot、EasyTDX 批次恢复/缺标的响应/损坏 manifest、开盘啦主分页中断/竞价组件、指数异常批次、分钟完整度与影子清理、分红影子修复、enriched/valuation 原子发布和回滚目录。候选分支另外覆盖全部逐股与逐板块组件、20,112 份归档产品化回放，以及禁止启动时立即触发辅助采集的维护模式。
+整改覆盖历史名称 PIT、批量/盘中指标逐列一致、KDJ 零波动、财务同键冲突拒绝、派生 source snapshot、EasyTDX 批次恢复/缺标的响应/损坏 manifest、开盘啦全部基础及逐股/逐板块组件、指数异常批次、分钟完整度与影子清理、分红影子修复、enriched/valuation 原子发布和回滚目录。本轮另外落地 20,112 份归档严格回放、龙虎榜明细 schema v2 迁移、机器可读入库健康门禁，以及禁止启动时立即触发辅助采集的维护模式。
 
 实际执行命令：
 
 ```bash
 cd backend
 PYTHONPATH=. .venv/bin/python -m pytest -q
-PYTHONPATH=. .venv/bin/python -m ruff check <本分支全部 Python 变更文件>
+PYTHONPATH=. .venv/bin/python -m ruff check app tests scripts
+PYTHONPATH=. .venv/bin/python scripts/replay_kaipanla_archives.py \
+  --data-dir ../data --output /tmp/tickflow-kaipanla-replay-post-repair.json
+PYTHONPATH=. .venv/bin/python scripts/check_ingestion_health.py \
+  --data-dir ../data --source easy_tdx --source kaipanla
 git diff --check custom...HEAD
 ```
 
-隔离工作树复用了主工作区现有 `.venv` 解释器。已进入 `custom` 的上一整改提交结果为 `954 passed, 13 warnings in 11.93s`；候选分支补充维护启动、开盘啦全端点门禁和归档回放后，全后端实际结果为 `963 passed, 13 warnings in 23.72s`。两次验证中全部相关 Python 文件 Ruff 通过，`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。候选分支的测试通过不代表其代码已进入 `custom`；本次只提交报告。生产数据执行证据见 11.5。
+隔离工作树使用 `uv sync --extra dev --extra easy-tdx` 建立独立环境。已进入 `custom` 的上一整改提交结果为 `954 passed, 13 warnings in 11.93s`；补充维护启动、开盘啦全端点门禁和初版归档回放后为 `963 passed, 13 warnings in 23.72s`；本轮强化 schema/主键回放、龙虎榜修复、剩余基础端点 manifest 和健康门禁后为 `978 passed, 13 warnings in 23.95s`。Ruff 对 `app tests scripts` 全部通过，`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。没有新增公开 API；canonical schema 和前端类型不变，唯一 schema 变更是辅助扩展表 `ext_kpl_lhb_detail` 从 v1 升级到 v2。
 
 ### 11.5 生产整改与外部阻塞证据
 
@@ -527,8 +537,9 @@ git diff --check custom...HEAD
 | ETF 分钟 | 83,741,815 行；拒绝 0；248 文件全部硬链接，仅生成 coverage manifest | 旧目录 `.kline_etf_minute.pre-repair-20260801T192030Z-b081bd8a`；最近两日覆盖不足仍存在 |
 | 股票 enriched | 6,160,370 行和唯一键不变；相对旧表连板列改动 7,433/6,672 行，股本列改动 134/169 行；metadata 固化全部输入 hash | 旧目录 `.kline_daily_enriched.pre-rebuild-20260801T185833Z` |
 | valuation | 6,160,370 行和唯一键不变；按新 enriched 和固定财务 source snapshot 重建 | 旧目录 `.valuation_daily.pre-rebuild-20260801T190039Z`；财务原表 8 组冲突仍需供应商核源后再次重建 |
-| 开盘啦回放 | 20,112/20,112 归档解析成功；错误 0；11 张表主键缺失/额外和字段错配均为 0；`/30` 2,681 份均为 `valid_empty` | 报告写到 `/tmp`，未修改数据湖 |
+| 开盘啦龙虎榜明细 | 720 -> 798 行；恢复 78 行；`(symbol,side,log_id)` 798 个唯一键；schema v2；字段 contract hash `2481d895...53c0` | 旧目录 `timeseries.pre-repair-20260801T205054Z-84730081` 和旧配置可回滚；修复仅修改该表 3 个活动文件 |
+| 开盘啦回放 | 20,112/20,112 归档解析成功；错误 0；12 张表 schema/类型/分区/主键/字段值全部通过；`/30` 2,681 份均为 `valid_empty` | 报告写到 `/tmp`；除已声明的龙虎榜修复外不修改数据湖 |
 | 指数在线核源 | 7 个指数、8,477 行在线 TickFlow 与本地逐 OHLCVA 字段一致；在线结果仍触发质量门禁，本地异常未改 | 等待上游修正或提供 revision；不得用其他辅助源静默替代 |
 | 财务在线核源 | 当前 `financial_capability=False`，8 组冲突无法在线取证 | 保留 fail-closed；取得 Expert 能力或供应商 revision 后再修原表和 valuation |
 
-本轮数据执行前确认 `3011`、`3018` 无监听进程；EasyTDX/开盘啦在线核源只调用 client/parser，未调用 collector。维护启动开关目前仅在候选分支；在其另行复审并合入前，不应把 `TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 当作 `custom` 已支持能力，维护窗口需继续通过停止应用/调度器规避启动回补。
+本轮数据执行前确认 `3011`、`3018` 无监听进程；没有调用 EasyTDX/开盘啦在线 collector。龙虎榜修复从已有 72 份归档重建，执行窗口内 `data/` 新 mtime 仅出现在该表的 `config.json`、`part.parquet` 和 `repair-manifest.json`；备份文件 hash 与修复前活动文件逐字节一致。`TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 已随本轮实现落地，但它只跳过启动首拉，不禁用到点 cron。
