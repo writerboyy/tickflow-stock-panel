@@ -460,6 +460,52 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
     assert engine.market_history_requirements == {("index", "1d"): 235}
 
 
+def test_performance_small_cap_ema_ignores_leading_missing_values():
+    assert performance_small_cap._ema([None, 1.0, 2.0, 3.0], 3) == [
+        None,
+        None,
+        1.5,
+        2.25,
+    ]
+
+
+def test_performance_small_cap_top_divergence_requires_current_dead_cross(monkeypatch):
+    size = performance_small_cap.INDEX_HISTORY_BARS
+    closes = [float(index) for index in range(size)]
+    rows = [SimpleNamespace(close=value) for value in closes]
+    context = SimpleNamespace(
+        market_history_bars=lambda *_args, **_kwargs: rows,
+    )
+
+    dif = [2.0] * size
+    dif[100] = 4.0
+    dif[-20:-10] = [3.0] * 10
+    dif[-10:] = [1.0] * 10
+    dif[200] = 2.0
+    stale_macd = [-1.0] * size
+    stale_macd[99] = 1.0
+    stale_macd[199] = 1.0
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_macd",
+        lambda _values: (dif, [None] * size, stale_macd),
+    )
+
+    assert performance_small_cap._detect_divergences(context) == (False, False)
+
+    current_macd = [-1.0] * size
+    current_macd[99] = 1.0
+    current_macd[-2] = 1.0
+    dif[-1] = 2.0
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_macd",
+        lambda _values: (dif, [None] * size, current_macd),
+    )
+
+    assert performance_small_cap._detect_divergences(context) == (True, False)
+
+
 def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selection():
     previous_day = datetime(2025, 7, 23)
     symbols = [f"00{index:04d}.SZ" for index in range(1, 49)]

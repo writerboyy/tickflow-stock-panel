@@ -481,15 +481,20 @@ def _check_smallcap_timing(context) -> None:
             _execute_recovery_buying(context)
 
 
-def _ema(values: list[float], span: int) -> list[float | None]:
+def _ema(values: list[float | None], span: int) -> list[float | None]:
     if not values:
         return []
     alpha = 2 / (span + 1)
     result: list[float | None] = []
     current: float | None = None
-    for index, value in enumerate(values):
+    observations = 0
+    for value in values:
+        if value is None or not math.isfinite(float(value)):
+            result.append(None)
+            continue
         current = value if current is None else alpha * value + (1 - alpha) * current
-        result.append(current if index >= span - 2 else None)
+        observations += 1
+        result.append(current if observations >= span - 1 else None)
     return result
 
 
@@ -500,12 +505,7 @@ def _macd(values: list[float]) -> tuple[list[float | None], list[float | None], 
         fast - slow if fast is not None and slow is not None else None
         for fast, slow in zip(ema_fast, ema_slow)
     ]
-    clean_dif = [value if value is not None else 0.0 for value in dif]
-    dea_raw = _ema(clean_dif, 9)
-    dea = [
-        value if dif[index] is not None and index >= 33 else None
-        for index, value in enumerate(dea_raw)
-    ]
+    dea = _ema(dif, 9)
     macd = [
         (dif_value - dea_value) * 2 if dif_value is not None and dea_value is not None else None
         for dif_value, dea_value in zip(dif, dea)
@@ -540,6 +540,9 @@ def _detect_divergences(context) -> tuple[bool, bool]:
             and dif[previous] is not None
             and dif[current] is not None
             and dif[previous] > dif[current] > 0
+            and macd[-2] is not None
+            and macd[-1] is not None
+            and macd[-2] > 0 > macd[-1]
         ):
             recent = [value for value in dif[-10:] if value is not None]
             prior = [value for value in dif[-20:-10] if value is not None]
@@ -551,6 +554,9 @@ def _detect_divergences(context) -> tuple[bool, bool]:
             and dif[previous] is not None
             and dif[current] is not None
             and dif[previous] < dif[current] < 0
+            and macd[-2] is not None
+            and macd[-1] is not None
+            and macd[-2] < 0 < macd[-1]
         ):
             recent = [value for value in dif[-10:] if value is not None]
             prior = [value for value in dif[-20:-10] if value is not None]

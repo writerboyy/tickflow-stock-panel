@@ -509,6 +509,8 @@ def test_create_paper_account_continues_from_backtest_without_private_fields(
         store = PaperAccountStore(data_dir)
         state = store.get(account_id)
         assert "continuation_job_id" not in state["config"]
+        assert state["config"]["start"] == "2025-07-24"
+        assert state["config"]["end"] == "2026-07-03"
         state["checkpoint"] = {"private": True}
         state["continuation"] = {"job_id": job_id}
         return store.save(state)
@@ -522,6 +524,8 @@ def test_create_paper_account_continues_from_backtest_without_private_fields(
         "name": "小市值模拟",
         "timeframe": "1d",
         "market_mode": "bar_1d",
+        "start": "2025-07-24",
+        "end": "2026-07-03",
         "continuation_job_id": "verified-run",
     })
 

@@ -952,7 +952,7 @@ def create_paper_account(req: PaperWrite, request: Request):
     _validate_paper_payload(req, request)
     strategy = _strategy_store(request).get(req.strategy_id)
     account_id = uuid.uuid4().hex[:12]
-    payload = req.model_dump()
+    payload = req.model_dump(mode="json")
     risk_config = payload.pop("risk_config")
     continuation_job_id = payload.pop("continuation_job_id", None)
     state = {
