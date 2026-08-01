@@ -318,6 +318,8 @@ class KlineRepository:
         self._instruments_cache: pl.DataFrame | None = None
         self._historical_shares_cache: pl.DataFrame | None = None
         self._historical_shares_mtime_ns: int | None = None
+        self._historical_names_cache: pl.DataFrame | None = None
+        self._historical_names_mtime_ns: int | None = None
         # 完整 enriched 历史 (含所有指标, 供 filter_history 策略使用)
         self._enriched_history_cache: pl.DataFrame | None = None  # ~100万行
         self._enriched_history_start: date | None = None
@@ -573,6 +575,7 @@ class KlineRepository:
                             df_full,
                             instruments,
                             historical_shares=self.get_historical_shares(),
+                            historical_names=self.get_instrument_name_history(),
                         )
                         logger.info("enriched refresh step done: compute limit signals (%.2fs)", time.perf_counter() - step)
 
@@ -698,14 +701,52 @@ class KlineRepository:
             logger.warning("enriched latest cache restore skipped: %s", e)
             return df_today
 
+    def _build_recursive_indicator_state(self, latest: date) -> pl.DataFrame:
+        """Build exact EWM state from the complete stored history.
+
+        Recursive EMA/MACD/KDJ/ATR/RSI state cannot be re-initialized from a
+        recent rolling window without changing the frozen batch formula.
+        """
+        from app.indicators.pipeline import compute_indicators
+
+        try:
+            lf = (
+                scan_enriched_parquet(self._enriched_glob)
+                .filter(pl.col("date") <= latest)
+                .select("symbol", "date", "high", "low", "close")
+                .sort(["symbol", "date"])
+            )
+            history = lf.collect(engine="streaming")
+            if history.is_empty():
+                return pl.DataFrame()
+            state = compute_indicators(
+                history,
+                needed={
+                    "ema5", "ema10", "ema20", "ema30", "ema60",
+                    "macd_dea", "kdj_d", "atr_14",
+                    "rsi_6", "rsi_14", "rsi_24",
+                },
+                keep_recursive_state=True,
+            )
+            columns = [
+                "symbol", "date",
+                "ema5", "ema10", "ema20", "ema30", "ema60",
+                "_ema12", "_ema26", "macd_dea", "kdj_k", "kdj_d", "atr_14",
+                "_rsi_avg_gain_6", "_rsi_avg_loss_6",
+                "_rsi_avg_gain_14", "_rsi_avg_loss_14",
+                "_rsi_avg_gain_24", "_rsi_avg_loss_24",
+            ]
+            return _last_available_rows(state.select(columns), latest).drop("date")
+        except (OSError, pl.exceptions.PolarsError) as exc:
+            logger.warning("完整递推指标状态构造失败: %s", exc)
+            return pl.DataFrame()
+
     def _build_live_agg(self, latest: date) -> None:
         """从 OHLCV 即时计算递推状态 + 窗口聚合, 构建盘中实时聚合表。
 
         优化: 优先使用 _enriched_history_cache (启动时已计算), 避免重复 compute_indicators。
         """
         from datetime import timedelta
-        from app.indicators.pipeline import _ema_alpha
-
         started = time.perf_counter()
         logger.info("live agg build start: latest=%s", latest)
         start_60d = latest - timedelta(days=90)  # 日历90天 ≈ 60个交易日
@@ -761,42 +802,23 @@ class KlineRepository:
             logger.info("live agg build skipped: empty state (%.2fs)", time.perf_counter() - started)
             return
 
-        # 单独计算 _ema12 / _ema26 (compute_indicators 内部会 drop 掉)
+        # 递推指标必须从完整历史构造；短窗口重新初始化会与批量公式漂移。
         step = time.perf_counter()
-        logger.info("live agg step start: ema state")
-        df_ema = _last_available_rows(
-            df_hist.sort(["symbol", "date"]).with_columns([
-                pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
-                pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
-            ]).select("symbol", "date", "_ema12", "_ema26"),
-            latest,
-        ).select("symbol", "_ema12", "_ema26")
-
-        agg_a = agg_a.join(df_ema, on="symbol", how="inner")
-        logger.info("live agg step done: ema state (%.2fs)", time.perf_counter() - step)
-
-        # 单独计算 RSI 状态列 (compute_indicators 内部会 drop 掉)
-        step = time.perf_counter()
-        logger.info("live agg step start: rsi state")
-        df_rsi_base = df_hist.sort(["symbol", "date"]).with_columns(
-            pl.col("close").diff().over("symbol").alias("_daily_delta")
-        )
-        gain = pl.when(pl.col("_daily_delta") > 0).then(pl.col("_daily_delta")).otherwise(0.0)
-        loss = pl.when(pl.col("_daily_delta") < 0).then(-pl.col("_daily_delta")).otherwise(0.0)
-        rsi_exprs = []
-        for n in (6, 14, 24):
-            a = 1.0 / n
-            rsi_exprs.append(gain.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_gain_{n}"))
-            rsi_exprs.append(loss.ewm_mean(alpha=a, adjust=False).over("symbol").alias(f"_rsi_avg_loss_{n}"))
-        df_rsi = (
-            _last_available_rows(
-                df_rsi_base.with_columns(rsi_exprs), latest,
-            )
-            .select("symbol", *[f"_rsi_avg_gain_{n}" for n in (6, 14, 24)],
-                              *[f"_rsi_avg_loss_{n}" for n in (6, 14, 24)])
-        )
-        agg_a = agg_a.join(df_rsi, on="symbol", how="inner")
-        logger.info("live agg step done: rsi state (%.2fs)", time.perf_counter() - step)
+        logger.info("live agg step start: full recursive state")
+        recursive_state = self._build_recursive_indicator_state(latest)
+        if recursive_state.is_empty():
+            self._live_agg_cache = pl.DataFrame()
+            self._live_agg_cache_date = None
+            logger.warning("live agg disabled: exact recursive state unavailable")
+            return
+        replace_columns = [
+            column for column in recursive_state.columns
+            if column != "symbol" and column in agg_a.columns
+        ]
+        if replace_columns:
+            agg_a = agg_a.drop(replace_columns)
+        agg_a = agg_a.join(recursive_state, on="symbol", how="inner")
+        logger.info("live agg step done: full recursive state (%.2fs)", time.perf_counter() - step)
 
         # 前复权因子: adj_factor = close(复权) / raw_close(原始)
         if "raw_close" in df_hist.columns:
@@ -875,8 +897,8 @@ class KlineRepository:
                 pl.col("close").tail(19).sum().alias("_boll_partial_sum"),
                 (pl.col("close").tail(19) ** 2).sum().alias("_boll_partial_sq_sum"),
 
-                pl.col("high").tail(59).max().alias("_high_59d"),
-                pl.col("low").tail(59).min().alias("_low_59d"),
+                pl.col("close").tail(59).max().alias("_high_59d"),
+                pl.col("close").tail(59).min().alias("_low_59d"),
 
                 pl.col("close").tail(5).first().alias("_close_5d_ago"),
                 pl.col("close").tail(10).first().alias("_close_10d_ago"),
@@ -892,7 +914,7 @@ class KlineRepository:
                 pl.col("low").tail(8).min().alias("_kdj_8d_low"),
                 pl.col("high").tail(8).max().alias("_kdj_8d_high"),
 
-                pl.col("close").tail(59).len().alias("_window_len"),
+                pl.col("close").tail(60).len().alias("_window_len"),
             ])
         )
 
@@ -1236,6 +1258,22 @@ class KlineRepository:
             self._historical_shares_cache = load_share_history(self.store.data_dir)
             self._historical_shares_mtime_ns = mtime_ns
         return self._historical_shares_cache
+
+    def get_instrument_name_history(self) -> pl.DataFrame:
+        """Read point-in-time instrument names and refresh when the file changes."""
+        path = self.store.data_dir / "instrument_name_history" / "part.parquet"
+        mtime_ns = path.stat().st_mtime_ns if path.exists() else None
+        if self._historical_names_cache is None or mtime_ns != self._historical_names_mtime_ns:
+            if path.exists():
+                try:
+                    self._historical_names_cache = pl.read_parquet(path)
+                except (OSError, pl.exceptions.PolarsError) as exc:
+                    logger.warning("instrument name history 读取失败: %s", exc)
+                    self._historical_names_cache = pl.DataFrame()
+            else:
+                self._historical_names_cache = pl.DataFrame()
+            self._historical_names_mtime_ns = mtime_ns
+        return self._historical_names_cache
 
     def get_index_instruments(self) -> pl.DataFrame:
         """返回缓存的指数 instruments DataFrame。如无缓存则懒加载。"""
@@ -1732,6 +1770,7 @@ class KlineRepository:
                 df,
                 instruments,
                 historical_shares=self.get_historical_shares(),
+                historical_names=self.get_instrument_name_history(),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("on-demand compute failed: %s", e)

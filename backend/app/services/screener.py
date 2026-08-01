@@ -187,6 +187,7 @@ class ScreenerService:
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+                historical_names=self.repo.get_instrument_name_history(),
             )
 
         # 只保留目标日期
@@ -284,6 +285,7 @@ class ScreenerService:
                 df_full,
                 instruments,
                 historical_shares=self.repo.get_historical_shares(),
+                historical_names=self.repo.get_instrument_name_history(),
             )
 
         if instruments is not None and not instruments.is_empty():

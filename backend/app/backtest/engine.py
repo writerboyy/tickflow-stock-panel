@@ -359,6 +359,11 @@ class BacktestEngine:
                     if asset_type == "stock" and self.repo is not None
                     else None
                 ),
+                historical_names=(
+                    self.repo.get_instrument_name_history()
+                    if asset_type == "stock" and self.repo is not None
+                    else None
+                ),
             )
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
             join_cols.extend(
@@ -521,7 +526,16 @@ class BacktestEngine:
         # 按 asset_type 取维表: ETF 回测须用 ETF 维表, 否则名称 JOIN 失败(全 null)、
         # 涨停信号算在错误的 instruments 上。
         instruments = self.repo.get_instruments_asset(asset_type)
-        df = compute_all(df, instruments=instruments)
+        df = compute_all(
+            df,
+            instruments=instruments,
+            historical_shares=(
+                self.repo.get_historical_shares() if asset_type == "stock" else None
+            ),
+            historical_names=(
+                self.repo.get_instrument_name_history() if asset_type == "stock" else None
+            ),
+        )
         if not instruments.is_empty() and "name" not in df.columns:
             inst_cols = [c for c in ["symbol", "name"] if c in instruments.columns]
             if len(inst_cols) == 2:

@@ -95,6 +95,44 @@ def test_st_main_board_historical_limit_is_5pct():
     assert sig is True
 
 
+def test_historical_name_changes_drive_point_in_time_st_limits():
+    start = date(2026, 4, 28)
+    bars = pl.DataFrame({
+        "symbol": ["600001.SH"] * 3,
+        "date": [start, start + timedelta(days=1), start + timedelta(days=2)],
+        "open": [10.0, 10.5, 11.55],
+        "high": [10.0, 10.5, 11.55],
+        "low": [10.0, 10.5, 11.55],
+        "close": [10.0, 10.5, 11.55],
+        "raw_close": [10.0, 10.5, 11.55],
+        "raw_high": [10.0, 10.5, 11.55],
+        "change_pct": [None, 0.05, 0.1],
+        "vol_ratio_5d": [None, 1.0, 1.0],
+        "volume": [100.0, 100.0, 100.0],
+    })
+    instruments = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "name": ["测试股份"],
+        "float_shares": [1_000_000.0],
+    })
+    name_history = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "change_date": [start + timedelta(days=2)],
+        "before_name": ["ST测试"],
+        "after_name": ["测试股份"],
+    })
+
+    result = compute_limit_signals(
+        bars,
+        instruments,
+        historical_names=name_history,
+    ).sort("date")
+
+    assert result["signal_limit_up"].to_list() == [None, True, True]
+    assert result["consecutive_limit_ups"].to_list() == [0, 1, 2]
+    assert result["name"].to_list() == ["ST测试", "ST测试", "测试股份"]
+
+
 def test_st_main_board_limit_changes_to_10pct_on_2026_07_06():
     change_date = date(2026, 7, 6)
     plus_five, _ = _last_limit_up(

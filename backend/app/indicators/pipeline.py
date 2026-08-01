@@ -330,7 +330,12 @@ def _resolve_needed(needed: set[str] | None) -> set[str]:
     return want
 
 
-def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.DataFrame:
+def compute_indicators(
+    df: pl.DataFrame,
+    needed: set[str] | None = None,
+    *,
+    keep_recursive_state: bool = False,
+) -> pl.DataFrame:
     """从 OHLCV 数据计算全套技术指标。
 
     输入必须包含: symbol, date, open, high, low, close, volume
@@ -430,9 +435,11 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
 
     # Pass 3: KDJ
     if "kdj_k" in want:
+        kdj_range = pl.col("_kdj_hn") - pl.col("_kdj_ln")
         _kdj_rsv = (
-            100 * (pl.col("close") - pl.col("_kdj_ln"))
-            / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
+            pl.when(kdj_range == 0)
+            .then(50.0)
+            .otherwise(100 * (pl.col("close") - pl.col("_kdj_ln")) / kdj_range)
         )
         df = df.with_columns([
             _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
@@ -525,7 +532,16 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
                   "_rsi_avg_gain_6", "_rsi_avg_loss_6",
                   "_rsi_avg_gain_14", "_rsi_avg_loss_14",
                   "_rsi_avg_gain_24", "_rsi_avg_loss_24"]
-    df = df.drop([c for c in _temp_cols if c in df.columns])
+    recursive_state_cols = {
+        "_ema12", "_ema26",
+        "_rsi_avg_gain_6", "_rsi_avg_loss_6",
+        "_rsi_avg_gain_14", "_rsi_avg_loss_14",
+        "_rsi_avg_gain_24", "_rsi_avg_loss_24",
+    }
+    df = df.drop([
+        c for c in _temp_cols
+        if c in df.columns and not (keep_recursive_state and c in recursive_state_cols)
+    ])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000
     import logging as _logging
@@ -641,6 +657,7 @@ def compute_limit_signals(
     instruments: pl.DataFrame,
     needed: set[str] | None = None,
     historical_shares: pl.DataFrame | None = None,
+    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """计算涨跌停相关信号。
 
@@ -689,18 +706,62 @@ def compute_limit_signals(
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
-    if need_price_limits and "name" in instruments.columns:
-        st_flag = (
-            instruments
-            .select(
-                "symbol",
-                polars_is_risk_warning_name(pl.col("name")).alias("_is_st"),
-            )
-            .unique(subset=["symbol"])
-        )
-        inst_subset = inst_subset.join(st_flag, on="symbol", how="left")
-
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
+
+    point_in_time_names = False
+    if need_price_limits:
+        if historical_names is not None and not historical_names.is_empty():
+            required = {"symbol", "change_date", "before_name", "after_name"}
+            if required <= set(historical_names.columns):
+                changes = (
+                    historical_names
+                    .select(
+                        pl.col("symbol").cast(pl.String),
+                        pl.col("change_date").cast(pl.Date, strict=False),
+                        pl.col("before_name").cast(pl.String, strict=False),
+                        pl.col("after_name").cast(pl.String, strict=False),
+                    )
+                    .drop_nulls(["symbol", "change_date"])
+                    .sort(["symbol", "change_date"])
+                    .unique(subset=["symbol", "change_date"], keep="last")
+                )
+                first_names = (
+                    changes
+                    .group_by("symbol", maintain_order=True)
+                    .agg(pl.col("before_name").first().alias("_historical_before_name"))
+                )
+                events = changes.select(
+                    "symbol",
+                    pl.col("change_date").alias("_historical_change_date"),
+                    pl.col("after_name").alias("_historical_after_name"),
+                )
+                df = (
+                    df.sort(["symbol", "date"])
+                    .join_asof(
+                        events.sort(["symbol", "_historical_change_date"]),
+                        left_on="date",
+                        right_on="_historical_change_date",
+                        by="symbol",
+                        strategy="backward",
+                        check_sortedness=False,
+                    )
+                    .join(first_names, on="symbol", how="left")
+                )
+                current_name = pl.col("name") if "name" in df.columns else pl.lit(None, dtype=pl.String)
+                df = df.with_columns(
+                    pl.coalesce(
+                        pl.col("_historical_after_name"),
+                        pl.col("_historical_before_name"),
+                        current_name,
+                    ).alias("_effective_name"),
+                )
+                df = df.with_columns(pl.col("_effective_name").alias("name"))
+                point_in_time_names = True
+        name_col = "_effective_name" if "_effective_name" in df.columns else "name"
+        if name_col in df.columns:
+            df = df.with_columns(
+                polars_is_risk_warning_name(pl.col(name_col)).alias("_is_st")
+            )
 
     if "turnover_rate" in want:
         df = apply_point_in_time_shares(df, historical_shares, today=cn_today())
@@ -889,7 +950,9 @@ def compute_limit_signals(
     cleanup = ["_prev_raw_close", "_limit_pct",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
-               "_grp_up", "_grp_down", "_instrument_as_of"]
+               "_grp_up", "_grp_down", "_instrument_as_of",
+               "_historical_change_date", "_historical_after_name",
+               "_historical_before_name", "_effective_name"]
     if "_is_st" in df.columns:
         cleanup.append("_is_st")
     # 清理 join 产生的重复列
@@ -898,6 +961,8 @@ def compute_limit_signals(
             cleanup.append(c)
     # name / limit_up / limit_down 只用于计算, 不存入 enriched
     for c in ["name", "limit_up", "limit_down"]:
+        if c == "name" and point_in_time_names:
+            continue
         if c in df.columns and c != "turnover_rate":
             cleanup.append(c)
     internal_outputs = {"signal_limit_up", "signal_limit_down"} - want
@@ -911,6 +976,7 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
@@ -919,7 +985,12 @@ def compute_all(
     df = compute_indicators(df)
     df = compute_signals(df)
     if instruments is not None and not instruments.is_empty():
-        df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
+        df = compute_limit_signals(
+            df,
+            instruments,
+            historical_shares=historical_shares,
+            historical_names=historical_names,
+        )
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -956,6 +1027,7 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
+    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
@@ -991,6 +1063,7 @@ def compute_enriched(
         df,
         instruments=instruments,
         historical_shares=historical_shares,
+        historical_names=historical_names,
     )
 
     return df
@@ -1048,6 +1121,13 @@ def run_pipeline(data_dir: Path | None = None,
     except Exception as e:  # noqa: BLE001
         logger.warning("instruments 读取失败: %s", e)
     historical_shares = load_share_history(d)
+    historical_names = pl.DataFrame()
+    name_history_path = d / "instrument_name_history" / "part.parquet"
+    if name_history_path.exists():
+        try:
+            historical_names = pl.read_parquet(name_history_path)
+        except (OSError, pl.exceptions.PolarsError) as e:
+            logger.warning("instrument name history 读取失败: %s", e)
 
     if new_dates_only:
         # ── 向后增量模式 ──
@@ -1095,6 +1175,7 @@ def run_pipeline(data_dir: Path | None = None,
                 factors=factors,
                 instruments=instruments,
                 historical_shares=historical_shares,
+                historical_names=historical_names,
             )
 
             # 只保留新日期的行
@@ -1132,11 +1213,13 @@ def run_pipeline(data_dir: Path | None = None,
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
                 shares_sym = historical_shares.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_shares.is_empty() else historical_shares
+                names_sym = historical_names.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_names.is_empty() else historical_names
                 enriched_sym = compute_enriched(
                     raw_sym,
                     factors=factors_sym,
                     instruments=inst_sym,
                     historical_shares=shares_sym,
+                    historical_names=names_sym,
                 )
                 for date_df in enriched_sym.partition_by("date"):
                     dt = date_df["date"][0]
@@ -1227,6 +1310,10 @@ def run_pipeline(data_dir: Path | None = None,
             historical_shares.filter(pl.col("symbol").is_in(batch_syms))
             if not historical_shares.is_empty() else historical_shares
         )
+        batch_names = (
+            historical_names.filter(pl.col("symbol").is_in(batch_syms))
+            if not historical_names.is_empty() else historical_names
+        )
 
         # 计算
         enriched = compute_enriched(
@@ -1234,6 +1321,7 @@ def run_pipeline(data_dir: Path | None = None,
             factors=batch_factors,
             instruments=batch_inst,
             historical_shares=batch_shares,
+            historical_names=batch_names,
         )
 
         if not enriched.is_empty():
@@ -1260,7 +1348,7 @@ def run_pipeline(data_dir: Path | None = None,
                     date_buffers[ds].append(_select_storage_cols(date_df).sort(["symbol"]))
                     written += date_df.height
 
-        del raw, enriched, batch_factors, batch_inst, batch_shares
+        del raw, enriched, batch_factors, batch_inst, batch_shares, batch_names
         gc.collect()
 
         logger.info("symbol 批次 %d/%d (%s ~ %s), 已处理 %d 行",
@@ -1396,6 +1484,7 @@ def compute_enriched_today(
     live_state = live_agg.with_columns(pl.lit(True).alias("_has_history_state"))
     df = today_ohlcv.join(live_state, on="symbol", how="left")
     has_history_state = pl.col("_has_history_state").fill_null(False)
+    history_len = pl.col("_window_len").fill_null(0)
 
     # ---- 前复权: 保存原始价 → 调整 OHLCV ----
     df = df.with_columns([
@@ -1464,34 +1553,39 @@ def compute_enriched_today(
 
     # ---- MA (用部分和) ----
     df = df.with_columns([
-        ((pl.col("_ma5_partial_sum") + pl.col("close")) / 5).alias("ma5"),
-        ((pl.col("_ma10_partial_sum") + pl.col("close")) / 10).alias("ma10"),
-        ((pl.col("_ma20_partial_sum") + pl.col("close")) / 20).alias("ma20"),
-        ((pl.col("_ma30_partial_sum") + pl.col("close")) / 30).alias("ma30"),
-        ((pl.col("_ma60_partial_sum") + pl.col("close")) / 60).alias("ma60"),
+        pl.when(history_len >= 4).then((pl.col("_ma5_partial_sum") + pl.col("close")) / 5).otherwise(None).alias("ma5"),
+        pl.when(history_len >= 9).then((pl.col("_ma10_partial_sum") + pl.col("close")) / 10).otherwise(None).alias("ma10"),
+        pl.when(history_len >= 19).then((pl.col("_ma20_partial_sum") + pl.col("close")) / 20).otherwise(None).alias("ma20"),
+        pl.when(history_len >= 29).then((pl.col("_ma30_partial_sum") + pl.col("close")) / 30).otherwise(None).alias("ma30"),
+        pl.when(history_len >= 59).then((pl.col("_ma60_partial_sum") + pl.col("close")) / 60).otherwise(None).alias("ma60"),
     ])
 
     # ---- Bollinger ----
     boll_sum = pl.col("_boll_partial_sum") + pl.col("close")
     boll_sq_sum = pl.col("_boll_partial_sq_sum") + pl.col("close") ** 2
     boll_ma = boll_sum / 20
-    boll_var = boll_sq_sum / 20 - boll_ma ** 2
-    boll_std = pl.when(boll_var > 0).then(boll_var.sqrt()).otherwise(0.0)
+    boll_var = (boll_sq_sum - boll_sum ** 2 / 20) / 19
+    boll_std = pl.max_horizontal(boll_var, pl.lit(0.0)).sqrt()
     df = df.with_columns([
-        (boll_ma + 2 * boll_std).alias("boll_upper"),
-        (boll_ma - 2 * boll_std).alias("boll_lower"),
+        pl.when(history_len >= 19).then(boll_ma + 2 * boll_std).otherwise(None).alias("boll_upper"),
+        pl.when(history_len >= 19).then(boll_ma - 2 * boll_std).otherwise(None).alias("boll_lower"),
     ])
 
     # ---- KDJ (递推) ----
     kdj_ln = pl.min_horizontal(pl.col("_kdj_8d_low"), pl.col("low"))
     kdj_hn = pl.max_horizontal(pl.col("_kdj_8d_high"), pl.col("high"))
-    rsv = (pl.col("close") - kdj_ln) / (kdj_hn - kdj_ln).fill_null(1e-12) * 100
-    k_today = rsv / 3 + pl.col("kdj_k") * 2 / 3
-    d_today = k_today / 3 + pl.col("kdj_d") * 2 / 3
+    kdj_range = kdj_hn - kdj_ln
+    rsv = pl.when(kdj_range == 0).then(50.0).otherwise((pl.col("close") - kdj_ln) / kdj_range * 100)
+    k_today = pl.when(pl.col("kdj_k").is_null()).then(rsv).otherwise(
+        rsv / 3 + pl.col("kdj_k") * 2 / 3
+    )
+    d_today = pl.when(pl.col("kdj_d").is_null()).then(k_today).otherwise(
+        k_today / 3 + pl.col("kdj_d") * 2 / 3
+    )
     df = df.with_columns([
-        k_today.alias("kdj_k"),
-        d_today.alias("kdj_d"),
-        (3 * k_today - 2 * d_today).alias("kdj_j"),
+        pl.when(history_len >= 8).then(k_today).otherwise(None).alias("kdj_k"),
+        pl.when(history_len >= 8).then(d_today).otherwise(None).alias("kdj_d"),
+        pl.when(history_len >= 8).then(3 * k_today - 2 * d_today).otherwise(None).alias("kdj_j"),
     ])
 
     # ---- ATR (递推) ----
@@ -1532,30 +1626,30 @@ def compute_enriched_today(
     else:
         time_factor = 1.0  # 盘后/无效时间: 不折算(此时 volume 已是全天量)
     df = df.with_columns([
-        vol_ma5.alias("vol_ma5"),
-        vol_ma10.alias("vol_ma10"),
-        ((pl.col("volume") * time_factor) / vol_ma5_prev).alias("vol_ratio_5d"),
+        pl.when(history_len >= 4).then(vol_ma5).otherwise(None).alias("vol_ma5"),
+        pl.when(history_len >= 9).then(vol_ma10).otherwise(None).alias("vol_ma10"),
+        pl.when(history_len >= 5).then((pl.col("volume") * time_factor) / vol_ma5_prev).otherwise(None).alias("vol_ratio_5d"),
     ])
 
     # ---- 极值 60 日 ----
     df = df.with_columns([
-        pl.when(has_history_state)
-          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("high")))
+        pl.when(has_history_state & (history_len >= 59))
+          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("close")))
           .otherwise(None)
           .alias("high_60d"),
-        pl.when(has_history_state)
-          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("low")))
+        pl.when(has_history_state & (history_len >= 59))
+          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("close")))
           .otherwise(None)
           .alias("low_60d"),
     ])
 
     # ---- 动量 (5d/10d/20d/30d/60d) ----
     df = df.with_columns([
-        (pl.col("close") / pl.col("_close_5d_ago") - 1).alias("momentum_5d"),
-        (pl.col("close") / pl.col("_close_10d_ago") - 1).alias("momentum_10d"),
-        (pl.col("close") / pl.col("_close_20d_ago") - 1).alias("momentum_20d"),
-        (pl.col("close") / pl.col("_close_30d_ago") - 1).alias("momentum_30d"),
-        (pl.col("close") / pl.col("_close_60d_ago") - 1).alias("momentum_60d"),
+        pl.when(history_len >= 5).then(pl.col("close") / pl.col("_close_5d_ago") - 1).otherwise(None).alias("momentum_5d"),
+        pl.when(history_len >= 10).then(pl.col("close") / pl.col("_close_10d_ago") - 1).otherwise(None).alias("momentum_10d"),
+        pl.when(history_len >= 20).then(pl.col("close") / pl.col("_close_20d_ago") - 1).otherwise(None).alias("momentum_20d"),
+        pl.when(history_len >= 30).then(pl.col("close") / pl.col("_close_30d_ago") - 1).otherwise(None).alias("momentum_30d"),
+        pl.when(history_len >= 60).then(pl.col("close") / pl.col("_close_60d_ago") - 1).otherwise(None).alias("momentum_60d"),
     ])
 
     # ---- 年化波动率 20d (递推) ----
@@ -1563,11 +1657,10 @@ def compute_enriched_today(
     today_ret = pl.col("close") / pl.col("prev_close") - 1
     total_sum = pl.col("_vol_19d_pct_sum").fill_null(0.0) + today_ret
     total_sq_sum = pl.col("_vol_19d_pct_sq_sum").fill_null(0.0) + today_ret ** 2
-    vol_mean = total_sum / 20
-    vol_var = total_sq_sum / 20 - vol_mean ** 2
+    vol_var = (total_sq_sum - total_sum ** 2 / 20) / 19
     df = df.with_columns(
-        pl.when(has_history_state & (vol_var > 0))
-          .then(vol_var.sqrt() * (252 ** 0.5))
+        pl.when(has_history_state & (history_len >= 20))
+          .then(pl.max_horizontal(vol_var, pl.lit(0.0)).sqrt() * (252 ** 0.5))
           .otherwise(None)
           .alias("annual_vol_20d"),
     )
