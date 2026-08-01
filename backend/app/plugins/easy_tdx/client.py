@@ -5,8 +5,12 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from calendar import monthrange
 from datetime import date
+import json
+import os
 import re
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 def _text(value: Any) -> str:
@@ -82,10 +86,33 @@ _FORECAST = re.compile(
     r"(?P<yoy_low>-?[\d.]+)%(?:至(?P<yoy_high>-?[\d.]+)%)?",
     re.S,
 )
+_CASH_DIVIDEND = re.compile(
+    r"(?P<shares>\d+(?:\.\d+)?)\s*(?:股)?派(?:发)?\s*(?P<cash>\d+(?:\.\d+)?)\s*元"
+)
+_TQLEX_URL = "http://static.tdx.com.cn:7615/TQLEX"
 
 
 def _number(value: str) -> float:
     return float(value.replace(",", ""))
+
+
+def _date_text(value: Any) -> str | None:
+    text = _text(value)
+    if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", text):
+        return None
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
+
+
+def _cash_per_share(plan: Any) -> float | None:
+    match = _CASH_DIVIDEND.search(_text(plan))
+    if match is None:
+        return None
+    shares = float(match.group("shares"))
+    cash = float(match.group("cash"))
+    return cash / shares if shares > 0 and cash > 0 else None
 
 
 def _section(text: str, marker: str) -> str | None:
@@ -191,4 +218,73 @@ def fetch_f10_texts(codes: Iterable[str], timeout: float = 8.0) -> list[tuple[st
             except Exception:
                 continue
             records.append((code, content))
+    return records
+
+
+def fetch_dividend_history_rows(codes: Iterable[str], timeout: float = 10.0) -> list[dict]:
+    """Fetch implemented cash dividends from the TDX 7615 history page.
+
+    EasyTDX's company-info API exposes only the current prompt text, while this
+    public TDX F10 page retains historical registration dates.  Rows without a
+    concrete record date or cash amount are deliberately discarded.
+    """
+    base_url = os.getenv("EASY_TDX_TQLEX_URL", _TQLEX_URL).rstrip("?")
+    entry = "CWServ.tdxf10_gg_fhrz"
+    url = f"{base_url}{'&' if '?' in base_url else '?'}{urlencode({'Entry': entry})}"
+    records: list[dict] = []
+    for raw_code in codes:
+        code = _code(raw_code)
+        symbol = _f10_symbol(code)
+        if symbol is None:
+            continue
+        request = Request(
+            url,
+            data=json.dumps({"Params": [code, "fh"]}, separators=(",", ":")).encode(),
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Accept": "application/json",
+                "User-Agent": "TickFlow EasyTDX",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8-sig"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict) or payload.get("ErrorCode", 0) not in (0, "0", None):
+            continue
+        result_sets = payload.get("ResultSets") or []
+        if not result_sets or not isinstance(result_sets[0], dict):
+            continue
+        table = result_sets[0]
+        columns = table.get("ColName") or []
+        if not isinstance(columns, list):
+            continue
+        for source_row in table.get("Content") or []:
+            if not isinstance(source_row, list):
+                continue
+            row = dict(zip((str(column) for column in columns), source_row, strict=False))
+            record_date = _date_text(row.get("T021"))
+            plan = _text(row.get("T004"))
+            cash_per_share = _cash_per_share(plan)
+            if (
+                record_date is None
+                or cash_per_share is None
+                or _text(row.get("aT036")) != "036003"
+            ):
+                continue
+            records.append({
+                "symbol": symbol,
+                "code": code,
+                "report_date": record_date,
+                "record_date": record_date,
+                "ex_dividend_date": _date_text(row.get("T023")),
+                "board_date": _date_text(row.get("T003")),
+                "plan": plan,
+                "cash_per_share": cash_per_share,
+                "progress": _text(row.get("T036")),
+                "progress_code": _text(row.get("aT036")),
+                "source": "tdx_7615_f10",
+            })
     return records

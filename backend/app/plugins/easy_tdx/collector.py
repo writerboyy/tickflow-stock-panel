@@ -13,8 +13,14 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.market_time import cn_now
 from app.plugins.easy_tdx.bridge import availability
-from app.plugins.easy_tdx.client import fetch_f10_texts, fetch_industry_rows, parse_f10_reference
+from app.plugins.easy_tdx.client import (
+    fetch_dividend_history_rows,
+    fetch_f10_texts,
+    fetch_industry_rows,
+    parse_f10_reference,
+)
 from app.plugins.easy_tdx.storage import (
+    DIVIDEND_HISTORY_TABLE,
     EXPRESS_TABLE,
     FORECAST_TABLE,
     MARGIN_TABLE,
@@ -34,11 +40,13 @@ class EasyTdxCollector:
         data_dir: Path,
         fetcher: Callable[[], list[dict]] = fetch_industry_rows,
         f10_fetcher: Callable[[list[str]], list[tuple[str, str]]] = fetch_f10_texts,
+        dividend_fetcher: Callable[[list[str]], list[dict]] = fetch_dividend_history_rows,
         availability_check: Callable[[], tuple[bool, str]] = availability,
     ) -> None:
         self.data_dir = Path(data_dir)
         self._fetcher = fetcher
         self._f10_fetcher = f10_fetcher
+        self._dividend_fetcher = dividend_fetcher
         self._availability_check = availability_check
         self._bootstrap_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -155,14 +163,17 @@ class EasyTdxCollector:
         margins: list[dict] = []
         forecasts: list[dict] = []
         expresses: list[dict] = []
+        dividends = await asyncio.to_thread(self._dividend_fetcher, codes or self._stock_codes())
         collected_at = cn_now().isoformat()
         for code, text in texts:
             parsed_margin, parsed_forecast, parsed_express = parse_f10_reference(text, code)
             margins.extend({**row, "collected_at": collected_at} for row in parsed_margin)
             forecasts.extend({**row, "collected_at": collected_at} for row in parsed_forecast)
             expresses.extend({**row, "collected_at": collected_at} for row in parsed_express)
+        dividends = [{**row, "collected_at": collected_at} for row in dividends]
         return (
             upsert_records(self.data_dir, MARGIN_TABLE, margins, ("symbol",))
             + upsert_records(self.data_dir, FORECAST_TABLE, forecasts, ("symbol", "announcement_date"))
             + upsert_records(self.data_dir, EXPRESS_TABLE, expresses, ("symbol", "announcement_date"))
+            + upsert_records(self.data_dir, DIVIDEND_HISTORY_TABLE, dividends, ("symbol", "record_date", "plan"))
         )

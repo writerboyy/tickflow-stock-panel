@@ -324,11 +324,11 @@ def _load_dividend_ratio_ranked(
     )
     if frame.is_empty():
         return []
-    from app.services.stock_dividends import load_cash_dividends
+    from app.services.stock_dividends import load_record_date_cash_dividends
 
     dividends = [
         {"symbol": symbol, "date": day, "cash_dividend": cash}
-        for (symbol, day), cash in load_cash_dividends(data_dir).items()
+        for (symbol, day), cash in load_record_date_cash_dividends(data_dir).items()
         if symbol in symbols and start <= day <= previous_date
     ]
     dividend_frame = pl.DataFrame(

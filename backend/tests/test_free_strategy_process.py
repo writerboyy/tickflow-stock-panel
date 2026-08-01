@@ -151,13 +151,21 @@ def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path
                 "total_shares": [100.0] * 12,
             })
 
-    dividend_path = tmp_path / "corporate_actions" / "stock_dividends.parquet"
-    dividend_path.parent.mkdir()
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["A", "B", "C", "D"],
-        "event_date": [date(2024, 1, 2)] * 4,
+        "record_date": ["2024-01-02"] * 4,
         "cash_per_share": [1.0, 2.0, 3.0, 4.0],
+        "progress_code": ["036003"] * 4,
     }).write_parquet(dividend_path)
+    xdxr_path = tmp_path / "corporate_actions" / "stock_dividends.parquet"
+    xdxr_path.parent.mkdir()
+    pl.DataFrame({
+        "symbol": ["A"],
+        "event_date": [date(2024, 1, 2)],
+        "cash_per_share": [100.0],
+    }).write_parquet(xdxr_path)
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),

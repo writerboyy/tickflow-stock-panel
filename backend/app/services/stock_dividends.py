@@ -8,6 +8,7 @@ import polars as pl
 
 
 DIVIDEND_PATH = Path("corporate_actions") / "stock_dividends.parquet"
+RECORD_DATE_DIVIDEND_PATH = Path("ext_data") / "ext_tdx_dividend_history" / "timeseries"
 _REQUIRED_COLUMNS = {"instrument_id", "event_date", "c1", "record_hex"}
 
 
@@ -72,5 +73,31 @@ def load_cash_dividends(data_dir: Path) -> dict[tuple[str, date], float]:
     result: dict[tuple[str, date], float] = {}
     for symbol, day, cash in frame.select("symbol", "event_date", "cash_per_share").iter_rows():
         if isinstance(day, date) and cash is not None:
+            result[(str(symbol), day)] = result.get((str(symbol), day), 0.0) + float(cash)
+    return result
+
+
+def load_record_date_cash_dividends(data_dir: Path) -> dict[tuple[str, date], float]:
+    """Load implemented TDX F10 cash dividends keyed by their record date."""
+    directory = data_dir / RECORD_DATE_DIVIDEND_PATH
+    if not directory.exists():
+        return {}
+    try:
+        frame = pl.read_parquet(str(directory / "**" / "*.parquet"), glob=True)
+    except Exception:
+        return {}
+    required = {"symbol", "record_date", "cash_per_share", "progress_code"}
+    if frame.is_empty() or not required <= set(frame.columns):
+        return {}
+    result: dict[tuple[str, date], float] = {}
+    for symbol, day, cash, progress_code in frame.select(
+        "symbol", "record_date", "cash_per_share", "progress_code"
+    ).iter_rows():
+        if isinstance(day, str):
+            try:
+                day = date.fromisoformat(day)
+            except ValueError:
+                continue
+        if isinstance(day, date) and cash is not None and str(progress_code) == "036003":
             result[(str(symbol), day)] = result.get((str(symbol), day), 0.0) + float(cash)
     return result
