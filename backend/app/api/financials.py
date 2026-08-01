@@ -144,7 +144,7 @@ def get_shares(request: Request, symbol: str | None = None):
 def sync_table(request: Request, table: str):
     """手动触发同步(立即返回,后台异步执行)。
 
-    table: metrics / income / balance_sheet / cash_flow / shares / all
+    table: metrics / income / balance_sheet / cash_flow / shares / valuation / all
     同步在后台线程执行,全量同步需数分钟。本接口立即返回 started 状态,
     前端通过轮询 GET /status 的 syncing 字段观察进度。
     """

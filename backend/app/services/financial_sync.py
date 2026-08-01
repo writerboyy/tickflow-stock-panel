@@ -21,8 +21,15 @@ logger = logging.getLogger(__name__)
 # 每个 API 请求最多 100 个标的
 _BATCH_SIZE = 100
 
-# 财务报表 + 历史股本表
-FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow", "shares")
+# 财务报表 + 历史股本/估值表
+FINANCIAL_TABLES = (
+    "metrics",
+    "income",
+    "balance_sheet",
+    "cash_flow",
+    "shares",
+    "valuation",
+)
 
 
 # ================================================================
@@ -91,9 +98,13 @@ def _fetch_table(
         "balance_sheet": tf.financials.balance_sheet,
         "cash_flow": tf.financials.cash_flow,
         "shares": getattr(tf.financials, "shares", None),
-    }[table]
+        "valuation": getattr(tf.financials, "valuation", None),
+    }.get(table)
     if api_method is None:
-        logger.warning("sync_shares skipped: current TickFlow SDK does not support shares")
+        logger.info(
+            "sync_%s skipped: current TickFlow SDK does not support this table",
+            table,
+        )
         return pl.DataFrame()
 
     all_records: list[dict] = []
@@ -226,6 +237,12 @@ def sync_shares(data_dir: Path, capset: CapabilitySet) -> int:
     return _sync_shares_for_symbols(symbols, data_dir, capset)
 
 
+def sync_valuation(data_dir: Path, capset: CapabilitySet) -> int:
+    """同步历史估值表；当前仅支持提供 valuation 的 financial provider。"""
+    symbols = _get_symbols(data_dir)
+    return _sync_table("valuation", symbols, data_dir, capset, latest_only=False)
+
+
 def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     """同步所有财务表。返回 {table: rows}。"""
     if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
@@ -260,6 +277,7 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_balance_sheet": f"{d}/financials/balance_sheet/*.parquet",
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
+        "financials_valuation": f"{d}/financials/valuation/*.parquet",
     }
     for name, path in views.items():
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
@@ -421,6 +439,7 @@ class FinancialScheduler:
                 "balance_sheet": sync_balance_sheet,
                 "cash_flow": sync_cash_flow,
                 "shares": sync_shares,
+                "valuation": sync_valuation,
             }.get(table)
             if not fn:
                 return {}

@@ -109,6 +109,61 @@ def test_custom_financial_provider_receives_shares_contract(monkeypatch):
     assert received == [("shares", ["600000.SH"], False)]
 
 
+def test_custom_financial_provider_receives_valuation_contract(monkeypatch):
+    received: list[tuple[str, list[str], bool]] = []
+
+    class Provider:
+        def get_financials(self, table, symbols, latest_only=True):
+            received.append((table, symbols, latest_only))
+            return pl.DataFrame({
+                "symbol": symbols,
+                "date": ["2024-06-30"],
+                "market_cap": [10.0],
+            })
+
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: True)
+    monkeypatch.setattr(preferences, "get_financial_provider", lambda: "custom-test")
+    monkeypatch.setattr(custom_sources, "get_provider", lambda _name: Provider())
+
+    result = financial_sync._fetch_table(
+        "valuation",
+        ["600000.SH"],
+        CapabilitySet(),
+        latest_only=False,
+    )
+
+    assert result.height == 1
+    assert received == [("valuation", ["600000.SH"], False)]
+
+
+def test_tickflow_financial_provider_skips_unsupported_valuation(monkeypatch):
+    financials = SimpleNamespace(
+        metrics=lambda *_args, **_kwargs: {},
+        income=lambda *_args, **_kwargs: {},
+        balance_sheet=lambda *_args, **_kwargs: {},
+        cash_flow=lambda *_args, **_kwargs: {},
+        shares=lambda *_args, **_kwargs: {},
+    )
+
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: False)
+    monkeypatch.setattr(
+        "app.tickflow.client.get_client",
+        lambda: SimpleNamespace(financials=financials),
+    )
+
+    result = financial_sync._fetch_table(
+        "valuation",
+        ["600000.SH"],
+        CapabilitySet({Cap.FINANCIAL: CapabilityLimits()}),
+        latest_only=False,
+    )
+
+    assert result.is_empty()
+
+
 def test_statement_sync_fetches_complete_history_for_backtests(tmp_path, monkeypatch):
     _write_instruments(tmp_path, ["600000.SH"])
     calls: list[tuple[str, list[str], bool]] = []
@@ -159,6 +214,7 @@ def test_sync_all_fetches_statement_history_not_latest_only(tmp_path, monkeypatc
         "balance_sheet": 1,
         "cash_flow": 1,
         "shares": 1,
+        "valuation": 1,
     }
     assert calls == [
         ("metrics", False),
@@ -166,6 +222,7 @@ def test_sync_all_fetches_statement_history_not_latest_only(tmp_path, monkeypatc
         ("balance_sheet", False),
         ("cash_flow", False),
         ("shares", False),
+        ("valuation", False),
     ]
 
 
