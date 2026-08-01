@@ -926,6 +926,7 @@ export function Data() {
                 { label: 'Enriched', files: s?.storage.enriched_files,    size: s?.storage.enriched_size_mb },
                 { label: '分钟 K',   files: s?.storage.minute_files,      size: s?.storage.minute_size_mb },
                 { label: '财务数据', files: s?.storage.financials_files,   size: s?.storage.financials_size_mb },
+                { label: '日度估值', files: s?.storage.valuation_daily_files, size: s?.storage.valuation_daily_size_mb },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between text-[11px]">
                   <span className="text-muted">{item.label}</span>
