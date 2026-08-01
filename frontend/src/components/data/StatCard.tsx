@@ -15,8 +15,10 @@ export const CARD_META: Record<string, {
   daily:       { capKey: 'kline.daily.batch',       tierReq: 'Starter+' },
   adj_factor:  { capKey: 'adj_factor',              tierReq: 'Starter+' },
   enriched:    { capKey: '',                        tierReq: '' },
-  // ETF 复用日K批量能力(免费档 kline.daily.batch 即可),不显示档位徽章
-  etf:         { capKey: 'kline.daily.batch',       tierReq: '' },
+  etf_instruments: { capKey: '',                    tierReq: '' },
+  etf_daily:   { capKey: 'kline.daily.batch',       tierReq: '' },
+  etf_enriched: { capKey: '',                       tierReq: '' },
+  etf_minute:  { capKey: 'kline.minute.batch',      tierReq: 'Pro+' },
   minute:      { capKey: 'kline.minute.batch',      tierReq: 'Pro+' },
   financials:  { capKey: 'financial',                tierReq: 'Expert' },
 }

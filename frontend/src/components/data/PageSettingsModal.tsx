@@ -21,7 +21,8 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'etf' | 'minute' | 'financials'
+  | 'index' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
+  | 'minute' | 'financials'
 
 interface CardDef {
   key: CardKey
@@ -40,18 +41,23 @@ export const DATA_CARD_DEFS: CardDef[] = [
   { key: 'adj_factor',  label: '除权因子', desc: '复权计算因子',           defaultHiddenIfNoCap: true },
   { key: 'enriched',    label: 'Enriched', desc: '技术指标计算结果',       defaultHiddenIfNoCap: false },
   { key: 'index',       label: '指数',     desc: '主要市场指数日K',        defaultHiddenIfNoCap: false },
-  { key: 'etf',         label: 'ETF',      desc: '场内交易基金日K及分钟K',   defaultHiddenIfNoCap: false },
+  { key: 'etf_instruments', label: 'ETF 维表',     desc: '场内基金元数据',       defaultHiddenIfNoCap: false },
+  { key: 'etf_daily',       label: 'ETF 日 K',     desc: 'ETF 日K线数据',        defaultHiddenIfNoCap: false },
+  { key: 'etf_enriched',    label: 'ETF Enriched', desc: 'ETF 技术指标计算结果', defaultHiddenIfNoCap: false },
   { key: 'minute',      label: '分钟 K',   desc: '分钟级K线(需 Pro+)',     defaultHiddenIfNoCap: true },
+  { key: 'etf_minute',  label: 'ETF 分钟 K', desc: 'ETF 分钟级K线(需 Pro+)', defaultHiddenIfNoCap: true },
   { key: 'financials',  label: '财务数据', desc: '财报数据(需 Expert)',    defaultHiddenIfNoCap: true },
 ]
 
 const DEFAULT_ORDER = DATA_CARD_DEFS.map(d => d.key)
 /** 恢复默认时显示的卡片数量(按默认顺序取前 N 张) */
-const DEFAULT_VISIBLE_COUNT = 5
+const DEFAULT_VISIBLE_COUNT = 8
 
 const CAP_KEY_MAP: Partial<Record<CardKey, string>> = {
   adj_factor: 'adj_factor',
+  etf_daily: 'kline.daily.batch',
   minute: 'kline.minute.batch',
+  etf_minute: 'kline.minute.batch',
   financials: 'financial',
 }
 

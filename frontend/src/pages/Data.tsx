@@ -52,6 +52,15 @@ import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 
+type ExtPlatform = 'easytdx' | 'kaipanla' | 'other'
+
+function extPlatform(config: ExtDataConfig): ExtPlatform {
+  const id = config.id.toLowerCase()
+  if (id.startsWith('ext_kpl_')) return 'kaipanla'
+  if (id.startsWith('ext_tdx_') || id.includes('_tdx')) return 'easytdx'
+  return 'other'
+}
+
 export function Data() {
   const [searchParams] = useSearchParams()
   const qc = useQueryClient()
@@ -175,7 +184,8 @@ export function Data() {
   const TIERKEY_TO_DATASET: Record<string, string> = {
     daily: 'daily',
     adj_factor: 'adj_factor',
-    etf: 'daily',        // ETF 复用日K能力
+    etf_daily: 'daily',
+    etf_minute: 'minute',
     minute: 'minute',
     financials: 'financial',
   }
@@ -294,14 +304,6 @@ export function Data() {
     symbols_covered: s.index_daily?.symbols_covered ?? s.index_instruments?.rows ?? 0,
     trading_days: s.index_daily?.trading_days ?? s.index_enriched?.trading_days ?? 0,
   } : null
-  // ETF 统计(后端已按 asset_type='etf' 从 index 存储中拆分)
-  const etfOverviewStats = s ? {
-    rows: 0,
-    earliest_date: s.etf_daily?.earliest_date ?? s.etf_enriched?.earliest_date ?? s.etf_minute?.earliest_date ?? null,
-    latest_date: s.etf_daily?.latest_date ?? s.etf_enriched?.latest_date ?? s.etf_minute?.latest_date ?? null,
-    symbols_covered: s.etf_daily?.symbols_covered ?? s.etf_instruments?.rows ?? s.etf_minute?.symbols_covered ?? 0,
-    trading_days: s.etf_daily?.trading_days ?? s.etf_enriched?.trading_days ?? s.etf_minute?.trading_days ?? 0,
-  } : null
   const hasEtfData = !!(s?.etf_instruments?.rows || s?.etf_daily?.rows || s?.etf_minute?.trading_days)
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
@@ -325,9 +327,10 @@ export function Data() {
     compute_enriched: 'enriched',
     rebuild_enriched: 'enriched',
     sync_index: 'index_daily',
+    sync_etf: 'etf_daily',
     sync_minute: 'minute',
     extend_minute: 'minute',
-    sync_etf_minute: 'etf',
+    sync_etf_minute: 'etf_minute',
   }
   const activeCard = isRunning && job.data ? STAGE_CARD[job.data.stage] ?? null : null
 
@@ -475,30 +478,74 @@ export function Data() {
             settingsOpen={openSettings === 'index'}
           />
         )
-      case 'etf':
+      case 'etf_instruments':
         return (
           <StatCard
-            title="ETF"
-            hint="场内基金 · 独立存储"
-            stats={etfOverviewStats}
+            title="ETF 维表"
+            hint="场内基金 · 元数据"
+            stats={s?.etf_instruments}
+            isInstrument
             loading={isLoading}
-            tierKey="etf"
+            tierKey="etf_instruments"
             capLimits={caps.data?.capabilities}
             tierLabel={caps.data?.label}
-            customProvider={getCustomProviderName('etf')}
-            auto={etfAuto || etfMinuteAuto}
-            active={activeCard === 'etf'}
-            done={doneStages.has('etf')}
-            skipped={skippedCards.has('etf')}
-            stagePct={activeCard === 'etf' ? (job.data?.stage_pct ?? 0) : 0}
-            subLabel="维表 · 日K · 指标 · 分钟K"
-            fieldTabs={[
-              { label: '维表', table: 'etf_instruments' },
-              { label: '日K', table: 'etf_daily' },
-              { label: '指标', table: 'etf_enriched' },
-              { label: '分钟K', table: 'etf_minute' },
-            ] as FieldTab[]}
-            onShowFields={(t) => setSchemaTable(t ?? 'etf_daily')}
+            auto={etfAuto}
+            onShowFields={() => setSchemaTable('etf_instruments')}
+          />
+        )
+      case 'etf_daily':
+        return (
+          <StatCard
+            title="ETF 日 K"
+            hint="场内基金 · 日线"
+            stats={s?.etf_daily}
+            loading={isLoading}
+            tierKey="etf_daily"
+            capLimits={caps.data?.capabilities}
+            tierLabel={caps.data?.label}
+            customProvider={getCustomProviderName('etf_daily')}
+            auto={etfAuto}
+            active={activeCard === 'etf_daily'}
+            done={doneStages.has('etf_daily')}
+            skipped={skippedCards.has('etf_daily')}
+            stagePct={activeCard === 'etf_daily' ? (job.data?.stage_pct ?? 0) : 0}
+            subLabel="日 · ETF标的 · 日线"
+            onShowFields={() => setSchemaTable('etf_daily')}
+          />
+        )
+      case 'etf_enriched':
+        return (
+          <StatCard
+            title="ETF Enriched"
+            hint="ETF 复权 OHLCV + 技术指标"
+            stats={s?.etf_enriched}
+            loading={isLoading}
+            tierKey="etf_enriched"
+            capLimits={caps.data?.capabilities}
+            tierLabel={caps.data?.label}
+            auto={etfAuto}
+            subLabel="字段 · ETF指标 · 信号"
+            onShowFields={() => setSchemaTable('etf_enriched')}
+          />
+        )
+      case 'etf_minute':
+        return (
+          <StatCard
+            title="ETF 分钟 K"
+            hint="场内基金 · 分钟线"
+            stats={s?.etf_minute}
+            loading={isLoading}
+            tierKey="etf_minute"
+            capLimits={caps.data?.capabilities}
+            tierLabel={caps.data?.label}
+            customProvider={getCustomProviderName('etf_minute')}
+            auto={etfMinuteAuto}
+            active={activeCard === 'etf_minute'}
+            done={doneStages.has('etf_minute')}
+            skipped={skippedCards.has('etf_minute')}
+            stagePct={activeCard === 'etf_minute' ? (job.data?.stage_pct ?? 0) : 0}
+            subLabel="日 · ETF标的 · 分钟级"
+            onShowFields={() => setSchemaTable('etf_minute')}
             onSettings={hasEtfData ? () => setOpenSettings(v => v === 'etf-minute' ? null : 'etf-minute') : undefined}
             settingsOpen={openSettings === 'etf-minute'}
           />
@@ -545,6 +592,46 @@ export function Data() {
       default:
         return null
     }
+  }
+
+  const visibleCardKeys = getCardOrder().filter(k => cardVisible[k])
+  const extItems = extConfigs.data?.items ?? []
+  const easyTdxExt = extItems.filter(ext => extPlatform(ext) === 'easytdx')
+  const kaipanlaExt = extItems.filter(ext => extPlatform(ext) === 'kaipanla')
+  const otherExt = extItems.filter(ext => extPlatform(ext) === 'other')
+  const renderExtCard = (ext: ExtDataConfig) => (
+    <ExtDataStatCard
+      key={ext.id}
+      config={ext}
+      onDelete={() => deleteExt.mutate(ext.id)}
+      deleting={deleteExt.isPending}
+      onEdit={() => setEditingExt(ext)}
+    />
+  )
+
+  const renderPlatformSection = (
+    title: string,
+    hint: string,
+    count: number,
+    children: React.ReactNode,
+  ) => {
+    if (!count) return null
+    return (
+      <div className="rounded-card border border-border/70 bg-base/20 p-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-semibold text-foreground">{title}</div>
+            <div className="mt-0.5 text-[10px] text-muted">{hint}</div>
+          </div>
+          <span className="shrink-0 rounded bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-muted">
+            {count} 项
+          </span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-stretch">
+          {children}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -866,19 +953,31 @@ export function Data() {
         {/* 数据画像 */}
         <div>
           <SectionTitle icon={Database}>数据画像</SectionTitle>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-stretch">
-            {getCardOrder().filter(k => cardVisible[k]).map((k: CardKey) => (
-              <Fragment key={k}>{renderStatCard(k)}</Fragment>
-            ))}
-            {(extConfigs.data?.items ?? []).map((ext) => (
-              <ExtDataStatCard
-                key={ext.id}
-                config={ext}
-                onDelete={() => deleteExt.mutate(ext.id)}
-                deleting={deleteExt.isPending}
-                onEdit={() => setEditingExt(ext)}
-              />
-            ))}
+          <div className="mt-3 space-y-4">
+            {renderPlatformSection(
+              'TickFlow',
+              '主行情 / 复权 / 指标 / 分钟 / 财务',
+              visibleCardKeys.length,
+              visibleCardKeys.map((k: CardKey) => <Fragment key={k}>{renderStatCard(k)}</Fragment>),
+            )}
+            {renderPlatformSection(
+              'EasyTdx',
+              'F10 文本 / 行业口径 / 分红参考',
+              easyTdxExt.length,
+              easyTdxExt.map(renderExtCard),
+            )}
+            {renderPlatformSection(
+              '开盘啦',
+              '竞价 / 龙虎榜 / 监管 / 北向 / 股东结构',
+              kaipanlaExt.length,
+              kaipanlaExt.map(renderExtCard),
+            )}
+            {renderPlatformSection(
+              '其他扩展',
+              '非主口径辅助数据',
+              otherExt.length,
+              otherExt.map(renderExtCard),
+            )}
           </div>
         </div>
 
