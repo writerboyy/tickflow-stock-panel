@@ -602,13 +602,7 @@ def _open_position(context, symbol: str, target_value: float, current: dict[str,
     bar = current.get(symbol)
     if not _tradable_at_snapshot(symbol, bar):
         return False
-    price = _bar_price(bar)
-    quantity = math.floor(target_value / price / 100) * 100
-    if quantity <= 0:
-        return False
-    if quantity <= float(context.portfolio.positions.get(symbol, 0.0)):
-        return False
-    context.order_target(symbol, quantity)
+    context.order_target_value(symbol, target_value)
     return True
 
 
@@ -620,18 +614,13 @@ def _buy_missing_targets(context, target: list[str], current: dict[str, Any]) ->
         return []
     submitted: list[str] = []
     just_sold = set(_state(context).get("just_sold", []))
+    target_value = available_cash / remaining_slots
     for symbol in target:
         if symbol in held or symbol in just_sold:
             continue
-        slots_left = remaining_slots - len(submitted)
-        if slots_left <= 0:
-            break
-        target_value = available_cash / slots_left
         bar = current.get(symbol)
         if bar is not None and _open_position(context, symbol, target_value, current):
-            price = _bar_price(bar)
-            quantity = math.floor(target_value / price / 100) * 100
-            available_cash = max(0.0, available_cash - quantity * price)
+            available_cash -= target_value
             submitted.append(symbol)
     return submitted
 

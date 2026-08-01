@@ -537,8 +537,10 @@ def _engine_from_state(
     from app.free_strategy.process import (
         MarketData,
         _instrument_records,
+        _load_dividend_ratio_ranked,
         _load_market_data,
         _load_financial_snapshot,
+        _load_smallcap_index_value,
         _load_scheduled_history_batch,
         _prepare_market_reference,
         _preload_tradable_dates,
@@ -584,6 +586,17 @@ def _engine_from_state(
             symbols,
             cutoff,
         )
+    )
+    engine.set_dividend_ratio_loader(
+        lambda symbols, cutoff: _load_dividend_ratio_ranked(
+            repo,
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
+    engine.set_smallcap_index_loader(
+        lambda symbols, cutoff: _load_smallcap_index_value(repo, symbols, cutoff)
     )
     if config.allow_stale_fills:
         _preload_tradable_dates(

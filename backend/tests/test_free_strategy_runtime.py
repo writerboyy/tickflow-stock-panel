@@ -407,6 +407,7 @@ def test_performance_small_cap_template_uses_reference_backtest_parameters():
         "fees_pct": 0.0001,
         "commission_pct": 0.0001,
         "min_commission": 5,
+        "reserve_buy_fees": False,
         "stamp_tax_pct": 0.001,
         "slippage_bps": 0,
         "price_tick": 0.01,
@@ -524,6 +525,26 @@ def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selectio
 
     assert performance_small_cap._held_and_selection_symbols(context, context.now) == ["HELD.SZ"]
     assert history_calls == []
+
+
+def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position():
+    now = datetime(2025, 7, 24, 9, 30)
+    submitted = []
+    symbols = ["000001.SZ", "000002.SZ", "000003.SZ"]
+    bars = {
+        symbol: Bar(symbol, now, 10, 10, 10, 10, raw_close=10, limit_up=11, limit_down=9)
+        for symbol in symbols
+    }
+    context = SimpleNamespace(
+        portfolio=SimpleNamespace(positions={}, cash=100_000),
+        state={"performance_small_cap": {"just_sold": []}},
+        order_target_value=lambda symbol, value: submitted.append((symbol, value)),
+    )
+
+    result = performance_small_cap._buy_missing_targets(context, symbols, bars)
+
+    assert result == symbols
+    assert submitted == [(symbol, 100_000 / 3) for symbol in symbols]
 
 
 def test_performance_small_cap_previous_trading_date_uses_latest_visible_sample():

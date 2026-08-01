@@ -179,6 +179,7 @@ def on_bar(context, bars):
             "fees_pct": 0.0001,
             "commission_pct": 0.0001,
             "min_commission": 5,
+            "reserve_buy_fees": False,
             "stamp_tax_pct": 0.001,
             "slippage_bps": 0,
             "price_tick": 0.01,
