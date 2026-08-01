@@ -296,6 +296,72 @@ def _load_financial_snapshot(
     return result
 
 
+def _load_dividend_ratio_ranked(
+    repo: Any,
+    data_dir: Path,
+    symbols: list[str],
+    previous_date: date,
+) -> list[str]:
+    """Return the original 260-session dividend-yield top quartile without Bar expansion."""
+    if not symbols:
+        return []
+    get_batch = getattr(repo, "get_daily_asset_batch", None)
+    if not callable(get_batch):
+        return []
+    start = previous_date - timedelta(days=260 * 2 + 14)
+    columns = ["symbol", "date", "close", "raw_close", "total_shares"]
+    frame = get_batch("stock", symbols, start, previous_date, columns)
+    required = {"symbol", "date", "close", "total_shares"}
+    if frame.is_empty() or not required.issubset(frame.columns):
+        return []
+    frame = (
+        frame
+        .filter(pl.col("date") <= previous_date)
+        .sort(["symbol", "date"])
+        .group_by("symbol", maintain_order=True)
+        .tail(260)
+        .filter(pl.col("date") >= previous_date - timedelta(days=366))
+    )
+    if frame.is_empty():
+        return []
+    from app.services.stock_dividends import load_cash_dividends
+
+    dividends = [
+        {"symbol": symbol, "date": day, "cash_dividend": cash}
+        for (symbol, day), cash in load_cash_dividends(data_dir).items()
+        if symbol in symbols and start <= day <= previous_date
+    ]
+    dividend_frame = pl.DataFrame(
+        dividends,
+        schema={"symbol": pl.String, "date": pl.Date, "cash_dividend": pl.Float64},
+    )
+    values = frame.join(dividend_frame, on=["symbol", "date"], how="left").with_columns(
+        pl.col("cash_dividend").fill_null(0.0),
+        pl.coalesce([pl.col("raw_close"), pl.col("close")]).alias("_price"),
+        pl.col("total_shares").shift(1).over("symbol").alias("_shares"),
+    )
+    dividend = values.group_by("symbol").agg(
+        (pl.col("cash_dividend") * pl.col("_shares")).sum().alias("_dividend")
+    )
+    latest = values.group_by("symbol", maintain_order=True).tail(1).select(
+        "symbol",
+        (pl.col("_price") * pl.col("_shares")).alias("_market_cap"),
+    )
+    ranked = (
+        dividend
+        .join(latest, on="symbol", how="inner")
+        .filter(
+            pl.col("_dividend").is_finite()
+            & (pl.col("_dividend") > 0)
+            & pl.col("_market_cap").is_finite()
+            & (pl.col("_market_cap") > 0)
+        )
+        .with_columns((pl.col("_dividend") / pl.col("_market_cap")).alias("_ratio"))
+        .sort(["_ratio", "symbol"], descending=[True, False])
+    )
+    return ranked["symbol"].to_list()[: int(ranked.height * 0.25)]
+
+
 def _financial_coverage(
     data_dir: Path,
     table: str,
@@ -1459,6 +1525,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         engine.set_run_window(start, end)
         engine.set_financial_snapshot_loader(
             lambda symbols, cutoff: _load_financial_snapshot(
+                repo.store.data_dir,
+                symbols,
+                cutoff,
+            )
+        )
+        engine.set_dividend_ratio_loader(
+            lambda symbols, cutoff: _load_dividend_ratio_ranked(
+                repo,
                 repo.store.data_dir,
                 symbols,
                 cutoff,

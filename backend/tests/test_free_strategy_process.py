@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import queue
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 
 import polars as pl
@@ -135,6 +135,33 @@ def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_
         tmp_path,
         datetime(2024, 7, 1).date(),
     )
+
+
+def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path):
+    from app.free_strategy.process import _load_dividend_ratio_ranked
+
+    class Repo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            return pl.DataFrame({
+                "symbol": ["A", "A", "A", "B", "B", "B", "C", "C", "C", "D", "D", "D"],
+                "date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)] * 4,
+                "close": [10.0] * 12,
+                "raw_close": [10.0] * 12,
+                "total_shares": [100.0] * 12,
+            })
+
+    dividend_path = tmp_path / "corporate_actions" / "stock_dividends.parquet"
+    dividend_path.parent.mkdir()
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D"],
+        "event_date": [date(2024, 1, 2)] * 4,
+        "cash_per_share": [1.0, 2.0, 3.0, 4.0],
+    }).write_parquet(dividend_path)
+
+    assert _load_dividend_ratio_ranked(
+        Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
+    ) == ["D"]
 
 
 def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):

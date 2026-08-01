@@ -716,6 +716,7 @@ def _paper_loop(account_id: str, root: str) -> None:
     from app.free_strategy.process import (
         _instrument_records,
         _load_market_data,
+        _load_dividend_ratio_ranked,
         _load_scheduled_history,
         _load_scheduled_history_batch,
         _merge_market_data,
@@ -746,6 +747,14 @@ def _paper_loop(account_id: str, root: str) -> None:
         instruments = _instrument_records(repo, asset_type, timeframe)
         engine = FreeStrategyEngine(
             source, timeframe, engine_config, state=state.get("state", {}), instruments=instruments,
+        )
+        engine.set_dividend_ratio_loader(
+            lambda symbols, cutoff: _load_dividend_ratio_ranked(
+                repo,
+                repo.store.data_dir,
+                symbols,
+                cutoff,
+            )
         )
         symbols, universe_source = _resolve_symbols(engine, {"symbols": legacy_symbols})
         state["universe"] = symbols

@@ -193,6 +193,11 @@ def _positive(value: Any) -> bool:
 
 
 def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> list[str]:
+    loader = getattr(context, "dividend_ratio_ranked", None)
+    if callable(loader):
+        ranked = loader(symbols, previous_date)
+        if ranked is not None:
+            return list(ranked)
     history = context.history_batch(symbols, count=260, timeframe="1d")
     ranked: list[tuple[float, str]] = []
     for symbol in symbols:
