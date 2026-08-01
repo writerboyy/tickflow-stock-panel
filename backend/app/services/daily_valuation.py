@@ -356,23 +356,32 @@ def _atomic_write_parquet(frame: pl.DataFrame, path: Path) -> None:
             temporary.unlink()
 
 
-def _replace_directory(staging: Path, target: Path) -> None:
+def _replace_directory(staging: Path, target: Path, *, keep_backup: bool = False) -> Path | None:
     if not target.exists():
         os.replace(staging, target)
-        return
-    backup = target.with_name(f".{target.name}.{uuid.uuid4().hex}.backup")
+        return None
+    backup = target.with_name(
+        f".{target.name}.pre-rebuild-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        if keep_backup
+        else f".{target.name}.{uuid.uuid4().hex}.backup"
+    )
     os.replace(target, backup)
     try:
         os.replace(staging, target)
     except Exception:
         os.replace(backup, target)
         raise
-    shutil.rmtree(backup)
+    if not keep_backup:
+        shutil.rmtree(backup)
+        return None
+    return backup
 
 
 def build_daily_valuation(
     data_dir: Path,
     dates: Iterable[date] | None = None,
+    *,
+    keep_backup: bool = False,
 ) -> dict[str, int]:
     """Build the complete table, or atomically upsert selected trading days."""
     data_dir = Path(data_dir)
@@ -484,7 +493,7 @@ def build_daily_valuation(
         metadata_path = output_dir / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         if full_rebuild:
-            _replace_directory(output_dir, target)
+            _replace_directory(output_dir, target, keep_backup=keep_backup)
     except Exception:
         if full_rebuild and output_dir.exists():
             shutil.rmtree(output_dir)

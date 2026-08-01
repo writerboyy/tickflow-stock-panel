@@ -245,3 +245,26 @@ def test_daily_valuation_coverage_requires_previous_and_backtest_dates(tmp_path)
         date(2024, 4, 22),
         date(2024, 4, 23),
     )
+
+
+def test_full_valuation_rebuild_can_keep_rollback_directory(tmp_path) -> None:
+    day = date(2024, 4, 22)
+    _write_enriched(tmp_path, day)
+    build_daily_valuation(tmp_path)
+    original = (
+        tmp_path / "valuation_daily" / "date=2024-04-22" / "part.parquet"
+    ).read_bytes()
+    _write_enriched(tmp_path, day, close=12.0)
+
+    assert build_daily_valuation(tmp_path, keep_backup=True) == {
+        "rows": 1,
+        "trading_days": 1,
+    }
+
+    backups = list(tmp_path.glob(".valuation_daily.pre-rebuild-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "date=2024-04-22" / "part.parquet").read_bytes() == original
+    rebuilt = pl.read_parquet(
+        tmp_path / "valuation_daily" / "date=2024-04-22" / "part.parquet"
+    )
+    assert rebuilt["market_cap"].to_list() == [1_200.0]
