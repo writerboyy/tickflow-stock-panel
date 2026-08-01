@@ -182,6 +182,8 @@ def on_bar(context, bars):
             "stamp_tax_pct": 0.001,
             "slippage_bps": 0,
             "price_tick": 0.01,
+            # Full-market one-year dividend screening exceeds the generic script limit.
+            "callback_timeout_seconds": 120,
             "benchmark_symbol": "399303.SZ",
             "settlement": "t1",
             "fill_policy": "close",

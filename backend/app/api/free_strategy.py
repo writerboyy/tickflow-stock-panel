@@ -344,6 +344,7 @@ class BacktestWrite(BaseModel):
     stamp_tax_pct: float = Field(default=0.001, ge=0)
     slippage_bps: float = Field(default=5, ge=0)
     price_tick: float | None = Field(default=None, gt=0)
+    callback_timeout_seconds: float = Field(default=30, ge=0.1, le=120)
     lot_size: int = Field(default=100, ge=1)
     max_exposure_pct: float = Field(default=1.0, gt=0, le=1)
     settlement: Literal["t1", "t0"] = "t1"

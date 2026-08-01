@@ -38,6 +38,7 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
     )
 
     assert payload["config"]["asset_type"] == "etf"
+    assert payload["config"]["callback_timeout_seconds"] == 30
     assert payload["strategy_name"] == "五福"
 
 

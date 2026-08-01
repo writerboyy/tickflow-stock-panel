@@ -989,6 +989,7 @@ export interface FreeBacktestConfig {
   stamp_tax_pct: number
   slippage_bps: number
   price_tick: number | null
+  callback_timeout_seconds?: number
   lot_size: number
   max_exposure_pct: number
   settlement: 't1' | 't0'
