@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import os
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
@@ -39,8 +40,14 @@ from app.services.source_snapshot import capture_source_snapshot
 logger = logging.getLogger(__name__)
 
 
-def _write_enriched_metadata(data_dir: Path, *, mode: str, written: int) -> None:
-    target = data_dir / "kline_daily_enriched" / "metadata.json"
+def _write_enriched_metadata(
+    data_dir: Path,
+    *,
+    mode: str,
+    written: int,
+    output_dir: Path | None = None,
+) -> None:
+    target = (output_dir or data_dir / "kline_daily_enriched") / "metadata.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     previous: dict = {}
     if target.exists():
@@ -1121,7 +1128,8 @@ def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
 def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
-                 on_batch_done: Callable[[int, int], None] | None = None) -> int:
+                 on_batch_done: Callable[[int, int], None] | None = None,
+                 keep_backup: bool = False) -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
     enriched 表仅存储 17 列基础行情窄表（含按时点解析的总股本和流通股本）。
@@ -1417,13 +1425,51 @@ def run_pipeline(data_dir: Path | None = None,
             sample = ", ".join(sorted(missing_dates)[:5])
             raise RuntimeError(f"全量重建结果缺少已有日期分区,拒绝覆盖: {sample}")
 
-        base.mkdir(parents=True, exist_ok=True)
+        staging = d / f".kline_daily_enriched.{uuid4().hex}.tmp"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        if base.exists():
+            for child in base.iterdir():
+                if child.name.startswith("date=") or child.name == "metadata.json":
+                    continue
+                target = staging / child.name
+                if child.is_dir():
+                    shutil.copytree(child, target)
+                else:
+                    shutil.copy2(child, target)
 
         for ds, dfs in date_buffers.items():
-            out = base / f"date={ds}" / "part.parquet"
+            out = staging / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
             merged = pl.concat(dfs, how="diagonal_relaxed").sort(["symbol"])
             merged.write_parquet(out)
+
+        staged_parts = list(staging.glob("date=*/part.parquet"))
+        staged_rows = sum(
+            pl.scan_parquet(path).select(pl.len()).collect().item()
+            for path in staged_parts
+        )
+        if staged_rows != written or len(staged_parts) != len(rebuilt_dates):
+            shutil.rmtree(staging)
+            raise RuntimeError("enriched 影子重建行数或分区数校验失败，拒绝切换")
+        _write_enriched_metadata(d, mode="full", written=written, output_dir=staging)
+
+        backup = d / (
+            f".kline_daily_enriched.pre-rebuild-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            if keep_backup
+            else f".kline_daily_enriched.{uuid4().hex}.backup"
+        )
+        if base.exists():
+            os.replace(base, backup)
+        try:
+            os.replace(staging, base)
+        except Exception:
+            if backup.exists():
+                os.replace(backup, base)
+            raise
+        if backup.exists() and not keep_backup:
+            shutil.rmtree(backup)
 
         date_buffers.clear()
         gc.collect()
@@ -1432,7 +1478,8 @@ def run_pipeline(data_dir: Path | None = None,
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",
                 mode, t_done - t0, written, adj_label)
-    _write_enriched_metadata(d, mode=mode, written=written)
+    if symbols:
+        _write_enriched_metadata(d, mode=mode, written=written)
     return written
 
 
