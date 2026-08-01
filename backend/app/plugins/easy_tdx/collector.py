@@ -70,7 +70,7 @@ class EasyTdxCollector:
         self._bootstrap_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
-    def start(self, scheduler) -> None:
+    def start(self, scheduler, *, bootstrap: bool = True) -> None:
         ensure_config(self.data_dir)
         if scheduler is not None:
             scheduler.add_job(
@@ -92,7 +92,8 @@ class EasyTdxCollector:
                 misfire_grace_time=14400,
                 replace_existing=True,
             )
-        self.trigger_bootstrap()
+        if bootstrap:
+            self.trigger_bootstrap()
 
     def trigger_bootstrap(self) -> None:
         available, reason = self._availability_check()

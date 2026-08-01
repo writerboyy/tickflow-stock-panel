@@ -31,10 +31,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    collector_bootstrap = not settings.tickflow_skip_collector_bootstrap
     logger.info(
         "TickFlow Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
+    if not collector_bootstrap:
+        logger.info("collector bootstrap disabled by TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP")
 
     # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
     # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
@@ -127,7 +130,7 @@ async def lifespan(app: FastAPI):
         from app.plugins.kaipanla import KaipanlaCollector
 
         kaipanla_collector = KaipanlaCollector(store.data_dir)
-        kaipanla_collector.start(app.state.scheduler)
+        kaipanla_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
         app.state.kaipanla_collector = kaipanla_collector
     except Exception as e:  # noqa: BLE001
         logger.warning("kaipanla collector not started: %s", e)
@@ -138,7 +141,7 @@ async def lifespan(app: FastAPI):
         from app.plugins.easy_tdx import EasyTdxCollector
 
         easy_tdx_collector = EasyTdxCollector(store.data_dir)
-        easy_tdx_collector.start(app.state.scheduler)
+        easy_tdx_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
         app.state.easy_tdx_collector = easy_tdx_collector
     except Exception as e:  # noqa: BLE001
         logger.warning("EasyTDX collector not started: %s", e)
@@ -172,7 +175,7 @@ async def lifespan(app: FastAPI):
 
     # 扩展数据定时拉取: 在预设配置就绪后启动, 自动调度 enabled 的预设。
     from app.services.ext_pull import pull_scheduler
-    pull_scheduler.start(store.data_dir)
+    pull_scheduler.start(store.data_dir, run_immediately=collector_bootstrap)
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
 

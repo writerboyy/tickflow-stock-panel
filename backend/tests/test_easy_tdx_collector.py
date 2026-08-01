@@ -251,6 +251,26 @@ def test_start_without_dependency_registers_config_and_job_without_bootstrap(tmp
     assert ExtConfigStore(tmp_path).get(INDUSTRY_TABLE) is not None
 
 
+def test_start_can_register_jobs_without_running_bootstrap(tmp_path):
+    class Scheduler:
+        def __init__(self):
+            self.jobs = []
+
+        def add_job(self, _func, **kwargs):
+            self.jobs.append(kwargs["id"])
+
+    scheduler = Scheduler()
+    collector = EasyTdxCollector(
+        tmp_path,
+        availability_check=lambda: (True, "available"),
+    )
+
+    collector.start(scheduler, bootstrap=False)
+
+    assert scheduler.jobs == ["easy_tdx_industry", "easy_tdx_f10_reference"]
+    assert collector._bootstrap_task is None
+
+
 @pytest.mark.asyncio
 async def test_collection_writes_source_and_collection_time(tmp_path):
     collector = EasyTdxCollector(

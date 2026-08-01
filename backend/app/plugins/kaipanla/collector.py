@@ -100,7 +100,7 @@ class KaipanlaCollector:
     def configured(self) -> bool:
         return load_credentials() is not None
 
-    def start(self, scheduler) -> None:
+    def start(self, scheduler, *, bootstrap: bool = True) -> None:
         ensure_configs(self.data_dir)
         if scheduler is not None:
             for checkpoint, hour, minute in (
@@ -220,7 +220,8 @@ class KaipanlaCollector:
                     misfire_grace_time=3600,
                     replace_existing=True,
                 )
-        self.trigger_catch_up()
+        if bootstrap:
+            self.trigger_catch_up()
 
     def trigger_catch_up(self) -> None:
         if not self.configured:

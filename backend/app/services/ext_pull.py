@@ -165,11 +165,13 @@ class PullScheduler:
         self._tasks: dict[str, asyncio.Task] = {}
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._run_immediately = True
 
-    def start(self, data_dir) -> None:
+    def start(self, data_dir, *, run_immediately: bool = True) -> None:
         """启动调度（在 lifespan startup 调用，主事件循环内）。"""
         self._running = True
         self._data_dir = data_dir
+        self._run_immediately = run_immediately
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -243,6 +245,9 @@ class PullScheduler:
         这样用户中途修改间隔也能立即生效 (无需重启)。
         """
         try:
+            if not self._run_immediately:
+                interval = max(config.pull.schedule_minutes * 60, 60)
+                await asyncio.sleep(interval)
             while self._running:
                 # 每轮重读最新配置 — 用户可能修改了 url / interval / enabled
                 store = ExtConfigStore(self._data_dir)

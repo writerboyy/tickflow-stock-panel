@@ -515,3 +515,22 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     assert "kaipanla_shareholder_counts" in scheduler.jobs
     assert "kaipanla_sector_constituents" in scheduler.jobs
     assert collector._bootstrap_task is None
+
+
+def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+
+    class Scheduler:
+        def __init__(self):
+            self.jobs = []
+
+        def add_job(self, _func, **kwargs):
+            self.jobs.append(kwargs["id"])
+
+    scheduler = Scheduler()
+    collector = KaipanlaCollector(tmp_path)
+
+    collector.start(scheduler, bootstrap=False)
+
+    assert len(scheduler.jobs) == 12
+    assert collector._bootstrap_task is None
