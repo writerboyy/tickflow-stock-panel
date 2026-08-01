@@ -24,6 +24,44 @@ logger = logging.getLogger(__name__)
 
 # exchanges.get_instruments 查询的交易所(沪深京)
 _EXCHANGES = ["SH", "SZ", "BJ"]
+_MAX_REASONABLE_INDEX_AMOUNT = 1e15
+
+
+class IndexDailyQualityError(ValueError):
+    """Raised when provider index bars cannot be safely persisted."""
+
+
+def _validate_index_daily(frame: pl.DataFrame) -> pl.DataFrame:
+    required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
+    if frame.is_empty():
+        return frame
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise IndexDailyQualityError(f"指数日线缺少字段: {', '.join(missing)}")
+    invalid = frame.filter(
+        pl.any_horizontal(
+            pl.col(column).is_null() | ~pl.col(column).is_finite()
+            for column in ("open", "high", "low", "close", "volume", "amount")
+        )
+        | (pl.col("open") <= 0)
+        | (pl.col("high") <= 0)
+        | (pl.col("low") <= 0)
+        | (pl.col("close") <= 0)
+        | (pl.col("volume") < 0)
+        | (pl.col("amount") < 0)
+        | (pl.col("amount") >= _MAX_REASONABLE_INDEX_AMOUNT)
+        | (pl.col("high") < pl.max_horizontal("open", "low", "close"))
+        | (pl.col("low") > pl.min_horizontal("open", "high", "close"))
+    )
+    if invalid.is_empty():
+        return frame
+    sample = ", ".join(
+        f"{row['symbol']}/{row['date']}"
+        for row in invalid.select("symbol", "date").unique().sort(["symbol", "date"]).head(8).iter_rows(named=True)
+    )
+    raise IndexDailyQualityError(
+        "指数日线包含负成交量、异常成交额或非法 OHLC，拒绝发布批次: " + sample
+    )
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:
@@ -240,6 +278,7 @@ def sync_and_persist_index_daily(
         )
         if raw.is_empty():
             continue
+        raw = _validate_index_daily(raw)
 
         repo.append_index_daily(raw)
         enriched = compute_enriched(raw, factors=None, instruments=None)
