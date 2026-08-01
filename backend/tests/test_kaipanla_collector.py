@@ -18,7 +18,9 @@ from app.plugins.kaipanla.storage import (
     NORTHBOUND_SECTOR_TABLE,
     NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
+    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
+    SHAREHOLDER_TABLE,
 )
 
 
@@ -476,6 +478,136 @@ async def test_fund_detail_endpoints_fail_independently(tmp_path, monkeypatch):
     stored = pl.read_parquet(path).to_dicts()[0]
     assert stored["capital_net_close"] is None
     assert stored["main_net_amount_over_300k"] == 50
+    capital_manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "fund_capital_net" / "2026-07-10.json"
+    ).read_text())
+    statistics_manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "fund_large_order_statistics" / "2026-07-10.json"
+    ).read_text())
+    assert capital_manifest["status"] == "incomplete"
+    assert capital_manifest["failed_batches"] == ["600126"]
+    assert statistics_manifest["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_northbound_partial_stock_batch_preserves_sector_only(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+
+    def stock_response(params):
+        if params["IndexID"] == "P2":
+            raise RuntimeError("unavailable")
+        return {
+            "Date": "20260630",
+            "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
+        }
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                "northbound_sector_latest": {
+                    "Date": "20260630",
+                    "Sum_ZCJE": 10,
+                    "Sum_ZCC": 20,
+                    "List": [
+                        ["P1", "板块一", 1, 2, 3, 4, 5, 6, 7],
+                        ["P2", "板块二", 1, 2, 3, 4, 5, 6, 7],
+                    ],
+                },
+                "northbound_stocks_latest": stock_response,
+            },
+            [],
+        ),
+    )
+
+    assert await collector.collect_northbound() == 2
+    stock_path = (
+        tmp_path / "ext_data" / NORTHBOUND_STOCK_TABLE
+        / "timeseries" / "date=2026-06-30" / "part.parquet"
+    )
+    assert not stock_path.exists()
+    manifest = json.loads(next((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla" / NORTHBOUND_STOCK_TABLE
+    ).glob("*.json")).read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["failed_batches"] == ["P2"]
+
+
+@pytest.mark.asyncio
+async def test_shareholder_partial_symbol_batch_does_not_publish(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({"code": ["600126", "600127"], "type": ["stock", "stock"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+
+    def response(params):
+        if params["StockID"] == "600127":
+            raise RuntimeError("unavailable")
+        return {
+            "LTGDData": [{
+                "JGID": "holder-1",
+                "JG": "股东甲",
+                "CYSL": 10,
+                "ZLTBL": 1,
+                "SJJZC": "新进",
+                "NiuSan": 0,
+                "Color": 0,
+            }],
+            "LTGDData_SQ": [],
+        }
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"shareholder_changes": response}, []),
+    )
+
+    assert await collector.collect_shareholder_changes(date(2026, 6, 30)) == 0
+    partition = (
+        tmp_path / "ext_data" / SHAREHOLDER_TABLE
+        / "timeseries" / "date=2026-06-30" / "part.parquet"
+    )
+    assert not partition.exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / SHAREHOLDER_TABLE / "2026-06-30.json"
+    ).read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["failed_batches"] == ["600127"]
+
+
+@pytest.mark.asyncio
+async def test_sector_partial_plate_batch_does_not_publish(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+
+    def response(params):
+        if params["PlateID"] == "801002":
+            raise RuntimeError("unavailable")
+        row = [None] * 41
+        row[0], row[1] = "600126", "杭钢股份"
+        return {"list": [row]}
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"sector_constituents": response}, []),
+    )
+
+    assert await collector.collect_sector_constituents(
+        date(2026, 7, 31), ["801001", "801002"]
+    ) == 0
+    partition = (
+        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE
+        / "timeseries" / "date=2026-07-31" / "part.parquet"
+    )
+    assert not partition.exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / SECTOR_CONSTITUENT_TABLE / "2026-07-31.json"
+    ).read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["failed_batches"] == ["801002"]
 
 
 def test_fund_stock_pool_requires_current_code_and_type_schema(tmp_path):
