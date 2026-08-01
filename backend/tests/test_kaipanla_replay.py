@@ -4,12 +4,16 @@ import gzip
 import json
 from datetime import date
 
+import polars as pl
+
 from app.plugins.kaipanla.parsers import parse_shareholder_count_changes
 from app.plugins.kaipanla.replay import replay_archives
 from app.plugins.kaipanla.storage import (
+    AUCTION_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     archive_raw,
     atomic_upsert_records,
+    ensure_configs,
 )
 from app.services.ingestion_manifest import stable_content_hash
 
@@ -54,11 +58,14 @@ def test_replay_accepts_legacy_response_and_matches_parquet(tmp_path):
 
 
 def test_replay_accepts_current_envelope_and_classifies_endpoint_30_empty(tmp_path):
+    ensure_configs(tmp_path)
     archive_raw(tmp_path, 30, date(2026, 7, 31), {"info": []})
 
     result = replay_archives(tmp_path)
 
     assert result["status"] == "passed"
+    assert result["tables"][AUCTION_TABLE]["status"] == "passed"
+    assert result["tables"][AUCTION_TABLE]["replay_rows"] == 0
     assert result["endpoints"]["30"] == {
         "archives": 1,
         "parsed_rows": 0,
@@ -86,3 +93,78 @@ def test_replay_rejects_tampered_content_hash(tmp_path):
     assert result["status"] == "failed"
     assert result["parsed_archives"] == 0
     assert "content hash mismatch" in result["errors"][0]["error"]
+
+
+def test_replay_fails_when_parquet_schema_drops_a_declared_field(tmp_path):
+    payload = {
+        "DateList": [],
+        "List": [{
+            "Day": "20260731",
+            "StockID": "600126",
+            "Name": "杭钢股份",
+            "LTZB": 1,
+            "CMJZ": 2,
+            "JSQBH": 3,
+            "UpdateDay": "20260801",
+            "IsNew": 1,
+        }],
+    }
+    archive_raw(tmp_path, "shareholder_count_changes", date(2026, 7, 31), payload)
+    rows = parse_shareholder_count_changes(payload)
+    atomic_upsert_records(
+        tmp_path,
+        SHAREHOLDER_COUNT_TABLE,
+        date(2026, 7, 31),
+        rows,
+        ("symbol",),
+    )
+    parquet = (
+        tmp_path / "ext_data" / SHAREHOLDER_COUNT_TABLE
+        / "timeseries" / "date=2026-07-31" / "part.parquet"
+    )
+    pl.read_parquet(parquet).drop("chip_concentration").write_parquet(parquet)
+
+    result = replay_archives(tmp_path)
+
+    table = result["tables"][SHAREHOLDER_COUNT_TABLE]
+    assert result["status"] == "failed"
+    assert table["status"] == "failed"
+    assert table["schema_missing_fields"] == ["chip_concentration"]
+    assert table["missing_value_fields"] == 1
+
+
+def test_replay_fails_on_duplicate_parquet_primary_key(tmp_path):
+    payload = {
+        "DateList": [],
+        "List": [{
+            "Day": "20260731",
+            "StockID": "600126",
+            "Name": "杭钢股份",
+            "LTZB": 1,
+            "CMJZ": 2,
+            "JSQBH": 3,
+            "UpdateDay": "20260801",
+            "IsNew": 1,
+        }],
+    }
+    archive_raw(tmp_path, "shareholder_count_changes", date(2026, 7, 31), payload)
+    rows = parse_shareholder_count_changes(payload)
+    atomic_upsert_records(
+        tmp_path,
+        SHAREHOLDER_COUNT_TABLE,
+        date(2026, 7, 31),
+        rows,
+        ("symbol",),
+    )
+    parquet = (
+        tmp_path / "ext_data" / SHAREHOLDER_COUNT_TABLE
+        / "timeseries" / "date=2026-07-31" / "part.parquet"
+    )
+    frame = pl.read_parquet(parquet)
+    pl.concat([frame, frame]).write_parquet(parquet)
+
+    result = replay_archives(tmp_path)
+
+    table = result["tables"][SHAREHOLDER_COUNT_TABLE]
+    assert result["status"] == "failed"
+    assert table["duplicate_parquet_keys"] == 1

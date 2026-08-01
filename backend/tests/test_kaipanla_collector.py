@@ -15,6 +15,7 @@ from app.plugins.kaipanla.storage import (
     LHB_DETAIL_TABLE,
     LHB_MOVEMENT_TABLE,
     LHB_TABLE,
+    LIMITUP_TABLE,
     NORTHBOUND_SECTOR_TABLE,
     NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
@@ -263,7 +264,10 @@ async def test_lhb_collection_automatically_fans_out_seat_details(tmp_path, monk
         "dragon_tiger_details": {
             "List": [
                 {
-                    "BuyList": [{"ID": "D1", "Name": "席位甲", "Buy": 100, "Sell": 20, "PX": 1, "GroupIcon": []}],
+                    "BuyList": [{
+                        "ID": "D1", "Name": "席位甲", "Buy": 100, "Sell": 20,
+                        "PX": 1, "LogID": "log-1", "ReasonType": "0", "GroupIcon": [],
+                    }],
                     "SellList": [],
                 }
             ]
@@ -298,7 +302,11 @@ async def test_lhb_reference_collects_department_details_when_movement_fails(tmp
                     "List": [
                         {
                             "BuyList": [
-                                {"ID": "D1", "Name": "席位甲", "Buy": 100, "Sell": 20, "PX": 1, "GroupIcon": []}
+                                {
+                                    "ID": "D1", "Name": "席位甲", "Buy": 100,
+                                    "Sell": 20, "PX": 1, "LogID": "log-1",
+                                    "ReasonType": "0", "GroupIcon": [],
+                                }
                             ],
                             "SellList": [],
                         }
@@ -452,6 +460,35 @@ async def test_fund_interval_uses_offsets_and_stops_on_a_duplicate_page(tmp_path
         ("fund_interval", 0),
         ("fund_interval", 1000),
     ]
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "fund_interval" / "2026-07-10.json"
+    ).read_text())
+    assert manifest["status"] == "complete"
+    assert manifest["completed_pages"] == 2
+
+
+@pytest.mark.asyncio
+async def test_fund_interval_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"fund_interval": RuntimeError("unavailable")}, []),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await collector.collect_funds(date(2026, 7, 10))
+
+    assert not (
+        tmp_path / "ext_data" / FUNDS_TABLE
+        / "timeseries" / "date=2026-07-10" / "part.parquet"
+    ).exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "fund_interval" / "2026-07-10.json"
+    ).read_text())
+    assert manifest["batches"]["offset-000000"]["status"] == "source_error"
 
 
 @pytest.mark.asyncio
@@ -533,6 +570,101 @@ async def test_northbound_partial_stock_batch_preserves_sector_only(tmp_path, mo
     ).glob("*.json")).read_text())
     assert manifest["status"] == "incomplete"
     assert manifest["failed_batches"] == ["P2"]
+
+
+@pytest.mark.asyncio
+async def test_northbound_sector_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({
+            "northbound_sector_latest": RuntimeError("unavailable"),
+        }, []),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await collector.collect_northbound()
+
+    assert not (
+        tmp_path / "ext_data" / NORTHBOUND_SECTOR_TABLE / "timeseries"
+    ).exists()
+    manifest = json.loads(next((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / NORTHBOUND_SECTOR_TABLE
+    ).glob("*.json")).read_text())
+    assert manifest["batches"]["offset-000000"]["status"] == "source_error"
+
+
+@pytest.mark.asyncio
+async def test_shareholder_count_page_failure_is_manifested_without_publishing(
+    tmp_path, monkeypatch
+):
+    _configured(monkeypatch)
+
+    def response(params):
+        if params["StratDate"] == "2026-07-31":
+            return {"DateList": [{"StratDate": "2026-07-16", "EndDate": "2026-07-31"}]}
+        raise RuntimeError("unavailable")
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"shareholder_count_changes": response}, []),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await collector.collect_shareholder_counts(date(2026, 7, 31), date(2026, 7, 31))
+
+    assert not (
+        tmp_path / "ext_data" / SHAREHOLDER_COUNT_TABLE / "timeseries"
+    ).exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / SHAREHOLDER_COUNT_TABLE / "2026-07-31.json"
+    ).read_text())
+    batch = "2026-07-16_2026-07-31_offset-000000"
+    assert manifest["batches"][batch]["status"] == "source_error"
+
+
+@pytest.mark.asyncio
+async def test_sector_discovery_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"sector_strength": RuntimeError("unavailable")}, []),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await collector.collect_sector_constituents(date(2026, 7, 31))
+
+    assert not (
+        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE / "timeseries"
+    ).exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "sector_strength_discovery" / "2026-07-31.json"
+    ).read_text())
+    assert manifest["batches"]["page-000"]["status"] == "source_error"
+
+
+@pytest.mark.asyncio
+async def test_limitup_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({15: RuntimeError("unavailable")}, []),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await collector.collect_limitup(date(2026, 7, 31))
+
+    assert not (
+        tmp_path / "ext_data" / LIMITUP_TABLE / "timeseries"
+    ).exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "endpoint_15" / "2026-07-31.json"
+    ).read_text())
+    assert manifest["batches"]["page-000"]["status"] == "source_error"
 
 
 @pytest.mark.asyncio

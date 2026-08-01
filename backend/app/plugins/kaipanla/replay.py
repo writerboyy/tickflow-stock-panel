@@ -45,8 +45,10 @@ from app.plugins.kaipanla.storage import (
     SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
+    TABLE_IDS,
     _normalize_rows,
 )
+from app.services.ext_data import ExtConfigStore
 from app.services.ingestion_manifest import stable_content_hash
 
 
@@ -61,7 +63,7 @@ _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     SHAREHOLDER_TABLE: ("symbol", "snapshot_kind", "shareholder_id"),
     SHAREHOLDER_COUNT_TABLE: ("symbol",),
     LHB_MOVEMENT_TABLE: ("participant_id", "side", "symbol"),
-    LHB_DETAIL_TABLE: ("symbol", "side", "rank"),
+    LHB_DETAIL_TABLE: ("symbol", "side", "log_id"),
     SECTOR_CONSTITUENT_TABLE: ("plate_id", "symbol"),
 }
 _IGNORED_COMPARE_FIELDS = {
@@ -70,6 +72,13 @@ _IGNORED_COMPARE_FIELDS = {
     "detail_collected_at",
     "pre_collected_at",
     "post_collected_at",
+}
+_VIRTUAL_PARTITION_FIELDS = {"report_date"}
+_EXPECTED_DTYPES = {
+    "string": pl.String,
+    "int": pl.Int64,
+    "float": pl.Float64,
+    "bool": pl.Boolean,
 }
 
 
@@ -130,6 +139,31 @@ def _stamp_report_date(rows: list[dict[str, Any]], value: date) -> list[dict[str
     return [{**row, "report_date": value.isoformat()} for row in rows]
 
 
+def _auction_rows(
+    endpoint: str,
+    payload: dict[str, Any],
+    path: Path,
+) -> list[dict[str, Any]]:
+    rows = parse_auction(payload)
+    if not rows:
+        return []
+    context = _context(path)
+    checkpoint = context.split("-", 1)[0]
+    if endpoint == "30" and checkpoint not in {"0915", "0920", "0925"}:
+        checkpoint = "0925"
+    if checkpoint not in {"0915", "0920", "0925"}:
+        raise ValueError("auction archive is missing checkpoint metadata")
+    result = []
+    for row in rows:
+        item = {key: row.get(key) for key in ("symbol", "code", "name")}
+        item[f"source_{checkpoint}"] = f"/{endpoint}"
+        for field, value in row.items():
+            if field not in {"symbol", "code", "name"}:
+                item[f"{field}_{checkpoint}"] = value
+        result.append(item)
+    return result
+
+
 def _parse_archive(
     endpoint: str,
     payload: dict[str, Any],
@@ -140,7 +174,7 @@ def _parse_archive(
     partition = archive_date
     rows: list[dict[str, Any]]
     if endpoint in {"30", "115"}:
-        table, rows = AUCTION_TABLE, parse_auction(payload)
+        table, rows = AUCTION_TABLE, _auction_rows(endpoint, payload, path)
     elif endpoint == "31":
         table, rows = AUCTION_TABLE, [parse_bid_detail(payload)]
     elif endpoint == "15":
@@ -257,36 +291,98 @@ def _compare_table(
     table: str,
     replay_rows: dict[tuple[str, ...], dict[str, Any]],
 ) -> dict[str, Any]:
+    config = ExtConfigStore(data_dir).get(table)
+    contract_fields = {field.name: field for field in config.fields} if config else {}
+    contract_hash = stable_content_hash(
+        [field.to_dict() for field in config.fields]
+    ) if config else None
     parquet_rows: dict[tuple[str, ...], dict[str, Any]] = {}
+    duplicate_keys = 0
+    partition_date_mismatches = 0
+    schema_missing_fields: set[str] = set()
+    schema_unexpected_fields: set[str] = set()
+    dtype_mismatches: set[str] = set()
     root = data_dir / "ext_data" / table / "timeseries"
-    for path in sorted(root.glob("date=*/part.parquet")):
+    parquet_files = sorted(root.glob("date=*/part.parquet"))
+    for path in parquet_files:
         partition = date.fromisoformat(path.parent.name.removeprefix("date="))
+        schema = pl.read_parquet_schema(path)
+        actual_fields = set(schema)
+        expected_fields = set(contract_fields)
+        schema_missing_fields.update(expected_fields - actual_fields)
+        schema_unexpected_fields.update(actual_fields - expected_fields)
+        for field in sorted(expected_fields & actual_fields):
+            expected_dtype = _EXPECTED_DTYPES.get(contract_fields[field].dtype)
+            if expected_dtype is None or schema[field] != expected_dtype:
+                dtype_mismatches.add(
+                    f"{field}: expected={contract_fields[field].dtype}, actual={schema[field]}"
+                )
         for row in pl.read_parquet(path).to_dicts():
-            parquet_rows[_row_key(table, partition, row)] = row
+            if "report_date" in row and row["report_date"] not in (
+                None,
+                partition.isoformat(),
+            ):
+                partition_date_mismatches += 1
+            key = _row_key(table, partition, row)
+            if key in parquet_rows:
+                duplicate_keys += 1
+            parquet_rows[key] = row
 
     replay_keys = set(replay_rows)
     parquet_keys = set(parquet_rows)
     mismatches = 0
+    missing_value_fields = 0
+    unexpected_replay_fields: set[str] = set()
     for key in sorted(replay_keys & parquet_keys):
         expected = replay_rows[key]
         actual = parquet_rows[key]
         for field, value in expected.items():
-            if field in _IGNORED_COMPARE_FIELDS or field not in actual:
+            if field in _VIRTUAL_PARTITION_FIELDS:
+                if value not in (None, key[0]):
+                    partition_date_mismatches += 1
+                continue
+            if field in _IGNORED_COMPARE_FIELDS:
+                continue
+            if field not in contract_fields:
+                unexpected_replay_fields.add(field)
+                continue
+            if field not in actual:
+                missing_value_fields += 1
                 continue
             if not _same_value(value, actual[field]):
                 mismatches += 1
 
+    contract_valid = config is not None and config.schema_version >= 1
+    passed = (
+        contract_valid
+        and replay_keys == parquet_keys
+        and mismatches == 0
+        and missing_value_fields == 0
+        and duplicate_keys == 0
+        and partition_date_mismatches == 0
+        and not schema_missing_fields
+        and not schema_unexpected_fields
+        and not dtype_mismatches
+        and not unexpected_replay_fields
+    )
+
     return {
-        "status": (
-            "passed"
-            if replay_keys == parquet_keys and mismatches == 0
-            else "failed"
-        ),
+        "status": "passed" if passed else "failed",
         "replay_rows": len(replay_rows),
         "parquet_rows": len(parquet_rows),
+        "parquet_files": len(parquet_files),
         "missing_in_parquet": len(replay_keys - parquet_keys),
         "missing_in_replay": len(parquet_keys - replay_keys),
         "field_mismatches": mismatches,
+        "missing_value_fields": missing_value_fields,
+        "duplicate_parquet_keys": duplicate_keys,
+        "partition_date_mismatches": partition_date_mismatches,
+        "schema_missing_fields": sorted(schema_missing_fields),
+        "schema_unexpected_fields": sorted(schema_unexpected_fields),
+        "dtype_mismatches": sorted(dtype_mismatches),
+        "unexpected_replay_fields": sorted(unexpected_replay_fields),
+        "schema_version": config.schema_version if config else None,
+        "field_contract_hash": contract_hash,
         "primary_key": ["partition_date", *_PRIMARY_KEYS[table]],
         "replay_hash": stable_content_hash(
             [{"key": key, "row": replay_rows[key]} for key in sorted(replay_rows)]
@@ -303,6 +399,8 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
         lambda: {"archives": 0, "parsed_rows": 0, "valid_empty": 0, "errors": 0}
     )
     replay_rows: dict[str, dict[tuple[str, ...], dict[str, Any]]] = defaultdict(dict)
+    replay_revisions: dict[str, int] = defaultdict(int)
+    conflicting_field_updates: dict[str, int] = defaultdict(int)
     errors: list[dict[str, str]] = []
     parser_versions: set[str] = set()
 
@@ -318,9 +416,24 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
             stats["parsed_rows"] += len(records)
             if not records:
                 stats["valid_empty"] += 1
+            archive_keys: set[tuple[str, ...]] = set()
             for table, partition, row in records:
                 key = _row_key(table, partition, row)
+                if key in archive_keys:
+                    raise ValueError(f"archive contains duplicate primary key: {key}")
+                archive_keys.add(key)
                 current = dict(replay_rows[table].get(key, {}))
+                if current:
+                    replay_revisions[table] += 1
+                    conflicting_field_updates[table] += sum(
+                        1
+                        for field, value in row.items()
+                        if field not in _IGNORED_COMPARE_FIELDS
+                        and value is not None
+                        and field in current
+                        and current[field] is not None
+                        and not _same_value(current[field], value)
+                    )
                 current.update({field: value for field, value in row.items() if value is not None})
                 replay_rows[table][key] = current
         except Exception as exc:  # noqa: BLE001
@@ -332,8 +445,12 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
 
     tables = (
         {
-            table: _compare_table(data_dir, table, rows)
-            for table, rows in sorted(replay_rows.items())
+            table: {
+                **_compare_table(data_dir, table, replay_rows[table]),
+                "replay_revisions": replay_revisions[table],
+                "conflicting_field_updates": conflicting_field_updates[table],
+            }
+            for table in sorted(TABLE_IDS)
         }
         if compare_parquet
         else {}

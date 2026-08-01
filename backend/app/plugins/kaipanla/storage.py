@@ -378,6 +378,8 @@ def _lhb_detail_config() -> ExtConfig:
         mode="timeseries",
         fields=_base_fields()
         + [
+            ExtField("log_id", "string", "上游席位记录 ID"),
+            ExtField("reason_type", "string", "上榜原因类型"),
             ExtField("department_id", "string", "营业部 ID"),
             ExtField("department_name", "string", "营业部名称"),
             ExtField("side", "string", "买卖方向"),
@@ -390,6 +392,7 @@ def _lhb_detail_config() -> ExtConfig:
         description="开盘啦龙虎榜单股买卖席位明细",
         symbol_map={"type": "mapped", "col": "symbol"},
         code_map={"type": "mapped", "col": "code"},
+        schema_version=2,
     )
 
 
@@ -439,8 +442,14 @@ def configs() -> list[ExtConfig]:
 def ensure_configs(data_dir: Path) -> None:
     store = ExtConfigStore(data_dir)
     for config in configs():
-        if store.get(config.id) is None:
+        current = store.get(config.id)
+        if current is None:
             store.upsert(config)
+        elif current.schema_version < config.schema_version:
+            current.fields = config.fields
+            current.schema_version = config.schema_version
+            current.description = config.description
+            store.upsert(current)
 
 
 def _partition_path(data_dir: Path, table_id: str, trade_date: date) -> Path:

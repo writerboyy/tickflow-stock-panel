@@ -10,6 +10,7 @@ from app.plugins.kaipanla.parsers import (
     parse_auction,
     parse_bid_detail,
     parse_capital_net,
+    parse_dragon_tiger_details,
     parse_dragon_tiger_movement,
     parse_interval_stock,
     parse_large_order_statistics,
@@ -252,3 +253,30 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
     assert movements[0]["side"] == "buy"
     assert constituents[0]["limit_count"] == 2
     assert strengths[0]["plate_id"] == "P1"
+
+
+def test_lhb_detail_parser_preserves_source_identity_across_reason_groups():
+    def item(log_id: str, reason_type: str) -> dict:
+        return {
+            "ID": "D1",
+            "Name": "席位甲",
+            "Buy": 100,
+            "Sell": 20,
+            "PX": 1,
+            "LogID": log_id,
+            "ReasonType": reason_type,
+            "GroupIcon": [],
+        }
+
+    rows = parse_dragon_tiger_details(
+        {"List": [
+            {"BuyList": [item("log-0", "0")], "SellList": []},
+            {"BuyList": [item("log-1", "1")], "SellList": []},
+        ]},
+        "600126",
+    )
+
+    assert [(row["log_id"], row["reason_type"], row["rank"]) for row in rows] == [
+        ("log-0", "0", 1),
+        ("log-1", "1", 1),
+    ]

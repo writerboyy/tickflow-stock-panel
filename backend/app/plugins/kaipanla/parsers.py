@@ -311,6 +311,12 @@ def parse_dragon_tiger_details(payload: dict, code: str) -> list[dict]:
                     {
                         "symbol": code,
                         "code": code,
+                        "log_id": _text(
+                            item.get("LogID"),
+                            f"{field}[{index}].LogID",
+                            required=True,
+                        ),
+                        "reason_type": _text(item.get("ReasonType"), "ReasonType"),
                         "department_id": _text(item.get("ID"), f"{field}[{index}].ID", required=True),
                         "department_name": _text(item.get("Name"), f"{field}[{index}].Name"),
                         "side": side,

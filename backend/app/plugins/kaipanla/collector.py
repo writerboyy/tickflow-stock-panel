@@ -333,19 +333,68 @@ class KaipanlaCollector:
         collected_at = cn_now().isoformat()
         interval_rows: list[dict] = []
         interval_codes: set[str] = set()
+        completed_pages = 0
         async with self._client_factory() as client:
             for offset in range(0, _MAX_PAGES * _FUND_INTERVAL_PAGE_SIZE, _FUND_INTERVAL_PAGE_SIZE):
-                payload = await client.request(
-                    "fund_interval",
-                    {
-                        "DStart": trade_date.strftime("%Y-%m-%d"),
-                        "DEnd": trade_date.strftime("%Y-%m-%d"),
-                        "Index": offset,
-                        "st": _FUND_INTERVAL_PAGE_SIZE,
-                    },
-                )
+                batch_id = f"offset-{offset:06d}"
+                try:
+                    payload = await client.request(
+                        "fund_interval",
+                        {
+                            "DStart": trade_date.strftime("%Y-%m-%d"),
+                            "DEnd": trade_date.strftime("%Y-%m-%d"),
+                            "Index": offset,
+                            "st": _FUND_INTERVAL_PAGE_SIZE,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "fund_interval",
+                        trade_date.isoformat(),
+                        batch_id,
+                        status="source_error",
+                        error_code=type(exc).__name__,
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        page_size=_FUND_INTERVAL_PAGE_SIZE,
+                    )
+                    raise
                 archive_raw(self.data_dir, "fund_interval", trade_date, payload, f"offset-{offset}")
-                parsed = parse_interval_stock(payload)
+                try:
+                    parsed = parse_interval_stock(payload)
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "fund_interval",
+                        trade_date.isoformat(),
+                        batch_id,
+                        status="parse_rejected",
+                        error_code=type(exc).__name__,
+                        source_content_hash=stable_content_hash(payload),
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        page_size=_FUND_INTERVAL_PAGE_SIZE,
+                    )
+                    raise
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    "fund_interval",
+                    trade_date.isoformat(),
+                    batch_id,
+                    status="completed" if parsed else "valid_empty",
+                    row_count=len(parsed),
+                    content_hash=stable_content_hash(parsed),
+                    source_content_hash=stable_content_hash(payload),
+                    empty_reason=None if parsed else "valid_empty",
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                    page_size=_FUND_INTERVAL_PAGE_SIZE,
+                )
+                completed_pages += 1
                 fresh = []
                 for row in parsed:
                     code = row["code"]
@@ -358,7 +407,29 @@ class KaipanlaCollector:
                 if len(parsed) < _FUND_INTERVAL_PAGE_SIZE:
                     break
             else:
+                update_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    "fund_interval",
+                    trade_date.isoformat(),
+                    status="page_limit_reached",
+                    error_code="page_limit_reached",
+                    published_rows=0,
+                )
                 raise RuntimeError("开盘啦资金排名分页超过安全上限")
+            update_ingestion_manifest(
+                self.data_dir,
+                "kaipanla",
+                "fund_interval",
+                trade_date.isoformat(),
+                status="complete" if interval_rows else "valid_empty",
+                completed_pages=completed_pages,
+                published_rows=len(interval_rows),
+                empty_reason=None if interval_rows else "valid_empty",
+                error_code=None,
+                parser_version="kaipanla_v1",
+                schema_version=1,
+            )
 
             codes = self._stock_codes()
             semaphore = asyncio.Semaphore(16)
@@ -510,16 +581,67 @@ class KaipanlaCollector:
         """采集北向季度板块及个股持仓，不混作每日资金流。"""
         sector_endpoint = "northbound_sector_history" if report_date else "northbound_sector_latest"
         stock_endpoint = "northbound_stocks_history" if report_date else "northbound_stocks_latest"
+        logical_snapshot = (report_date or cn_today()).isoformat()
         sector_rows: list[dict] = []
         seen_plates: set[str] = set()
         async with self._client_factory() as client:
             for offset in range(0, _MAX_PAGES * 20, 20):
+                batch_id = f"offset-{offset:06d}"
                 params = {"Index": offset, "st": 20}
                 if report_date:
                     params["Date"] = report_date.isoformat()
-                payload = await client.request(sector_endpoint, params)
+                try:
+                    payload = await client.request(sector_endpoint, params)
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        NORTHBOUND_SECTOR_TABLE,
+                        logical_snapshot,
+                        batch_id,
+                        status="source_error",
+                        error_code=type(exc).__name__,
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        endpoint=sector_endpoint,
+                        page_size=20,
+                    )
+                    raise
                 archive_raw(self.data_dir, sector_endpoint, report_date or cn_today(), payload, f"offset-{offset}")
-                _, parsed = parse_northbound_sector(payload)
+                try:
+                    _, parsed = parse_northbound_sector(payload)
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        NORTHBOUND_SECTOR_TABLE,
+                        logical_snapshot,
+                        batch_id,
+                        status="parse_rejected",
+                        error_code=type(exc).__name__,
+                        source_content_hash=stable_content_hash(payload),
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        endpoint=sector_endpoint,
+                        page_size=20,
+                    )
+                    raise
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    NORTHBOUND_SECTOR_TABLE,
+                    logical_snapshot,
+                    batch_id,
+                    status="completed" if parsed else "valid_empty",
+                    row_count=len(parsed),
+                    content_hash=stable_content_hash(parsed),
+                    source_content_hash=stable_content_hash(payload),
+                    empty_reason=None if parsed else "valid_empty",
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                    endpoint=sector_endpoint,
+                    page_size=20,
+                )
                 fresh = [row for row in parsed if row["plate_id"] not in seen_plates]
                 if not fresh:
                     break
@@ -528,7 +650,29 @@ class KaipanlaCollector:
                 if len(parsed) < 20:
                     break
             else:
+                update_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    NORTHBOUND_SECTOR_TABLE,
+                    logical_snapshot,
+                    status="page_limit_reached",
+                    error_code="page_limit_reached",
+                    published_rows=0,
+                )
                 raise RuntimeError("开盘啦北向板块分页超过安全上限")
+            update_ingestion_manifest(
+                self.data_dir,
+                "kaipanla",
+                NORTHBOUND_SECTOR_TABLE,
+                logical_snapshot,
+                status="complete" if sector_rows else "valid_empty",
+                published_rows=len(sector_rows),
+                empty_reason=None if sector_rows else "valid_empty",
+                error_code=None,
+                parser_version="kaipanla_v1",
+                schema_version=1,
+                endpoint=sector_endpoint,
+            )
 
             semaphore = asyncio.Semaphore(8)
             failed_plates: set[str] = set()
@@ -600,29 +744,92 @@ class KaipanlaCollector:
     async def collect_shareholder_counts(self, start_date: date, end_date: date) -> int:
         """采集指定统计区间的股东人数变更，日期取上游每行 Day。"""
         rows: list[dict] = []
+        logical_snapshot = end_date.isoformat()
         async with self._client_factory() as client:
-            window_payload = await client.request(
-                "shareholder_count_changes",
-                {
-                    "StratDate": start_date.isoformat(),
-                    "EndDate": end_date.isoformat(),
-                    "Index": 0,
-                    "st": _REFERENCE_PAGE_SIZE,
-                },
-            )
+            try:
+                window_payload = await client.request(
+                    "shareholder_count_changes",
+                    {
+                        "StratDate": start_date.isoformat(),
+                        "EndDate": end_date.isoformat(),
+                        "Index": 0,
+                        "st": _REFERENCE_PAGE_SIZE,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    "shareholder_count_windows",
+                    logical_snapshot,
+                    "windows",
+                    status="source_error",
+                    error_code=type(exc).__name__,
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                )
+                raise
             archive_raw(self.data_dir, "shareholder_count_changes", end_date, window_payload, "windows")
-            windows = _shareholder_count_windows(window_payload)
+            try:
+                windows = _shareholder_count_windows(window_payload)
+            except Exception as exc:  # noqa: BLE001
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    "shareholder_count_windows",
+                    logical_snapshot,
+                    "windows",
+                    status="parse_rejected",
+                    error_code=type(exc).__name__,
+                    source_content_hash=stable_content_hash(window_payload),
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                )
+                raise
+            record_ingestion_batch(
+                self.data_dir,
+                "kaipanla",
+                "shareholder_count_windows",
+                logical_snapshot,
+                "windows",
+                status="completed" if windows else "valid_empty",
+                row_count=len(windows),
+                content_hash=stable_content_hash(windows),
+                source_content_hash=stable_content_hash(window_payload),
+                empty_reason=None if windows else "valid_empty",
+                parser_version="kaipanla_v1",
+                schema_version=1,
+            )
             for window_start, window_end in windows:
                 for offset in range(0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE):
-                    payload = await client.request(
-                        "shareholder_count_changes",
-                        {
-                            "StratDate": window_start.isoformat(),
-                            "EndDate": window_end.isoformat(),
-                            "Index": offset,
-                            "st": _REFERENCE_PAGE_SIZE,
-                        },
+                    batch_id = (
+                        f"{window_start.isoformat()}_{window_end.isoformat()}_"
+                        f"offset-{offset:06d}"
                     )
+                    try:
+                        payload = await client.request(
+                            "shareholder_count_changes",
+                            {
+                                "StratDate": window_start.isoformat(),
+                                "EndDate": window_end.isoformat(),
+                                "Index": offset,
+                                "st": _REFERENCE_PAGE_SIZE,
+                            },
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        record_ingestion_batch(
+                            self.data_dir,
+                            "kaipanla",
+                            SHAREHOLDER_COUNT_TABLE,
+                            logical_snapshot,
+                            batch_id,
+                            status="source_error",
+                            error_code=type(exc).__name__,
+                            parser_version="kaipanla_v1",
+                            schema_version=1,
+                            page_size=_REFERENCE_PAGE_SIZE,
+                        )
+                        raise
                     archive_raw(
                         self.data_dir,
                         "shareholder_count_changes",
@@ -630,12 +837,64 @@ class KaipanlaCollector:
                         payload,
                         f"offset-{offset}",
                     )
-                    parsed = parse_shareholder_count_changes(payload)
+                    try:
+                        parsed = parse_shareholder_count_changes(payload)
+                    except Exception as exc:  # noqa: BLE001
+                        record_ingestion_batch(
+                            self.data_dir,
+                            "kaipanla",
+                            SHAREHOLDER_COUNT_TABLE,
+                            logical_snapshot,
+                            batch_id,
+                            status="parse_rejected",
+                            error_code=type(exc).__name__,
+                            source_content_hash=stable_content_hash(payload),
+                            parser_version="kaipanla_v1",
+                            schema_version=1,
+                            page_size=_REFERENCE_PAGE_SIZE,
+                        )
+                        raise
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        SHAREHOLDER_COUNT_TABLE,
+                        logical_snapshot,
+                        batch_id,
+                        status="completed" if parsed else "valid_empty",
+                        row_count=len(parsed),
+                        content_hash=stable_content_hash(parsed),
+                        source_content_hash=stable_content_hash(payload),
+                        empty_reason=None if parsed else "valid_empty",
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        page_size=_REFERENCE_PAGE_SIZE,
+                    )
                     rows.extend(parsed)
                     if len(parsed) < _REFERENCE_PAGE_SIZE:
                         break
                 else:
+                    update_ingestion_manifest(
+                        self.data_dir,
+                        "kaipanla",
+                        SHAREHOLDER_COUNT_TABLE,
+                        logical_snapshot,
+                        status="page_limit_reached",
+                        error_code="page_limit_reached",
+                        published_rows=0,
+                    )
                     raise RuntimeError("开盘啦股东人数分页超过安全上限")
+        update_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            SHAREHOLDER_COUNT_TABLE,
+            logical_snapshot,
+            status="complete" if rows else "valid_empty",
+            published_rows=len(rows),
+            empty_reason=None if rows else "valid_empty",
+            error_code=None,
+            parser_version="kaipanla_v1",
+            schema_version=1,
+        )
         return self._write_records(SHAREHOLDER_COUNT_TABLE, rows, ("symbol",))
 
     async def collect_shareholder_changes(self, report_date: date) -> int:
@@ -716,11 +975,70 @@ class KaipanlaCollector:
         """由板块强度榜发现板块，再抓取目标日完整历史成分。"""
         async with self._client_factory() as client:
             if plate_ids is None:
-                payload = await client.request(
-                    "sector_strength", {"Day": trade_date.isoformat(), "Index": 0, "st": _REFERENCE_PAGE_SIZE}
-                )
+                try:
+                    payload = await client.request(
+                        "sector_strength",
+                        {
+                            "Day": trade_date.isoformat(),
+                            "Index": 0,
+                            "st": _REFERENCE_PAGE_SIZE,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "sector_strength_discovery",
+                        trade_date.isoformat(),
+                        "page-000",
+                        status="source_error",
+                        error_code=type(exc).__name__,
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                    )
+                    raise
                 archive_raw(self.data_dir, "sector_strength", trade_date, payload)
-                plate_ids = [row["plate_id"] for row in parse_sector_strength(payload)]
+                try:
+                    strength_rows = parse_sector_strength(payload)
+                except Exception as exc:  # noqa: BLE001
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "sector_strength_discovery",
+                        trade_date.isoformat(),
+                        "page-000",
+                        status="parse_rejected",
+                        error_code=type(exc).__name__,
+                        source_content_hash=stable_content_hash(payload),
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                    )
+                    raise
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    "sector_strength_discovery",
+                    trade_date.isoformat(),
+                    "page-000",
+                    status="completed" if strength_rows else "valid_empty",
+                    row_count=len(strength_rows),
+                    content_hash=stable_content_hash(strength_rows),
+                    source_content_hash=stable_content_hash(payload),
+                    empty_reason=None if strength_rows else "valid_empty",
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                )
+                update_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    "sector_strength_discovery",
+                    trade_date.isoformat(),
+                    status="complete" if strength_rows else "valid_empty",
+                    published_rows=len(strength_rows),
+                    empty_reason=None if strength_rows else "valid_empty",
+                    error_code=None,
+                )
+                plate_ids = [row["plate_id"] for row in strength_rows]
             requested_plates = sorted(set(plate_ids))
             failed_plates: set[str] = set()
             semaphore = asyncio.Semaphore(8)
@@ -939,7 +1257,7 @@ class KaipanlaCollector:
         )
         return self._write_records(
             LHB_MOVEMENT_TABLE, movement, ("participant_id", "side", "symbol")
-        ) + self._write_records(LHB_DETAIL_TABLE, details, ("symbol", "side", "rank"))
+        ) + self._write_records(LHB_DETAIL_TABLE, details, ("symbol", "side", "log_id"))
 
     async def _fetch_pages(
         self,
@@ -947,6 +1265,8 @@ class KaipanlaCollector:
         endpoint: int,
         trade_date: date,
         params: dict[str, object] | None = None,
+        *,
+        archive_context: str | None = None,
     ) -> list[dict]:
         page_size = _PAGE_SIZE[endpoint]
         pages = []
@@ -971,7 +1291,8 @@ class KaipanlaCollector:
                     page_size=page_size,
                 )
                 raise
-            archive_raw(self.data_dir, endpoint, trade_date, payload, f"page-{index}")
+            context = f"{archive_context}-page-{index}" if archive_context else f"page-{index}"
+            archive_raw(self.data_dir, endpoint, trade_date, payload, context)
             pages.append(payload)
             rows = payload.get(_ROW_KEY[endpoint])
             if not isinstance(rows, list):
@@ -1017,6 +1338,7 @@ class KaipanlaCollector:
                     empty_reason="valid_empty" if not any(
                         payload.get(_ROW_KEY[endpoint]) for payload in pages
                     ) else None,
+                    error_code=None,
                 )
                 return pages
         if len(pages) >= _MAX_PAGES:
@@ -1044,7 +1366,13 @@ class KaipanlaCollector:
         params = {"Date": trade_date.isoformat()} if historical else {}
         collected_at = cn_now().isoformat()
         async with self._client_factory() as client:
-            pages = await self._fetch_pages(client, endpoint, trade_date, params)
+            pages = await self._fetch_pages(
+                client,
+                endpoint,
+                trade_date,
+                params,
+                archive_context=checkpoint,
+            )
             base_rows = [row for payload in pages for row in parse_auction(payload)]
             rows = []
             for row in base_rows:
@@ -1182,10 +1510,64 @@ class KaipanlaCollector:
 
     async def collect_limitup(self, trade_date: date) -> int:
         async with self._client_factory() as client:
-            payload = await client.request(15, {"Index": 0, "st": 1000})
+            try:
+                payload = await client.request(15, {"Index": 0, "st": 1000})
+            except Exception as exc:  # noqa: BLE001
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    "endpoint_15",
+                    trade_date.isoformat(),
+                    "page-000",
+                    status="source_error",
+                    error_code=type(exc).__name__,
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                )
+                raise
         archive_raw(self.data_dir, 15, trade_date, payload)
         collected_at = cn_now().isoformat()
-        rows = [{**row, "collected_at": collected_at} for row in parse_limitup(payload)]
+        try:
+            parsed = parse_limitup(payload)
+        except Exception as exc:  # noqa: BLE001
+            record_ingestion_batch(
+                self.data_dir,
+                "kaipanla",
+                "endpoint_15",
+                trade_date.isoformat(),
+                "page-000",
+                status="parse_rejected",
+                error_code=type(exc).__name__,
+                source_content_hash=stable_content_hash(payload),
+                parser_version="kaipanla_v1",
+                schema_version=1,
+            )
+            raise
+        record_ingestion_batch(
+            self.data_dir,
+            "kaipanla",
+            "endpoint_15",
+            trade_date.isoformat(),
+            "page-000",
+            status="completed" if parsed else "valid_empty",
+            row_count=len(parsed),
+            content_hash=stable_content_hash(parsed),
+            source_content_hash=stable_content_hash(payload),
+            empty_reason=None if parsed else "valid_empty",
+            parser_version="kaipanla_v1",
+            schema_version=1,
+        )
+        update_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            "endpoint_15",
+            trade_date.isoformat(),
+            status="complete" if parsed else "valid_empty",
+            published_rows=len(parsed),
+            empty_reason=None if parsed else "valid_empty",
+            error_code=None,
+        )
+        rows = [{**row, "collected_at": collected_at} for row in parsed]
         return atomic_upsert(self.data_dir, LIMITUP_TABLE, trade_date, rows)
 
     async def collect_lhb(self) -> int:
