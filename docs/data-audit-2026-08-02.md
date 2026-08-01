@@ -501,7 +501,7 @@ PYTHONPATH=. .venv/bin/python -m pytest \
   tests/test_backfill_easy_tdx_dividends.py -q
 ```
 
-实际结果：`134 passed, 4 warnings in 5.49s`。4 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。该结果对应只读审计报告提交，报告本身不改变公开 API、schema、类型、采集代码或运行时行为。
+原只读审计报告提交时的实际结果为 `134 passed, 4 warnings in 5.49s`。最终报告合入后在 `custom` 复跑同一组命令，实际结果为 `154 passed, 6 warnings in 4.73s`；新增用例来自当前测试文件扩充，6 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。报告本身不改变公开 API、schema、类型、采集代码或运行时行为。
 
 ### 11.4 整改实现验证
 
