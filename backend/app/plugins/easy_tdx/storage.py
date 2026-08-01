@@ -197,7 +197,8 @@ def replace_industry_snapshot(data_dir: Path, rows: list[dict]) -> int:
 
 
 def _partition_path(data_dir: Path, table_id: str, value: date) -> Path:
-    return Path(data_dir) / "ext_data" / table_id / "timeseries" / f"date={value}" / "part.parquet"
+    partition = f"year={value.year}" if table_id == DIVIDEND_HISTORY_TABLE else f"date={value}"
+    return Path(data_dir) / "ext_data" / table_id / "timeseries" / partition / "part.parquet"
 
 
 def _path_lock(path: Path) -> threading.Lock:

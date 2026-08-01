@@ -288,7 +288,7 @@ async def test_f10_collection_writes_separate_reference_tables(tmp_path):
     forecast = pl.read_parquet(tmp_path / "ext_data" / FORECAST_TABLE / "timeseries" / "date=2026-07-15" / "part.parquet")
     assert margin.to_dicts()[0]["margin_balance_10k"] == 474212.95
     assert forecast.to_dicts()[0]["report_period"] == "2026-06-30"
-    dividend = pl.read_parquet(tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE / "timeseries" / "date=2026-06-16" / "part.parquet")
+    dividend = pl.read_parquet(tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE / "timeseries" / "year=2026" / "part.parquet")
     assert dividend.to_dicts()[0]["cash_per_share"] == 0.03
     assert not (tmp_path / "ext_data" / EXPRESS_TABLE / "timeseries").exists()
     manifests = tmp_path / "ext_data" / "_ingestion" / "easy_tdx"
@@ -346,7 +346,7 @@ async def test_f10_batches_resume_failed_sources_and_publish_datasets_independen
     assert not (tmp_path / "ext_data" / MARGIN_TABLE / "timeseries").exists()
     dividend_path = (
         tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE
-        / "timeseries" / "date=2026-06-16" / "part.parquet"
+        / "timeseries" / "year=2026" / "part.parquet"
     )
     assert pl.read_parquet(dividend_path).height == 51
     margin_manifest_path = next(

@@ -198,16 +198,44 @@ def _read_ext_dataframe(
 
     if snapshot_date:
         path = base / f"date={snapshot_date}" / "part.parquet"
-        if not path.exists():
+        if path.exists():
+            return pl.read_parquet(path), snapshot_date
+        files = sorted(base.rglob("*.parquet"))
+        if not files:
             return pl.DataFrame(), snapshot_date
-        return pl.read_parquet(path), snapshot_date
+        frame = pl.read_parquet(files)
+        logical_date = next(
+            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
+            None,
+        )
+        if logical_date is None:
+            return pl.DataFrame(), snapshot_date
+        return frame.filter(
+            pl.col(logical_date).cast(pl.String) == snapshot_date
+        ), snapshot_date
 
     partitions = sorted(
         d for d in base.iterdir()
         if d.is_dir() and d.name.startswith("date=") and (d / "part.parquet").exists()
     )
     if not partitions:
-        return pl.DataFrame(), None
+        files = sorted(base.rglob("*.parquet"))
+        if not files:
+            return pl.DataFrame(), None
+        frame = pl.read_parquet(files)
+        logical_date = next(
+            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
+            None,
+        )
+        if logical_date is None:
+            return frame, None
+        values = frame[logical_date].drop_nulls().cast(pl.String)
+        if values.is_empty():
+            return pl.DataFrame(schema=frame.schema), None
+        latest_date = values.max()
+        return frame.filter(
+            pl.col(logical_date).cast(pl.String) == latest_date
+        ), latest_date
 
     latest = partitions[-1]
     latest_date = latest.name[5:]
@@ -265,13 +293,11 @@ def _latest_sync_from_partitions(base: Path) -> str | None:
     from datetime import datetime
     latest_ts: float = 0
     latest_date: str | None = None
-    for d in base.iterdir():
-        if d.is_dir() and d.name.startswith("date="):
-            for f in d.glob("*.parquet"):
-                mtime = f.stat().st_mtime
-                if mtime > latest_ts:
-                    latest_ts = mtime
-                    latest_date = d.name[5:]
+    for f in base.rglob("*.parquet"):
+        mtime = f.stat().st_mtime
+        if mtime > latest_ts:
+            latest_ts = mtime
+            latest_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
     if latest_date and latest_ts > 0:
         ts = datetime.fromtimestamp(latest_ts).strftime("%H:%M:%S")
         return f"{latest_date} {ts}"
@@ -293,7 +319,19 @@ def _date_range(config: ExtConfig, data_dir: Path) -> list[str] | None:
         if d.is_dir() and d.name.startswith("date="):
             dates.append(d.name[5:])
     if len(dates) < 1:
-        return None
+        files = sorted(base.rglob("*.parquet"))
+        if not files:
+            return None
+        frame = pl.read_parquet(files)
+        logical_date = next(
+            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
+            None,
+        )
+        if logical_date is None:
+            return None
+        dates = frame[logical_date].drop_nulls().cast(pl.String).unique().to_list()
+        if not dates:
+            return None
     dates.sort()
     return [dates[0], dates[-1]]
 
