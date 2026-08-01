@@ -271,7 +271,80 @@ def test_record_date_dividend_loader_reparses_transfer_plan_cash_base(tmp_path):
     }
 
 
-def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close():
+def test_valuation_market_cap_loader_normalizes_joinquant_yi_units(tmp_path):
+    from app.free_strategy.process import _load_valuation_market_caps
+
+    path = tmp_path / "financials" / "valuation" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "A", "B"],
+        "date": ["2024-01-02", "2024-01-03", "2024-01-03"],
+        "market_cap": [9.0, 10.0, 20.0],
+    }).write_parquet(path)
+
+    assert _load_valuation_market_caps(tmp_path, ["A", "B"], date(2024, 1, 3)) == {
+        "A": 1_000_000_000.0,
+        "B": 2_000_000_000.0,
+    }
+
+
+def test_valuation_market_cap_loader_normalizes_tushare_wanyuan_units(tmp_path):
+    from app.free_strategy.process import _load_valuation_market_caps
+
+    path = tmp_path / "financials" / "valuation" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B"],
+        "trade_date": ["2024-01-03", "2024-01-03"],
+        "total_mv": [2_000_000.0, 3_000_000.0],
+    }).write_parquet(path)
+
+    assert _load_valuation_market_caps(tmp_path, ["A", "B"], date(2024, 1, 3)) == {
+        "A": 20_000_000_000.0,
+        "B": 30_000_000_000.0,
+    }
+
+
+def test_dividend_ratio_loader_prefers_valuation_market_cap(tmp_path):
+    from app.free_strategy.process import _load_dividend_ratio_ranked
+
+    class Repo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            rows = []
+            for symbol in symbols:
+                for day in (date(2024, 1, 1), date(2024, 1, 3)):
+                    rows.append({
+                        "symbol": symbol,
+                        "date": day,
+                        "close": 10.0,
+                        "raw_close": 10.0,
+                        "total_shares": 100.0,
+                    })
+            return pl.DataFrame(rows)
+
+    dividend_path = tmp_path / "ext_data" / "ext_tdx_dividend_history" / "timeseries" / "date=2024-01-02" / "part.parquet"
+    dividend_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D"],
+        "record_date": ["2024-01-02"] * 4,
+        "cash_per_share": [1.0, 1.0, 1.0, 1.0],
+        "progress_code": ["036003"] * 4,
+    }).write_parquet(dividend_path)
+    valuation_path = tmp_path / "financials" / "valuation" / "part.parquet"
+    valuation_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B", "C", "D"],
+        "date": ["2024-01-03"] * 4,
+        "market_cap": [40.0, 30.0, 20.0, 10.0],
+    }).write_parquet(valuation_path)
+
+    assert _load_dividend_ratio_ranked(
+        Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
+    ) == ["D"]
+
+
+def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close(tmp_path):
     from app.free_strategy.process import _load_smallcap_index_value
 
     class Repo:
@@ -285,7 +358,7 @@ def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close():
                 "total_shares": [100.0, 1.0, 10.0, 1.0],
             })
 
-    assert _load_smallcap_index_value(Repo(), ["A", "B"], date(2024, 1, 3)) == 15.0
+    assert _load_smallcap_index_value(Repo(), tmp_path, ["A", "B"], date(2024, 1, 3)) == 15.0
 
 
 def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):

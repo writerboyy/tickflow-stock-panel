@@ -541,6 +541,7 @@ def _engine_from_state(
         _load_market_data,
         _load_financial_snapshot,
         _load_smallcap_index_value,
+        _load_valuation_market_caps,
         _load_scheduled_history_batch,
         _prepare_market_reference,
         _preload_tradable_dates,
@@ -595,8 +596,15 @@ def _engine_from_state(
             cutoff,
         )
     )
+    engine.set_valuation_market_cap_loader(
+        lambda symbols, cutoff: _load_valuation_market_caps(
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
     engine.set_smallcap_index_loader(
-        lambda symbols, cutoff: _load_smallcap_index_value(repo, symbols, cutoff)
+        lambda symbols, cutoff: _load_smallcap_index_value(repo, data_dir, symbols, cutoff)
     )
     if config.allow_stale_fills:
         _preload_tradable_dates(

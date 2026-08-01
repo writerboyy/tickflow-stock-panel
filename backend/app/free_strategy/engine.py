@@ -306,6 +306,29 @@ class Context:
         ))
         return self._engine._dividend_ratio_loader(normalized, previous_date)
 
+    def valuation_market_caps(
+        self,
+        symbols: Iterable[str],
+        end_date: date | datetime | str | None = None,
+    ) -> dict[str, float]:
+        if self._engine._valuation_market_cap_loader is None or self.now is None:
+            return {}
+        normalized = list(dict.fromkeys(
+            self._normalize_symbol(symbol)
+            for symbol in symbols
+            if str(symbol).strip()
+        ))
+        if isinstance(end_date, datetime):
+            requested_end = end_date.date()
+        elif isinstance(end_date, date):
+            requested_end = end_date
+        elif end_date is not None:
+            requested_end = date.fromisoformat(str(end_date))
+        else:
+            requested_end = self.now.date() - timedelta(days=1)
+        cutoff = min(requested_end, self.now.date() - timedelta(days=1))
+        return self._engine._valuation_market_cap_loader(normalized, cutoff)
+
     def smallcap_index_value(
         self,
         symbols: Iterable[str],
@@ -600,6 +623,7 @@ class FreeStrategyEngine:
         self._extra_history_loader: Callable[[str, list[str], date, date], None] | None = None
         self._financial_snapshot_loader: Callable[[list[str], date], dict[str, dict[str, Any]]] | None = None
         self._dividend_ratio_loader: Callable[[list[str], date], list[str]] | None = None
+        self._valuation_market_cap_loader: Callable[[list[str], date], dict[str, float]] | None = None
         self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
@@ -730,6 +754,12 @@ class FreeStrategyEngine:
         loader: Callable[[list[str], date], list[str]] | None,
     ) -> None:
         self._dividend_ratio_loader = loader
+
+    def set_valuation_market_cap_loader(
+        self,
+        loader: Callable[[list[str], date], dict[str, float]] | None,
+    ) -> None:
+        self._valuation_market_cap_loader = loader
 
     def set_smallcap_index_loader(
         self,

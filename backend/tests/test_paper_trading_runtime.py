@@ -136,8 +136,12 @@ def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monk
         lambda repo, data_dir, symbols, cutoff: calls.append(("dividend", repo, data_dir, symbols, cutoff)) or ["X"],
     )
     monkeypatch.setattr(
+        "app.free_strategy.process._load_valuation_market_caps",
+        lambda data_dir, symbols, cutoff: calls.append(("valuation", data_dir, symbols, cutoff)) or {"X": 1.0},
+    )
+    monkeypatch.setattr(
         "app.free_strategy.process._load_smallcap_index_value",
-        lambda repo, symbols, cutoff: calls.append(("smallcap", repo, symbols, cutoff)) or 12.34,
+        lambda repo, data_dir, symbols, cutoff: calls.append(("smallcap", repo, data_dir, symbols, cutoff)) or 12.34,
     )
     account_root = tmp_path / "free_strategy_paper" / "performance"
     account_root.mkdir(parents=True)
@@ -156,8 +160,9 @@ def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monk
 
     assert engine.context.financial_snapshot(["X"], cutoff) == {"X": {}}
     assert engine.context.dividend_ratio_ranked(["X"], cutoff) == ["X"]
+    assert engine.context.valuation_market_caps(["X"], cutoff) == {"X": 1.0}
     assert engine.context.smallcap_index_value(["X"], cutoff) == 12.34
-    assert [item[0] for item in calls] == ["financial", "dividend", "smallcap"]
+    assert [item[0] for item in calls] == ["financial", "dividend", "valuation", "smallcap"]
 
 
 def test_on_quote_current_and_next_quote_fill_rules():
