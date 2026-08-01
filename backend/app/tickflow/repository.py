@@ -71,6 +71,7 @@ class DataStore:
             "adj_factor",
             "adj_factor_etf",
             "financials",
+            "valuation_daily",
             "instruments",
             "instruments_index",
             "instruments_etf",
@@ -196,6 +197,8 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/financials/cash_flow/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW financials_shares AS
                 SELECT * FROM read_parquet('{d}/financials/shares/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW valuation_daily AS
+                SELECT * FROM read_parquet('{d}/valuation_daily/**/*.parquet', union_by_name=true)""",
             # 五档盘口 sealed 真假涨停(独立旁路存储,不进 enriched)
             f"""CREATE OR REPLACE VIEW depth5 AS
                 SELECT * FROM read_parquet('{d}/depth5/**/*.parquet', union_by_name=true)""",
@@ -2142,7 +2145,7 @@ class KlineRepository:
             self.store._register_unified_views()
 
     def rebuild_views(self) -> None:
-        """重建全部 13 张 parquet 视图并重挂 unified 视图 —— 唯一权威实现。
+        """重建全部 parquet 视图并重挂 unified 视图 —— 唯一权威实现。
 
         原先 daily_pipeline._refresh_views(盘后管道) 与 /api/data/clear(清库) 各自
         内联了同一份视图重建 SQL, 清库那份还漏了几张视图导致漂移。此处收敛为单一入口:
@@ -2163,6 +2166,7 @@ class KlineRepository:
             "instruments": f"{d}/instruments/**/*.parquet",
             "instruments_index": f"{d}/instruments_index/**/*.parquet",
             "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
+            "valuation_daily": f"{d}/valuation_daily/**/*.parquet",
         }
         for name, path in views.items():
             try:

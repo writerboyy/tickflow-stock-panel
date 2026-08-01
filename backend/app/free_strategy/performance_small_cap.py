@@ -149,14 +149,6 @@ def _tradable_at_snapshot(symbol: str, bar: Any, *, allow_held: bool = False) ->
     return bool(symbol)
 
 
-def _market_cap(symbol: str, bar: Any) -> float | None:
-    price = _bar_price(bar)
-    total_shares = float(getattr(bar, "total_shares", 0.0) or 0.0)
-    if price <= 0 or total_shares <= 0:
-        return None
-    return price * total_shares
-
-
 def _valuation_market_caps(context, symbols: list[str], previous_date: date) -> dict[str, float]:
     loader = getattr(context, "valuation_market_caps", None)
     if not callable(loader):
@@ -227,7 +219,7 @@ def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> 
         if not values:
             continue
         latest = values[-1]
-        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, latest)
+        market_cap = valuation_caps.get(symbol)
         if market_cap is None:
             continue
         one_year = _one_year_before(previous_date)
@@ -268,7 +260,7 @@ def _candidate_symbols(context, previous_date: date) -> list[str]:
         price = _bar_price(latest)
         if symbol not in held and price >= MAX_STOCK_PRICE:
             continue
-        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, latest)
+        market_cap = valuation_caps.get(symbol)
         if market_cap is None:
             continue
         candidates.append((market_cap, symbol))
@@ -432,7 +424,7 @@ def _smallcap_index_value(context) -> float | None:
         if not values:
             continue
         bar = values[-1]
-        market_cap = valuation_caps.get(symbol) or _market_cap(symbol, bar)
+        market_cap = valuation_caps.get(symbol)
         if market_cap is None:
             continue
         ranked.append((market_cap, symbol, bar))

@@ -572,7 +572,7 @@ export function Data() {
           />
         )
       case 'financials': {
-        const historicalShareRows = s?.financials?.tables?.shares?.rows ?? 0
+        const valuationRows = s?.financials?.tables?.valuation_daily?.rows ?? 0
         return (
           <StatCard
             title="财务数据"
@@ -583,7 +583,8 @@ export function Data() {
             capLimits={caps.data?.capabilities}
             tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('financials')}
-            subLabel={`历史股本 · ${historicalShareRows.toLocaleString()} 条`}
+            subLabel={`日度估值 · ${valuationRows.toLocaleString()} 条`}
+            onShowFields={valuationRows > 0 ? () => setSchemaTable('valuation_daily') : undefined}
             onSettings={hasData ? () => setOpenSettings(v => v === 'financials' ? null : 'financials') : undefined}
             settingsOpen={openSettings === 'financials'}
           />

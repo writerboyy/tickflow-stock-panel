@@ -13,7 +13,7 @@ import polars as pl
 import pytest
 
 from app.jobs import daily_pipeline
-from app.services import pipeline_jobs, quote_service
+from app.services import daily_valuation, pipeline_jobs, quote_service
 from app.services.pipeline_jobs import JobStore
 from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
@@ -135,6 +135,11 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(daily_pipeline, "_resolve_universe", lambda *_: [])
     monkeypatch.setattr(daily_pipeline, "_refresh_single_view", lambda *_: None)
     monkeypatch.setattr(daily_pipeline, "_invalidate", lambda *_: None)
+    monkeypatch.setattr(
+        daily_valuation,
+        "sync_missing_daily_valuation",
+        lambda *_: {"rows": 0, "trading_days": 0},
+    )
     monkeypatch.setattr(daily_pipeline.kline_sync, "sync_and_persist_minute", sync_minute)
     monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_a_share", lambda: False)
     monkeypatch.setattr(daily_pipeline._prefs, "get_adj_factor_provider", lambda: "tickflow")

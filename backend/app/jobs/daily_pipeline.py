@@ -365,6 +365,18 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
+    from app.services.daily_valuation import sync_missing_daily_valuation
+
+    valuation_result = sync_missing_daily_valuation(repo.store.data_dir)
+    if valuation_result["trading_days"]:
+        _refresh_single_view(repo, "valuation_daily")
+        emit(
+            "compute_valuation",
+            89,
+            f"日度估值完成,{valuation_result['trading_days']} 天",
+        )
+        logger.info("valuation_daily incremental done: %s", valuation_result)
+
     # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0
     written_etf_daily = 0
@@ -604,6 +616,7 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         "instruments": f"{d}/instruments/**/*.parquet",
         "instruments_index": f"{d}/instruments_index/**/*.parquet",
         "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
+        "valuation_daily": f"{d}/valuation_daily/**/*.parquet",
     }
     path = paths.get(name)
     if not path:

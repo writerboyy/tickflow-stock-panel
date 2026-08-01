@@ -8,6 +8,7 @@ const TABLE_TITLES: Record<string, string> = {
   daily: '日 K',
   adj_factor: '除权因子',
   enriched: 'Enriched',
+  valuation_daily: '日度估值',
   minute: '分钟 K',
   index_instruments: '指数维表',
   index_daily: '指数日 K',
@@ -18,9 +19,16 @@ const TABLE_TITLES: Record<string, string> = {
   etf_minute: 'ETF 分钟 K',
 }
 
-function categorize(name: string): string {
+function categorize(name: string, table: string | null): string {
   if (['symbol', 'date'].includes(name)) return '基础'
   if (['open', 'high', 'low', 'close', 'volume', 'amount'].includes(name)) return '行情'
+  if (table === 'valuation_daily') {
+    if (['raw_close', 'total_shares', 'float_shares'].includes(name)) return '计算输入'
+    if (['market_cap', 'float_market_cap', 'float_share_ratio'].includes(name)) return '市值'
+    if (['pe_ttm', 'pb', 'ps_ttm', 'pcf_ttm'].includes(name)) return '估值'
+    if (name.endsWith('_announce_date') || name.endsWith('_period_end')) return '财务时点'
+    if (['net_income_ttm', 'revenue_ttm', 'equity_attributable', 'operating_cash_flow_ttm'].includes(name)) return '财务基数'
+  }
   if (name.startsWith('raw_') || name.startsWith('ex_') || name === 'close_pre_adj') return '复权'
   if (name.startsWith('ma')) return '均线 MA'
   if (name.startsWith('ema')) return '指数均线 EMA'
@@ -47,7 +55,7 @@ export function EnrichedSchemaModal({ table, onClose }: { table: string | null; 
 
   const groups: Record<string, EnrichedField[]> = {}
   for (const f of fields) {
-    const cat = categorize(f.name)
+    const cat = categorize(f.name, table)
     if (!groups[cat]) groups[cat] = []
     groups[cat].push(f)
   }

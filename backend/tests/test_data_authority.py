@@ -25,6 +25,16 @@ def test_tickflow_primary_datasets_cover_etf_daily_and_minute_tables():
     assert etf_minute.storage == ("kline_etf_minute",)
 
 
+def test_daily_valuation_is_a_tickflow_owned_derived_dataset():
+    valuation = dataset_authority("valuation_daily")
+
+    assert valuation is not None
+    assert valuation.authority == "derived"
+    assert valuation.owner == "tickflow"
+    assert valuation.storage == ("valuation_daily",)
+    assert "pe_ttm" in valuation.fields
+
+
 def test_ext_config_backfills_authority_metadata_without_rewriting_legacy_config():
     config = ExtConfig(
         id="ext_money_flow",

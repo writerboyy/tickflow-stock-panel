@@ -1366,6 +1366,14 @@ async def rebuild_enriched(request: Request):
                     lambda: run_pipeline(on_batch_done=_batch_progress),
                 )
 
+                progress("rebuild_valuation", 96, "重建日度估值…")
+                from app.services.daily_valuation import build_daily_valuation
+
+                valuation = await loop.run_in_executor(
+                    _long_task_executor,
+                    lambda: build_daily_valuation(repo.store.data_dir),
+                )
+
                 enriched_dir = repo.store.data_dir / "kline_daily_enriched"
                 enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
 
@@ -1373,6 +1381,7 @@ async def rebuild_enriched(request: Request):
                 d = repo.store.data_dir.as_posix()
                 for view_name, glob in [
                     ("kline_enriched", f"{d}/kline_daily_enriched/**/*.parquet"),
+                    ("valuation_daily", f"{d}/valuation_daily/**/*.parquet"),
                 ]:
                     try:
                         repo.db.execute(
@@ -1386,6 +1395,7 @@ async def rebuild_enriched(request: Request):
                 job_store.succeed(job_id, {
                     "enriched_days": enriched_days,
                     "enriched_rows": written,
+                    "valuation_rows": valuation["rows"],
                 })
                 invalidate_storage_cache()
             except Exception as e:

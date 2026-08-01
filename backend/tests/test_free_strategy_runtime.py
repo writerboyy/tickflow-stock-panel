@@ -504,6 +504,10 @@ def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selectio
         ],
         history_bars=lambda symbol, **_kwargs: histories[symbol][-1:],
         history_batch=history_batch,
+        valuation_market_caps=lambda requested, _cutoff: {
+            symbol: histories[symbol][-1].raw_close * histories[symbol][-1].total_shares
+            for symbol in requested
+        },
         financial_snapshot=lambda requested, _cutoff: {
             symbol: {
                 "revenue": 200_000_000,
@@ -596,6 +600,10 @@ def test_performance_small_cap_applies_name_filter_at_current_snapshot():
             symbol: histories[symbol][-count:] for symbol in requested
         },
         dividend_ratio_ranked=lambda requested, _cutoff: list(requested),
+        valuation_market_caps=lambda requested, _cutoff: {
+            symbol: histories[symbol][-1].raw_close * histories[symbol][-1].total_shares
+            for symbol in requested
+        },
         financial_snapshot=lambda requested, _cutoff: {
             symbol: {
                 "revenue": 200_000_000,
@@ -654,7 +662,7 @@ def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position
     assert submitted == [(symbol, 100_000 / 3) for symbol in symbols]
 
 
-def test_performance_small_cap_candidate_sort_prefers_valuation_market_cap():
+def test_performance_small_cap_candidate_sort_uses_persisted_market_cap():
     previous_day = datetime(2025, 7, 23)
     symbols = ["000001.SZ", "000002.SZ"]
     histories = {

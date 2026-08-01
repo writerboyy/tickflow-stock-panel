@@ -8,7 +8,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.services.financial_sync import FINANCIAL_TABLES, get_financial_df
+from app.services.financial_sync import (
+    DERIVED_FINANCIAL_TABLES,
+    FINANCIAL_TABLES,
+    get_financial_df,
+)
+from app.services.daily_valuation import load_daily_valuation_metadata
 from app.services.financial_analyzer import analyze_financials_stream
 from app.services import ai_reports
 from app.tickflow.capabilities import Cap
@@ -43,8 +48,15 @@ def financial_status(request: Request):
     data_dir = request.app.state.repo.store.data_dir
     tables = {}
 
-    for table in FINANCIAL_TABLES:
+    for table in (*FINANCIAL_TABLES, *DERIVED_FINANCIAL_TABLES):
         path = data_dir / "financials" / table / "part.parquet"
+        if table == "valuation_daily":
+            metadata = load_daily_valuation_metadata(data_dir)
+            tables[table] = {
+                "rows": int(metadata.get("rows") or 0),
+                "symbols": int(metadata.get("symbols") or 0),
+            }
+            continue
         if path.exists():
             try:
                 df = pl.read_parquet(path, columns=["symbol"])
@@ -144,14 +156,14 @@ def get_shares(request: Request, symbol: str | None = None):
 def sync_table(request: Request, table: str):
     """手动触发同步(立即返回,后台异步执行)。
 
-    table: metrics / income / balance_sheet / cash_flow / shares / valuation / all
+    table: metrics / income / balance_sheet / cash_flow / shares / valuation_daily / all
     同步在后台线程执行,全量同步需数分钟。本接口立即返回 started 状态,
     前端通过轮询 GET /status 的 syncing 字段观察进度。
     """
     capset = request.app.state.capabilities
     _require_financial(capset)
 
-    valid_tables = {*FINANCIAL_TABLES, "all"}
+    valid_tables = {*FINANCIAL_TABLES, *DERIVED_FINANCIAL_TABLES, "all"}
     if table not in valid_tables:
         raise HTTPException(400, f"invalid table: {table}, expected one of {valid_tables}")
 

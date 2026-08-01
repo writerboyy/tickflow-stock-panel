@@ -427,6 +427,16 @@ def _safe_aggregate_financials(repo) -> dict | None:
         else:
             tables_info[table] = {"rows": 0, "symbols": 0}
 
+    from app.services.daily_valuation import load_daily_valuation_metadata
+
+    metadata = load_daily_valuation_metadata(data_dir)
+    valuation_info = {
+        "rows": int(metadata.get("rows") or 0),
+        "symbols": int(metadata.get("symbols") or 0),
+    }
+    tables_info["valuation_daily"] = valuation_info
+    total_rows += valuation_info["rows"]
+
     if total_rows == 0:
         return None
 
@@ -497,6 +507,7 @@ def _compute_storage(data_dir: Path) -> dict:
         "adj_factor": data_dir / "adj_factor",
         "instruments": data_dir / "instruments",
         "ext_data": data_dir / "ext_data",
+        "valuation_daily": data_dir / "valuation_daily",
     }
     stats = {}
     total_size = 0
@@ -634,6 +645,7 @@ def clear_data(request: Request):
         "kline_daily", "kline_daily_enriched", "kline_index_daily", "kline_index_enriched",
         "kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "kline_minute",
         "adj_factor", "adj_factor_etf", "instruments", "instruments_index", "instruments_etf", "pools", "financials",
+        "valuation_daily",
         "backtest_results", "screener_results", "ai_cache",
     ):
         d = data_dir / sub
@@ -705,6 +717,30 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "amount": "成交额",
     },
     "kline_enriched": ENRICHED_COLUMNS,
+    "valuation_daily": {
+        "symbol": "股票代码",
+        "date": "交易日期",
+        "raw_close": "当日未复权收盘价",
+        "total_shares": "当日有效总股本",
+        "float_shares": "当日有效流通股本",
+        "market_cap": "总市值(元)",
+        "float_market_cap": "流通市值(元)",
+        "float_share_ratio": "流通股本占比",
+        "income_announce_date": "利润表公告日",
+        "income_period_end": "利润表报告期",
+        "net_income_ttm": "归母净利润TTM(元)",
+        "revenue_ttm": "营业收入TTM(元)",
+        "balance_announce_date": "资产负债表公告日",
+        "balance_period_end": "资产负债表报告期",
+        "equity_attributable": "归母净资产(元)",
+        "cash_flow_announce_date": "现金流量表公告日",
+        "cash_flow_period_end": "现金流量表报告期",
+        "operating_cash_flow_ttm": "经营现金流TTM(元)",
+        "pe_ttm": "滚动市盈率",
+        "pb": "市净率",
+        "ps_ttm": "滚动市销率",
+        "pcf_ttm": "滚动市现率",
+    },
     "kline_index_daily": {
         "symbol": "指数代码",
         "date": "交易日期",
@@ -777,6 +813,7 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
 _SCHEMA_VIEWS: dict[str, str] = {
     "daily": "kline_daily",
     "enriched": "kline_enriched",
+    "valuation_daily": "valuation_daily",
     "index_daily": "kline_index_daily",
     "index_enriched": "kline_index_enriched",
     "index_instruments": "instruments_index",

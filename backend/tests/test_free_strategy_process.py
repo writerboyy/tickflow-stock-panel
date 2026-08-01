@@ -58,6 +58,16 @@ def daily_row(day, price: float) -> dict:
     }
 
 
+def _write_daily_market_caps(data_dir, day: date, caps: dict[str, float]) -> None:
+    path = data_dir / "valuation_daily" / f"date={day.isoformat()}" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": list(caps),
+        "date": [day] * len(caps),
+        "market_cap": list(caps.values()),
+    }).write_parquet(path)
+
+
 def _write_financial_table(tmp_path, table: str, rows: dict) -> None:
     path = tmp_path / "financials" / table / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +151,7 @@ def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_
     )
 
 
-def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path):
+def test_dividend_ratio_loader_matches_top_quartile_with_persisted_market_cap(tmp_path):
     from app.free_strategy.process import _load_dividend_ratio_ranked
 
     class Repo:
@@ -170,6 +180,11 @@ def test_dividend_ratio_loader_matches_top_quartile_with_raw_market_cap(tmp_path
         "event_date": [date(2024, 1, 2)],
         "cash_per_share": [100.0],
     }).write_parquet(xdxr_path)
+    _write_daily_market_caps(
+        tmp_path,
+        date(2024, 1, 3),
+        {symbol: 1_000.0 for symbol in ("A", "B", "C", "D")},
+    )
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
@@ -202,6 +217,11 @@ def test_dividend_ratio_loader_uses_calendar_year_window(tmp_path):
         "cash_per_share": [100.0, 1.0, 2.0, 3.0, 4.0],
         "progress_code": ["036003"] * 5,
     }).write_parquet(dividend_path)
+    _write_daily_market_caps(
+        tmp_path,
+        date(2025, 7, 23),
+        {symbol: 1_000.0 for symbol in ("A", "B", "C", "D", "E")},
+    )
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D", "E"], date(2025, 7, 23),
@@ -234,6 +254,11 @@ def test_dividend_ratio_loader_counts_record_date_without_daily_bar(tmp_path):
         "cash_per_share": [1.0, 2.0, 3.0, 4.0],
         "progress_code": ["036003"] * 4,
     }).write_parquet(dividend_path)
+    _write_daily_market_caps(
+        tmp_path,
+        date(2024, 1, 3),
+        {symbol: 1_000.0 for symbol in ("A", "B", "C", "D")},
+    )
 
     assert _load_dividend_ratio_ranked(
         Repo(), tmp_path, ["A", "B", "C", "D"], date(2024, 1, 3),
@@ -271,41 +296,24 @@ def test_record_date_dividend_loader_reparses_transfer_plan_cash_base(tmp_path):
     }
 
 
-def test_valuation_market_cap_loader_normalizes_joinquant_yi_units(tmp_path):
+def test_valuation_market_cap_loader_reads_canonical_daily_table(tmp_path):
     from app.free_strategy.process import _load_valuation_market_caps
 
-    path = tmp_path / "financials" / "valuation" / "part.parquet"
-    path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["A", "A", "B"],
-        "date": ["2024-01-02", "2024-01-03", "2024-01-03"],
-        "market_cap": [9.0, 10.0, 20.0],
-    }).write_parquet(path)
-
-    assert _load_valuation_market_caps(tmp_path, ["A", "B"], date(2024, 1, 3)) == {
-        "A": 1_000_000_000.0,
-        "B": 2_000_000_000.0,
-    }
-
-
-def test_valuation_market_cap_loader_normalizes_tushare_wanyuan_units(tmp_path):
-    from app.free_strategy.process import _load_valuation_market_caps
-
-    path = tmp_path / "financials" / "valuation" / "part.parquet"
-    path.parent.mkdir(parents=True)
+    daily_path = tmp_path / "valuation_daily" / "date=2024-01-03" / "part.parquet"
+    daily_path.parent.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["A", "B"],
-        "trade_date": ["2024-01-03", "2024-01-03"],
-        "total_mv": [2_000_000.0, 3_000_000.0],
-    }).write_parquet(path)
+        "date": [date(2024, 1, 3)] * 2,
+        "market_cap": [900.0, 2_000.0],
+    }).write_parquet(daily_path)
 
     assert _load_valuation_market_caps(tmp_path, ["A", "B"], date(2024, 1, 3)) == {
-        "A": 20_000_000_000.0,
-        "B": 30_000_000_000.0,
+        "A": 900.0,
+        "B": 2_000.0,
     }
 
 
-def test_dividend_ratio_loader_prefers_valuation_market_cap(tmp_path):
+def test_dividend_ratio_loader_uses_canonical_valuation_market_cap(tmp_path):
     from app.free_strategy.process import _load_dividend_ratio_ranked
 
     class Repo:
@@ -331,12 +339,12 @@ def test_dividend_ratio_loader_prefers_valuation_market_cap(tmp_path):
         "cash_per_share": [1.0, 1.0, 1.0, 1.0],
         "progress_code": ["036003"] * 4,
     }).write_parquet(dividend_path)
-    valuation_path = tmp_path / "financials" / "valuation" / "part.parquet"
+    valuation_path = tmp_path / "valuation_daily" / "date=2024-01-03" / "part.parquet"
     valuation_path.parent.mkdir(parents=True)
     pl.DataFrame({
         "symbol": ["A", "B", "C", "D"],
-        "date": ["2024-01-03"] * 4,
-        "market_cap": [40.0, 30.0, 20.0, 10.0],
+        "date": [date(2024, 1, 3)] * 4,
+        "market_cap": [4_000.0, 3_000.0, 2_000.0, 1_000.0],
     }).write_parquet(valuation_path)
 
     assert _load_dividend_ratio_ranked(
@@ -344,7 +352,7 @@ def test_dividend_ratio_loader_prefers_valuation_market_cap(tmp_path):
     ) == ["D"]
 
 
-def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close(tmp_path):
+def test_smallcap_index_loader_uses_canonical_market_cap_and_adjusted_close(tmp_path):
     from app.free_strategy.process import _load_smallcap_index_value
 
     class Repo:
@@ -357,6 +365,14 @@ def test_smallcap_index_loader_uses_prior_day_shares_and_adjusted_close(tmp_path
                 "raw_close": [8.0, 10.0, 16.0, 20.0],
                 "total_shares": [100.0, 1.0, 10.0, 1.0],
             })
+
+    valuation_path = tmp_path / "valuation_daily" / "date=2024-01-03" / "part.parquet"
+    valuation_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["A", "B"],
+        "date": [date(2024, 1, 3)] * 2,
+        "market_cap": [1_000.0, 200.0],
+    }).write_parquet(valuation_path)
 
     assert _load_smallcap_index_value(Repo(), tmp_path, ["A", "B"], date(2024, 1, 3)) == 15.0
 

@@ -21,15 +21,15 @@ logger = logging.getLogger(__name__)
 # 每个 API 请求最多 100 个标的
 _BATCH_SIZE = 100
 
-# 财务报表 + 历史股本/估值表
+# 财务报表 + 历史股本表
 FINANCIAL_TABLES = (
     "metrics",
     "income",
     "balance_sheet",
     "cash_flow",
     "shares",
-    "valuation",
 )
+DERIVED_FINANCIAL_TABLES = ("valuation_daily",)
 
 
 # ================================================================
@@ -98,7 +98,6 @@ def _fetch_table(
         "balance_sheet": tf.financials.balance_sheet,
         "cash_flow": tf.financials.cash_flow,
         "shares": getattr(tf.financials, "shares", None),
-        "valuation": getattr(tf.financials, "valuation", None),
     }.get(table)
     if api_method is None:
         logger.info(
@@ -237,12 +236,6 @@ def sync_shares(data_dir: Path, capset: CapabilitySet) -> int:
     return _sync_shares_for_symbols(symbols, data_dir, capset)
 
 
-def sync_valuation(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步历史估值表；当前仅支持提供 valuation 的 financial provider。"""
-    symbols = _get_symbols(data_dir)
-    return _sync_table("valuation", symbols, data_dir, capset, latest_only=False)
-
-
 def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     """同步所有财务表。返回 {table: rows}。"""
     if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
@@ -257,6 +250,10 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
             if table == "shares"
             else _sync_table(table, symbols, data_dir, capset, latest_only=False)
         )
+
+    from app.services.daily_valuation import build_daily_valuation
+
+    results["valuation_daily"] = build_daily_valuation(data_dir)["rows"]
 
     # 同步完成后注册 DuckDB 视图
     _refresh_financials_views(data_dir)
@@ -277,7 +274,6 @@ def _refresh_financials_views(data_dir: Path) -> None:
         "financials_balance_sheet": f"{d}/financials/balance_sheet/*.parquet",
         "financials_cash_flow": f"{d}/financials/cash_flow/*.parquet",
         "financials_shares": f"{d}/financials/shares/*.parquet",
-        "financials_valuation": f"{d}/financials/valuation/*.parquet",
     }
     for name, path in views.items():
         out = data_dir / "financials" / name.replace("financials_", "") / "part.parquet"
@@ -311,12 +307,20 @@ class FinancialScheduler:
         self._running = False
         self._data_dir: Path | None = None
         self._capset: CapabilitySet | None = None
+        self._repo: Any | None = None
         self._lock = threading.Lock()
         self._last_sync: dict[str, str] = {}  # {table: iso_timestamp}
         # 手动同步(run_now)是否正在进行。前端据此显示"同步中"并防重复点击。
         self._is_syncing = False
 
-    def start(self, data_dir: Path, capset: CapabilitySet, *, auto_schedule: bool = False) -> None:
+    def start(
+        self,
+        data_dir: Path,
+        capset: CapabilitySet,
+        repo: Any,
+        *,
+        auto_schedule: bool = False,
+    ) -> None:
         """初始化调度器，并按需启动周期同步后台任务。
 
         auto_schedule=False (默认): 仅初始化 (设置数据目录/能力 + 恢复 last_sync),
@@ -329,6 +333,7 @@ class FinancialScheduler:
         # 即便 app.state.capabilities 已更新, 调度器仍报 "no FINANCIAL capability"。
         self._data_dir = data_dir
         self._capset = capset
+        self._repo = repo
         if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
             logger.info("FinancialScheduler skipped: no FINANCIAL capability")
             return
@@ -375,6 +380,10 @@ class FinancialScheduler:
             preferences.set_financial_sync_time(table, ts)
         except Exception as e:  # noqa: BLE001
             logger.warning("persist financial_sync_time(%s) failed: %s", e)
+
+    def _refresh_views(self) -> None:
+        if self._repo is not None:
+            self._repo.rebuild_views()
 
     def update_capabilities(self, capset: CapabilitySet) -> None:
         """刷新调度器持有的能力集。
@@ -433,19 +442,32 @@ class FinancialScheduler:
         每张表完成立即更新 last_sync,让前端轮询 /status 能看到进度递增。
         """
         if table:
+            if table == "valuation_daily":
+                from app.services.daily_valuation import build_daily_valuation
+
+                rows = build_daily_valuation(self._data_dir)["rows"]
+                self._refresh_views()
+                self._record_sync(table)
+                return {table: rows}
             fn = {
                 "metrics": sync_metrics,
                 "income": sync_income,
                 "balance_sheet": sync_balance_sheet,
                 "cash_flow": sync_cash_flow,
                 "shares": sync_shares,
-                "valuation": sync_valuation,
             }.get(table)
             if not fn:
                 return {}
             rows = fn(self._data_dir, self._capset)
             self._record_sync(table)
-            return {table: rows}
+            result = {table: rows}
+            if table in {"income", "balance_sheet", "cash_flow", "shares"}:
+                from app.services.daily_valuation import build_daily_valuation
+
+                result["valuation_daily"] = build_daily_valuation(self._data_dir)["rows"]
+                self._refresh_views()
+                self._record_sync("valuation_daily")
+            return result
         # 全部同步
         symbols = _get_symbols(self._data_dir)
         result: dict[str, int] = {}
@@ -456,6 +478,11 @@ class FinancialScheduler:
                 else _sync_table(t, symbols, self._data_dir, self._capset, latest_only=False)
             )
             self._record_sync(t)
+        from app.services.daily_valuation import build_daily_valuation
+
+        result["valuation_daily"] = build_daily_valuation(self._data_dir)["rows"]
+        self._refresh_views()
+        self._record_sync("valuation_daily")
         _refresh_financials_views(self._data_dir)
         return result
 

@@ -2658,6 +2658,8 @@ export interface DataStatus {
     instruments_size_mb: number
     financials_files?: number
     financials_size_mb?: number
+    valuation_daily_files?: number
+    valuation_daily_size_mb?: number
     ext_data_files?: number
     ext_data_size_mb?: number
     total_size_mb: number

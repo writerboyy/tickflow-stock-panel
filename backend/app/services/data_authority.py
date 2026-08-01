@@ -141,6 +141,22 @@ PRIMARY_DATASETS: dict[str, DatasetAuthority] = {
 
 
 DERIVED_DATASETS: dict[str, DatasetAuthority] = {
+    "valuation_daily": DatasetAuthority(
+        dataset="valuation_daily",
+        authority="derived",
+        owner="tickflow",
+        storage=("valuation_daily",),
+        fields=(
+            "market_cap",
+            "float_market_cap",
+            "float_share_ratio",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "pcf_ttm",
+        ),
+        note="Derived PIT values from raw close, historical shares, and announced statements.",
+    ),
     "stock_enriched": DatasetAuthority(
         dataset="stock_enriched",
         authority="derived",

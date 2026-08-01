@@ -303,73 +303,14 @@ def _load_financial_snapshot(
     return result
 
 
-def _valuation_market_cap_column(frame: pl.DataFrame) -> tuple[str, float] | None:
-    market_cap_columns = {
-        "market_cap_yuan": 1.0,
-        "market_cap_cny": 1.0,
-        "market_cap": 100_000_000.0,
-        "total_mv": 10_000.0,
-    }
-    for column, scale in market_cap_columns.items():
-        if column not in frame.columns:
-            continue
-        values = (
-            frame
-            .select(pl.col(column).cast(pl.Float64, strict=False).alias("_value"))
-            .filter(pl.col("_value").is_finite() & (pl.col("_value") > 0))
-        )
-        if values.is_empty():
-            continue
-        return column, scale
-    return None
-
-
 def _load_valuation_market_caps(
     data_dir: Path,
     symbols: list[str],
     cutoff: date,
 ) -> dict[str, float]:
-    from app.services.financial_sync import get_financial_df
+    from app.services.daily_valuation import load_latest_market_caps
 
-    symbols = list(dict.fromkeys(symbols))
-    frame = get_financial_df(data_dir, "valuation")
-    if frame.is_empty() or "symbol" not in frame.columns or not symbols:
-        return {}
-    date_column = next(
-        (column for column in ("date", "trade_date", "day", "stat_date") if column in frame.columns),
-        None,
-    )
-    market_cap = _valuation_market_cap_column(frame)
-    if date_column is None or market_cap is None:
-        return {}
-    value_column, scale = market_cap
-    frame = (
-        frame
-        .filter(pl.col("symbol").is_in(symbols))
-        .with_columns([
-            _date_column_expr(frame, date_column).alias("_valuation_date"),
-            (pl.col(value_column).cast(pl.Float64, strict=False) * scale).alias("_market_cap"),
-        ])
-        .filter(
-            pl.col("_valuation_date").is_not_null()
-            & (pl.col("_valuation_date") <= cutoff)
-            & pl.col("_market_cap").is_finite()
-            & (pl.col("_market_cap") > 0)
-        )
-        .sort(["symbol", "_valuation_date"])
-    )
-    if frame.is_empty():
-        return {}
-    return {
-        str(symbol): float(market_cap)
-        for symbol, market_cap in (
-            frame
-            .group_by("symbol", maintain_order=True)
-            .tail(1)
-            .select("symbol", "_market_cap")
-            .iter_rows()
-        )
-    }
+    return load_latest_market_caps(data_dir, symbols, cutoff)
 
 
 def _load_dividend_ratio_ranked(
@@ -432,26 +373,16 @@ def _load_dividend_ratio_ranked(
     )
     if dividend.is_empty():
         return []
-    latest = values.group_by("symbol", maintain_order=True).tail(1).with_columns(
-        (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_fallback_market_cap")
-    ).select(
-        "symbol",
-        "_fallback_market_cap",
-    )
     valuation_caps = _load_valuation_market_caps(data_dir, symbols, previous_date)
-    if valuation_caps:
-        valuation = pl.DataFrame(
-            [{"symbol": symbol, "_valuation_market_cap": value} for symbol, value in valuation_caps.items()],
-            schema={"symbol": pl.String, "_valuation_market_cap": pl.Float64},
-        )
-        latest = latest.join(valuation, on="symbol", how="left").with_columns(
-            pl.coalesce([pl.col("_valuation_market_cap"), pl.col("_fallback_market_cap")]).alias("_market_cap")
-        )
-    else:
-        latest = latest.with_columns(pl.col("_fallback_market_cap").alias("_market_cap"))
+    if not valuation_caps:
+        return []
+    valuation = pl.DataFrame(
+        [{"symbol": symbol, "_market_cap": value} for symbol, value in valuation_caps.items()],
+        schema={"symbol": pl.String, "_market_cap": pl.Float64},
+    )
     ranked = (
         dividend
-        .join(latest, on="symbol", how="inner")
+        .join(valuation, on="symbol", how="inner")
         .filter(
             pl.col("_dividend").is_finite()
             & (pl.col("_dividend") > 0)
@@ -480,35 +411,27 @@ def _load_smallcap_index_value(
         symbols,
         previous_date - timedelta(days=16),
         previous_date,
-        ["symbol", "date", "close", "raw_close", "total_shares"],
+        ["symbol", "date", "close"],
     )
-    required = {"symbol", "date", "close", "total_shares"}
+    required = {"symbol", "date", "close"}
     if frame.is_empty() or not required.issubset(frame.columns):
         return None
     latest = (
         frame
         .filter(pl.col("date") <= previous_date)
         .sort(["symbol", "date"])
-        .with_columns(pl.col("total_shares").shift(1).over("symbol").alias("_shares"))
         .group_by("symbol", maintain_order=True)
         .tail(1)
-        .with_columns(
-            (pl.coalesce([pl.col("raw_close"), pl.col("close")]) * pl.col("_shares")).alias("_fallback_market_cap")
-        )
     )
     valuation_caps = _load_valuation_market_caps(data_dir, symbols, previous_date)
-    if valuation_caps:
-        valuation = pl.DataFrame(
-            [{"symbol": symbol, "_valuation_market_cap": value} for symbol, value in valuation_caps.items()],
-            schema={"symbol": pl.String, "_valuation_market_cap": pl.Float64},
-        )
-        latest = latest.join(valuation, on="symbol", how="left").with_columns(
-            pl.coalesce([pl.col("_valuation_market_cap"), pl.col("_fallback_market_cap")]).alias("_market_cap")
-        )
-    else:
-        latest = latest.with_columns(pl.col("_fallback_market_cap").alias("_market_cap"))
+    if not valuation_caps:
+        return None
+    valuation = pl.DataFrame(
+        [{"symbol": symbol, "_market_cap": value} for symbol, value in valuation_caps.items()],
+        schema={"symbol": pl.String, "_market_cap": pl.Float64},
+    )
     latest = (
-        latest
+        latest.join(valuation, on="symbol", how="inner")
         .filter(pl.col("_market_cap").is_finite() & (pl.col("_market_cap") > 0))
         .sort(["_market_cap", "symbol"])
         .head(400)
@@ -1665,6 +1588,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
         if _is_performance_small_cap_source(source):
             _assert_performance_small_cap_financial_coverage(repo.store.data_dir, start)
+            from app.services.daily_valuation import assert_daily_valuation_coverage
+
+            assert_daily_valuation_coverage(repo.store.data_dir, start, end)
         config = FreeStrategyConfig(**payload["config"])
         engine = FreeStrategyEngine(
             source,
