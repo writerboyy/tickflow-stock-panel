@@ -139,7 +139,7 @@ class MyConfig:
 `backend/app/plugins/kaipanla/` 是这类插件的现有参考实现，具体表契约和调度见
 [开盘啦扩展数据接入](./plans/kaipanla-auction.md)。
 
-### EasyTDX 行业维度
+### EasyTDX 辅助数据
 
 EasyTDX 按辅助采集插件接入，不创建 `plugin.yaml`，不会出现在主行情数据源列表。
 上游参考为 [handsomejustin/easy_tdx](https://github.com/handsomejustin/easy_tdx)
@@ -152,7 +152,7 @@ cd backend
 uv sync --extra easy-tdx
 ```
 
-采集结果写入 snapshot 扩展表 `ext_industry_tdx`：
+行业快照写入 `ext_industry_tdx`：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -161,9 +161,14 @@ uv sync --extra easy-tdx
 | `industry_tdx` | EasyTDX 从 `tdxhy.cfg` 读取的通达信行业代码 |
 | `source` / `collected_at` | 来源标识 / 采集时间 |
 
+F10 参考数据在每个交易日 `18:40` 采集，写入 `ext_tdx_margin`、
+`ext_tdx_forecast`、`ext_tdx_express`。两融使用 F10 正式日度表；预告和快报
+仅解析正式栏目，互动问答、新闻或未匹配的正文不会写入。预告与快报按公告日分表，
+不互相覆盖，也不代替正式财报。
+
 数据边界：
 
-- 只保留两个行业代码。EasyTDX 返回的名称、行情等字段不落库，避免与 TickFlow 重复。
+- 行业快照只保留两个行业代码。EasyTDX 返回的名称、行情等字段不落库，避免与 TickFlow 重复。
 - 不采集竞价、涨停复盘、龙虎榜和监管数据，避免与开盘啦四张扩展表重复。
 - `get_security_list_all()` 当前只覆盖沪深 A 股；北交所不在快照内。
 - `industry_sw` 保留上游原始代码，不推断行业名称或自行截断层级。

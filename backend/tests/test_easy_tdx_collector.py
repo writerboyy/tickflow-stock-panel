@@ -6,10 +6,17 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.plugins.easy_tdx.client import fetch_industry_rows, normalize_industry_rows
+from app.plugins.easy_tdx.client import (
+    fetch_industry_rows,
+    normalize_industry_rows,
+    parse_f10_reference,
+)
 from app.plugins.easy_tdx.collector import EasyTdxCollector
 from app.plugins.easy_tdx.storage import (
     INDUSTRY_TABLE,
+    EXPRESS_TABLE,
+    FORECAST_TABLE,
+    MARGIN_TABLE,
     ensure_config,
     replace_industry_snapshot,
 )
@@ -94,6 +101,51 @@ def test_fetch_industry_rows_uses_easy_tdx_public_api(monkeypatch):
     assert calls == [(5.0, 0)]
 
 
+def test_parse_f10_reference_requires_explicit_sections():
+    text = """最新提示☆ ◇000858 五 粮 液 更新日期：2026-08-01◇
+【7.融资融券】
+│交易日期        │ 融资余额(万元)│ 融资买入额(万元)│ 融券余额(万元)│ 融券卖出量(万股)│融资融券余额(万元)│
+│2026-07-30      │       474212.95│          21533.51│          100.00│             2.00│       474312.95│
+【8.风险提示】
+│●业绩预告:
+│2026-07-15 预告业绩:业绩大幅上升
+│预计公司2026年01-06月归属于上市公司股东的净利润为873000万元至920000万元，与上年同期相比变动幅度为88.8%至98.97%。
+├────────────────────
+│问：什么时候发布业绩快报
+│答：请关注公告
+"""
+
+    margins, forecasts, expresses = parse_f10_reference(text, "000858")
+
+    assert margins == [{
+        "symbol": "000858.SZ", "code": "000858", "name": "五 粮 液", "report_date": "2026-07-30",
+        "margin_balance_10k": 474212.95, "margin_purchase_10k": 21533.51, "short_balance_10k": 100.0,
+        "short_sell_10k_shares": 2.0, "margin_short_balance_10k": 474312.95,
+    }]
+    assert forecasts[0]["announcement_date"] == "2026-07-15"
+    assert forecasts[0]["report_period"] == "2026-06-30"
+    assert forecasts[0]["net_profit_low_10k"] == 873000
+    assert forecasts[0]["net_profit_yoy_high_pct"] == 98.97
+    assert expresses == []
+
+
+def test_parse_f10_reference_keeps_only_explicit_express_section():
+    text = """◇300750 宁德时代 更新日期：2026-08-01◇
+│●业绩快报:
+│2026-02-20 公司披露 2025 年度业绩快报
+│营业收入和净利润以正式公告为准
+├────────────────────
+│问：什么时候发布业绩快报
+"""
+
+    _, _, expresses = parse_f10_reference(text, "300750")
+
+    assert expresses == [{
+        "symbol": "300750.SZ", "code": "300750", "name": "宁德时代", "report_date": "2026-02-20",
+        "announcement_date": "2026-02-20", "summary": "●业绩快报:\n2026-02-20 公司披露 2025 年度业绩快报\n营业收入和净利润以正式公告为准",
+    }]
+
+
 def test_snapshot_replace_is_atomic_and_empty_rows_preserve_last_valid_data(tmp_path):
     first = [{**_row("600000", "X480101"), "symbol": "600000.SH"}]
     second = [{**_row("000001", "X500102"), "symbol": "000001.SZ"}]
@@ -144,7 +196,7 @@ def test_start_without_dependency_registers_config_and_job_without_bootstrap(tmp
 
     collector.start(scheduler)
 
-    assert scheduler.jobs == ["easy_tdx_industry"]
+    assert scheduler.jobs == ["easy_tdx_industry", "easy_tdx_f10_reference"]
     assert collector._bootstrap_task is None
     assert ExtConfigStore(tmp_path).get(INDUSTRY_TABLE) is not None
 
@@ -167,6 +219,27 @@ async def test_collection_writes_source_and_collection_time(tmp_path):
     stored = pl.read_parquet(path).to_dicts()[0]
     assert stored["source"] == "easy_tdx"
     assert stored["collected_at"]
+
+
+@pytest.mark.asyncio
+async def test_f10_collection_writes_separate_reference_tables(tmp_path):
+    text = """◇000858 五 粮 液 更新日期：2026-08-01◇
+    【7.融资融券】
+    │交易日期        │ 融资余额(万元)│ 融资买入额(万元)│ 融券余额(万元)│ 融券卖出量(万股)│融资融券余额(万元)│
+    │2026-07-30      │       474212.95│          21533.51│          100.00│             2.00│       474312.95│
+│●业绩预告:
+│2026-07-15 预告业绩:业绩大幅上升
+│预计公司2026年01-06月归属于上市公司股东的净利润为873000万元至920000万元，与上年同期相比变动幅度为88.8%至98.97%。
+├────────────────────
+"""
+    collector = EasyTdxCollector(tmp_path, f10_fetcher=lambda _codes: [("000858", text)])
+
+    assert await collector.collect_f10(["000858"]) == 2
+    margin = pl.read_parquet(tmp_path / "ext_data" / MARGIN_TABLE / "timeseries" / "date=2026-07-30" / "part.parquet")
+    forecast = pl.read_parquet(tmp_path / "ext_data" / FORECAST_TABLE / "timeseries" / "date=2026-07-15" / "part.parquet")
+    assert margin.to_dicts()[0]["margin_balance_10k"] == 474212.95
+    assert forecast.to_dicts()[0]["report_period"] == "2026-06-30"
+    assert not (tmp_path / "ext_data" / EXPRESS_TABLE / "timeseries").exists()
 
 
 @pytest.mark.asyncio
