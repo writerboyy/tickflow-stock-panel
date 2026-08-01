@@ -2,18 +2,18 @@
 
 ## 1. 审计结论
 
-结论：**部分通过**。当前数据湖的股票、ETF 日线主链路结构合理，原始日线、enriched 和日度估值逐 `(symbol, date)` 对齐；复权、换手率、市值、TTM 与估值公式在可验证范围内正确。开盘啦与 EasyTDX 的扩展数据基本按各自独立语义入库，没有替代 TickFlow 权威行情或正式财务数据。
+原始审计结论：**部分通过**。当前数据湖的股票、ETF 日线主链路结构合理，原始日线、enriched 和日度估值逐 `(symbol, date)` 对齐；复权、换手率、市值、TTM 与估值公式在可验证范围内正确。开盘啦与 EasyTDX 的扩展数据基本按各自独立语义入库，没有替代 TickFlow 权威行情或正式财务数据。
 
-但当前不能把全部历史派生结果和盘中指标视为可靠，存在 4 组 P1 问题：
+原始基线存在 4 组 P1 问题：
 
 1. 历史 ST 名称没有进入涨跌停和连板计算，造成 212 个标的的 7,433 行涨停连板、6,672 行跌停连板与历史名称口径不符，属于未来信息污染。
 2. 盘中增量指标与批量公式不一致。30 个真实标的中 MACD、BOLL、年化波动率、60 日极值和 RSI 全部或大部分不一致；窗口未满时还会提前产生 MA/BOLL/极值。
 3. EasyTDX 分红历史有 7,259 / 51,390 行 `cash_per_share` 不能由当前分红方案解析公式复现，影响 3,421 个标的。该表只能作为辅助记录日上下文，不能用于权威复权或事件回放。
 4. 指数日线有 495 行负成交量，覆盖 7 个指数；`000691.SH` 同时出现约 `1e18` 的异常成交额，符合有符号 32 位溢出/字段解码错误特征。
 
-此外，财务原表存在重复键和 8 组同键不同值；当前 enriched/valuation 与彼此一致，但最新股本原表已不能完全复现部分近期分区。股票和 ETF 分钟数据的历史覆盖与最近两个交易日完整度也没有达到全市场连续覆盖。
+整改后当前状态：前 3 组 P1 已完成代码修复和生产重算；股票 enriched、valuation 仍各为 6,160,370 个唯一键，EasyTDX 分红 7,259 行差异已归零并从 4,005 个文件压缩为 27 个年度文件，股票分钟 149,179 行空 OHLC 已清除。第 4 组指数异常仍存在：同源在线重拉的 8,477 行与本地逐字段一致，远端本身仍返回异常值，现行入口门禁会拒绝再次发布。财务 8 组冲突也仍存在，当前账号没有 TickFlow financial 能力，无法取得 revision 证据，禁止按文件顺序猜测修复。分钟历史覆盖不足、指数分钟缺失和 depth5 历史不可回补仍是能力边界。
 
-本次只读审计没有启动应用、collector、刷新或重建任务。原因是应用启动会注册并可能触发后台采集，不符合“审计前后市场数据不变”的约束。
+原始只读审计阶段没有启动应用、collector、刷新或重建任务。原因是应用启动会注册并可能触发后台采集，不符合“审计前后市场数据不变”的约束。后续生产整改及其数据变更单独记录在 11.2.1 和 11.5，不能与原始只读基线混为一谈。
 
 ## 2. 范围与判定
 
@@ -43,13 +43,13 @@
 | 数据集 | 粒度、主键、分区 | 覆盖与规模 | 来源、单位、消费者 | 结论 |
 | --- | --- | --- | --- | --- |
 | `kline_daily` | 日频；`symbol,date`；`date=YYYY-MM-DD` | 1,211 文件，6,160,370 行，`2021-08-02..2026-07-31` | TickFlow；价格元/股、成交量股、成交额元；enriched、回测、筛选、行情 API | 通过 |
-| `kline_daily_enriched` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与日线逐键对齐 | TickFlow 派生；前复权 OHLC、原始价、股本、换手率、连板；策略/回测/监控 | **不通过**：历史 ST 连板错误；近期股本重现漂移 |
-| `valuation_daily` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与 enriched 逐键对齐 | TickFlow 派生；金额元、比率倍数；估值 API/策略 | **部分通过**：公式正确，但依赖的财务去重和最新股本输入不可完全重现 |
+| `kline_daily_enriched` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与日线逐键对齐 | TickFlow 派生；前复权 OHLC、原始价、股本、换手率、连板；策略/回测/监控 | 通过：已按历史名称和当前股本 source snapshot 全量重建 |
+| `valuation_daily` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与 enriched 逐键对齐 | TickFlow 派生；金额元、比率倍数；估值 API/策略 | **部分通过**：公式和股本输入已重建，但财务 8 组冲突仍未取得 revision 证据 |
 | `kline_index_daily` | 日频；`symbol,date`；按日分区 | 704,552 行，`2021-08-02..2026-07-31` | TickFlow 指数行情；指数看板/市场背景 | **不通过**：495 行负成交量，`000691.SH` 成交额异常 |
 | `kline_index_enriched` | 日频；`symbol,date`；按日分区 | 704,552 行，与指数日线逐键对齐 | 指数派生；监控/市场概览 | **不通过**：完整继承指数原表异常 |
 | `kline_etf_daily` | 日频；`symbol,date`；按日分区 | 1,123,552 行，`2021-08-02..2026-07-31` | TickFlow ETF 行情；ETF 回测/策略/行情 API | 通过 |
 | `kline_etf_enriched` | 日频；`symbol,date`；按日分区 | 1,123,552 行，与 ETF 日线逐键对齐 | TickFlow 派生；ETF 策略/监控 | 通过 |
-| `kline_minute` | 分钟；`symbol,datetime`；按交易日分区 | 327 文件，386,812,351 行，`2025-03-28..2026-07-31` | TickFlow；北京时间左开右闭，`09:30` 为竞价例外；分钟回测/分时 | **部分通过**：覆盖不足及 149,179 行空 OHLC |
+| `kline_minute` | 分钟；`symbol,datetime`；按交易日分区 | 327 文件，386,663,172 行，`2025-03-28..2026-07-31` | TickFlow；北京时间左开右闭，`09:30` 为竞价例外；分钟回测/分时 | **部分通过**：空 OHLC 已清除，历史覆盖仍不足 |
 | `kline_etf_minute` | 分钟；`symbol,datetime`；按交易日分区 | 248 文件，83,741,815 行，`2025-07-24..2026-07-31` | TickFlow ETF 分钟行情；ETF 回测/分时 | **部分通过**：最近两日覆盖不足 |
 | `kline_index_minute` | 预期分钟；`symbol,datetime` | 数据集不存在 | 当前未声明指数分钟权威表 | 无数据不可验证 |
 | `adj_factor` | 事件序列；`symbol,trade_date`；单文件 | 20,986 行，`2021-08-02..2026-07-31` | TickFlow 复权事件；`ex_factor` 为事件乘数；股票前复权 | 通过 |
@@ -63,14 +63,14 @@
 | `financials/income` | 累计报表；同上 | 404,545 行；352 个重复余量，其中 3 组同键不同值 | TickFlow 正式利润表；TTM、PE/PS | **不通过** |
 | `financials/balance_sheet` | 时点报表；同上 | 344,741 行；340 个完全重复余量 | TickFlow 正式资产负债表；PB | 部分通过 |
 | `financials/cash_flow` | 累计报表；同上 | 328,697 行；113 个完全重复余量 | TickFlow 正式现金流量表；PCF | 部分通过 |
-| `financials/shares` | 生效事件；`symbol,period_end,announce_date` | 422,834 行；无重复键；62,838 行 `period_end > announce_date` | `announce_date` 为生效日、`period_end` 为对应股本日期；换手率/市值 | 部分通过：语义合理，但源刷新后未重建部分派生分区 |
+| `financials/shares` | 生效事件；`symbol,period_end,announce_date` | 422,834 行；无重复键；62,838 行 `period_end > announce_date` | `announce_date` 为生效日、`period_end` 为对应股本日期；换手率/市值 | 通过：语义合理，派生表已按冻结 source snapshot 重建 |
 | `corporate_actions` | 事件；`symbol,event_date` | 53,538 行，`1991-05-02..2026-08-07`；无重复/非正现金分红 | TickFlow 权威除权事件；复权和历史回放 | 通过 |
 | `depth5` | 日内快照；`symbol` + 分区日 | 646 行，仅 6 个交易日 `2026-07-24..2026-07-31` | TickFlow 实时五档；封板状态 | 部分通过：现有数据合法，历史能力不可回补 |
 | `fund_nav` | 基金日净值；`symbol,date`；按 symbol 分区 | 773,022 行、695 只，`2004-12-29..2026-07-31` | 基金净值；免费策略净值基准 | 部分通过：36 文件新增 `date_timezone`，659 文件为旧 schema |
 | `instruments` | 当前股票快照；`symbol` | 5,537 行，无重复/非法代码 | TickFlow 维表；当前名称、股本、涨跌停价 | 通过（仅当前快照） |
 | `instruments_index` | 当前指数快照；`symbol` | 612 行 | 指数路由与名称 | 通过 |
 | `instruments_etf` | 当前 ETF 快照；`symbol` | 1,648 行 | ETF 路由、名称和基金元数据 | 通过 |
-| `instrument_name_history` | 名称事件；`symbol,change_date` | 7,493 行 | 历史 ST/名称判定 | **部分通过**：表本身有效，但连板生产链路未消费 |
+| `instrument_name_history` | 名称事件；`symbol,change_date` | 7,493 行 | 历史 ST/名称判定 | 通过：历史连板生产链路已消费并重建 |
 | `pools` | 当前池快照；`symbol,as_of` | 5,530 行 | 当前股票池筛选 | 通过（不能作为历史 PIT 成分） |
 | `instruments_ext` | 扩展维表 | 0 行 | 未启用 | 无数据不可验证 |
 | `kline_ext` | 扩展 K 线 | 0 行 | 未启用 | 无数据不可验证 |
@@ -100,7 +100,7 @@
 | `ext_tdx_margin` | 日频；`symbol,report_date`；49,493 行 | EasyTDX F10，两融金额万元、融券卖出量万股 | 通过 |
 | `ext_tdx_forecast` | 公告；`symbol,announcement_date`；1,750 行 | EasyTDX 正式“业绩预告”章节；不等于快报/正式报表 | 通过 |
 | `ext_tdx_express` | 公告；`symbol,announcement_date`；0 行 | EasyTDX 正式“业绩快报”章节 | 通过（合理空数据） |
-| `ext_tdx_dividend_history` | 记录日；`symbol,record_date,plan`；51,390 行 | EasyTDX 7615 已实施分红；不替代 TickFlow 除权事件 | **不通过**：7,259 行每股现金分红错误 |
+| `ext_tdx_dividend_history` | 记录日；`symbol,record_date,plan`；51,390 行 | EasyTDX 7615 已实施分红；不替代 TickFlow 除权事件 | 通过：7,259 行已修正，冻结公式复核差异 0 |
 
 ## 4. Schema、单位和分区审计
 
@@ -141,7 +141,7 @@
 - 实际全市场覆盖从 `2025-05-19` 才开始，不能把名义起点 `2025-03-28` 当作全市场起点。
 - 相对当日日线 universe，有 33 个交易日的完整 241 根覆盖率低于 95%。
 - `2026-07-30` 只有 4,813 / 5,528 个分钟标的完整，完整率 86.97%；`2026-07-31` 缺 6 个日线标的。
-- 149,179 行 OHLC 全空，集中在 `2026-04-20..2026-07-22` 的遗留标的日；当前 sanitizer 会丢弃这些行，但历史文件没有清理。
+- 原始基线的 149,179 行空 OHLC 已由影子修复清除；修复后 386,663,172 行，空 OHLC 为 0，原 327 个文件中 64 个重写、263 个硬链接，旧目录保留用于回滚。
 - 3,341 个表面 OHLC 越界均为浮点 epsilon；41,086 个负 `amount` 也只是约 `1e-10` 的计算残差，均不是经济意义上的负值。
 - `2026-07-31` 可比标的分钟收盘与日线收盘 0 实质差异。开盘、高低、成交量/额受竞价根、缺根和供应商聚合语义影响，不据此直接判错。
 
@@ -157,7 +157,7 @@ ETF 分钟：
 ### 5.3 小文件
 
 - 日线和分钟均为一日一文件，文件大小与扫描方式合理。
-- `ext_tdx_dividend_history` 51,390 行分散在 4,005 个日期分区，中位数仅少量记录，是明确的小文件开销。
+- `ext_tdx_dividend_history` 原 51,390 行分散在 4,005 个日期分区；整改后按年压缩为 27 个文件，主键和行数不变。
 - `fund_nav` 695 个 symbol 分区符合按基金读取场景，但全市场扫描时仍应走 dataset scanner，避免逐文件 Python 循环。
 
 ## 6. 派生链路和 PIT 对账
@@ -167,7 +167,7 @@ ETF 分钟：
 - 使用 `adj_factor.ex_factor` 独立构造累计因子，对全部股票和 ETF 日线重算前复权 OHLC，股票与 ETF 四价错配均为 0。
 - 股票日线、enriched、valuation 共 6,160,370 个键完全一致。
 - stored enriched 与 valuation 的 `raw_close,total_shares,float_shares` 一致；换手率、市值、流通市值、PE/PB/PS/PCF 公式错配均为 0。
-- 使用当前 `financials/shares` 和 `instruments` 重新按 PIT 规则选择股本时，`total_shares` 有 134 行不一致，`float_shares` 有 236 行不一致。主要集中于最近交易日，说明源表更新后没有同步重建受影响的 enriched/valuation 分区。
+- 原始基线使用当前 `financials/shares` 和 `instruments` 重算时，`total_shares` 有 134 行、`float_shares` 有 236 行漂移。全量重建后，与旧表相比对应列分别改动 134 和 169 行；当前 metadata 固化了 `shares`、`instruments`、历史名称、复权和日线的逐文件 hash。仅用历史股本、不带 `instruments._instrument_as_of` 复核时剩余 4/46 行差异全部位于 `2026-07-31`，属于当日安全使用当前维表快照，不是历史未来数据回退。
 
 ### 6.2 TTM 和公告日可见性
 
@@ -204,11 +204,13 @@ income:  300500.SZ/2024-12-31/2025-12-31
 
 ### 6.3 历史 ST 涨跌停和连板
 
-`instrument_name_history` 显示 304 个标的、213,608 个交易日的历史名称状态与当前名称不同。生产 enriched 的历史连板值与“当前名称套用全部历史”结果完全一致，证明历史名称没有进入调用链。
+原始审计时，`instrument_name_history` 显示 304 个标的、213,608 个交易日的历史名称状态与当前名称不同；旧生产 enriched 的历史连板值与“当前名称套用全部历史”结果完全一致，证明当时历史名称没有进入调用链。
 
 - 按历史名称重算，`consecutive_limit_ups` 有 7,433 行、212 个标的不一致；
 - `consecutive_limit_downs` 有 6,672 行、212 个标的不一致；
 - ST/`*ST` 的 5% 价格限制被错误按当前 10% 或反向错误套用于历史，直接影响连板策略、涨跌停筛选和历史回测。
+
+整改后历史名称已进入批量和盘中路径，全量重建相对旧表实际改动上述 7,433/6,672 行，行数和主键保持不变。
 
 ## 7. 数据源入库与所有权
 
@@ -235,9 +237,19 @@ income:  300500.SZ/2024-12-31/2025-12-31
 - 其余表重放并按声明主键合并后，主键集合与 Parquet 完全一致，字段值错配为 0；
 - 典型对账：资金 5,537/5,537、涨停 100/100、龙虎榜 72/72、北向个股 3,807/3,807、十大股东 54,662/54,662、股东人数 17,614/17,614、板块成分 30,667/30,667。
 
+隔离候选分支 `codex/data-audit-completion-20260802` 已将该检查产品化为只读门禁：
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python scripts/replay_kaipanla_archives.py \
+  --data-dir ../data --output /tmp/tickflow-kaipanla-replay.json
+```
+
+候选分支实际结果为 `status=passed`、20,112/20,112 解析成功、错误 0；11 张有数据表均为 `missing_in_parquet=0`、`missing_in_replay=0`、`field_mismatches=0`。输出只写显式指定的隔离路径，不调用在线 client、collector 或生产 storage。该 CLI 尚未进入 `custom`，本次报告提交也不包含它。
+
 ### 7.3 EasyTDX 在线只读抽样
 
-按稳定排序选取 30 个标的：沪 12、深 12、北 6；沪深各含 6 个已有预告记录和 6 个无预告记录，北交所覆盖当前无行业/预告记录场景。直接调用 client/parser，不调用 collector，不写结果：
+审计基线按稳定排序选取 30 个标的：沪 12、深 12、北 6；沪深各含 6 个已有预告记录和 6 个无预告记录，北交所覆盖当前无行业/预告记录场景。直接调用 client/parser，不调用 collector，不写结果：
 
 - 行业列表返回 5,209 行；24 个沪深样本与落盘行业编码 0 差异。6 个北交所样本不在当前 `_symbol()` 行业映射中，属于明确能力缺失；
 - F10 30/30 返回：10 个标的含两融表，共 204 行，与落盘 0 差异；12 个含正式业绩预告，与落盘 0 差异；30 个均无正式业绩快报章节；
@@ -248,7 +260,7 @@ income:  300500.SZ/2024-12-31/2025-12-31
 
 ### 7.4 EasyTDX 与开盘啦入库优化方案
 
-以下内容是基于本次审计证据形成的实施方案。审计阶段保持只读，没有调用 collector、刷新任务或在线结果落盘；后续整改分支已实现其中一部分代码门禁，具体状态见 7.4.5。代码实现不等于现有数据已修复，所有影子重算、归档回放和生产发布仍需单独验收。
+以下内容是基于本次审计证据形成的实施方案。审计阶段保持只读，没有调用 collector、刷新任务或在线结果落盘；后续整改按 7.4.4 的顺序执行，当前代码和数据验收状态见 7.4.5 与 11.5。任何“已修复”结论同时要求代码门禁、影子校验和生产数据证据。
 
 #### 7.4.1 目标架构与数据边界
 
@@ -288,7 +300,7 @@ fetch
 4. **能力三态**：北交所行业当前明确记录为 `unsupported`，不能伪装成“无行业”；快报无正式章节记录为 `section_absent`，请求失败为 `source_error`，解析被拒绝为 `parse_rejected`。只有前两类可形成合理空数据结论，后两类必须进入失败清单并可重试。
 5. **分红专项修复**：先把 7,259 行差异键及原始 `plan` 写入不对外服务的修复清单；使用冻结后的 `cash_per_share_from_plan` 在影子表重算，逐 `(symbol,record_date,plan)` 对账主键、单位和行数。只有差异归零后才原子切换 `ext_tdx_dividend_history`；回滚方式是恢复旧 manifest/分区。修复期间及完成后，权威复权仍只使用 TickFlow `corporate_actions`。
 6. **可追溯原文**：对 F10 内容保存 source snapshot、category metadata、内容 hash 和 parser version；敏感连接信息不得进入归档或日志。原文发生变化时生成新 revision，不依赖文件遍历顺序选择“最后一条”。
-7. **小文件治理**：分红表从当前 4,005 个小分区迁移为按年或月 compact 的物理布局，同时保留 `record_date` 列和分区统计以支持逻辑查询。compaction 只在新文件校验成功后更新 manifest，不与采集任务原地改写同一批文件。
+7. **小文件治理**：分红表从原始 4,005 个小分区迁移为按年或月 compact 的物理布局，同时保留 `record_date` 列和分区统计以支持逻辑查询。compaction 只在新文件校验成功后更新 manifest，不与采集任务原地改写同一批文件。
 
 #### 7.4.3 开盘啦专项改造
 
@@ -313,17 +325,20 @@ fetch
 
 #### 7.4.5 整改分支落地状态
 
-本节记录 `codex/data-audit-remediation-20260802` 的代码实现边界。隔离分支的开发和测试没有运行 EasyTDX/开盘啦 collector，也没有切换任何生产影子表；但合并到仍在运行且启用 `uvicorn --reload` 的 `custom` 后，热重载触发了既有启动任务，例外见 11.2.1。
+本节分别记录已进入 `custom` 的整改、已完成的数据验收，以及尚未合入的 `codex/data-audit-completion-20260802` 候选实现。隔离分支开发和测试没有运行 EasyTDX/开盘啦 collector；生产数据修复只使用已有原始数据走影子校验和原子切换。首次整改合并到仍运行且启用 `uvicorn --reload` 的 `custom` 后曾触发既有启动任务，例外见 11.2.1。本次交付只合入 Markdown，候选实现必须另行复审后才能进入 `custom`。
 
-| 能力 | 已落地 | 尚未完成/不能宣称 |
-| --- | --- | --- |
-| EasyTDX 批次与恢复 | 50 标的稳定批次；数据集独立 manifest/checkpoint；失败批次重试；staging 与原始内容 hash；相同输入恢复；manifest 损坏时 fail-closed | 尚未对全市场真实任务做中断恢复演练；尚未建立运维告警面板 |
-| EasyTDX 空数据判定 | F10 批次必须返回全部请求标的，缺标的记 `source_error`；分红底层逐标的失败会使整批失败；正式章节缺失才可记 `section_absent` | 北交所行业仍是既有能力边界，未新增其数据；真实快报首次出现后的落盘仍待在线验收 |
-| EasyTDX 分红修复 | 新增只读默认的影子重算/按年 compaction 工具；校验行数、主键和冻结公式；`apply` 时保留旧目录用于回滚 | 未对现有 51,390 行执行影子重算或切换；因此 7,259 行历史差异仍存在，权威复权仍只使用 TickFlow `corporate_actions` |
-| 开盘啦分页与竞价 | `/115`、`/30`、`/100` 统一分页上限、逐页归档和 manifest；分页失败不发布；竞价三检查点与 `/31` 记录组件完成状态；`/31` 任一标的失败时不发布该批明细 | 其他逐股扩展端点仍需逐项接入同等级 checkpoint/dead-letter；20,112 份归档尚未在本整改分支重新全量回放 |
-| 数据所有权 | 扩展配置持久化 `schema_version`、authority、canonical dataset、overlap policy 与 allowed usage；负向测试保持 EasyTDX/开盘啦不能替代 TickFlow 权威字段 | 未改变公开 API 或 canonical schema；消费者新增扩展用途时仍需同步增加 authority 测试 |
+| 能力 | 状态 | 已验证内容 | 尚未完成/不能宣称 |
+| --- | --- | --- | --- |
+| EasyTDX 批次与恢复 | `custom` 已落地 | 50 标的稳定批次；数据集独立 manifest/checkpoint；失败批次重试；staging 与原始内容 hash；相同输入恢复；manifest 损坏时 fail-closed | 尚未对全市场真实任务做中断恢复演练；尚未建立运维告警面板 |
+| EasyTDX 空数据判定 | `custom` 已落地 | F10 批次必须返回全部请求标的，缺标的记 `source_error`；分红底层逐标的失败会使整批失败；正式章节缺失才可记 `section_absent` | 北交所行业仍是既有能力边界，未新增其数据；真实快报首次出现后的落盘仍待在线验收 |
+| EasyTDX 分红修复 | 生产数据已验收 | 51,390 行影子重算后原子切换；7,259 行差异归零；4,005 个日期文件压缩为 27 个年度文件；旧目录和 manifest 可回滚 | 权威复权仍只使用 TickFlow `corporate_actions`；未把辅助分红记录升级为除权事件 |
+| 开盘啦分页与竞价 | `custom` 已落地 | `/115`、`/30`、`/100` 统一分页上限、逐页归档和 manifest；分页失败不发布；竞价三检查点与 `/31` 记录组件完成状态；`/31` 任一标的失败时不发布该批明细 | 竞价仍无业务行，但 2,681 份 `/30` 原始响应均已证明为 `valid_empty` |
+| 开盘啦扩展端点 | 候选分支，未合入 | 资金分时/日度组件、北向个股、十大股东、板块成分、龙虎榜主/扩展明细和监管端点均记录独立批次；不完整组件不覆盖上一有效数据 | 尚未进行全市场真实故障恢复演练或建设外部告警面板 |
+| 开盘啦归档回放 | 候选分支，未合入 | 产品化只读回放器兼容旧 envelope 和带 hash/parser version 的新 envelope；20,112/20,112 解析成功，11 张表主键集合和字段值与 Parquet 完全一致 | 现存旧归档没有 parser version/hash 字段，只能在后续新归档中逐步建立版本链 |
+| 维护启动 | 候选分支，未合入 | `TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 跳过 EasyTDX bootstrap、开盘啦 catch-up 和通用扩展即时首拉，同时保留定时任务注册 | 该开关不禁用到点执行的正常 cron；合入前不能依赖此变量保护 `custom` 启动 |
+| 数据所有权 | `custom` 已落地 | 扩展配置持久化 `schema_version`、authority、canonical dataset、overlap policy 与 allowed usage；负向测试保持 EasyTDX/开盘啦不能替代 TickFlow 权威字段 | 未改变公开 API 或 canonical schema；消费者新增扩展用途时仍需同步增加 authority 测试 |
 
-EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 B 的核心采集骨架和阶段 C 的竞价/龙虎榜主分页门禁已实现并通过模拟故障测试；阶段 A 只有修复工具、没有数据执行；阶段 C 的全归档回放和阶段 D 的监控、全端点治理尚未完成。
+EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 A 已完成生产修复和回滚留存；阶段 B 的核心采集骨架已进入 `custom`；阶段 C 的主分页门禁已进入 `custom`，逐端点隔离和产品化全归档回放已完成候选代码与离线验收但尚未合入；阶段 D 的外部告警面板和全市场真实中断恢复演练仍未完成。
 
 ## 8. 指标公式与独立验证
 
@@ -344,14 +359,14 @@ EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 
 | 涨跌幅/额 | `close/prev_close-1`; `close-prev_close` | 前复权价 |
 | 振幅 | `(high-low)/prev_close` | 前复权价；前收必须正 |
 | 60 日极值 | `rolling_max/min(close,60)` | 当前批量公式是收盘极值，不是日内 high/low |
-| 涨跌停/连板 | 交易板块、日期、ST 状态决定比例，按 tick size 舍入 | 必须使用原始价和历史名称；当前历史名称调用链有 bug |
+| 涨跌停/连板 | 交易板块、日期、ST 状态决定比例，按 tick size 舍入 | 必须使用原始价和历史名称；整改后批量与盘中路径一致 |
 | 换手率 | `volume/float_shares*100` | 历史股本优先，缺失才回退当前维表 |
 | 前复权 | 日 OHLC 乘基于事件因子的累计比例 | `raw_*` 保持原价 |
 | 估值 | 市值/TTM 或时点权益 | 公告日 PIT；负/零分母输出 null |
 
 ### 8.2 30 标的真实数据重算
 
-使用前 300 个自然日（约 210 个交易日）的原始 OHLCV，独立 Python 循环实现上述公式，不调用生产指标函数作为 expected。样本为沪 12、深 12、北 6，且每只至少 180 条记录。
+以下数字为原始审计基线。使用前 300 个自然日（约 210 个交易日）的原始 OHLCV，独立 Python 循环实现上述公式，不调用生产指标函数作为 expected。样本为沪 12、深 12、北 6，且每只至少 180 条记录。
 
 批量路径：34 个输出列全部 0 错配，包括 MA/EMA/MACD/BOLL/KDJ/ATR/量比/动量/波动率/RSI/涨跌幅/振幅/极值。
 
@@ -366,9 +381,11 @@ EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 
 | `low_60d` | 30/30 | 2.46 | 增量用日 low，批量用 close |
 | `rsi_6/14/24` | 30/30 | 0.00203 / 0.54616 / 1.94280 | RSI 状态只用近 90 自然日重新初始化 |
 
-MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 0 错配。
+MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 0 错配。整改后盘中路径复用批量公式和完整历史窗口，新增逐列一致性测试覆盖 MACD、BOLL、波动率、60 日极值、RSI 和窗口 gate；原始错配不再代表当前代码状态。
 
 ### 8.3 固定边界样本
+
+以下前三项同样记录原始缺陷；整改后 KDJ 零区间冻结为中性 RSV、窗口未满保持 null，除权和股本边界继续保持原契约。
 
 - 80 日恒定价格：BOLL 上下轨 10、ATR 0、年化波动率 0、量比 1、RSI 0；K/D/J 为 NaN，因为代码只对 null 分母填 `1e-12`，没有处理实际的 0 区间。
 - 只有 10 日历史后计算第 11 日：批量 `ma20/30/60,boll,high_60d` 均为 null；增量却分别输出 `5.0/3.3333/1.6667`、BOLL 上轨 15、`high_60d=10`。`_window_len` 已构造但没有用于 gate。
@@ -390,16 +407,16 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 
 | 优先级 | 问题与影响 | 修复/重算方案 |
 | --- | --- | --- |
-| P1 | 历史 ST 状态未进入涨跌停/连板；14,105 个字段行差异，影响 212 个标的和历史策略信号 | 在历史流水线按 `(symbol,date)` as-of join `instrument_name_history`；增加 ST 变更日前后测试；全量重建股票 enriched、valuation 受影响列和依赖策略缓存 |
-| P1 | 盘中 MACD/BOLL/波动率/极值/RSI 与批量不一致，窗口未满提前输出 | 以批量冻结公式为唯一契约；保存/构造完整递推状态，BOLL/波动率统一 `ddof=1`，极值统一 close，所有窗口使用 `_window_len` gate；增加批量-增量逐列一致性测试 |
-| P1 | EasyTDX 分红 `cash_per_share` 7,259 行错误 | 不改变该表的辅助所有权；用当前 `cash_per_share_from_plan` 对原始 `plan` 生成修复候选，逐键校验后仅重建该扩展表；权威复权继续只读 `corporate_actions` |
-| P1 | 指数 495 行负成交量和 `000691.SH` 异常成交额 | 从 TickFlow 重新拉取 7 个指数的受影响日期；在标准化入口增加 int32 overflow/负量/异常金额校验；重建指数 enriched 和市场背景缓存 |
-| P2 | 财务原表重复及 8 组冲突，“最后一条”依赖文件顺序 | 保存供应商 record/revision/update ID；按确定性 revision 规则去重；对 8 组人工核源；重建 valuation 并逐日对账 |
-| P2 | 当前股本源不能复现 enriched 的 134/236 行 | 记录派生构建 source snapshot/version；股本刷新后按最小受影响日期重建 enriched/valuation；增加 source hash 到 metadata |
-| P2 | 股票分钟 149,179 行空 OHLC，33 日低覆盖；ETF 最近两日低覆盖 | 清理历史空 OHLC 前先生成修复清单；以标的日 241/240 根和日线 universe 建 coverage manifest；分钟回测按所需窗口 fail-closed |
-| P2 | KDJ 零区间为 NaN | 对 `high_9 == low_9` 冻结明确值（建议延续前 K/D 或使用中性 RSV=50），批量与增量同时修改并补恒定价格测试 |
+| 已解决 P1 | 历史 ST 连板 14,105 个字段行差异 | 已接入历史名称、全量重建并保留旧目录；新旧表对应列实际改动 7,433/6,672 行 |
+| 已解决 P1 | 盘中 MACD/BOLL/波动率/极值/RSI 和窗口 gate | 已统一批量公式、完整历史窗口和逐列一致性测试 |
+| 已解决 P1 | EasyTDX 分红 7,259 行错误 | 已影子校验、原子发布并保留 4,005 文件旧目录；冻结公式剩余差异 0 |
+| 阻塞 P1 | 指数负量/异常成交额 | 入口已 fail-closed；同源在线 8,477 行与本地逐字段一致且同样异常，等待 TickFlow 修正或提供可验证 revision，不能本地猜值 |
+| 阻塞 P2 | 财务原表重复及 8 组冲突 | 下游已拒绝同键冲突；当前无 financial 能力，无法在线核源，必须取得供应商 revision/update ID 后修复并重建 valuation |
+| 已解决 P2 | 股本源刷新后派生漂移 | enriched/valuation 已按固定 source snapshot 全量重建并保留旧目录 |
+| 部分解决 P2 | 股票分钟空 OHLC 和分钟覆盖不足 | 149,179 行空 OHLC 已清除；覆盖 manifest/fail-closed 已落地，历史覆盖不足仍保留为能力边界 |
+| 已解决 P2 | KDJ 零区间为 NaN | 批量与增量统一中性 RSV 并补恒定价格测试 |
 | P3 | `fund_nav` 两种 schema、旧扩展配置缺 authority 持久字段 | 在不改变公开 schema 的前提下登记 schema version；迁移配置元数据或在审计中持续校验 runtime 补全 |
-| P3 | EasyTDX 分红 4,005 个小分区 | 在保持逻辑按记录日查询的前提下按年/月 compaction，维护 manifest/统计信息 |
+| 已解决 P3 | EasyTDX 分红 4,005 个小分区 | 已按年 compaction 为 27 个文件并维护 repair manifest，逻辑主键和行数不变 |
 
 推荐重算顺序：先修生产公式和确定性去重规则，再修原表，最后依次重建 `kline_daily_enriched -> valuation_daily -> 指数 enriched -> 依赖缓存/策略结果`。不能先重算后修公式，否则会把已确认错误扩大到全历史。
 
@@ -410,7 +427,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 - 当前 pools、行业和 instruments 是快照，不能证明历史 PIT 成分或历史行业归属。
 - EasyTDX 业绩快报全表为空；全市场采集结果和 30 标的在线样本均没有正式快报章节，因此判为合理空数据，但不能证明未来出现快报时的实际落盘行为；parser/collector 定向测试承担该契约验证。
 - 在线抽样只能证明审计时点的 30 个标的和两个开盘啦端点，不等于供应商所有代码、所有历史日期的 SLA。
-- 审计阶段和隔离分支测试没有刷新生产数据；合并热重载例外只刷新 3 张辅助扩展快照，没有执行本报告的影子修复或 canonical 重算。因此已确认缺口仍保留在数据湖中，报告中的“代码已落地”不是“数据已修复”证明。
+- 财务 8 组冲突和指数源异常仍保留在数据湖中；其余“已解决”项均有生产 repair manifest、source snapshot 或回滚目录证明，不能仅以测试通过替代数据验收。
 
 ## 11. 证据与验证记录
 
@@ -488,7 +505,7 @@ PYTHONPATH=. .venv/bin/python -m pytest \
 
 ### 11.4 整改实现验证
 
-整改分支新增并验证了以下失败路径：历史名称 PIT、批量/盘中指标逐列一致、KDJ 零波动、财务同键冲突拒绝、派生 source snapshot、EasyTDX 批次恢复/缺标的响应/损坏 manifest、开盘啦分页中断/竞价组件/部分 `/31` 明细、指数异常批次、分钟完整度与影子清理、分红影子修复、enriched/valuation 原子发布和回滚目录。
+已进入 `custom` 的整改覆盖历史名称 PIT、批量/盘中指标逐列一致、KDJ 零波动、财务同键冲突拒绝、派生 source snapshot、EasyTDX 批次恢复/缺标的响应/损坏 manifest、开盘啦主分页中断/竞价组件、指数异常批次、分钟完整度与影子清理、分红影子修复、enriched/valuation 原子发布和回滚目录。候选分支另外覆盖全部逐股与逐板块组件、20,112 份归档产品化回放，以及禁止启动时立即触发辅助采集的维护模式。
 
 实际执行命令：
 
@@ -499,4 +516,19 @@ PYTHONPATH=. .venv/bin/python -m ruff check <本分支全部 Python 变更文件
 git diff --check custom...HEAD
 ```
 
-隔离工作树复用了主工作区现有 `.venv` 解释器。实际结果：`954 passed, 13 warnings in 11.93s`；Ruff 全部通过；`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。测试本身只使用临时目录；合并热重载例外见 11.2.1。生产数据修复仍必须按 7.4.4 的影子验收顺序单独执行。
+隔离工作树复用了主工作区现有 `.venv` 解释器。已进入 `custom` 的上一整改提交结果为 `954 passed, 13 warnings in 11.93s`；候选分支补充维护启动、开盘啦全端点门禁和归档回放后，全后端实际结果为 `963 passed, 13 warnings in 23.72s`。两次验证中全部相关 Python 文件 Ruff 通过，`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。候选分支的测试通过不代表其代码已进入 `custom`；本次只提交报告。生产数据执行证据见 11.5。
+
+### 11.5 生产整改与外部阻塞证据
+
+| 项目 | 当前结果 | 回滚/边界 |
+| --- | --- | --- |
+| EasyTDX 分红 | repair manifest：51,390 行、修正 7,259 行、差异归零、4,005 文件变 27 文件 | 旧目录 `timeseries.pre-repair-20260801T185338Z-a9caa86b`；`corporate_actions` 聚合 hash 前后保持 `e861b74e...d99` |
+| 股票分钟 | 386,812,351 -> 386,663,172 行；拒绝 149,179 行；64 文件重写、263 文件硬链接；空 OHLC 复核 0 | 旧目录 `.kline_minute.pre-repair-20260801T190525Z-54f52795`；覆盖不足未伪装修复 |
+| ETF 分钟 | 83,741,815 行；拒绝 0；248 文件全部硬链接，仅生成 coverage manifest | 旧目录 `.kline_etf_minute.pre-repair-20260801T192030Z-b081bd8a`；最近两日覆盖不足仍存在 |
+| 股票 enriched | 6,160,370 行和唯一键不变；相对旧表连板列改动 7,433/6,672 行，股本列改动 134/169 行；metadata 固化全部输入 hash | 旧目录 `.kline_daily_enriched.pre-rebuild-20260801T185833Z` |
+| valuation | 6,160,370 行和唯一键不变；按新 enriched 和固定财务 source snapshot 重建 | 旧目录 `.valuation_daily.pre-rebuild-20260801T190039Z`；财务原表 8 组冲突仍需供应商核源后再次重建 |
+| 开盘啦回放 | 20,112/20,112 归档解析成功；错误 0；11 张表主键缺失/额外和字段错配均为 0；`/30` 2,681 份均为 `valid_empty` | 报告写到 `/tmp`，未修改数据湖 |
+| 指数在线核源 | 7 个指数、8,477 行在线 TickFlow 与本地逐 OHLCVA 字段一致；在线结果仍触发质量门禁，本地异常未改 | 等待上游修正或提供 revision；不得用其他辅助源静默替代 |
+| 财务在线核源 | 当前 `financial_capability=False`，8 组冲突无法在线取证 | 保留 fail-closed；取得 Expert 能力或供应商 revision 后再修原表和 valuation |
+
+本轮数据执行前确认 `3011`、`3018` 无监听进程；EasyTDX/开盘啦在线核源只调用 client/parser，未调用 collector。维护启动开关目前仅在候选分支；在其另行复审并合入前，不应把 `TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 当作 `custom` 已支持能力，维护窗口需继续通过停止应用/调度器规避启动回补。
