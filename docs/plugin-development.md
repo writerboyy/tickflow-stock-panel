@@ -162,9 +162,21 @@ uv sync --extra easy-tdx
 | `source` / `collected_at` | 来源标识 / 采集时间 |
 
 F10 参考数据在每个交易日 `18:40` 采集，写入 `ext_tdx_margin`、
-`ext_tdx_forecast`、`ext_tdx_express`。两融使用 F10 正式日度表；预告和快报
-仅解析正式栏目，互动问答、新闻或未匹配的正文不会写入。预告与快报按公告日分表，
-不互相覆盖，也不代替正式财报。
+`ext_tdx_forecast`、`ext_tdx_express` 和 `ext_tdx_dividend_history`。分红历史来自
+通达信 7615 F10 页，仅保留已实施、登记日和每股现金额明确的方案，按股权登记日分区；
+两融使用 F10 正式日度表；预告和快报仅解析正式栏目，互动问答、新闻或未匹配的正文
+不会写入。预告与快报按公告日分表，不互相覆盖，也不代替正式财报。
+
+全市场分红历史首次回填使用可恢复脚本：
+
+```bash
+cd backend
+uv run python scripts/backfill_easy_tdx_dividends.py
+```
+
+默认每批 50 只股票、4 个并发请求，进度写入
+`data/backfill_state/easy_tdx_dividends.json`。请求失败的代码不会被标记完成，重跑只会重试
+这些代码；全部代码完成前脚本以非零状态退出。
 
 数据边界：
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from calendar import monthrange
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 import json
 import os
@@ -221,6 +222,104 @@ def fetch_f10_texts(codes: Iterable[str], timeout: float = 8.0) -> list[tuple[st
     return records
 
 
+def _fetch_dividend_history_for_code(
+    code: str,
+    symbol: str,
+    url: str,
+    timeout: float,
+) -> tuple[list[dict], str | None]:
+    request = Request(
+        url,
+        data=json.dumps({"Params": [code, "fh"]}, separators=(",", ":")).encode(),
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Accept": "application/json",
+            "User-Agent": "TickFlow EasyTDX",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+    except Exception as exc:  # noqa: BLE001
+        return [], type(exc).__name__
+    if not isinstance(payload, dict) or payload.get("ErrorCode", 0) not in (0, "0", None):
+        return [], "invalid_response"
+    result_sets = payload.get("ResultSets") or []
+    if not result_sets or not isinstance(result_sets[0], dict):
+        return [], "missing_result_set"
+    table = result_sets[0]
+    columns = table.get("ColName") or []
+    if not isinstance(columns, list):
+        return [], "invalid_columns"
+    records: list[dict] = []
+    for source_row in table.get("Content") or []:
+        if not isinstance(source_row, list):
+            continue
+        row = dict(zip((str(column) for column in columns), source_row, strict=False))
+        record_date = _date_text(row.get("T021"))
+        plan = _text(row.get("T004"))
+        cash_per_share = _cash_per_share(plan)
+        if (
+            record_date is None
+            or cash_per_share is None
+            or _text(row.get("aT036")) != "036003"
+        ):
+            continue
+        records.append({
+            "symbol": symbol,
+            "code": code,
+            "report_date": record_date,
+            "record_date": record_date,
+            "ex_dividend_date": _date_text(row.get("T023")),
+            "board_date": _date_text(row.get("T003")),
+            "plan": plan,
+            "cash_per_share": cash_per_share,
+            "progress": _text(row.get("T036")),
+            "progress_code": _text(row.get("aT036")),
+            "source": "tdx_7615_f10",
+        })
+    return records, None
+
+
+def fetch_dividend_history_batch(
+    codes: Iterable[str],
+    timeout: float = 10.0,
+    workers: int = 4,
+) -> tuple[list[dict], dict[str, str]]:
+    """Fetch a bounded code batch and retain per-code failures for retry."""
+    normalized = []
+    for raw_code in codes:
+        code = _code(raw_code)
+        symbol = _f10_symbol(code)
+        if symbol is not None:
+            normalized.append((code, symbol))
+    if not normalized:
+        return [], {}
+    base_url = os.getenv("EASY_TDX_TQLEX_URL", _TQLEX_URL).rstrip("?")
+    entry = "CWServ.tdxf10_gg_fhrz"
+    url = f"{base_url}{'&' if '?' in base_url else '?'}{urlencode({'Entry': entry})}"
+    records: list[dict] = []
+    failures: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(max(1, workers), len(normalized))) as executor:
+        futures = {
+            executor.submit(_fetch_dividend_history_for_code, code, symbol, url, timeout): code
+            for code, symbol in normalized
+        }
+        for future in as_completed(futures):
+            code = futures[future]
+            try:
+                rows, error = future.result()
+            except Exception as exc:  # noqa: BLE001
+                failures[code] = type(exc).__name__
+                continue
+            if error is not None:
+                failures[code] = error
+            else:
+                records.extend(rows)
+    return records, failures
+
+
 def fetch_dividend_history_rows(codes: Iterable[str], timeout: float = 10.0) -> list[dict]:
     """Fetch implemented cash dividends from the TDX 7615 history page.
 
@@ -228,63 +327,5 @@ def fetch_dividend_history_rows(codes: Iterable[str], timeout: float = 10.0) -> 
     public TDX F10 page retains historical registration dates.  Rows without a
     concrete record date or cash amount are deliberately discarded.
     """
-    base_url = os.getenv("EASY_TDX_TQLEX_URL", _TQLEX_URL).rstrip("?")
-    entry = "CWServ.tdxf10_gg_fhrz"
-    url = f"{base_url}{'&' if '?' in base_url else '?'}{urlencode({'Entry': entry})}"
-    records: list[dict] = []
-    for raw_code in codes:
-        code = _code(raw_code)
-        symbol = _f10_symbol(code)
-        if symbol is None:
-            continue
-        request = Request(
-            url,
-            data=json.dumps({"Params": [code, "fh"]}, separators=(",", ":")).encode(),
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Accept": "application/json",
-                "User-Agent": "TickFlow EasyTDX",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                payload = json.loads(response.read().decode("utf-8-sig"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict) or payload.get("ErrorCode", 0) not in (0, "0", None):
-            continue
-        result_sets = payload.get("ResultSets") or []
-        if not result_sets or not isinstance(result_sets[0], dict):
-            continue
-        table = result_sets[0]
-        columns = table.get("ColName") or []
-        if not isinstance(columns, list):
-            continue
-        for source_row in table.get("Content") or []:
-            if not isinstance(source_row, list):
-                continue
-            row = dict(zip((str(column) for column in columns), source_row, strict=False))
-            record_date = _date_text(row.get("T021"))
-            plan = _text(row.get("T004"))
-            cash_per_share = _cash_per_share(plan)
-            if (
-                record_date is None
-                or cash_per_share is None
-                or _text(row.get("aT036")) != "036003"
-            ):
-                continue
-            records.append({
-                "symbol": symbol,
-                "code": code,
-                "report_date": record_date,
-                "record_date": record_date,
-                "ex_dividend_date": _date_text(row.get("T023")),
-                "board_date": _date_text(row.get("T003")),
-                "plan": plan,
-                "cash_per_share": cash_per_share,
-                "progress": _text(row.get("T036")),
-                "progress_code": _text(row.get("aT036")),
-                "source": "tdx_7615_f10",
-            })
+    records, _failures = fetch_dividend_history_batch(codes, timeout=timeout)
     return records
