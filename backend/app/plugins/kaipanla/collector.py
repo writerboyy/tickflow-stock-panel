@@ -852,7 +852,9 @@ class KaipanlaCollector:
         details = [
             row for row in await asyncio.gather(*(collect_one(c) for c in unique_codes)) if row
         ]
-        count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details)
+        count = 0
+        if not failed_codes:
+            count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details)
         update_ingestion_manifest(
             self.data_dir,
             "kaipanla",

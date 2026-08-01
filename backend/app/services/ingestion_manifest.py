@@ -74,9 +74,11 @@ def load_ingestion_manifest(
         return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid ingestion manifest: {path}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid ingestion manifest: {path}")
+    return value
 
 
 def update_ingestion_manifest(

@@ -267,6 +267,13 @@ class EasyTdxCollector:
             if not all(self._batch_completed(state, batch_id) for state in f10_states.values()):
                 try:
                     texts, retry_count = await self._fetch_with_retry(self._f10_fetcher, batch_codes)
+                    returned_codes = {str(code).zfill(6) for code, _text in texts}
+                    missing_codes = sorted(set(batch_codes) - returned_codes)
+                    if missing_codes:
+                        sample = ", ".join(missing_codes[:8])
+                        raise RuntimeError(
+                            "EasyTDX F10 批次缺少标的响应，不能判为章节为空: " + sample
+                        )
                     _, source_hash = archive_source_payload(
                         self.data_dir,
                         "easy_tdx",

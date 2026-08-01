@@ -248,7 +248,7 @@ income:  300500.SZ/2024-12-31/2025-12-31
 
 ### 7.4 EasyTDX 与开盘啦入库优化方案
 
-以下内容是基于本次审计证据形成的实施方案，不代表采集代码或现有数据已经完成改造。本次审计仍保持只读，没有调用 collector、刷新任务或在线结果落盘。
+以下内容是基于本次审计证据形成的实施方案。审计阶段保持只读，没有调用 collector、刷新任务或在线结果落盘；后续整改分支已实现其中一部分代码门禁，具体状态见 7.4.5。代码实现不等于现有数据已修复，所有影子重算、归档回放和生产发布仍需单独验收。
 
 #### 7.4.1 目标架构与数据边界
 
@@ -310,6 +310,20 @@ fetch
 | D | P3 | 两源 manifest、质量指标、告警和小文件 compaction | 发布批次可追溯；异常能定位到源/端点/标的/页；小文件数显著下降且查询结果不变 |
 
 上线前必须在隔离目录或影子表完成故障注入：网络超时、单页失败、F10 缺章节、schema 增列/缺列、重复键、单位异常、任务中断和重复执行。验收指标统一为：发布表重复键 0、非法单位 0、未解释空数据 0、失败批次可恢复、同输入重跑 hash 一致、部分响应不覆盖上一有效快照、canonical authority 负向测试全部通过、非目标表文件 hash/mtime 不变。发布后按批次监控成功率、有效空/失败原因分布、拒绝行数、源到湖延迟、主键冲突数、重试次数和小文件数量；任一质量门禁失败时停止该数据集发布，不影响 TickFlow 权威主链路和其他辅助表。
+
+#### 7.4.5 整改分支落地状态
+
+本节记录 `codex/data-audit-remediation-20260802` 的代码实现边界。整改只修改代码和测试，没有运行 EasyTDX/开盘啦 collector，没有把在线样本写入数据湖，也没有切换任何生产影子表。
+
+| 能力 | 已落地 | 尚未完成/不能宣称 |
+| --- | --- | --- |
+| EasyTDX 批次与恢复 | 50 标的稳定批次；数据集独立 manifest/checkpoint；失败批次重试；staging 与原始内容 hash；相同输入恢复；manifest 损坏时 fail-closed | 尚未对全市场真实任务做中断恢复演练；尚未建立运维告警面板 |
+| EasyTDX 空数据判定 | F10 批次必须返回全部请求标的，缺标的记 `source_error`；分红底层逐标的失败会使整批失败；正式章节缺失才可记 `section_absent` | 北交所行业仍是既有能力边界，未新增其数据；真实快报首次出现后的落盘仍待在线验收 |
+| EasyTDX 分红修复 | 新增只读默认的影子重算/按年 compaction 工具；校验行数、主键和冻结公式；`apply` 时保留旧目录用于回滚 | 未对现有 51,390 行执行影子重算或切换；因此 7,259 行历史差异仍存在，权威复权仍只使用 TickFlow `corporate_actions` |
+| 开盘啦分页与竞价 | `/115`、`/30`、`/100` 统一分页上限、逐页归档和 manifest；分页失败不发布；竞价三检查点与 `/31` 记录组件完成状态；`/31` 任一标的失败时不发布该批明细 | 其他逐股扩展端点仍需逐项接入同等级 checkpoint/dead-letter；20,112 份归档尚未在本整改分支重新全量回放 |
+| 数据所有权 | 扩展配置持久化 `schema_version`、authority、canonical dataset、overlap policy 与 allowed usage；负向测试保持 EasyTDX/开盘啦不能替代 TickFlow 权威字段 | 未改变公开 API 或 canonical schema；消费者新增扩展用途时仍需同步增加 authority 测试 |
+
+EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 B 的核心采集骨架和阶段 C 的竞价/龙虎榜主分页门禁已实现并通过模拟故障测试；阶段 A 只有修复工具、没有数据执行；阶段 C 的全归档回放和阶段 D 的监控、全端点治理尚未完成。
 
 ## 8. 指标公式与独立验证
 
@@ -396,7 +410,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 - 当前 pools、行业和 instruments 是快照，不能证明历史 PIT 成分或历史行业归属。
 - EasyTDX 业绩快报全表为空；全市场采集结果和 30 标的在线样本均没有正式快报章节，因此判为合理空数据，但不能证明未来出现快报时的实际落盘行为；parser/collector 定向测试承担该契约验证。
 - 在线抽样只能证明审计时点的 30 个标的和两个开盘啦端点，不等于供应商所有代码、所有历史日期的 SLA。
-- 本次没有刷新数据，因此已确认缺口仍保留在数据湖中；本报告是修复输入，不是修复完成证明。
+- 审计和整改验证均没有刷新生产数据，因此已确认缺口仍保留在数据湖中；报告中的“代码已落地”不是“数据已修复”证明。
 
 ## 11. 证据与验证记录
 
@@ -460,4 +474,19 @@ PYTHONPATH=. .venv/bin/python -m pytest \
   tests/test_backfill_easy_tdx_dividends.py -q
 ```
 
-实际结果：`134 passed, 4 warnings in 5.49s`。4 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。报告本身不改变公开 API、schema、类型、采集代码或运行时行为。
+实际结果：`134 passed, 4 warnings in 5.49s`。4 条 warning 均为既有 Polars `collect(streaming=True)` 参数弃用提示，没有测试失败。`git diff --check` 通过。该结果对应只读审计报告提交，报告本身不改变公开 API、schema、类型、采集代码或运行时行为。
+
+### 11.4 整改实现验证
+
+整改分支新增并验证了以下失败路径：历史名称 PIT、批量/盘中指标逐列一致、KDJ 零波动、财务同键冲突拒绝、派生 source snapshot、EasyTDX 批次恢复/缺标的响应/损坏 manifest、开盘啦分页中断/竞价组件/部分 `/31` 明细、指数异常批次、分钟完整度与影子清理、分红影子修复、enriched/valuation 原子发布和回滚目录。
+
+实际执行命令：
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python -m pytest -q
+PYTHONPATH=. .venv/bin/python -m ruff check <本分支全部 Python 变更文件>
+git diff --check custom...HEAD
+```
+
+隔离工作树复用了主工作区现有 `.venv` 解释器。实际结果：`954 passed, 13 warnings in 11.93s`；Ruff 全部通过；`git diff --check` 通过。13 条 warning 均为既有 Polars streaming 参数或 `datetime.utcnow()` 弃用提示。测试只使用临时目录，没有调用真实 collector 或改写 `data/`；生产数据修复仍必须按 7.4.4 的影子验收顺序单独执行。

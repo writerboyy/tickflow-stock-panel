@@ -25,6 +25,7 @@ from app.plugins.easy_tdx.storage import (
     replace_industry_snapshot,
 )
 from app.services.ext_data import ExtConfigStore
+from app.services.ingestion_manifest import load_ingestion_manifest
 
 
 def _row(code: str, industry_sw: str, industry_tdx: str = "T01") -> dict[str, str]:
@@ -131,6 +132,16 @@ def test_fetch_dividend_history_keeps_only_implemented_cash_records(monkeypatch)
         "progress_code": "036003",
         "source": "tdx_7615_f10",
     }]
+
+
+def test_fetch_dividend_history_rejects_partial_source_failure(monkeypatch):
+    monkeypatch.setattr(
+        "app.plugins.easy_tdx.client.fetch_dividend_history_batch",
+        lambda _codes, timeout: ([], {"300187": "TimeoutError"}),
+    )
+
+    with pytest.raises(RuntimeError, match="不能判为有效空数据"):
+        fetch_dividend_history_rows(["300187"])
 
 
 def test_cash_per_share_uses_original_share_base_for_transfer_plans():
@@ -315,7 +326,7 @@ async def test_f10_batches_resume_failed_sources_and_publish_datasets_independen
         calls.append(list(batch))
         if len(batch) == 1 and fail_last_batch:
             raise RuntimeError("source unavailable")
-        return [(batch[0], margin_text)] if len(batch) == 50 else []
+        return [(code, margin_text) for code in batch]
 
     def fetch_dividends(batch: list[str]):
         return [
@@ -356,7 +367,7 @@ async def test_f10_batches_resume_failed_sources_and_publish_datasets_independen
 
     fail_last_batch = False
     calls.clear()
-    assert await collector.collect_f10(codes) == 1
+    assert await collector.collect_f10(codes) == 51
     assert [len(batch) for batch in calls] == [1]
     margin_path = (
         tmp_path / "ext_data" / MARGIN_TABLE
@@ -364,6 +375,42 @@ async def test_f10_batches_resume_failed_sources_and_publish_datasets_independen
     )
     assert pl.read_parquet(margin_path).height == 1
     assert json.loads(margin_manifest_path.read_text())["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_f10_missing_symbol_response_is_not_treated_as_section_absent(tmp_path):
+    text = """◇600000 测试股份 更新日期：2026-08-01◇
+【7.融资融券】
+│交易日期        │ 融资余额(万元)│ 融资买入额(万元)│ 融券余额(万元)│ 融券卖出量(万股)│融资融券余额(万元)│
+│2026-07-30      │             10│                 2│               1│                0.5│               11│
+"""
+    collector = EasyTdxCollector(
+        tmp_path,
+        f10_fetcher=lambda _codes: [("600000", text)],
+        dividend_fetcher=lambda _codes: [],
+    )
+
+    assert await collector.collect_f10(["600000", "600001"]) == 0
+
+    manifest_path = next(
+        (tmp_path / "ext_data" / "_ingestion" / "easy_tdx" / MARGIN_TABLE).glob("*.json")
+    )
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["batches"]["00000"]["status"] == "source_error"
+    assert not (tmp_path / "ext_data" / MARGIN_TABLE / "timeseries").exists()
+
+
+def test_corrupt_ingestion_manifest_fails_closed(tmp_path):
+    manifest = (
+        tmp_path / "ext_data" / "_ingestion" / "easy_tdx"
+        / MARGIN_TABLE / "2026-08-02.json"
+    )
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid ingestion manifest"):
+        load_ingestion_manifest(tmp_path, "easy_tdx", MARGIN_TABLE, "2026-08-02")
 
 
 @pytest.mark.asyncio
@@ -375,7 +422,7 @@ async def test_f10_changed_input_does_not_publish_stale_staging_batches(tmp_path
 """
 
     def fetch_f10(batch: list[str]):
-        return [(batch[0], margin_text)]
+        return [(code, margin_text) for code in batch]
 
     collector = EasyTdxCollector(
         tmp_path,
@@ -383,7 +430,7 @@ async def test_f10_changed_input_does_not_publish_stale_staging_batches(tmp_path
         dividend_fetcher=lambda _codes: [],
     )
 
-    assert await collector.collect_f10([f"{600000 + index:06d}" for index in range(51)]) == 2
+    assert await collector.collect_f10([f"{600000 + index:06d}" for index in range(51)]) == 51
     assert await collector.collect_f10(["600010"]) == 1
 
     manifest_path = next(

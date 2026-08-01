@@ -192,6 +192,44 @@ async def test_incomplete_auction_pages_do_not_overwrite_last_valid_partition(tm
 
 
 @pytest.mark.asyncio
+async def test_partial_bid_details_do_not_publish(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    trade_date = date(2026, 5, 15)
+
+    def bid_response(params):
+        if params["StockID"] == "002970":
+            raise RuntimeError("detail unavailable")
+        return {
+            "code": params["StockID"],
+            "bid": [["09:15", 3.03, 1, 134]],
+            "preclose_px": 3.0,
+            "hprice": 3.03,
+            "lprice": 3.03,
+            "openpx": 3.03,
+        }
+
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({31: bid_response}, []),
+    )
+    auction_rows = [{"code": "002969"}, {"code": "002970"}]
+
+    async with collector._client_factory() as client:
+        assert await collector._collect_bid_details(client, trade_date, auction_rows) == 0
+
+    assert not (
+        tmp_path / "ext_data" / AUCTION_TABLE
+        / "timeseries" / "date=2026-05-15" / "part.parquet"
+    ).exists()
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "auction_bid_detail" / "2026-05-15.json"
+    ).read_text())
+    assert manifest["status"] == "incomplete"
+    assert manifest["failed_batches"] == ["002970"]
+
+
+@pytest.mark.asyncio
 async def test_lhb_collection_automatically_fans_out_seat_details(tmp_path, monkeypatch):
     _configured(monkeypatch)
     calls = []

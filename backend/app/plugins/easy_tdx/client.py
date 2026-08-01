@@ -321,5 +321,12 @@ def fetch_dividend_history_rows(codes: Iterable[str], timeout: float = 10.0) -> 
     public TDX F10 page retains historical registration dates.  Rows without a
     concrete record date or cash amount are deliberately discarded.
     """
-    records, _failures = fetch_dividend_history_batch(codes, timeout=timeout)
+    records, failures = fetch_dividend_history_batch(codes, timeout=timeout)
+    if failures:
+        sample = ", ".join(
+            f"{code}:{reason}" for code, reason in sorted(failures.items())[:8]
+        )
+        raise RuntimeError(
+            "EasyTDX 分红批次存在失败标的，不能判为有效空数据: " + sample
+        )
     return records
