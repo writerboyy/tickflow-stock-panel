@@ -17,9 +17,11 @@ from datetime import date, datetime
 
 import numpy as np
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine
 from app.backtest.minute_trigger import build_minute_exit_reference
+from app.services.minute_quality import MinuteCoverageError
 
 NUMERIC_COLS = BacktestEngine._MINUTE_NUMERIC_COLS  # open/high/low/close/volume/amount
 
@@ -162,3 +164,16 @@ def test_load_minute_for_fills_handles_missing_dates():
         repo, ["000001.SZ"], {"2024-01-02", "2024-01-03"}, "stock",
     )
     assert result == {}
+
+
+def test_load_minute_for_fills_fails_closed_when_required_session_is_incomplete():
+    repo = _FakeRepo(_sample_minute_df())
+
+    with pytest.raises(MinuteCoverageError, match="缺失或不完整"):
+        BacktestEngine._load_minute_for_fills(
+            repo,
+            ["000001.SZ"],
+            {"2024-01-02"},
+            "stock",
+            required_keys={("000001.SZ", "2024-01-02")},
+        )

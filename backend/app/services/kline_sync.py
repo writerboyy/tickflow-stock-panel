@@ -7,9 +7,12 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from uuid import uuid4
 
 import polars as pl
 
@@ -532,10 +535,58 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
 
     抽自原 sync_and_persist_minute 末尾的循环, 供流式落盘 (每段一次) 与一次性迁移共用。
     """
-    df = _sanitize_minute_rows(df)
-    if df.is_empty():
+    from app.services.minute_quality import minute_coverage_manifest
+
+    raw = df
+    raw_dated = (
+        raw.filter(pl.col("datetime").is_not_null()).with_columns(
+            pl.col("datetime").dt.date().alias("_trade_date")
+        )
+        if "datetime" in raw.columns
+        else pl.DataFrame()
+    )
+    incoming_by_date = {
+        group["_trade_date"][0]: group.height
+        for group in raw_dated.partition_by("_trade_date")
+    }
+    clean = _sanitize_minute_rows(raw)
+    clean = (
+        clean.with_columns(pl.col("datetime").dt.date().alias("_trade_date"))
+        if not clean.is_empty()
+        else clean
+    )
+    accepted_by_date = {
+        group["_trade_date"][0]: group.height
+        for group in clean.partition_by("_trade_date")
+    } if "_trade_date" in clean.columns else {}
+
+    def write_coverage(trade_date, stored: pl.DataFrame) -> None:
+        coverage = minute_coverage_manifest(stored)
+        incoming_rows = incoming_by_date.get(trade_date, 0)
+        coverage.update({
+            "trade_date": trade_date.isoformat(),
+            "incoming_rows": incoming_rows,
+            "rejected_rows": incoming_rows - accepted_by_date.get(trade_date, 0),
+        })
+        coverage_path = minute_dir / "_coverage" / f"date={trade_date}.json"
+        coverage_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = coverage_path.with_name(f".{coverage_path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(coverage, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, coverage_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    if clean.is_empty():
+        for trade_date in incoming_by_date:
+            write_coverage(trade_date, pl.DataFrame())
         return 0
-    df = df.with_columns(pl.col("datetime").dt.date().alias("_trade_date"))
+
+    df = clean
     written = 0
     for day_df in df.partition_by("_trade_date"):
         trade_date = day_df["_trade_date"][0]
@@ -552,7 +603,10 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         day_df = _sanitize_minute_rows(day_df)
         day_df = day_df.sort("symbol", "datetime")
         _atomic_write_parquet(day_df, out)
+        write_coverage(trade_date, day_df)
         written += day_df.height
+    for trade_date in incoming_by_date.keys() - accepted_by_date.keys():
+        write_coverage(trade_date, pl.DataFrame())
     return written
 
 

@@ -12,6 +12,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -95,6 +96,39 @@ def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path)
     assert stored["symbol"].to_list() == ["510300.SH"]
     assert stored["high"][0] == 4.05
     assert stored["low"][0] == 4.0
+    coverage = json.loads(
+        (minute_dir / "_coverage" / "date=2026-07-21.json").read_text(encoding="utf-8")
+    )
+    assert coverage["symbols"] == 1
+    assert coverage["complete_symbols"] == 0
+    assert coverage["incoming_rows"] == 2
+    assert coverage["rejected_rows"] == 1
+    assert coverage["groups"] == [
+        {"bars": 1, "complete": False, "symbol": "510300.SH"}
+    ]
+
+
+def test_write_minute_partition_records_all_rejected_day_without_fake_rows(tmp_path):
+    minute_dir = tmp_path / "kline_minute"
+    frame = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [datetime(2026, 7, 21, 9, 31)],
+        "open": [None],
+        "high": [None],
+        "low": [None],
+        "close": [None],
+        "volume": [0.0],
+        "amount": [0.0],
+    })
+
+    assert kline_sync._write_minute_partition(frame, minute_dir) == 0
+    assert not (minute_dir / "date=2026-07-21" / "part.parquet").exists()
+    coverage = json.loads(
+        (minute_dir / "_coverage" / "date=2026-07-21.json").read_text(encoding="utf-8")
+    )
+    assert coverage["incoming_rows"] == 1
+    assert coverage["rejected_rows"] == 1
+    assert coverage["complete_symbols"] == 0
 
 
 def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):

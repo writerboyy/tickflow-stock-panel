@@ -750,10 +750,20 @@ class BacktestEngine:
         minute_cache: dict = {}
         if config.minute_fill:
             trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
-            symbols = {matrix.symbols[int(a)] for a in trigger_assets}
+            required_minute_keys = {
+                (matrix.symbols[int(asset)], matrix.timestamp_labels[int(moment)][:10])
+                for moment, asset in zip(trigger_times, trigger_assets, strict=True)
+            }
+            dates = {day for _, day in required_minute_keys}
+            symbols = {symbol for symbol, _ in required_minute_keys}
             if dates and symbols:
-                loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, "stock")
+                loaded = self._load_minute_for_fills(
+                    self.repo,
+                    list(symbols),
+                    dates,
+                    "stock",
+                    required_keys=required_minute_keys,
+                )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
         def _count(key: str) -> None:
@@ -1115,13 +1125,21 @@ class BacktestEngine:
         if config.minute_fill:
             _trigger_dates: set[str] = set()
             _trigger_symbols: set[str] = set()
+            _required_minute_keys: set[tuple[str, str]] = set()
             for _idx in range(n):
                 if ent[_idx] or ext[_idx]:
-                    _trigger_dates.add(self._date_str(panel_dates[_idx]))
-                    _trigger_symbols.add(str(panel_symbols[_idx]))
+                    _day = self._date_str(panel_dates[_idx])
+                    _symbol = str(panel_symbols[_idx])
+                    _trigger_dates.add(_day)
+                    _trigger_symbols.add(_symbol)
+                    _required_minute_keys.add((_symbol, _day))
             if _trigger_dates and _trigger_symbols:
                 _loaded = self._load_minute_for_fills(
-                    self.repo, list(_trigger_symbols), _trigger_dates, "stock",
+                    self.repo,
+                    list(_trigger_symbols),
+                    _trigger_dates,
+                    "stock",
+                    required_keys=_required_minute_keys,
                 )
                 for _key, _marr in _loaded.items():
                     if _marr is not None and len(_marr) > 0:
@@ -1530,6 +1548,8 @@ class BacktestEngine:
         symbols: list[str],
         dates_needed: set,
         asset_type: str,
+        *,
+        required_keys: set[tuple[str, str]] | None = None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
@@ -1549,6 +1569,7 @@ class BacktestEngine:
         date_objs = [_date.fromisoformat(s) for s in sorted_date_strs]
 
         cache: dict = {}
+        loaded_frames: list[pl.DataFrame] = []
         # 分批读取: 每批 50 个交易日, 处理完拼进 cache, 避免单批过大。
         BATCH = 50
         numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
@@ -1561,6 +1582,7 @@ class BacktestEngine:
                 continue
             if df.is_empty():
                 continue
+            loaded_frames.append(df)
             # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
             df = df.sort(["symbol", "datetime"]).with_columns(
                 pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
@@ -1574,6 +1596,15 @@ class BacktestEngine:
                 cache[(sym, d_str)] = sub.select(
                     [pl.col(c).cast(pl.Float64) for c in cols]
                 ).to_numpy()
+        if required_keys is not None:
+            from app.services.minute_quality import assert_required_minute_coverage
+
+            combined = (
+                pl.concat(loaded_frames, how="diagonal_relaxed")
+                if loaded_frames
+                else pl.DataFrame()
+            )
+            assert_required_minute_coverage(combined, required_keys)
         return cache
 
     def simulate_portfolio(
@@ -1662,15 +1693,23 @@ class BacktestEngine:
         minute_cache: dict = {}
         if config.minute_fill:
             trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            trigger_dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
-            trigger_symbols = {matrix.symbols[int(a)] for a in trigger_assets}
+            required_minute_keys = {
+                (matrix.symbols[int(asset)], matrix.timestamp_labels[int(moment)][:10])
+                for moment, asset in zip(trigger_times, trigger_assets, strict=True)
+            }
+            trigger_dates = {day for _, day in required_minute_keys}
+            trigger_symbols = {symbol for symbol, _ in required_minute_keys}
             if trigger_dates and trigger_symbols:
                 asset_type = "etf" if all(
                     symbol.endswith(".SH") and symbol.startswith("5")
                     for symbol in list(trigger_symbols)[:5]
                 ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
+                    self.repo,
+                    list(trigger_symbols),
+                    trigger_dates,
+                    asset_type,
+                    required_keys=required_minute_keys,
                 )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
@@ -2191,16 +2230,24 @@ class BacktestEngine:
         if config.minute_fill:
             trigger_dates: set[str] = set()
             trigger_symbols: set[str] = set()
+            required_minute_keys: set[tuple[str, str]] = set()
             for idx in range(n):
                 if ent[idx] or ext[idx]:
-                    trigger_dates.add(self._date_str(panel_dates[idx]))
-                    trigger_symbols.add(str(panel_symbols[idx]))
+                    day = self._date_str(panel_dates[idx])
+                    symbol = str(panel_symbols[idx])
+                    trigger_dates.add(day)
+                    trigger_symbols.add(symbol)
+                    required_minute_keys.add((symbol, day))
             if trigger_dates and trigger_symbols:
                 asset_type = "etf" if all(
                     str(s).endswith(".SH") and str(s).startswith("5") for s in list(trigger_symbols)[:5]
                 ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
+                    self.repo,
+                    list(trigger_symbols),
+                    trigger_dates,
+                    asset_type,
+                    required_keys=required_minute_keys,
                 )
                 for key, marr in loaded.items():
                     if marr is not None and len(marr) > 0:
