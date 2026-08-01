@@ -15,9 +15,13 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
 import polars as pl
 
@@ -30,8 +34,47 @@ from app.price_limits import (
     polars_price_limit_pct,
 )
 from app.share_capital import apply_point_in_time_shares, load_share_history
+from app.services.source_snapshot import capture_source_snapshot
 
 logger = logging.getLogger(__name__)
+
+
+def _write_enriched_metadata(data_dir: Path, *, mode: str, written: int) -> None:
+    target = data_dir / "kline_daily_enriched" / "metadata.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    previous: dict = {}
+    if target.exists():
+        try:
+            previous = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+    metadata = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "written_rows": written,
+        "source_snapshots": capture_source_snapshot(
+            data_dir,
+            [
+                "kline_daily",
+                "adj_factor/all.parquet",
+                "instruments",
+                "financials/shares/part.parquet",
+                "instrument_name_history/part.parquet",
+            ],
+            previous=previous.get("source_snapshots"),
+        ),
+    }
+    temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -1238,6 +1281,7 @@ def run_pipeline(data_dir: Path | None = None,
 
         t_done = _t.perf_counter()
         logger.info("增量管道完成: %.2fs, %d 行", t_done - t0, written)
+        _write_enriched_metadata(d, mode="new_dates" if not symbols else "new_dates+symbols", written=written)
         return written
 
     # ── 全量 或 除权因子增量 模式 ──
@@ -1388,6 +1432,7 @@ def run_pipeline(data_dir: Path | None = None,
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",
                 mode, t_done - t0, written, adj_label)
+    _write_enriched_metadata(d, mode=mode, written=written)
     return written
 
 

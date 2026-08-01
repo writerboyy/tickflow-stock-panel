@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import polars as pl
 import pytest
@@ -11,6 +12,7 @@ from app.services.daily_valuation import (
     build_ttm_events,
     load_latest_market_caps,
 )
+from app.services.source_snapshot import capture_source_snapshot
 
 
 def _write_enriched(data_dir, day: date, *, close: float = 10.0) -> None:
@@ -60,6 +62,41 @@ def test_build_ttm_events_recomputes_when_prior_annual_is_revised() -> None:
     assert revised["revenue_ttm"] == pytest.approx(530.0)
 
 
+def test_financial_events_drop_exact_duplicates_independent_of_row_order() -> None:
+    rows = [
+        {"symbol": "600000.SH", "period_end": "2023-12-31", "announce_date": "2024-03-30", "net_income_attributable": 50.0},
+        {"symbol": "600000.SH", "period_end": "2023-12-31", "announce_date": "2024-03-30", "net_income_attributable": 50.0},
+    ]
+
+    forward = build_ttm_events(
+        pl.DataFrame(rows),
+        {"net_income_attributable": "net_income_ttm"},
+        prefix="income",
+    )
+    reverse = build_ttm_events(
+        pl.DataFrame(list(reversed(rows))),
+        {"net_income_attributable": "net_income_ttm"},
+        prefix="income",
+    )
+
+    assert forward.equals(reverse)
+    assert forward.height == 1
+
+
+def test_financial_events_fail_closed_on_same_key_conflicting_values() -> None:
+    rows = pl.DataFrame([
+        {"symbol": "600000.SH", "period_end": "2023-12-31", "announce_date": "2024-03-30", "net_income_attributable": 50.0},
+        {"symbol": "600000.SH", "period_end": "2023-12-31", "announce_date": "2024-03-30", "net_income_attributable": 52.0},
+    ])
+
+    with pytest.raises(ValueError, match="缺少可验证的 revision/update"):
+        build_ttm_events(
+            rows,
+            {"net_income_attributable": "net_income_ttm"},
+            prefix="income",
+        )
+
+
 def test_build_daily_valuation_persists_pit_ratios(tmp_path) -> None:
     before_q1 = date(2024, 4, 19)
     after_q1 = date(2024, 4, 22)
@@ -104,6 +141,47 @@ def test_build_daily_valuation_persists_pit_ratios(tmp_path) -> None:
     assert after["pb"] == pytest.approx(1_000 / 110)
     assert after["ps_ttm"] == pytest.approx(1_000 / 520)
     assert after["pcf_ttm"] == pytest.approx(1_000 / 85)
+    metadata = json.loads(
+        (tmp_path / "valuation_daily" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["source_snapshots"]["kline_daily_enriched"]["files"] == 2
+    assert len(metadata["source_snapshots"]["financials/income"]["sha256"]) == 64
+
+
+def test_source_snapshot_is_content_addressed_and_order_independent(tmp_path) -> None:
+    first = tmp_path / "financials" / "income" / "a.parquet"
+    second = tmp_path / "financials" / "income" / "b.parquet"
+    first.parent.mkdir(parents=True)
+    pl.DataFrame({"value": [1]}).write_parquet(first)
+    pl.DataFrame({"value": [2]}).write_parquet(second)
+
+    before = capture_source_snapshot(tmp_path, ["financials/income"])
+    second.touch()
+    after_touch = capture_source_snapshot(tmp_path, ["financials/income"])
+    pl.DataFrame({"value": [3]}).write_parquet(second)
+    after_change = capture_source_snapshot(tmp_path, ["financials/income"])
+
+    assert before["financials/income"]["sha256"] == after_touch["financials/income"]["sha256"]
+    assert before["financials/income"]["sha256"] != after_change["financials/income"]["sha256"]
+
+
+def test_source_snapshot_reuses_unchanged_file_hashes(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({"value": [1]}).write_parquet(path)
+    before = capture_source_snapshot(tmp_path, ["financials/income"])
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("unchanged source file should use cached content hash")
+
+    monkeypatch.setattr(path.__class__, "open", unexpected_open)
+    after = capture_source_snapshot(
+        tmp_path,
+        ["financials/income"],
+        previous=before,
+    )
+
+    assert before == after
 
 
 def test_daily_valuation_does_not_emit_pe_for_loss(tmp_path) -> None:

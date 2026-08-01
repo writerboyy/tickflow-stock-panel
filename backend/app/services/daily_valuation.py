@@ -13,6 +13,8 @@ import uuid
 
 import polars as pl
 
+from app.services.source_snapshot import capture_source_snapshot
+
 
 TABLE_NAME = "valuation_daily"
 SCHEMA_VERSION = 1
@@ -73,9 +75,8 @@ def _normalize_financial_events(
     required = {"symbol", "period_end", "announce_date", *value_columns}
     if frame.is_empty() or not required <= set(frame.columns):
         return pl.DataFrame()
-    return (
+    normalized = (
         frame
-        .with_row_index("_source_order")
         .select(
             pl.col("symbol").cast(pl.String),
             _as_date_expr(frame, "period_end").alias("period_end"),
@@ -84,7 +85,6 @@ def _normalize_financial_events(
                 pl.col(column).cast(pl.Float64, strict=False).alias(column)
                 for column in value_columns
             ],
-            "_source_order",
         )
         .filter(
             pl.col("symbol").is_not_null()
@@ -92,14 +92,22 @@ def _normalize_financial_events(
             & pl.col("announce_date").is_not_null()
             & (pl.col("period_end") <= pl.col("announce_date"))
         )
-        .sort(["symbol", "announce_date", "period_end", "_source_order"])
-        .unique(
-            subset=["symbol", "period_end", "announce_date"],
-            keep="last",
-            maintain_order=True,
-        )
-        .drop("_source_order")
+        .unique(maintain_order=False)
     )
+    key = ["symbol", "period_end", "announce_date"]
+    conflicts = (
+        normalized.group_by(key).len().filter(pl.col("len") > 1).sort(key)
+    )
+    if not conflicts.is_empty():
+        sample = ", ".join(
+            "/".join(str(row[column]) for column in key)
+            for row in conflicts.head(8).iter_rows(named=True)
+        )
+        raise ValueError(
+            "财务表存在同键不同值且缺少可验证的 revision/update 元数据；"
+            f"拒绝按文件顺序选择记录: {sample}"
+        )
+    return normalized.sort(["symbol", "announce_date", "period_end"])
 
 
 def _ttm_value(
@@ -368,6 +376,7 @@ def build_daily_valuation(
 ) -> dict[str, int]:
     """Build the complete table, or atomically upsert selected trading days."""
     data_dir = Path(data_dir)
+    prior_metadata = load_daily_valuation_metadata(data_dir)
     enriched_dir = data_dir / "kline_daily_enriched"
     available_dates = _partition_dates(enriched_dir)
     requested = None if dates is None else set(dates)
@@ -460,6 +469,17 @@ def build_daily_valuation(
                 "financials/balance_sheet",
                 "financials/cash_flow",
             ],
+            "source_snapshots": capture_source_snapshot(
+                data_dir,
+                [
+                    "kline_daily_enriched",
+                    "financials/shares",
+                    "financials/income",
+                    "financials/balance_sheet",
+                    "financials/cash_flow",
+                ],
+                previous=prior_metadata.get("source_snapshots"),
+            ),
         }
         metadata_path = output_dir / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
