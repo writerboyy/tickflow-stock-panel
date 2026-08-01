@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+from hashlib import sha256
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from app.services.ext_data import (
     build_code_lookup,
     normalize_symbol,
 )
+from app.services.ingestion_manifest import stable_content_hash, update_ingestion_manifest
 
 AUCTION_TABLE = "ext_kpl_auction"
 LIMITUP_TABLE = "ext_kpl_limitup"
@@ -503,6 +505,20 @@ def atomic_upsert(data_dir: Path, table_id: str, trade_date: date, rows: list[di
         finally:
             if tmp.exists():
                 tmp.unlink()
+    update_ingestion_manifest(
+        data_dir,
+        "kaipanla",
+        table_id,
+        trade_date.isoformat(),
+        status="published",
+        parser_version="kaipanla_v1",
+        schema_version=1,
+        primary_key=["symbol"],
+        incoming_rows=len(incoming),
+        published_rows=frame.height,
+        duplicate_keys=0,
+        published_hash=sha256(path.read_bytes()).hexdigest(),
+    )
     return len(incoming)
 
 
@@ -548,6 +564,20 @@ def atomic_upsert_records(
         finally:
             if tmp.exists():
                 tmp.unlink()
+    update_ingestion_manifest(
+        data_dir,
+        "kaipanla",
+        table_id,
+        trade_date.isoformat(),
+        status="published",
+        parser_version="kaipanla_v1",
+        schema_version=1,
+        primary_key=list(key_fields),
+        incoming_rows=len(incoming),
+        published_rows=frame.height,
+        duplicate_keys=0,
+        published_hash=sha256(path.read_bytes()).hexdigest(),
+    )
     return len(incoming)
 
 
@@ -597,6 +627,8 @@ def archive_raw(
     content = {
         "endpoint": f"/{endpoint}",
         "captured_at": now.isoformat(),
+        "parser_version": "kaipanla_v1",
+        "content_hash": stable_content_hash(payload),
         "response": payload,
     }
     try:

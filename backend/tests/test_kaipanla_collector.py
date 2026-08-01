@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import polars as pl
@@ -93,6 +94,101 @@ async def test_0925_collection_automatically_fans_out_bid_details(tmp_path, monk
     stored = pl.read_parquet(path).to_dicts()[0]
     assert stored["source_0925"] == "/115"
     assert stored["bid_points"] == 1
+
+
+@pytest.mark.asyncio
+async def test_auction_manifest_requires_all_live_checkpoints_and_bid_details(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    responses = {
+        115: {"info": [AUCTION_ROW]},
+        31: {
+            "code": "002969",
+            "bid": [["09:15", 3.03, 1, 134]],
+            "preclose_px": 3.0,
+            "hprice": 3.03,
+            "lprice": 3.03,
+            "openpx": 3.03,
+        },
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
+    trade_date = date(2026, 5, 15)
+
+    await collector.collect_auction("0915", trade_date)
+    manifest_path = (
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "auction_completion" / "2026-05-15.json"
+    )
+    assert json.loads(manifest_path.read_text())["status"] == "incomplete"
+
+    await collector.collect_auction("0920", trade_date)
+    await collector.collect_auction("0925", trade_date)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["status"] == "complete"
+    assert set(manifest["components"]) == {"0915", "0920", "0925", "bid_detail"}
+    assert manifest["components"]["bid_detail"]["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_historical_auction_records_explicit_valid_empty_without_fake_rows(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({30: {"info": []}}, []),
+    )
+
+    assert await collector.collect_auction("0925", date(2026, 5, 15), True) == 0
+    assert not (
+        tmp_path / "ext_data" / AUCTION_TABLE
+        / "timeseries" / "date=2026-05-15" / "part.parquet"
+    ).exists()
+    endpoint_manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "endpoint_30" / "2026-05-15.json"
+    ).read_text())
+    completion_manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "auction_completion" / "2026-05-15.json"
+    ).read_text())
+    assert endpoint_manifest["status"] == "valid_empty"
+    assert endpoint_manifest["empty_reason"] == "valid_empty"
+    assert completion_manifest["status"] == "complete"
+    assert completion_manifest["components"]["0925"]["status"] == "valid_empty"
+
+
+@pytest.mark.asyncio
+async def test_incomplete_auction_pages_do_not_overwrite_last_valid_partition(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    trade_date = date(2026, 5, 15)
+    good = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({115: {"info": [AUCTION_ROW]}}, []),
+    )
+    await good.collect_auction("0915", trade_date)
+    partition = (
+        tmp_path / "ext_data" / AUCTION_TABLE
+        / "timeseries" / "date=2026-05-15" / "part.parquet"
+    )
+    before = partition.read_bytes()
+
+    def interrupted(params):
+        if params["Index"] == 0:
+            return {"info": [AUCTION_ROW] * 200}
+        raise RuntimeError("page unavailable")
+
+    failing = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({115: interrupted}, []),
+    )
+    with pytest.raises(RuntimeError, match="page unavailable"):
+        await failing.collect_auction("0920", trade_date)
+
+    assert partition.read_bytes() == before
+    endpoint_manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "endpoint_115" / "2026-05-15.json"
+    ).read_text())
+    assert endpoint_manifest["batches"]["page-001"]["status"] == "source_error"
 
 
 @pytest.mark.asyncio

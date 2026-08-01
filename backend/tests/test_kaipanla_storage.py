@@ -122,6 +122,8 @@ def test_archive_raw_defaults_to_gzip_without_storing_request_parameters(tmp_pat
     with gzip.open(path, "rt", encoding="utf-8") as fh:
         payload = json.load(fh)
     assert payload["endpoint"] == "/fund_interval"
+    assert len(payload["content_hash"]) == 64
+    assert payload["parser_version"] == "kaipanla_v1"
     assert payload["response"] == {"ok": True}
 
 

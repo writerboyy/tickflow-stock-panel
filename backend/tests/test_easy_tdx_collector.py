@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -290,6 +291,107 @@ async def test_f10_collection_writes_separate_reference_tables(tmp_path):
     dividend = pl.read_parquet(tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE / "timeseries" / "date=2026-06-16" / "part.parquet")
     assert dividend.to_dicts()[0]["cash_per_share"] == 0.03
     assert not (tmp_path / "ext_data" / EXPRESS_TABLE / "timeseries").exists()
+    manifests = tmp_path / "ext_data" / "_ingestion" / "easy_tdx"
+    express_manifest = json.loads(next((manifests / EXPRESS_TABLE).glob("*.json")).read_text())
+    assert express_manifest["status"] == "published"
+    assert express_manifest["empty_reason"] == "section_absent"
+    assert express_manifest["parser_version"] == "easy_tdx_f10_v2"
+    assert list((tmp_path / "ext_data" / "_easy_tdx_raw").rglob("*.json.gz"))
+
+
+@pytest.mark.asyncio
+async def test_f10_batches_resume_failed_sources_and_publish_datasets_independently(tmp_path):
+    codes = [f"{600000 + index:06d}" for index in range(51)]
+    calls: list[list[str]] = []
+    fail_last_batch = True
+    margin_text = """◇600000 测试股份 更新日期：2026-08-01◇
+【7.融资融券】
+│交易日期        │ 融资余额(万元)│ 融资买入额(万元)│ 融券余额(万元)│ 融券卖出量(万股)│融资融券余额(万元)│
+│2026-07-30      │             10│                 2│               1│                0.5│               11│
+"""
+
+    def fetch_f10(batch: list[str]):
+        nonlocal fail_last_batch
+        calls.append(list(batch))
+        if len(batch) == 1 and fail_last_batch:
+            raise RuntimeError("source unavailable")
+        return [(batch[0], margin_text)] if len(batch) == 50 else []
+
+    def fetch_dividends(batch: list[str]):
+        return [
+            {
+                "symbol": f"{code}.SH",
+                "code": code,
+                "report_date": "2026-06-16",
+                "record_date": "2026-06-16",
+                "ex_dividend_date": "2026-06-17",
+                "board_date": "2026-04-22",
+                "plan": "10派0.3元(含税)",
+                "cash_per_share": 0.03,
+                "progress": "实施方案",
+                "progress_code": "036003",
+                "source": "tdx_7615_f10",
+            }
+            for code in batch
+        ]
+
+    collector = EasyTdxCollector(
+        tmp_path,
+        f10_fetcher=fetch_f10,
+        dividend_fetcher=fetch_dividends,
+    )
+
+    assert await collector.collect_f10(codes) == 51
+    assert [len(batch) for batch in calls] == [50, 1, 1, 1]
+    assert not (tmp_path / "ext_data" / MARGIN_TABLE / "timeseries").exists()
+    dividend_path = (
+        tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE
+        / "timeseries" / "date=2026-06-16" / "part.parquet"
+    )
+    assert pl.read_parquet(dividend_path).height == 51
+    margin_manifest_path = next(
+        (tmp_path / "ext_data" / "_ingestion" / "easy_tdx" / MARGIN_TABLE).glob("*.json")
+    )
+    assert json.loads(margin_manifest_path.read_text())["status"] == "incomplete"
+
+    fail_last_batch = False
+    calls.clear()
+    assert await collector.collect_f10(codes) == 1
+    assert [len(batch) for batch in calls] == [1]
+    margin_path = (
+        tmp_path / "ext_data" / MARGIN_TABLE
+        / "timeseries" / "date=2026-07-30" / "part.parquet"
+    )
+    assert pl.read_parquet(margin_path).height == 1
+    assert json.loads(margin_manifest_path.read_text())["status"] == "published"
+
+
+@pytest.mark.asyncio
+async def test_f10_changed_input_does_not_publish_stale_staging_batches(tmp_path):
+    margin_text = """◇600000 测试股份 更新日期：2026-08-01◇
+【7.融资融券】
+│交易日期        │ 融资余额(万元)│ 融资买入额(万元)│ 融券余额(万元)│ 融券卖出量(万股)│融资融券余额(万元)│
+│2026-07-30      │             10│                 2│               1│                0.5│               11│
+"""
+
+    def fetch_f10(batch: list[str]):
+        return [(batch[0], margin_text)]
+
+    collector = EasyTdxCollector(
+        tmp_path,
+        f10_fetcher=fetch_f10,
+        dividend_fetcher=lambda _codes: [],
+    )
+
+    assert await collector.collect_f10([f"{600000 + index:06d}" for index in range(51)]) == 2
+    assert await collector.collect_f10(["600010"]) == 1
+
+    manifest_path = next(
+        (tmp_path / "ext_data" / "_ingestion" / "easy_tdx" / MARGIN_TABLE).glob("*.json")
+    )
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["published_rows"] == 1
+    assert len(list((tmp_path / "ext_data" / "_staging" / "easy_tdx" / MARGIN_TABLE).iterdir())) == 2
 
 
 @pytest.mark.asyncio

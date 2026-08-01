@@ -53,6 +53,12 @@ from app.plugins.kaipanla.storage import (
     has_auction_0925,
     recent_trading_dates,
 )
+from app.services.ingestion_manifest import (
+    load_ingestion_manifest,
+    record_ingestion_batch,
+    stable_content_hash,
+    update_ingestion_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -632,18 +638,84 @@ class KaipanlaCollector:
         page_size = _PAGE_SIZE[endpoint]
         pages = []
         for index in range(_MAX_PAGES):
-            payload = await client.request(
-                endpoint,
-                {**(params or {}), "Index": index, "st": page_size},
-            )
+            batch_id = f"page-{index:03d}"
+            try:
+                payload = await client.request(
+                    endpoint,
+                    {**(params or {}), "Index": index, "st": page_size},
+                )
+            except Exception as exc:  # noqa: BLE001
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    f"endpoint_{endpoint}",
+                    trade_date.isoformat(),
+                    batch_id,
+                    status="source_error",
+                    error_code=type(exc).__name__,
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                    page_size=page_size,
+                )
+                raise
             archive_raw(self.data_dir, endpoint, trade_date, payload, f"page-{index}")
             pages.append(payload)
             rows = payload.get(_ROW_KEY[endpoint])
             if not isinstance(rows, list):
-                break
+                record_ingestion_batch(
+                    self.data_dir,
+                    "kaipanla",
+                    f"endpoint_{endpoint}",
+                    trade_date.isoformat(),
+                    batch_id,
+                    status="parse_rejected",
+                    error_code="rows_not_list",
+                    source_content_hash=stable_content_hash(payload),
+                    parser_version="kaipanla_v1",
+                    schema_version=1,
+                    page_size=page_size,
+                )
+                raise ValueError(f"开盘啦 /{endpoint} 分页记录不是数组")
+            record_ingestion_batch(
+                self.data_dir,
+                "kaipanla",
+                f"endpoint_{endpoint}",
+                trade_date.isoformat(),
+                batch_id,
+                status="valid_empty" if not rows else "completed",
+                row_count=len(rows),
+                content_hash=stable_content_hash(rows),
+                source_content_hash=stable_content_hash(payload),
+                empty_reason="valid_empty" if not rows else None,
+                parser_version="kaipanla_v1",
+                schema_version=1,
+                page_size=page_size,
+            )
             if len(rows) < page_size:
+                update_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    f"endpoint_{endpoint}",
+                    trade_date.isoformat(),
+                    status="valid_empty" if not any(
+                        payload.get(_ROW_KEY[endpoint]) for payload in pages
+                    ) else "complete",
+                    completed_pages=len(pages),
+                    empty_reason="valid_empty" if not any(
+                        payload.get(_ROW_KEY[endpoint]) for payload in pages
+                    ) else None,
+                )
                 return pages
         if len(pages) >= _MAX_PAGES:
+            update_ingestion_manifest(
+                self.data_dir,
+                "kaipanla",
+                f"endpoint_{endpoint}",
+                trade_date.isoformat(),
+                status="page_limit_reached",
+                completed_pages=len(pages),
+                error_code="page_limit_reached",
+            )
             raise RuntimeError(f"开盘啦 /{endpoint} 分页超过安全上限")
         return pages
 
@@ -671,8 +743,59 @@ class KaipanlaCollector:
                         item[f"{key}_{checkpoint}"] = value
                 rows.append(item)
             count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, rows)
+            components = {
+                checkpoint: {
+                    "status": "valid_empty" if not rows else "published",
+                    "endpoint": f"/{endpoint}",
+                    "rows": len(rows),
+                }
+            }
             if not historical and checkpoint == "0925" and base_rows:
                 await self._collect_bid_details(client, trade_date, base_rows)
+                bid_state = load_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    "auction_bid_detail",
+                    trade_date.isoformat(),
+                )
+                components["bid_detail"] = {
+                    "status": bid_state.get("status", "incomplete"),
+                    "rows": bid_state.get("published_rows", 0),
+                }
+            elif checkpoint == "0925":
+                components["bid_detail"] = {"status": "not_applicable", "rows": 0}
+            existing = load_ingestion_manifest(
+                self.data_dir,
+                "kaipanla",
+                "auction_completion",
+                trade_date.isoformat(),
+            )
+            all_components = {**(existing.get("components") or {}), **components}
+            required_components = (
+                {"0925", "bid_detail"}
+                if historical
+                else {"0915", "0920", "0925", "bid_detail"}
+            )
+            update_ingestion_manifest(
+                self.data_dir,
+                "kaipanla",
+                "auction_completion",
+                trade_date.isoformat(),
+                status=(
+                    "complete"
+                    if required_components <= set(all_components)
+                    and all(
+                        all_components[name].get("status")
+                        in {"published", "valid_empty", "complete", "not_applicable"}
+                        for name in required_components
+                    )
+                    else "incomplete"
+                ),
+                parser_version="kaipanla_v1",
+                schema_version=1,
+                expected_components=sorted(required_components),
+                components=all_components,
+            )
             return count
 
     async def _collect_bid_details(
@@ -683,24 +806,64 @@ class KaipanlaCollector:
     ) -> int:
         semaphore = asyncio.Semaphore(4)
         unique_codes = sorted({str(row["code"]) for row in auction_rows if row.get("code")})
+        failed_codes: set[str] = set()
 
         async def collect_one(code: str) -> dict | None:
             async with semaphore:
                 try:
                     payload = await client.request(31, {"StockID": code})
                     archive_raw(self.data_dir, 31, trade_date, payload, code)
-                    return {
+                    row = {
                         **parse_bid_detail(payload),
                         "bid_collected_at": cn_now().isoformat(),
                     }
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "auction_bid_detail",
+                        trade_date.isoformat(),
+                        code,
+                        status="completed",
+                        row_count=1,
+                        content_hash=stable_content_hash(row),
+                        source_content_hash=stable_content_hash(payload),
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        expected_batches=unique_codes,
+                    )
+                    return row
                 except Exception as exc:  # noqa: BLE001
+                    failed_codes.add(code)
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "auction_bid_detail",
+                        trade_date.isoformat(),
+                        code,
+                        status="source_error",
+                        error_code=type(exc).__name__,
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        expected_batches=unique_codes,
+                    )
                     logger.warning("开盘啦 /31 个股 %s 采集失败 (%s)", code, type(exc).__name__)
                     return None
 
         details = [
             row for row in await asyncio.gather(*(collect_one(c) for c in unique_codes)) if row
         ]
-        return atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details)
+        count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details)
+        update_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            "auction_bid_detail",
+            trade_date.isoformat(),
+            status="incomplete" if failed_codes else "complete",
+            expected_batches=unique_codes,
+            failed_batches=sorted(failed_codes),
+            published_rows=count,
+        )
+        return count
 
     async def collect_limitup(self, trade_date: date) -> int:
         async with self._client_factory() as client:
