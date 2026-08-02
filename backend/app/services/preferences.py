@@ -197,7 +197,7 @@ def get_minute_sync_segment_days() -> int:
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
-_ALLOWED_DATA_PROVIDERS = {"tickflow"}
+_ALLOWED_DATA_PROVIDERS = {"tickflow", "baostock"}
 
 
 def _allowed_data_providers() -> set[str]:

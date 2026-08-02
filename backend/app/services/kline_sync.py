@@ -640,8 +640,9 @@ def _migrate_utc_minute_wall_clock(repo: KlineRepository, asset_type: AssetType)
 
 def _resolve_minute_provider(
     provider_name: str,
+    freq: str = "1m",
 ) -> tuple[object | None, bool, str | None]:
-    """统一解析 custom minute provider, 把所有 resolver 调用纳入同一异常边界。
+    """统一解析非 TickFlow minute provider, 把 resolver 调用纳入同一异常边界。
 
     供 _try_custom_minute 和 sync_and_persist_minute 共用, 避免两处分别调
     provider_has_dataset / get_provider 时漏掉异常边界 (Issue 2 加固项)。
@@ -658,12 +659,25 @@ def _resolve_minute_provider(
         return (None, True, None)
     from app.data_providers import custom as custom_sources
     try:
-        if not custom_sources.provider_has_dataset(provider_name, "minute"):
-            return (None, True, None)
-        provider = custom_sources.get_provider(provider_name)
-        return (provider, False, None)
+        if custom_sources.provider_has_dataset(provider_name, "minute"):
+            provider = custom_sources.get_provider(provider_name)
+            return (provider, False, None)
     except Exception as e:  # noqa: BLE001
         return (None, True, str(e))
+    try:
+        from app.data_providers.registry import get_provider
+        provider = get_provider(provider_name)
+    except ValueError:
+        return (None, True, None)
+    except Exception as e:  # noqa: BLE001
+        return (None, True, str(e))
+    capabilities = getattr(provider, "capabilities", None)
+    if not bool(getattr(capabilities, "minute", False)):
+        return (None, True, None)
+    supports_freq = getattr(provider, "supports_minute_freq", None)
+    if callable(supports_freq) and not supports_freq(freq):
+        return (None, True, None)
+    return (provider, False, None)
 
 
 def _try_custom_minute(
@@ -694,7 +708,7 @@ def _try_custom_minute(
     默认 seg_label="custom" 转发给上层, 保证进度展示不降级。
     """
     provider_name = preferences.get_minute_data_provider()
-    provider, fallback, err = _resolve_minute_provider(provider_name)
+    provider, fallback, err = _resolve_minute_provider(provider_name, freq=freq)
     if fallback:
         if err is not None:
             logger.warning("custom minute provider %s resolution failed, falling back to TickFlow: %s",

@@ -459,7 +459,19 @@ def list_data_sources() -> dict:
     """列出已加载的数据源 (内置 / 插件 / 用户自定义)。"""
     from app.data_providers import custom as custom_sources
     return {
-        "builtin": [{"name": "tickflow", "display_name": "TickFlow", "datasets": ["daily", "adj_factor", "realtime", "minute"]}],
+        "builtin": [
+            {
+                "name": "tickflow",
+                "display_name": "TickFlow",
+                "datasets": ["daily", "adj_factor", "realtime", "minute"],
+            },
+            {
+                "name": "baostock",
+                "display_name": "BaoStock",
+                "datasets": ["minute"],
+                "notes": "股票 5/15/30/60 分钟历史 K；不提供 1 分钟路由",
+            },
+        ],
         "plugins": custom_sources.list_plugins(),
         "custom": custom_sources.list_sources(),
         "errors": custom_sources.errors(),

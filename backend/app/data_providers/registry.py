@@ -1,9 +1,11 @@
 """Provider registry."""
 from __future__ import annotations
 
+from app.data_providers.baostock_provider import BaoStockProvider
 from app.data_providers.tickflow_provider import TickFlowProvider
 
 _PROVIDERS = {
+    "baostock": BaoStockProvider,
     "tickflow": TickFlowProvider,
 }
 
