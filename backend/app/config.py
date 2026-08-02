@@ -74,6 +74,11 @@ class Settings(BaseSettings):
 
     # TickFlow
     tickflow_api_key: str = Field(default="", description="留空启用 free 模式")
+    hithink_finance_api_key: str = Field(
+        default="",
+        description="HiThink/Fuyao supplemental data API key; never required for startup",
+    )
+    hithink_finance_base_url: str = "https://fuyao.aicubes.cn"
 
     # AI
     ai_provider: str = "openai_compat"
