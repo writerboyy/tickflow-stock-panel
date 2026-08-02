@@ -8,7 +8,10 @@ explicit reconciliation step promotes them.
 """
 from __future__ import annotations
 
+import importlib
 import os
+import socket
+import threading
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
@@ -29,10 +32,25 @@ INDEX_CONSTITUENT_CANDIDATES_TABLE = "index_constituent_candidates"
 PARSER_VERSION = "baostock_index_candidates_v1"
 DEFAULT_INDEX_SYMBOL = "000300.SH"
 DEFAULT_INDEX_NAME = "沪深300"
+_BAOSTOCK_LOCK = threading.Lock()
 
 _INDEX_QUERY_METHODS = {
     "000300.SH": "query_hs300_stocks",
 }
+
+
+class _SocketModuleWithTimeout:
+    def __init__(self, original: Any, timeout: float) -> None:
+        self._original = original
+        self._timeout = timeout
+
+    def socket(self, *args: Any, **kwargs: Any):
+        value = self._original.socket(*args, **kwargs)
+        value.settimeout(self._timeout)
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
 
 
 def _text(value: object) -> str:
@@ -152,9 +170,16 @@ def normalize_index_constituent_candidates(
 
 
 class BaoStockIndexCandidateCollector:
-    def __init__(self, data_dir: Path, bs_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        bs_module: Any | None = None,
+        *,
+        timeout: float = 5.0,
+    ) -> None:
         self.data_dir = Path(data_dir)
         self._bs_module = bs_module
+        self._timeout = timeout
 
     def collect_hs300_snapshots(
         self,
@@ -183,34 +208,49 @@ class BaoStockIndexCandidateCollector:
         if not dates:
             return 0
 
-        bs = self._baostock()
-        login = bs.login()
-        if getattr(login, "error_code", "0") != "0":
-            raise RuntimeError(f"BaoStock login failed: {getattr(login, 'error_msg', '')}")
-
         frames: list[pl.DataFrame] = []
         raw_payloads: dict[str, Any] = {}
-        try:
-            query = getattr(bs, method_name)
-            for snapshot_date in dates:
-                result = query(date=snapshot_date.isoformat())
-                rows = _result_rows(result)
-                raw_payloads[snapshot_date.isoformat()] = {
-                    "index_symbol": normalized_index,
-                    "fields": list(getattr(result, "fields", [])),
-                    "rows": rows,
-                }
-                frame = normalize_index_constituent_candidates(
-                    rows,
-                    index_symbol=normalized_index,
-                    index_name=index_name,
-                    snapshot_date=snapshot_date,
-                )
-                if not frame.is_empty():
-                    publish_candidate_snapshot(self.data_dir, snapshot_date, frame)
-                    frames.append(frame)
-        finally:
-            bs.logout()
+        with _BAOSTOCK_LOCK:
+            bs = self._baostock()
+            socket_util = None
+            original_socket_module = None
+            if self._bs_module is None:
+                try:
+                    socket_util = importlib.import_module("baostock.util.socketutil")
+                    original_socket_module = socket_util.socket
+                    socket_util.socket = _SocketModuleWithTimeout(socket, self._timeout)
+                except (AttributeError, ModuleNotFoundError):
+                    pass
+            try:
+                login = bs.login()
+                if getattr(login, "error_code", "0") != "0":
+                    raise RuntimeError(
+                        f"BaoStock login failed: {getattr(login, 'error_msg', '')}"
+                    )
+                try:
+                    query = getattr(bs, method_name)
+                    for snapshot_date in dates:
+                        result = query(date=snapshot_date.isoformat())
+                        rows = _result_rows(result)
+                        raw_payloads[snapshot_date.isoformat()] = {
+                            "index_symbol": normalized_index,
+                            "fields": list(getattr(result, "fields", [])),
+                            "rows": rows,
+                        }
+                        frame = normalize_index_constituent_candidates(
+                            rows,
+                            index_symbol=normalized_index,
+                            index_name=index_name,
+                            snapshot_date=snapshot_date,
+                        )
+                        if not frame.is_empty():
+                            publish_candidate_snapshot(self.data_dir, snapshot_date, frame)
+                            frames.append(frame)
+                finally:
+                    bs.logout()
+            finally:
+                if socket_util is not None and original_socket_module is not None:
+                    socket_util.socket = original_socket_module
 
         logical_snapshot = (
             f"{normalized_index}_{dates[0].isoformat()}"

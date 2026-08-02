@@ -12,6 +12,7 @@ from app.plugins.baostock.index_candidates import (
 )
 from app.plugins.pit_history.storage import INDEX_MEMBERSHIP_EVENTS_TABLE, table_path
 from app.services import pit_reference
+from scripts.collect_baostock_hs300_candidates import candidate_dates, main
 
 
 class _LoginResult:
@@ -56,6 +57,15 @@ class _FakeBaoStock:
 class _FailingCollector:
     def collect_hs300_snapshots(self, snapshot_dates):
         raise RuntimeError("offline")
+
+
+def _write_daily_dates(data_dir, dates: list[date]) -> None:
+    root = data_dir / "kline_daily"
+    root.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"] * len(dates),
+        "date": dates,
+    }).write_parquet(root / "part.parquet")
 
 
 def test_normalize_baostock_hs300_candidates_keeps_snapshot_provenance():
@@ -163,3 +173,67 @@ def test_sync_baostock_candidates_returns_failed_without_partial_claim(tmp_path)
     assert result["status"] == "failed"
     assert result["published_rows"] == 0
     assert result["errors"] == ["index_constituent_candidates: offline"]
+
+
+def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):
+    _write_daily_dates(
+        tmp_path,
+        [
+            date(2020, 12, 31),
+            date(2021, 1, 4),
+            date(2021, 1, 6),
+            date(2021, 1, 8),
+        ],
+    )
+
+    dates, source = candidate_dates(
+        tmp_path,
+        start_date=date(2021, 1, 1),
+        end_date=date(2021, 1, 6),
+        weekday_fallback=False,
+    )
+
+    assert dates == [date(2021, 1, 4), date(2021, 1, 6)]
+    assert source == "local_trading_dates"
+
+
+def test_baostock_candidate_dates_require_explicit_weekday_fallback(tmp_path):
+    dates, source = candidate_dates(
+        tmp_path,
+        start_date=date(2021, 1, 1),
+        end_date=date(2021, 1, 5),
+        weekday_fallback=False,
+    )
+
+    assert dates == []
+    assert source == "none"
+
+    fallback_dates, fallback_source = candidate_dates(
+        tmp_path,
+        start_date=date(2021, 1, 1),
+        end_date=date(2021, 1, 5),
+        weekday_fallback=True,
+    )
+
+    assert fallback_dates == [date(2021, 1, 1), date(2021, 1, 4), date(2021, 1, 5)]
+    assert fallback_source == "weekday_fallback"
+
+
+def test_collect_baostock_candidates_dry_run_does_not_publish(tmp_path, capsys):
+    _write_daily_dates(tmp_path, [date(2021, 1, 4), date(2021, 1, 5)])
+
+    result = main([
+        "--data-dir",
+        str(tmp_path),
+        "--start-date",
+        "2021-01-01",
+        "--end-date",
+        "2021-01-05",
+        "--dry-run",
+    ])
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "candidate_dates=2" in output
+    assert "source=local_trading_dates" in output
+    assert not (tmp_path / "pit_reference" / "baostock").exists()
