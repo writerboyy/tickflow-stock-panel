@@ -42,6 +42,7 @@ export const QK = {
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
   marketHeatRadar:      (trendDays: number = 30) => ['market-heat-radar', trendDays] as const,
+  marketHeatPriceTrend: (symbols: string, days: number) => ['market-heat-price-trend', symbols, days] as const,
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,

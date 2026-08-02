@@ -12,7 +12,7 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
-import { api, type MarketHeatItem, type MarketHeatListKey, type MarketHeatRadar } from '@/lib/api'
+import { api, type KlineRow, type MarketHeatItem, type MarketHeatListKey, type MarketHeatRadar } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { QK } from '@/lib/queryKeys'
 import { useECharts } from './backtest/charts/useECharts'
@@ -61,6 +61,11 @@ const VIEW_CONFIG: Array<{
 
 const PANEL = 'rounded-[24px] border border-[#34224d] bg-[#130a21]/88 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur'
 const ROW_PANEL = 'rounded-[18px] border border-[#2c1e40] bg-[#160c25]/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]'
+const CHART_PALETTE = ['#FDBA4D', '#C06BFF', '#55D6C8']
+const PRICE_QUERY_DAYS = 45
+const PRICE_DISPLAY_POINTS = 30
+
+type TrendMode = 'rank' | 'price'
 
 function fmtNumber(value: number | null | undefined, digits = 2) {
   if (value == null || !Number.isFinite(Number(value))) return '--'
@@ -116,6 +121,36 @@ function directionMeta(direction: string | null | undefined) {
 function rankChangeTone(value: number | null | undefined) {
   if (value == null || value === 0) return 'text-[#aa9ac7]'
   return value > 0 ? 'text-[#55d6c8]' : 'text-[#ffbd4a]'
+}
+
+function buildPriceSeries(
+  trends: Array<MarketHeatRadar['trends'][string]>,
+  priceRows: Record<string, KlineRow[]>,
+) {
+  return trends.map(trend => {
+    const rows = (priceRows[trend.thscode] ?? priceRows[trend.ticker] ?? [])
+      .filter(row => row.date && Number.isFinite(Number(row.close)))
+      .sort((left, right) => String(left.date).localeCompare(String(right.date)))
+      .slice(-PRICE_DISPLAY_POINTS)
+    const base = Number(rows[0]?.close)
+    const points = Number.isFinite(base) && base > 0
+      ? rows.map(row => {
+          const close = Number(row.close)
+          return {
+            date: row.date,
+            close,
+            index: (close / base) * 100,
+          }
+        })
+      : []
+
+    return {
+      thscode: trend.thscode,
+      ticker: trend.ticker,
+      name: trend.name || trend.ticker,
+      points,
+    }
+  }).filter(series => series.points.length > 0)
 }
 
 function MetricCard({ label, value, hint }: { label: string; value: string; hint: string }) {
@@ -174,9 +209,114 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
   )
 }
 
-function TrendChart({ data }: { data: MarketHeatRadar }) {
+function TrendChart({
+  data,
+  mode,
+  onModeChange,
+  priceRows,
+  priceLoading,
+  priceError,
+}: {
+  data: MarketHeatRadar
+  mode: TrendMode
+  onModeChange: (mode: TrendMode) => void
+  priceRows: Record<string, KlineRow[]>
+  priceLoading: boolean
+  priceError: unknown
+}) {
   const trends = useMemo(() => Object.values(data.trends), [data.trends])
+  const priceSeries = useMemo(() => buildPriceSeries(trends, priceRows), [priceRows, trends])
   const option = useMemo<EChartsOption | null>(() => {
+    if (mode === 'price') {
+      const dates = Array.from(
+        new Set(priceSeries.flatMap(series => series.points.map(point => point.date).filter(Boolean))),
+      ).sort()
+      if (!dates.length || !priceSeries.length) return null
+
+      return {
+        color: CHART_PALETTE,
+        animationDuration: 360,
+        animationEasing: 'cubicOut',
+        backgroundColor: 'transparent',
+        grid: { left: 54, right: 18, top: 8, bottom: 34 },
+        tooltip: {
+          trigger: 'axis',
+          backgroundColor: 'rgba(15,8,28,0.96)',
+          borderColor: 'rgba(255,255,255,0.12)',
+          borderWidth: 1,
+          padding: [10, 12],
+          extraCssText: 'border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.35);',
+          textStyle: { color: '#F8F5FF', fontSize: 12 },
+          formatter: (params: any) => {
+            const rows = Array.isArray(params) ? params : [params]
+            const date = rows[0]?.axisValue ?? ''
+            const body = rows.map((row: any) => {
+              const marker = row?.marker ?? ''
+              const close = row?.data?.close
+              const value = Number(row?.value)
+              return marker + row.seriesName + ': ¥' + fmtNumber(close, 2)
+                + ' · ' + (Number.isFinite(value) ? fmtNumber(value, 1) : '--')
+            }).join('<br/>')
+            return '<div style="font-weight:600;margin-bottom:6px">' + date + '</div>' + body
+          },
+        },
+        xAxis: {
+          type: 'category',
+          data: dates,
+          boundaryGap: false,
+          axisLabel: { color: 'rgba(232,224,255,0.62)', fontSize: 11, hideOverlap: true },
+          axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+          axisTick: { show: false },
+        },
+        yAxis: {
+          type: 'value',
+          scale: true,
+          axisLabel: {
+            color: 'rgba(232,224,255,0.64)',
+            fontSize: 11,
+            formatter: (value: number) => fmtNumber(value, 0),
+          },
+          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+          axisLine: { show: false },
+          axisTick: { show: false },
+        },
+        dataZoom: [
+          { type: 'inside', throttle: 60, zoomOnMouseWheel: true, moveOnMouseMove: true },
+        ],
+        series: priceSeries.map((series, index) => {
+          const color = CHART_PALETTE[index % CHART_PALETTE.length]
+          const byDate = new Map(series.points.map(point => [point.date, point]))
+          return {
+            name: series.name || series.ticker,
+            type: 'line',
+            smooth: 0.25,
+            showSymbol: false,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            data: dates.map(date => {
+              const point = byDate.get(date)
+              return point
+                ? { value: Number(point.index.toFixed(2)), close: point.close, date: point.date }
+                : null
+            }),
+            lineStyle: {
+              width: 2.6,
+              color,
+              shadowBlur: 8,
+              shadowColor: color + '55',
+            },
+            itemStyle: { color },
+            emphasis: {
+              focus: 'series',
+              lineStyle: { width: 3.2 },
+              itemStyle: { borderWidth: 2, borderColor: '#fff' },
+            },
+          }
+        }),
+      }
+    }
+
     const dates = Array.from(
       new Set(trends.flatMap(trend => trend.points.map(point => point.date).filter(Boolean))),
     ).sort()
@@ -187,10 +327,9 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
     if (!ranks.length) return null
     const rawMax = Math.max(...ranks)
     const yMax = Math.max(32, 2 ** Math.ceil(Math.log2(rawMax + 1)))
-    const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
 
     return {
-      color: palette,
+      color: CHART_PALETTE,
       animationDuration: 360,
       animationEasing: 'cubicOut',
       backgroundColor: 'transparent',
@@ -242,7 +381,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
         { type: 'inside', throttle: 60, zoomOnMouseWheel: true, moveOnMouseMove: true },
       ],
       series: trends.map((trend, index) => {
-        const color = palette[index % palette.length]
+        const color = CHART_PALETTE[index % CHART_PALETTE.length]
         const byDate = new Map(trend.points.map(point => [point.date, point.rank]))
         return {
           name: trend.name || trend.ticker,
@@ -268,33 +407,109 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
         }
       }),
     }
-  }, [trends])
-  const chartRef = useECharts(option, [option])
+  }, [mode, priceSeries, trends])
+  const emptyOption = useMemo<EChartsOption>(() => ({
+    backgroundColor: 'transparent',
+    grid: { left: 54, right: 18, top: 8, bottom: 34 },
+    xAxis: {
+      type: 'category',
+      data: [],
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+    },
+    series: [],
+  }), [])
+  const chartRef = useECharts(option ?? emptyOption, [option, emptyOption])
 
-  if (!option) {
-    return <EmptyState icon={TrendingUp} title="暂无排名轨迹" hint="热股榜前三名暂未返回可绘制的近 30 日排名数据。" />
-  }
+  const title = mode === 'rank' ? '近 30 日排名轨迹' : '近 30 个交易日股价走势'
+  const subtitle = mode === 'rank'
+    ? '对数排名轴展示低位名次，悬停查看真实排名；滚轮/触控可缩放区间'
+    : '收盘价首个可用交易日=100，悬停查看真实价格；滚轮/触控可缩放区间'
+  const emptyTitle = mode === 'price'
+    ? (priceLoading ? '正在读取股价走势' : '暂无股价走势')
+    : '暂无排名轨迹'
+  const emptyHint = mode === 'price'
+    ? (priceError instanceof Error
+        ? priceError.message
+        : '当前代表股票暂未返回可绘制的本地日 K 收盘价。')
+    : '热股榜前三名暂未返回可绘制的近 30 日排名数据。'
 
-  const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
   return (
     <div className={cn(PANEL, 'overflow-hidden')}>
       <div className="border-b border-white/10 px-5 py-5">
-        <div className="text-xl font-semibold tracking-tight text-white">近 30 日排名轨迹</div>
-        <div className="mt-1 text-sm text-[#aa9ac7]">对数排名轴展示低位名次，悬停查看真实排名</div>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div className="text-xl font-semibold tracking-tight text-white">{title}</div>
+            <div className="mt-1 text-sm text-[#aa9ac7]">{subtitle}</div>
+          </div>
+          <div className="inline-flex w-fit rounded-full border border-[#3a2852] bg-[#0f081a]/80 p-1">
+            {([
+              ['rank', '排名'],
+              ['price', '股价'],
+            ] as const).map(([nextMode, label]) => {
+              const active = mode === nextMode
+              return (
+                <button
+                  key={nextMode}
+                  type="button"
+                  onClick={() => onModeChange(nextMode)}
+                  className={cn(
+                    'rounded-full px-3 py-1.5 text-xs font-semibold transition-colors',
+                    active
+                      ? 'bg-[#c06bff] text-white shadow-[0_0_18px_rgba(192,107,255,0.35)]'
+                      : 'text-[#b8a9d4] hover:bg-white/5 hover:text-white',
+                  )}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
         <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2">
-          {trends.map((trend, index) => (
-            <div key={trend.thscode} className="flex items-center gap-2 text-sm text-[#c8bce0]">
-              <span
-                className="h-2.5 w-2.5 rounded-full"
-                style={{ backgroundColor: palette[index % palette.length] }}
-              />
-              <span>{trend.name || trend.ticker}</span>
-            </div>
-          ))}
+          {trends.map((trend, index) => {
+            const price = priceSeries.find(series => series.thscode === trend.thscode)
+            const latest = price?.points[price.points.length - 1]
+            const priceReturn = latest ? latest.index / 100 - 1 : null
+            return (
+              <div key={trend.thscode} className="flex items-center gap-2 text-sm text-[#c8bce0]">
+                <span
+                  className="h-2.5 w-2.5 rounded-full"
+                  style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
+                />
+                <span>{trend.name || trend.ticker}</span>
+                {mode === 'price' && latest && (
+                  <>
+                    <span className="font-mono text-[#efe8ff]">¥{fmtNumber(latest.close, 2)}</span>
+                    <span className={cn('font-mono text-xs', rankChangeTone(priceReturn))}>
+                      {priceReturn != null ? fmtPct(priceReturn) : '--'}
+                    </span>
+                  </>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
       <div className="px-3 pb-4 pt-5">
-        <div ref={chartRef} className="h-[420px] w-full xl:h-[520px]" />
+        <div className="relative h-[420px] w-full xl:h-[520px]">
+          <div ref={chartRef} className={cn('h-full w-full', !option && 'opacity-20')} />
+          {!option && (
+            <div className="absolute inset-0 grid place-items-center px-6 text-center">
+              <EmptyState
+                icon={priceLoading ? Loader2 : TrendingUp}
+                title={emptyTitle}
+                hint={emptyHint}
+              />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -345,6 +560,7 @@ function OverlapPanel({ overlap }: { overlap: MarketHeatRadar['overlaps'][number
 
 export function MarketHeat() {
   const [activeKey, setActiveKey] = useState<MarketHeatListKey>('hot_day')
+  const [trendMode, setTrendMode] = useState<TrendMode>('rank')
   const query = useQuery({
     queryKey: QK.marketHeatRadar(30),
     queryFn: () => api.marketHeatRadar(30),
@@ -361,7 +577,19 @@ export function MarketHeat() {
     if (activeKey === 'skyrocket_day') return item.key === 'hot_vs_skyrocket_day'
     return item.key === 'hot_vs_skyrocket_hour'
   }) ?? data?.overlaps[0]
-  const trendRows = data ? Object.values(data.trends) : []
+  const trendRows = useMemo(() => data ? Object.values(data.trends) : [], [data])
+  const trendSymbols = useMemo(
+    () => trendRows.map(row => row.thscode).filter(Boolean).sort(),
+    [trendRows],
+  )
+  const trendSymbolKey = trendSymbols.join(',')
+  const priceQuery = useQuery({
+    queryKey: QK.marketHeatPriceTrend(trendSymbolKey, PRICE_QUERY_DAYS),
+    queryFn: () => api.klineDailyBatch(trendSymbols, PRICE_QUERY_DAYS),
+    enabled: trendSymbols.length > 0,
+    staleTime: 5 * 60_000,
+    placeholderData: previous => previous,
+  })
   const dayOverlap = data?.overlaps.find(item => item.key === 'hot_vs_skyrocket_day')
 
   return (
@@ -376,11 +604,14 @@ export function MarketHeat() {
                 同花顺/Fuyao · 当前快照
               </div>
               <button
-                onClick={() => query.refetch()}
-                disabled={query.isFetching}
+                onClick={() => {
+                  query.refetch()
+                  if (trendMode === 'price' && trendSymbols.length > 0) priceQuery.refetch()
+                }}
+                disabled={query.isFetching || (trendMode === 'price' && priceQuery.isFetching)}
                 className="inline-flex w-fit items-center gap-2 rounded-full border border-[#5b3b7a] bg-[#171024]/80 px-4 py-2 text-sm font-medium text-[#f4edff] transition-colors hover:border-[#c06bff] hover:bg-[#211333] disabled:opacity-60"
               >
-                {query.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {query.isFetching || (trendMode === 'price' && priceQuery.isFetching) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 刷新
               </button>
             </div>
@@ -482,12 +713,19 @@ export function MarketHeat() {
                 </div>
 
                 <aside className="space-y-5">
-                  <TrendChart data={data} />
+                  <TrendChart
+                    data={data}
+                    mode={trendMode}
+                    onModeChange={setTrendMode}
+                    priceRows={priceQuery.data?.data ?? {}}
+                    priceLoading={priceQuery.isFetching}
+                    priceError={priceQuery.error}
+                  />
                   <div className={cn(PANEL, 'p-5')}>
                     <div className="flex items-start gap-3">
                       <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#d36aff]" />
                       <div className="text-sm leading-relaxed text-[#aa9ac7]">
-                        代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；低位名次用对数坐标压缩展示，悬停可查看真实排名。
+                        代表股票取热股榜 24 小时前三。排名轨迹来自同花顺热股历史排名；股价走势来自本地日 K 收盘价并按首个可用交易日归一化，不构成买卖信号。
                       </div>
                     </div>
                   </div>
