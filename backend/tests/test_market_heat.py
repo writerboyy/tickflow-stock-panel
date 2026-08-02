@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api import market_heat
 from app.plugins.hithink.client import HiThinkAuthError
-from app.services.market_heat import build_market_heat_radar
+from app.services.market_heat import build_market_heat_radar, build_market_heat_rank_trend
 
 
 def _item(thscode: str, name: str, rank: int, heat: float, change: int, trend: str) -> dict[str, Any]:
@@ -75,6 +75,7 @@ class FakeHiThinkClient:
             "600001.SH": [30, 18, 6],
             "600002.SH": [7, 9, 12],
             "600003.SH": [3, 3, 3],
+            "600004.SH": [26, 11, 4],
         }[thscode]
         return {
             "timestamp": 1783180800000,
@@ -124,6 +125,65 @@ def test_market_heat_radar_fetches_four_lists_and_top_hot_trends() -> None:
     assert result["overlaps"][0]["count"] == 1
     assert result["overlaps"][0]["items"][0]["thscode"] == "600004.SH"
     _assert_no_score_keys(result)
+
+
+def test_market_heat_rank_trend_fetches_single_requested_stock() -> None:
+    client = FakeHiThinkClient()
+
+    result = build_market_heat_rank_trend(
+        client=client,
+        thscode="600004.SH",
+        ticker="600004",
+        name="热股四",
+        today=date(2026, 8, 2),
+        trend_days=30,
+    )
+
+    assert client.rank_trend_calls == [("600004.SH", "2026-07-04", "2026-08-02")]
+    assert result["thscode"] == "600004.SH"
+    assert result["ticker"] == "600004"
+    assert result["name"] == "热股四"
+    assert result["analysis"]["direction"] == "improving"
+    assert result["analysis"]["latest_rank"] == 4
+
+
+def test_market_heat_trend_api_uses_requested_stock(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_rank_trend(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {
+            "thscode": "600004.SH",
+            "ticker": "600004",
+            "name": "热股四",
+            "timestamp": None,
+            "timestamp_iso": None,
+            "points": [],
+            "analysis": {
+                "direction": "insufficient",
+                "first_rank": None,
+                "latest_rank": None,
+                "rank_delta": None,
+                "points": 0,
+            },
+        }
+
+    monkeypatch.setattr(market_heat, "build_market_heat_rank_trend", _fake_rank_trend)
+    app = FastAPI()
+    app.include_router(market_heat.router)
+
+    response = TestClient(app).get(
+        "/api/market-heat/trend?thscode=600004.SH&ticker=600004&name=热股四&trend_days=30"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["thscode"] == "600004.SH"
+    assert captured == {
+        "thscode": "600004.SH",
+        "ticker": "600004",
+        "name": "热股四",
+        "trend_days": 30,
+    }
 
 
 def test_market_heat_api_reports_missing_hithink_key(monkeypatch) -> None:

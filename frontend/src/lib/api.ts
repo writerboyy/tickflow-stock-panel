@@ -1929,6 +1929,15 @@ export const api = {
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
   marketHeatRadar: (trendDays = 30) =>
     request<MarketHeatRadar>(`/api/market-heat/radar?trend_days=${trendDays}`),
+  marketHeatRankTrend: (item: Pick<MarketHeatItem, 'thscode' | 'ticker' | 'name'>, trendDays = 30) => {
+    const params = new URLSearchParams({
+      thscode: item.thscode,
+      trend_days: String(trendDays),
+    })
+    if (item.ticker) params.set('ticker', item.ticker)
+    if (item.name) params.set('name', item.name)
+    return request<MarketHeatTrend>('/api/market-heat/trend?' + params.toString())
+  },
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number) =>

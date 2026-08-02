@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
 import {
@@ -12,7 +12,14 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
-import { api, type KlineRow, type MarketHeatItem, type MarketHeatListKey, type MarketHeatRadar } from '@/lib/api'
+import {
+  api,
+  type KlineRow,
+  type MarketHeatItem,
+  type MarketHeatListKey,
+  type MarketHeatRadar,
+  type MarketHeatTrend,
+} from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { QK } from '@/lib/queryKeys'
 import { useECharts } from './backtest/charts/useECharts'
@@ -122,7 +129,7 @@ function rankChangeTone(value: number | null | undefined) {
 }
 
 function buildPriceSeries(
-  trends: Array<MarketHeatRadar['trends'][string]>,
+  trends: MarketHeatTrend[],
   priceRows: Record<string, KlineRow[]>,
 ) {
   return trends.map(trend => {
@@ -164,7 +171,15 @@ function MetricCard({ label, value, hint }: { label: string; value: string; hint
   )
 }
 
-function RankingTable({ items }: { items: MarketHeatItem[] }) {
+function RankingTable({
+  items,
+  selectedThscode,
+  onSelect,
+}: {
+  items: MarketHeatItem[]
+  selectedThscode: string | null
+  onSelect: (item: MarketHeatItem) => void
+}) {
   const maxHeat = Math.max(...items.map(item => Number(item.heat) || 0), 1)
 
   return (
@@ -172,8 +187,19 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
       {items.map(item => {
         const heat = Number(item.heat) || 0
         const width = Math.max(4, Math.min(100, (heat / maxHeat) * 100))
+        const selected = item.thscode === selectedThscode
         return (
-          <div key={item.thscode} className={cn(ROW_PANEL, 'px-5 py-4 transition-colors hover:border-[#c06bff]/45 hover:bg-[#1b0f2d]')}>
+          <button
+            key={item.thscode}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onSelect(item)}
+            className={cn(
+              ROW_PANEL,
+              'block w-full px-5 py-4 text-left transition-colors hover:border-[#c06bff]/45 hover:bg-[#1b0f2d] focus:outline-none focus:ring-2 focus:ring-[#c06bff]/45',
+              selected && 'border-[#c06bff]/70 bg-[#211333] shadow-[0_0_24px_rgba(192,107,255,0.16)]',
+            )}
+          >
             <div className="grid grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-4">
               <div className="font-mono text-3xl font-semibold leading-none text-[#d36aff]">
                 #{item.rank ?? '--'}
@@ -200,7 +226,7 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
                 style={{ width: `${width}%` }}
               />
             </div>
-          </div>
+          </button>
         )
       })}
     </div>
@@ -208,21 +234,26 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
 }
 
 function TrendChart({
-  data,
+  trends,
+  selectedItem,
+  trendLoading,
+  trendError,
   showPriceOverlay,
   onPriceOverlayChange,
   priceRows,
   priceLoading,
   priceError,
 }: {
-  data: MarketHeatRadar
+  trends: MarketHeatTrend[]
+  selectedItem: MarketHeatItem | null
+  trendLoading: boolean
+  trendError: unknown
   showPriceOverlay: boolean
   onPriceOverlayChange: (show: boolean) => void
   priceRows: Record<string, KlineRow[]>
   priceLoading: boolean
   priceError: unknown
 }) {
-  const trends = useMemo(() => Object.values(data.trends), [data.trends])
   const priceSeries = useMemo(() => buildPriceSeries(trends, priceRows), [priceRows, trends])
   const option = useMemo<EChartsOption | null>(() => {
     const rankDates = Array.from(
@@ -398,16 +429,23 @@ function TrendChart({
 
   const priceOverlayHint = priceError instanceof Error
     ? priceError.message
-    : '当前代表股票暂未返回可叠加的本地日 K 收盘价。'
+    : '当前个股暂未返回可叠加的本地日 K 收盘价。'
+  const trendErrorHint = trendError instanceof Error
+    ? trendError.message
+    : selectedItem
+      ? (selectedItem.name || selectedItem.thscode) + ' 暂未返回可绘制的近 30 日排名数据。'
+      : '请选择左侧榜单中的一只股票查看排名轨迹。'
 
   return (
     <div className={cn(PANEL, 'overflow-hidden')}>
       <div className="border-b border-white/10 px-5 py-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <div className="text-xl font-semibold tracking-tight text-white">个股热度排名轨迹</div>
+            <div className="text-xl font-semibold tracking-tight text-white">
+              {selectedItem ? (selectedItem.name || selectedItem.thscode) + ' · 热度排名轨迹' : '个股热度排名轨迹'}
+            </div>
             <div className="mt-1 text-sm text-[#aa9ac7]">
-              对数排名轴展示低位名次；可按需叠加股价，右轴为首个可用交易日=100
+              点击左侧个股切换；对数排名轴展示低位名次，可按需叠加股价
             </div>
           </div>
           <button
@@ -464,11 +502,18 @@ function TrendChart({
           <div ref={chartRef} className={cn('h-full w-full', !option && 'opacity-20')} />
           {!option && (
             <div className="absolute inset-0 grid place-items-center px-6 text-center">
-              <EmptyState
-                icon={TrendingUp}
-                title="暂无排名轨迹"
-                hint="热股榜前三名暂未返回可绘制的近 30 日排名数据。"
-              />
+              {trendLoading ? (
+                <div className="flex items-center gap-2 text-sm text-[#b7a9cf]">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  正在读取个股热度趋势…
+                </div>
+              ) : (
+                <EmptyState
+                  icon={TrendingUp}
+                  title={trendError ? '个股趋势不可用' : '暂无排名轨迹'}
+                  hint={trendErrorHint}
+                />
+              )}
             </div>
           )}
         </div>
@@ -539,7 +584,38 @@ export function MarketHeat() {
     if (activeKey === 'skyrocket_day') return item.key === 'hot_vs_skyrocket_day'
     return item.key === 'hot_vs_skyrocket_hour'
   }) ?? data?.overlaps[0]
-  const trendRows = useMemo(() => data ? Object.values(data.trends) : [], [data])
+  const [selectedItem, setSelectedItem] = useState<MarketHeatItem | null>(null)
+  const fallbackSelectedItem = useMemo(() => {
+    if (!data) return null
+    return data.lists[activeKey]?.items[0] ?? data.trend_targets[0] ?? null
+  }, [activeKey, data])
+  useEffect(() => {
+    if (!data) return
+    const selectedStillExists = selectedItem
+      ? Object.values(data.lists).some(list => list.items.some(item => item.thscode === selectedItem.thscode))
+      : false
+    if (!selectedItem || !selectedStillExists) setSelectedItem(fallbackSelectedItem)
+  }, [data, fallbackSelectedItem, selectedItem])
+  const selectedTrendItem = selectedItem ?? fallbackSelectedItem
+  const cachedSelectedTrend = selectedTrendItem ? data?.trends[selectedTrendItem.thscode] : undefined
+  const selectedTrendQuery = useQuery({
+    queryKey: QK.marketHeatRankTrend(selectedTrendItem?.thscode ?? '', 30),
+    queryFn: () => {
+      if (!selectedTrendItem) throw new Error('缺少热股代码')
+      return api.marketHeatRankTrend(selectedTrendItem, 30)
+    },
+    enabled: !!selectedTrendItem && !cachedSelectedTrend,
+    staleTime: 5 * 60_000,
+  })
+  const selectedTrend = cachedSelectedTrend ?? selectedTrendQuery.data ?? null
+  const trendRows = useMemo<MarketHeatTrend[]>(() => {
+    if (!selectedTrend) return []
+    return [{
+      ...selectedTrend,
+      ticker: selectedTrend.ticker || selectedTrendItem?.ticker || '',
+      name: selectedTrend.name || selectedTrendItem?.name || '',
+    }]
+  }, [selectedTrend, selectedTrendItem])
   const trendSymbols = useMemo(
     () => trendRows.map(row => row.thscode).filter(Boolean).sort(),
     [trendRows],
@@ -568,12 +644,13 @@ export function MarketHeat() {
               <button
                 onClick={() => {
                   query.refetch()
+                  if (selectedTrendItem && !cachedSelectedTrend) selectedTrendQuery.refetch()
                   if (showPriceOverlay && trendSymbols.length > 0) priceQuery.refetch()
                 }}
-                disabled={query.isFetching || (showPriceOverlay && priceQuery.isFetching)}
+                disabled={query.isFetching || selectedTrendQuery.isFetching || (showPriceOverlay && priceQuery.isFetching)}
                 className="inline-flex w-fit items-center gap-2 rounded-full border border-[#5b3b7a] bg-[#171024]/80 px-4 py-2 text-sm font-medium text-[#f4edff] transition-colors hover:border-[#c06bff] hover:bg-[#211333] disabled:opacity-60"
               >
-                {query.isFetching || (showPriceOverlay && priceQuery.isFetching) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {query.isFetching || selectedTrendQuery.isFetching || (showPriceOverlay && priceQuery.isFetching) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 刷新
               </button>
             </div>
@@ -624,7 +701,7 @@ export function MarketHeat() {
                 <MetricCard label="24 小时热股" value={fmtNumber(data.lists.hot_day.summary.count, 0)} hint="热股榜样本" />
                 <MetricCard label="24 小时飙升" value={fmtNumber(data.lists.skyrocket_day.summary.count, 0)} hint="排名跃迁样本" />
                 <MetricCard label="双榜重合" value={fmtNumber(dayOverlap?.count, 0)} hint="前 30 名交集" />
-                <MetricCard label="趋势跟踪" value={fmtNumber(trendRows.length, 0)} hint="代表股票 · 近 30 日" />
+                <MetricCard label="趋势跟踪" value={fmtNumber(trendRows.length, 0)} hint="当前个股 · 近 30 日" />
               </section>
 
               <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(380px,0.85fr)]">
@@ -640,7 +717,10 @@ export function MarketHeat() {
                         return (
                           <button
                             key={view.key}
-                            onClick={() => setActiveKey(view.key)}
+                            onClick={() => {
+                              setActiveKey(view.key)
+                              setSelectedItem(data?.lists[view.key]?.items[0] ?? data?.trend_targets[0] ?? null)
+                            }}
                             className={cn(
                               'rounded-xl border px-4 py-2 text-sm font-semibold transition-colors',
                               active
@@ -665,7 +745,11 @@ export function MarketHeat() {
                       </div>
                     </div>
                     {activeList.items.length > 0 ? (
-                      <RankingTable items={activeList.items} />
+                      <RankingTable
+                        items={activeList.items}
+                        selectedThscode={selectedTrendItem?.thscode ?? null}
+                        onSelect={setSelectedItem}
+                      />
                     ) : (
                       <div className={cn(ROW_PANEL, 'min-h-[260px]')}>
                         <EmptyState icon={Info} title="当前榜单为空" hint="同花顺接口返回了空列表，可能与休市、数据就绪状态或权限有关。" />
@@ -676,7 +760,10 @@ export function MarketHeat() {
 
                 <aside className="space-y-5">
                   <TrendChart
-                    data={data}
+                    trends={trendRows}
+                    selectedItem={selectedTrendItem}
+                    trendLoading={!cachedSelectedTrend && selectedTrendQuery.isFetching}
+                    trendError={!cachedSelectedTrend ? selectedTrendQuery.error : null}
                     showPriceOverlay={showPriceOverlay}
                     onPriceOverlayChange={setShowPriceOverlay}
                     priceRows={priceQuery.data?.data ?? {}}
@@ -687,7 +774,7 @@ export function MarketHeat() {
                     <div className="flex items-start gap-3">
                       <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#d36aff]" />
                       <div className="text-sm leading-relaxed text-[#aa9ac7]">
-                        代表股票取热股榜 24 小时前三。默认只展示同花顺热股历史排名；打开“叠加股价”后，虚线来自本地日 K 收盘价并按首个可用交易日归一化，不构成买卖信号。
+                        点击左侧个股后，右侧展示该股近 30 日同花顺热股排名趋势；打开“叠加股价”后，虚线来自本地日 K 收盘价并按首个可用交易日归一化，不构成买卖信号。
                       </div>
                     </div>
                   </div>

@@ -230,6 +230,47 @@ def _fetch_rank_trends(
     return trends
 
 
+def _trend_window_dates(today: date | None, trend_days: int) -> tuple[str, str, int]:
+    end = today or datetime.now(SH_TZ).date()
+    window_days = max(1, trend_days)
+    start = end - timedelta(days=window_days - 1)
+    return start.isoformat(), end.isoformat(), window_days
+
+
+def build_market_heat_rank_trend(
+    *,
+    thscode: str,
+    ticker: str = "",
+    name: str = "",
+    client: HiThinkClient | None = None,
+    today: date | None = None,
+    trend_days: int = 30,
+) -> dict[str, Any]:
+    client = client or HiThinkClient()
+    start_text, end_text, _window_days = _trend_window_dates(today, trend_days)
+    normalized_thscode = thscode.strip()
+    target = {
+        "thscode": normalized_thscode,
+        "ticker": ticker.strip() or normalized_thscode.split(".", 1)[0],
+        "name": name.strip(),
+    }
+    trends = _fetch_rank_trends(
+        client,
+        [target],
+        start_date=start_text,
+        end_date=end_text,
+    )
+    return trends.get(normalized_thscode, {
+        "thscode": normalized_thscode,
+        "ticker": target["ticker"],
+        "name": target["name"],
+        "timestamp": None,
+        "timestamp_iso": None,
+        "points": [],
+        "analysis": _trend_analysis([]),
+    })
+
+
 def build_market_heat_radar(
     *,
     client: HiThinkClient | None = None,
@@ -237,11 +278,7 @@ def build_market_heat_radar(
     trend_days: int = 30,
 ) -> dict[str, Any]:
     client = client or HiThinkClient()
-    end = today or datetime.now(SH_TZ).date()
-    window_days = max(1, trend_days)
-    start = end - timedelta(days=window_days - 1)
-    start_text = start.isoformat()
-    end_text = end.isoformat()
+    start_text, end_text, window_days = _trend_window_dates(today, trend_days)
 
     lists: dict[str, dict[str, Any]] = {}
     for key, list_type, period, title in LIST_SPECS:
