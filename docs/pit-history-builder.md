@@ -23,6 +23,11 @@ Important boundaries:
   dates, and reasons.
 - provenance=historical_event means the raw file contained historical timing
   fields. Observed daily-K coverage should remain provenance=observed.
+- CSI 300 strict backtests require representative PIT member counts of at least
+  250 stocks. The builder now rejects incomplete `000300.SH` history by default;
+  pass `--allow-incomplete-index` only when archiving a non-backtest reference.
+- Industry history is a multi-standard table. Always filter exactly one
+  `industry_standard` before joining it to a daily PIT panel.
 
 Examples:
 
@@ -38,7 +43,8 @@ Examples:
     uv run python scripts/build_pit_history_from_raw.py \
       --fetch-sina-index 399300 \
       --index-symbol 000300.SH \
-      --index-source sina
+      --index-source sina \
+      --allow-incomplete-index
 
     # Cached AKShare/Cninfo industry-change export and exchange delisting export.
     uv run python scripts/build_pit_history_from_raw.py \

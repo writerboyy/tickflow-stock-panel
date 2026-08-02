@@ -336,7 +336,9 @@ export function Data() {
     ? `历史表 · 快照 ${pitSummary.latest_snapshot_date}`
     : '历史表 · 尚未冻结快照'
   const pitSubLabel = pitSummary ? '指数成分 · 行业历史 · 生命周期' : undefined
-  const pitBadgeSuffix = pitSummary?.hithink_configured ? '盘后快照' : '未配置同花顺Key'
+  const pitBadgeSuffix = pitSummary?.strict_index_membership_usable === false
+    ? '严格池不完整'
+    : pitSummary?.hithink_configured ? '盘后快照' : '未配置同花顺Key'
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
@@ -675,31 +677,47 @@ export function Data() {
 
   const pitHistoryEntries = Object.entries(pitReference.data?.history ?? {}) as [string, PitReferenceTableStatus][]
   const pitSnapshotEntries = Object.entries(pitReference.data?.snapshots ?? {}) as [string, PitReferenceTableStatus][]
+  const pitIndexAudit = pitReference.data?.history?.index_membership_events?.strict_backtest
+  const pitIndustryJoin = pitReference.data?.history?.industry_membership_history?.industry_join
+  const pitLifecycle = pitReference.data?.history?.instrument_lifecycle_events?.lifecycle_completeness
   const renderPitRows = (
     entries: [string, PitReferenceTableStatus][],
     mode: 'history' | 'snapshot',
   ) => (
     <div className="divide-y divide-border/60 rounded-btn border border-border overflow-hidden">
-      {entries.map(([key, item]) => (
-        <div key={key} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px]">
-          <div className="min-w-0">
-            <div className="font-medium text-foreground truncate">{item.label}</div>
-            <div className="mt-0.5 text-muted font-mono truncate">{key}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-muted">行数</div>
-            <div className="font-mono text-secondary tabular-nums">{item.rows.toLocaleString()}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-muted">{mode === 'history' ? '区间' : '快照日'}</div>
-            <div className="font-mono text-secondary tabular-nums">
-              {mode === 'history'
-                ? `${item.earliest_date ?? '—'} ~ ${item.latest_date ?? '—'}`
-                : (item.latest_snapshot_date ?? '—')}
+      {entries.map(([key, item]) => {
+        const quality = item.strict_backtest
+          ? (item.strict_backtest.usable ? '严格可用' : '严格不完整')
+          : item.industry_join
+            ? '需选单一行业标准'
+            : item.lifecycle_completeness
+              ? (item.lifecycle_completeness.complete_lifecycle ? '生命周期完整' : '生命周期部分')
+              : null
+        const qualityClass = item.strict_backtest?.usable === false || item.lifecycle_completeness?.complete_lifecycle === false
+          ? 'text-warning'
+          : 'text-muted'
+        return (
+          <div key={key} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px]">
+            <div className="min-w-0">
+              <div className="font-medium text-foreground truncate">{item.label}</div>
+              <div className="mt-0.5 text-muted font-mono truncate">{key}</div>
+              {quality && <div className={`mt-0.5 truncate ${qualityClass}`}>{quality}</div>}
+            </div>
+            <div className="text-right">
+              <div className="text-muted">行数</div>
+              <div className="font-mono text-secondary tabular-nums">{item.rows.toLocaleString()}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-muted">{mode === 'history' ? '区间' : '快照日'}</div>
+              <div className="font-mono text-secondary tabular-nums">
+                {mode === 'history'
+                  ? `${item.earliest_date ?? '—'} ~ ${item.latest_date ?? '—'}`
+                  : (item.latest_snapshot_date ?? '—')}
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 
@@ -1230,7 +1248,15 @@ export function Data() {
                 </div>
                 {!pitReference.data?.summary.hithink_configured && (
                   <div className="rounded-btn border border-warning/30 bg-warning/8 px-3 py-2 text-[11px] text-warning/90">
-                    未配置同花顺 API Key，盘后任务会跳过快照冻结；已有历史 PIT 表仍可用于回测。
+                    未配置同花顺 API Key，盘后任务会跳过快照冻结；严格回测需以后端完整性审计为准。
+                  </div>
+                )}
+                {pitIndexAudit && !pitIndexAudit.usable && (
+                  <div className="rounded-btn border border-danger/30 bg-danger/8 px-3 py-2 text-[11px] text-danger/90">
+                    沪深300历史成分不完整，不能作为严格 PIT 股票池。
+                    <span className="ml-1 font-mono">
+                      {pitIndexAudit.coverage_checks.map(item => `${item.date}:${item.members}`).join(' / ')}
+                    </span>
                   </div>
                 )}
                 <button
@@ -1262,6 +1288,16 @@ export function Data() {
               <div className="space-y-2">
                 <div className="text-xs font-medium text-foreground">历史 PIT 表</div>
                 {renderPitRows(pitHistoryEntries, 'history')}
+                {pitIndustryJoin?.requires_industry_standard && (
+                  <div className="text-[11px] text-muted">
+                    行业历史查询必须先选择一个分类标准；当前可用标准 {pitIndustryJoin.standards.length.toLocaleString()} 个。
+                  </div>
+                )}
+                {pitLifecycle && !pitLifecycle.complete_lifecycle && (
+                  <div className="text-[11px] text-warning/90">
+                    生命周期表为部分覆盖：缺少 {pitLifecycle.missing_event_types.join(', ') || '部分原因字段'}。
+                  </div>
+                )}
               </div>
               <div className="space-y-2">
                 <div className="text-xs font-medium text-foreground">同花顺快照表</div>

@@ -2783,6 +2783,42 @@ export interface PitReferenceTableStatus {
   latest_snapshot_date?: string | null
   earliest_snapshot_date?: string | null
   snapshots?: number
+  strict_backtest?: {
+    index_symbol: string
+    status: 'usable' | 'incomplete'
+    usable: boolean
+    expected_min_members: number
+    coverage_checks: Array<{
+      date: string
+      members: number
+      expected_min_members: number
+      ok: boolean
+    }>
+    message: string
+  }
+  industry_join?: {
+    requires_industry_standard: boolean
+    usable_with_single_standard: boolean
+    standards: Array<{
+      industry_standard: string
+      rows: number
+      symbols_covered: number
+      earliest_date: string | null
+      latest_date: string | null
+    }>
+    message: string
+  }
+  lifecycle_completeness?: {
+    status: 'complete' | 'partial'
+    complete_lifecycle: boolean
+    required_event_types: string[]
+    available_event_types: string[]
+    missing_event_types: string[]
+    delisted_symbols: number
+    complete_delisted_symbols: number
+    reason_event_rows: number
+    message: string
+  }
   manifest?: {
     logical_snapshot?: string | null
     status?: string | null
@@ -2803,6 +2839,7 @@ export interface PitReferenceStatus {
     latest_date: string | null
     latest_snapshot_date: string | null
     hithink_configured: boolean
+    strict_index_membership_usable: boolean
   }
 }
 

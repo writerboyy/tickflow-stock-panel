@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_EVENTS_TABLE,
     normalize_index_membership_events,
@@ -9,6 +11,9 @@ from app.plugins.pit_history.storage import (
     normalize_instrument_lifecycle_events,
     publish_history_table,
     read_history_table,
+    summarize_industry_standards,
+    summarize_lifecycle_completeness,
+    validate_index_membership_coverage,
 )
 from scripts.build_pit_history_from_raw import build_index_history, read_raw_rows
 
@@ -58,6 +63,58 @@ def test_index_history_rows_become_pit_intervals():
     ]
 
 
+def test_index_history_strict_coverage_fails_incomplete_hs300():
+    frame = normalize_index_membership_events(
+        [
+            {"品种代码": "600519", "纳入日期": "2005-04-08"},
+            {"品种代码": "000001", "纳入日期": "2005-04-08"},
+        ],
+        index_symbol="000300.SH",
+        source="fixture",
+    )
+
+    coverage = validate_index_membership_coverage(frame, index_symbol="000300.SH")
+
+    assert coverage["usable"] is False
+    assert coverage["status"] == "incomplete"
+    assert coverage["coverage_checks"][0] == {
+        "date": "2021-08-02",
+        "members": 2,
+        "expected_min_members": 250,
+        "ok": False,
+    }
+
+
+def test_index_history_strict_coverage_passes_complete_hs300_intervals():
+    raw_rows = [
+        {"品种代码": f"{600000 + index}", "纳入日期": "2020-01-01"}
+        for index in range(300)
+    ]
+    frame = normalize_index_membership_events(
+        raw_rows,
+        index_symbol="000300.SH",
+        source="fixture",
+    )
+
+    coverage = validate_index_membership_coverage(frame, index_symbol="000300.SH")
+
+    assert coverage["usable"] is True
+    assert [item["members"] for item in coverage["coverage_checks"]] == [300, 300, 300]
+
+
+def test_build_index_history_rejects_incomplete_strict_hs300(tmp_path):
+    with pytest.raises(ValueError, match="incomplete strict index history"):
+        build_index_history(
+            data_dir=tmp_path,
+            raw_rows=[{"品种代码": "600519", "纳入日期": "2005-04-08"}],
+            index_symbol="000300.SH",
+            source="fixture",
+            logical_snapshot="2026-08-02",
+            raw_label="sample",
+            validate_strict=True,
+        )
+
+
 def test_industry_history_derives_effective_to_from_next_change():
     frame = normalize_industry_membership_history(
         [
@@ -103,6 +160,33 @@ def test_industry_history_derives_effective_to_from_next_change():
     ]
 
 
+def test_industry_summary_requires_one_standard_before_joining():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "600519",
+                "分类标准": "证监会行业",
+                "行业编码": "C15",
+                "行业名称": "白酒",
+                "变更日期": "2020-01-01",
+            },
+            {
+                "证券代码": "600519",
+                "分类标准": "申万行业",
+                "行业编码": "801125",
+                "行业名称": "白酒",
+                "变更日期": "2020-01-01",
+            },
+        ],
+        source="fixture",
+    )
+
+    summary = summarize_industry_standards(frame)
+
+    assert summary["requires_industry_standard"] is True
+    assert [item["industry_standard"] for item in summary["standards"]] == ["申万行业", "证监会行业"]
+
+
 def test_industry_history_accepts_cninfo_akshare_columns():
     frame = normalize_industry_membership_history(
         [
@@ -131,6 +215,30 @@ def test_industry_history_accepts_cninfo_akshare_columns():
             "industry_name": "酒、饮料和精制茶制造业",
             "effective_from": date(2001, 8, 27),
         }
+    ]
+
+
+def test_lifecycle_summary_marks_partial_without_decision_period():
+    frame = normalize_instrument_lifecycle_events(
+        [
+            {
+                "证券代码": "000003",
+                "上市日期": "1991-07-03",
+                "终止上市日期": "2002-06-14",
+                "终止上市原因": "连续亏损",
+            }
+        ],
+        source="fixture",
+    )
+
+    summary = summarize_lifecycle_completeness(frame)
+
+    assert summary["complete_lifecycle"] is False
+    assert summary["status"] == "partial"
+    assert summary["missing_event_types"] == [
+        "delist_decision",
+        "delist_period_end",
+        "delist_period_start",
     ]
 
 

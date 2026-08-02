@@ -18,11 +18,17 @@ from app.services import pit_reference
 from app.plugins.hithink import client as hithink_client_module
 
 
+class MissingHiThinkClient:
+    def _api_key(self):
+        raise pit_reference.HiThinkAuthError("missing")
+
+
 def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_path):
     monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
     monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setattr(hithink_client_module.settings, "hithink_finance_api_key", "")
+    monkeypatch.setattr(pit_reference, "HiThinkClient", MissingHiThinkClient)
 
     publish_history_table(
         tmp_path,
@@ -87,7 +93,15 @@ def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_
     assert status["summary"]["earliest_date"] == "2001-08-27"
     assert status["summary"]["latest_snapshot_date"] == "2026-08-02"
     assert status["summary"]["hithink_configured"] is False
+    assert status["summary"]["strict_index_membership_usable"] is False
     assert status["history"][INDEX_MEMBERSHIP_EVENTS_TABLE]["symbols_covered"] == 2
+    assert status["history"][INDEX_MEMBERSHIP_EVENTS_TABLE]["strict_backtest"]["status"] == "incomplete"
+    assert (
+        status["history"][INDUSTRY_MEMBERSHIP_HISTORY_TABLE]["industry_join"][
+            "requires_industry_standard"
+        ]
+        is True
+    )
     assert status["snapshots"][INDEX_CONSTITUENTS_TABLE]["provenance_counts"] == {
         "snapshot_frozen": 1
     }
@@ -98,6 +112,7 @@ def test_pit_reference_sync_skips_without_hithink_key(monkeypatch, tmp_path):
     monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setattr(hithink_client_module.settings, "hithink_finance_api_key", "")
+    monkeypatch.setattr(pit_reference, "HiThinkClient", MissingHiThinkClient)
 
     result = pit_reference.sync_hithink_snapshots(
         tmp_path,

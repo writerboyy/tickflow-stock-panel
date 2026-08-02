@@ -29,6 +29,7 @@ from app.plugins.pit_history.storage import (
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
     publish_history_table,
+    validate_index_membership_coverage,
 )
 from app.services.ingestion_manifest import (
     archive_source_payload,
@@ -259,12 +260,25 @@ def build_index_history(
     source: str,
     logical_snapshot: str,
     raw_label: str,
+    validate_strict: bool = False,
 ) -> int:
     frame = normalize_index_membership_events(
         raw_rows,
         index_symbol=index_symbol,
         source=source,
     )
+    if validate_strict:
+        coverage = validate_index_membership_coverage(frame, index_symbol=index_symbol)
+        if not coverage["usable"]:
+            failed = ", ".join(
+                f"{item['date']}={item['members']}/{item['expected_min_members']}"
+                for item in coverage["coverage_checks"]
+                if not item["ok"]
+            )
+            raise ValueError(
+                f"incomplete strict index history for {index_symbol.upper()}: {failed}; "
+                "pass --allow-incomplete-index only for archived non-backtest reference data"
+            )
     return _publish(
         data_dir=data_dir,
         table=INDEX_MEMBERSHIP_EVENTS_TABLE,
@@ -330,6 +344,11 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument("--index-source", default="sina")
     parser.add_argument("--fetch-sina-index", help="Fetch one Sina history component page, e.g. 399300")
     parser.add_argument("--sina-max-pages", type=int, default=20)
+    parser.add_argument(
+        "--allow-incomplete-index",
+        action="store_true",
+        help="Archive/publish incomplete index history instead of failing strict PIT coverage checks",
+    )
     parser.add_argument("--industry-history-file", type=Path)
     parser.add_argument("--industry-source", default="cninfo")
     parser.add_argument("--lifecycle-file", type=Path)
@@ -354,6 +373,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             source=args.index_source,
             logical_snapshot=args.logical_snapshot,
             raw_label=f"sina-{args.fetch_sina_index}-pages-{args.sina_max_pages}",
+            validate_strict=not args.allow_incomplete_index,
         )
     elif args.index_history_file:
         rows = read_raw_rows(args.index_history_file, encoding=args.encoding)
@@ -364,6 +384,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             source=args.index_source,
             logical_snapshot=args.logical_snapshot,
             raw_label=_label(args.index_history_file, "index"),
+            validate_strict=not args.allow_incomplete_index,
         )
 
     if args.industry_history_file:

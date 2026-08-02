@@ -28,6 +28,25 @@ INDEX_MEMBERSHIP_EVENTS_TABLE = "index_membership_events"
 INDUSTRY_MEMBERSHIP_HISTORY_TABLE = "industry_membership_history"
 INSTRUMENT_LIFECYCLE_EVENTS_TABLE = "instrument_lifecycle_events"
 PARSER_VERSION = "pit_history_v1"
+DEFAULT_STRICT_INDEX_MIN_MEMBERS = 250
+DEFAULT_CSI300_COVERAGE_DATES = (
+    date(2021, 8, 2),
+    date(2024, 1, 2),
+    date(2026, 7, 31),
+)
+STRICT_INDEX_EXPECTATIONS: dict[str, dict[str, Any]] = {
+    "000300.SH": {
+        "expected_min_members": DEFAULT_STRICT_INDEX_MIN_MEMBERS,
+        "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
+    },
+}
+COMPLETE_LIFECYCLE_EVENT_TYPES = (
+    "listed",
+    "delist_decision",
+    "delist_period_start",
+    "delist_period_end",
+    "delisted",
+)
 
 _DIGITS = re.compile(r"\d+")
 _DATE_DIGITS = re.compile(r"^\d{8}$")
@@ -154,6 +173,134 @@ def read_history_table(data_dir: Path, table: str) -> pl.DataFrame:
     if not path.exists():
         return pl.DataFrame()
     return pl.read_parquet(path)
+
+
+def index_members_on_date(frame: pl.DataFrame, *, index_symbol: str, as_of: date) -> int:
+    if frame.is_empty() or not {"index_symbol", "member_symbol", "effective_from"}.issubset(
+        frame.columns
+    ):
+        return 0
+    normalized_index = index_symbol.upper()
+    active = frame.filter(
+        (pl.col("index_symbol") == normalized_index)
+        & (pl.col("effective_from") <= pl.lit(as_of))
+        & (
+            ~pl.col("effective_to").is_not_null()
+            | (pl.col("effective_to") > pl.lit(as_of))
+        )
+    )
+    return int(active["member_symbol"].n_unique()) if "member_symbol" in active.columns else 0
+
+
+def validate_index_membership_coverage(
+    frame: pl.DataFrame,
+    *,
+    index_symbol: str,
+    sample_dates: Iterable[date] | None = None,
+    expected_min_members: int | None = None,
+) -> dict[str, Any]:
+    normalized_index = index_symbol.upper()
+    expectation = STRICT_INDEX_EXPECTATIONS.get(normalized_index, {})
+    dates = tuple(sample_dates or expectation.get("sample_dates") or ())
+    minimum = int(expected_min_members or expectation.get("expected_min_members") or 0)
+    checks = [
+        {
+            "date": item.isoformat(),
+            "members": index_members_on_date(frame, index_symbol=normalized_index, as_of=item),
+            "expected_min_members": minimum,
+        }
+        for item in dates
+    ]
+    for item in checks:
+        item["ok"] = bool(minimum and item["members"] >= minimum)
+    usable = bool(checks) and all(bool(item["ok"]) for item in checks)
+    message = (
+        "representative PIT membership counts satisfy strict backtest minimum"
+        if usable
+        else "historical membership is incomplete; do not use this index as a strict PIT pool"
+    )
+    return {
+        "index_symbol": normalized_index,
+        "status": "usable" if usable else "incomplete",
+        "usable": usable,
+        "expected_min_members": minimum,
+        "coverage_checks": checks,
+        "message": message,
+    }
+
+
+def summarize_industry_standards(frame: pl.DataFrame) -> dict[str, Any]:
+    if frame.is_empty() or "industry_standard" not in frame.columns:
+        standards: list[dict[str, Any]] = []
+    else:
+        standards = (
+            frame.group_by("industry_standard")
+            .agg(
+                pl.len().alias("rows"),
+                pl.col("member_symbol").n_unique().alias("symbols_covered"),
+                pl.col("effective_from").min().alias("earliest_date"),
+                pl.col("effective_from").max().alias("latest_date"),
+            )
+            .sort("industry_standard")
+            .to_dicts()
+        )
+    return {
+        "requires_industry_standard": True,
+        "usable_with_single_standard": bool(standards),
+        "standards": [
+            {
+                "industry_standard": str(row["industry_standard"]),
+                "rows": int(row["rows"] or 0),
+                "symbols_covered": int(row["symbols_covered"] or 0),
+                "earliest_date": str(row["earliest_date"]) if row["earliest_date"] else None,
+                "latest_date": str(row["latest_date"]) if row["latest_date"] else None,
+            }
+            for row in standards
+        ],
+        "message": "filter exactly one industry_standard before joining a PIT industry panel",
+    }
+
+
+def summarize_lifecycle_completeness(frame: pl.DataFrame) -> dict[str, Any]:
+    event_types: set[str] = set()
+    by_symbol: dict[str, set[str]] = defaultdict(set)
+    symbols_with_reason: set[str] = set()
+    reason_event_rows = 0
+    for row in frame.iter_rows(named=True) if not frame.is_empty() else []:
+        symbol = str(row.get("symbol") or "")
+        event_type = str(row.get("event_type") or "")
+        reason = _text(row.get("reason"))
+        if event_type:
+            event_types.add(event_type)
+        if symbol and event_type:
+            by_symbol[symbol].add(event_type)
+        if symbol and reason:
+            symbols_with_reason.add(symbol)
+            reason_event_rows += 1
+
+    required = set(COMPLETE_LIFECYCLE_EVENT_TYPES)
+    delisted_symbols = [symbol for symbol, types in by_symbol.items() if "delisted" in types]
+    complete_symbols = [
+        symbol
+        for symbol in delisted_symbols
+        if required.issubset(by_symbol[symbol]) and symbol in symbols_with_reason
+    ]
+    complete = bool(delisted_symbols) and len(complete_symbols) == len(delisted_symbols)
+    return {
+        "status": "complete" if complete else "partial",
+        "complete_lifecycle": complete,
+        "required_event_types": list(COMPLETE_LIFECYCLE_EVENT_TYPES),
+        "available_event_types": sorted(event_types),
+        "missing_event_types": sorted(required - event_types),
+        "delisted_symbols": len(delisted_symbols),
+        "complete_delisted_symbols": len(complete_symbols),
+        "reason_event_rows": reason_event_rows,
+        "message": (
+            "all delisted symbols include decision, delisting-period and reason fields"
+            if complete
+            else "source lacks full delisting decision/period/reason coverage for complete lifecycle"
+        ),
+    }
 
 
 def normalize_index_membership_events(

@@ -29,7 +29,10 @@ from app.plugins.pit_history.storage import (
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     SOURCE as PIT_HISTORY_SOURCE,
+    summarize_industry_standards,
+    summarize_lifecycle_completeness,
     table_path,
+    validate_index_membership_coverage,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,10 +129,28 @@ def _provenance_counts(frame: pl.DataFrame) -> dict[str, int]:
     }
 
 
+def _decorate_history_status(
+    table: str,
+    status: dict[str, Any],
+    frame: pl.DataFrame | None = None,
+) -> dict[str, Any]:
+    frame = frame if frame is not None else pl.DataFrame()
+    if table == INDEX_MEMBERSHIP_EVENTS_TABLE:
+        status["strict_backtest"] = validate_index_membership_coverage(
+            frame,
+            index_symbol="000300.SH",
+        )
+    elif table == INDUSTRY_MEMBERSHIP_HISTORY_TABLE:
+        status["industry_join"] = summarize_industry_standards(frame)
+    elif table == INSTRUMENT_LIFECYCLE_EVENTS_TABLE:
+        status["lifecycle_completeness"] = summarize_lifecycle_completeness(frame)
+    return status
+
+
 def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> dict[str, Any]:
     path = table_path(data_dir, table)
     if not path.exists():
-        return {
+        return _decorate_history_status(table, {
             "label": meta["label"],
             "rows": 0,
             "earliest_date": None,
@@ -137,11 +158,11 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
             "symbols_covered": 0,
             "path_exists": False,
             "manifest": _latest_manifest(data_dir, PIT_HISTORY_SOURCE, table),
-        }
+        })
 
     frame = pl.read_parquet(path)
     if frame.is_empty():
-        return {
+        return _decorate_history_status(table, {
             "label": meta["label"],
             "rows": 0,
             "earliest_date": None,
@@ -149,7 +170,7 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
             "symbols_covered": 0,
             "path_exists": True,
             "manifest": _latest_manifest(data_dir, PIT_HISTORY_SOURCE, table),
-        }
+        }, frame)
 
     start_col = str(meta["start_col"])
     end_col = meta.get("end_col")
@@ -169,7 +190,7 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
     if "source" in frame.columns:
         sources = sorted(str(v) for v in frame["source"].drop_nulls().unique().to_list())
 
-    return {
+    return _decorate_history_status(table, {
         "label": meta["label"],
         "rows": int(row["rows"] or 0),
         "earliest_date": _date_text(row["earliest_date"]),
@@ -179,7 +200,7 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
         "sources": sources,
         "provenance_counts": _provenance_counts(frame),
         "manifest": _latest_manifest(data_dir, PIT_HISTORY_SOURCE, table),
-    }
+    }, frame)
 
 
 def _snapshot_root(data_dir: Path, table: str) -> Path:
@@ -250,6 +271,11 @@ def get_status(data_dir: Path) -> dict[str, Any]:
             "latest_date": max(history_dates) if history_dates else None,
             "latest_snapshot_date": max(latest_snapshots) if latest_snapshots else None,
             "hithink_configured": _configured_api_key(),
+            "strict_index_membership_usable": bool(
+                history.get(INDEX_MEMBERSHIP_EVENTS_TABLE, {})
+                .get("strict_backtest", {})
+                .get("usable")
+            ),
         },
     }
 
