@@ -21,6 +21,10 @@ from uuid import uuid4
 
 import polars as pl
 
+from app.plugins.baostock.socket_proxy import (
+    force_proxy_enabled,
+    open_baostock_proxy_connection,
+)
 from app.plugins.pit_history.storage import normalize_symbol
 from app.services.ingestion_manifest import (
     archive_source_payload,
@@ -44,7 +48,28 @@ _BAOSTOCK_BLACKLIST_ERROR_CODE = "10001011"
 class _SocketWithTimeout:
     def __init__(self, value: Any, timeout: float) -> None:
         self._value = value
+        self._timeout = timeout
         self._value.settimeout(timeout)
+
+    def connect(self, address: tuple[str, int]) -> None:
+        host, port = address
+        if force_proxy_enabled():
+            self._replace_with_proxy(host, port)
+            return
+        try:
+            self._value.connect(address)
+        except OSError as direct_error:
+            try:
+                self._replace_with_proxy(host, port)
+            except OSError as proxy_error:
+                raise direct_error from proxy_error
+
+    def _replace_with_proxy(self, host: str, port: int) -> None:
+        proxy_socket = open_baostock_proxy_connection(host, port, timeout=self._timeout)
+        try:
+            self._value.close()
+        finally:
+            self._value = proxy_socket
 
     def recv(self, *args: Any, **kwargs: Any) -> bytes:
         data = self._value.recv(*args, **kwargs)

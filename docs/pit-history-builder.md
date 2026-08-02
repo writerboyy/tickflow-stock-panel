@@ -54,6 +54,13 @@ Examples:
     # Existing snapshot partitions are skipped by default; keep this single-process.
     uv run python scripts/collect_baostock_hs300_candidates.py --years 5 --sleep-seconds 1
 
+    # If direct BaoStock TCP is blocked, use an HTTP CONNECT proxy.
+    uv run python scripts/collect_baostock_hs300_candidates.py \
+      --years 5 \
+      --max-dates 20 \
+      --proxy-url http://127.0.0.1:7890 \
+      --force-proxy
+
     # Cached AKShare/Cninfo industry-change export and exchange delisting export.
     uv run python scripts/build_pit_history_from_raw.py \
       --industry-history-file ../raw/cninfo_industry_changes.csv \

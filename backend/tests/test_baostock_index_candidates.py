@@ -12,6 +12,11 @@ from app.plugins.baostock.index_candidates import (
     normalize_index_constituent_candidates,
     partition_path,
 )
+from app.plugins.baostock.socket_proxy import (
+    force_proxy_enabled,
+    iter_proxy_candidates,
+    parse_http_proxy_url,
+)
 from app.plugins.pit_history.storage import INDEX_MEMBERSHIP_EVENTS_TABLE, table_path
 from app.services import pit_reference
 from scripts.collect_baostock_hs300_candidates import candidate_dates, main, query_dates
@@ -81,6 +86,30 @@ class _ClosedSocket:
     def recv(self, size: int) -> bytes:
         del size
         return b""
+
+
+class _DirectFailSocket:
+    def __init__(self) -> None:
+        self.closed = False
+        self.timeout = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def connect(self, address: tuple[str, int]) -> None:
+        del address
+        raise TimeoutError("direct failed")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _ConnectedProxySocket:
+    def __init__(self) -> None:
+        self.timeout = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
 
 
 def _write_daily_dates(data_dir, dates: list[date]) -> None:
@@ -211,6 +240,46 @@ def test_baostock_socket_wrapper_fails_fast_on_closed_connection():
         raise AssertionError("closed BaoStock socket should fail fast")
 
     assert socket.timeout == 3.0
+
+
+def test_baostock_socket_wrapper_falls_back_to_proxy(monkeypatch):
+    direct_socket = _DirectFailSocket()
+    proxy_socket = _ConnectedProxySocket()
+    calls: list[tuple[str, int, float]] = []
+
+    def fake_proxy(host: str, port: int, *, timeout: float):
+        calls.append((host, port, timeout))
+        return proxy_socket
+
+    monkeypatch.setattr(
+        "app.plugins.baostock.index_candidates.open_baostock_proxy_connection",
+        fake_proxy,
+    )
+
+    wrapped = _SocketWithTimeout(direct_socket, 7.0)
+    wrapped.connect(("www.baostock.com", 10030))
+
+    assert direct_socket.closed is True
+    assert calls == [("www.baostock.com", 10030, 7.0)]
+    assert wrapped._value is proxy_socket
+
+
+def test_baostock_proxy_env_helpers():
+    env = {
+        "BAOSTOCK_PROXY_URL": "127.0.0.1:7890",
+        "HTTP_PROXY": "http://127.0.0.1:8080",
+        "ICUBE_PROXY_HOST": "host.docker.internal",
+        "BAOSTOCK_FORCE_PROXY": "true",
+    }
+
+    assert list(iter_proxy_candidates(env)) == [
+        "127.0.0.1:7890",
+        "http://127.0.0.1:8080",
+        "http://host.docker.internal:7890",
+    ]
+    assert parse_http_proxy_url("127.0.0.1:7890") == ("127.0.0.1", 7890)
+    assert parse_http_proxy_url("socks5://127.0.0.1:7890") is None
+    assert force_proxy_enabled(env) is True
 
 
 def test_baostock_collector_reports_blacklisted_login_code(tmp_path):
