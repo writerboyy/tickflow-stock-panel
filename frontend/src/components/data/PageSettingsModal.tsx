@@ -21,7 +21,7 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
+  | 'index' | 'pit_reference' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
   | 'minute' | 'financials'
 
 interface CardDef {
@@ -41,6 +41,7 @@ export const DATA_CARD_DEFS: CardDef[] = [
   { key: 'adj_factor',  label: '除权因子', desc: '复权计算因子',           defaultHiddenIfNoCap: true },
   { key: 'enriched',    label: 'Enriched', desc: '技术指标计算结果',       defaultHiddenIfNoCap: false },
   { key: 'index',       label: '指数',     desc: '主要市场指数日K',        defaultHiddenIfNoCap: false },
+  { key: 'pit_reference', label: 'PIT Reference', desc: '指数成分 / 行业历史 / 退市生命周期', defaultHiddenIfNoCap: false },
   { key: 'etf_instruments', label: 'ETF 维表',     desc: '场内基金元数据',       defaultHiddenIfNoCap: false },
   { key: 'etf_daily',       label: 'ETF 日 K',     desc: 'ETF 日K线数据',        defaultHiddenIfNoCap: false },
   { key: 'etf_enriched',    label: 'ETF Enriched', desc: 'ETF 技术指标计算结果', defaultHiddenIfNoCap: false },

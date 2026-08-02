@@ -15,6 +15,7 @@ export const CARD_META: Record<string, {
   daily:       { capKey: 'kline.daily.batch',       tierReq: 'Starter+' },
   adj_factor:  { capKey: 'adj_factor',              tierReq: 'Starter+' },
   enriched:    { capKey: '',                        tierReq: '' },
+  pit_reference: { capKey: '',                      tierReq: '' },
   etf_instruments: { capKey: '',                    tierReq: '' },
   etf_daily:   { capKey: 'kline.daily.batch',       tierReq: '' },
   etf_enriched: { capKey: '',                       tierReq: '' },

@@ -22,7 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.services import index_sync, instrument_sync, kline_sync, pit_reference, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -499,6 +499,28 @@ def run_now(
     else:
         skipped.append("sync_index")
 
+    # Step 2.4: PIT Reference 快照同步 — 只冻结当天快照，不重建历史 PIT 表。
+    pit_reference_rows = 0
+    try:
+        emit("sync_pit_reference", 89, "同步 PIT Reference 快照…")
+        pit_result = pit_reference.sync_hithink_snapshots(repo.store.data_dir)
+        pit_reference_rows = int(pit_result.get("published_rows") or 0)
+        if pit_result.get("status") == "skipped":
+            skipped.append("sync_pit_reference")
+            emit("sync_pit_reference", 90, "PIT Reference 跳过: 未配置同花顺 API Key")
+            logger.info("sync_pit_reference skipped: %s", pit_result.get("reason"))
+        elif pit_result.get("status") == "failed":
+            errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
+            emit("sync_pit_reference", 90, f"PIT Reference 快照失败:{errors}")
+            stage_errors.append(f"PIT reference snapshots: {errors}")
+        else:
+            emit("sync_pit_reference", 90, f"PIT Reference 快照完成,{pit_reference_rows} 行")
+            logger.info("sync_pit_reference done: %s", pit_result)
+    except Exception as e:  # noqa: BLE001
+        emit("sync_pit_reference", 90, f"PIT Reference 快照失败:{e}")
+        logger.warning("sync_pit_reference failed: %s", e)
+        stage_errors.append(f"PIT reference snapshots: {e}")
+
     # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
     minute_on = preferences.get_minute_sync_enabled()
@@ -579,6 +601,7 @@ def run_now(
         "etf_count": etf_count,
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
+        "pit_reference_rows": pit_reference_rows,
         "minute_rows": written_minute,
         "etf_minute_rows": written_etf_minute,
         "lagging_symbols": len(lagging_symbols),

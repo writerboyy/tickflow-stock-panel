@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
-import { api, type ExtDataConfig } from '@/lib/api'
+import { api, type ExtDataConfig, type PitReferenceTableStatus } from '@/lib/api'
 import {
   useCapabilities,
   useSettings,
@@ -34,7 +34,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
 
 // 拆分出的子组件
-import { StatCard, type FieldTab } from '@/components/data/StatCard'
+import { Pill, StatCard, type FieldTab } from '@/components/data/StatCard'
 import { ActiveJobCard } from '@/components/data/ActiveJobCard'
 import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
@@ -78,6 +78,12 @@ export function Data() {
       if (activeJobId || data?.indicators_ready === false) return 2_000
       return 30_000
     },
+  })
+
+  const pitReference = useQuery({
+    queryKey: QK.pitReferenceStatus,
+    queryFn: api.pitReferenceStatus,
+    refetchInterval: activeJobId ? 2_000 : 60_000,
   })
 
   const history = useQuery({
@@ -164,6 +170,14 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.indexList })
       qc.invalidateQueries({ queryKey: QK.indexQuotes })
       qc.invalidateQueries({ queryKey: ['index-daily'] })
+    },
+  })
+
+  const syncPitReference = useMutation({
+    mutationFn: api.syncPitReferenceSnapshots,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
+      qc.invalidateQueries({ queryKey: QK.dataStatus })
     },
   })
 
@@ -254,6 +268,7 @@ export function Data() {
     '指标',
     ...(indexAuto ? ['指数'] : []),
     ...(etfAuto ? ['ETF'] : []),
+    'PIT快照',
     ...((hasMinuteCap && minuteAuto) ? ['分钟K'] : []),
     ...((hasMinuteCap && etfMinuteAuto) ? ['ETF分钟K'] : []),
   ]
@@ -272,6 +287,7 @@ export function Data() {
   useEffect(() => {
     if (job.data && (job.data.status === 'succeeded' || job.data.status === 'failed')) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
+      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
@@ -305,6 +321,22 @@ export function Data() {
     trading_days: s.index_daily?.trading_days ?? s.index_enriched?.trading_days ?? 0,
   } : null
   const hasEtfData = !!(s?.etf_instruments?.rows || s?.etf_daily?.rows || s?.etf_minute?.trading_days)
+  const pitSummary = pitReference.data?.summary
+  const pitStats = pitSummary ? {
+    rows: pitSummary.rows,
+    earliest_date: pitSummary.earliest_date,
+    latest_date: pitSummary.latest_date,
+    symbols_covered: Math.max(
+      0,
+      ...Object.values(pitReference.data?.history ?? {}).map(item => item.symbols_covered ?? 0),
+    ),
+    trading_days: 0,
+  } : null
+  const pitHint = pitSummary?.latest_snapshot_date
+    ? `历史表 · 快照 ${pitSummary.latest_snapshot_date}`
+    : '历史表 · 尚未冻结快照'
+  const pitSubLabel = pitSummary ? '指数成分 · 行业历史 · 生命周期' : undefined
+  const pitBadgeSuffix = pitSummary?.hithink_configured ? '盘后快照' : '未配置同花顺Key'
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
@@ -328,6 +360,7 @@ export function Data() {
     rebuild_enriched: 'enriched',
     sync_index: 'index_daily',
     sync_etf: 'etf_daily',
+    sync_pit_reference: 'pit_reference',
     sync_minute: 'minute',
     extend_minute: 'minute',
     sync_etf_minute: 'etf_minute',
@@ -352,6 +385,9 @@ export function Data() {
     }
     prevStageRef.current = stage
     qc.invalidateQueries({ queryKey: QK.dataStatus })
+    if (STAGE_CARD[stage] === 'pit_reference') {
+      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
+    }
   }, [job.data?.stage])
 
   useEffect(() => {
@@ -476,6 +512,33 @@ export function Data() {
             onShowFields={(t) => setSchemaTable(t ?? 'index_daily')}
             onSettings={hasData ? () => setOpenSettings(v => v === 'index' ? null : 'index') : undefined}
             settingsOpen={openSettings === 'index'}
+          />
+        )
+      case 'pit_reference':
+        return (
+          <StatCard
+            title="PIT Reference"
+            hint={pitHint}
+            stats={pitStats}
+            loading={pitReference.isLoading}
+            active={activeCard === 'pit_reference'}
+            done={doneStages.has('pit_reference')}
+            skipped={skippedCards.has('pit_reference')}
+            stagePct={activeCard === 'pit_reference' ? (job.data?.stage_pct ?? 0) : 0}
+            tierKey="pit_reference"
+            capLimits={caps.data?.capabilities}
+            tierLabel={caps.data?.label}
+            auto
+            localBadgeSuffix={pitBadgeSuffix}
+            subLabel={pitSubLabel}
+            fieldTabs={[
+              { label: '指数成分', table: 'pit_index_membership_events' },
+              { label: '行业历史', table: 'pit_industry_membership_history' },
+              { label: '生命周期', table: 'pit_instrument_lifecycle_events' },
+            ] as FieldTab[]}
+            onShowFields={(t) => setSchemaTable(t ?? 'pit_index_membership_events')}
+            onSettings={() => setOpenSettings(v => v === 'pit-reference' ? null : 'pit-reference')}
+            settingsOpen={openSettings === 'pit-reference'}
           />
         )
       case 'etf_instruments':
@@ -608,6 +671,36 @@ export function Data() {
       deleting={deleteExt.isPending}
       onEdit={() => setEditingExt(ext)}
     />
+  )
+
+  const pitHistoryEntries = Object.entries(pitReference.data?.history ?? {}) as [string, PitReferenceTableStatus][]
+  const pitSnapshotEntries = Object.entries(pitReference.data?.snapshots ?? {}) as [string, PitReferenceTableStatus][]
+  const renderPitRows = (
+    entries: [string, PitReferenceTableStatus][],
+    mode: 'history' | 'snapshot',
+  ) => (
+    <div className="divide-y divide-border/60 rounded-btn border border-border overflow-hidden">
+      {entries.map(([key, item]) => (
+        <div key={key} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px]">
+          <div className="min-w-0">
+            <div className="font-medium text-foreground truncate">{item.label}</div>
+            <div className="mt-0.5 text-muted font-mono truncate">{key}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-muted">行数</div>
+            <div className="font-mono text-secondary tabular-nums">{item.rows.toLocaleString()}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-muted">{mode === 'history' ? '区间' : '快照日'}</div>
+            <div className="font-mono text-secondary tabular-nums">
+              {mode === 'history'
+                ? `${item.earliest_date ?? '—'} ~ ${item.latest_date ?? '—'}`
+                : (item.latest_snapshot_date ?? '—')}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
   )
 
   const renderPlatformSection = (
@@ -927,6 +1020,7 @@ export function Data() {
                 { label: '分钟 K',   files: s?.storage.minute_files,      size: s?.storage.minute_size_mb },
                 { label: '财务数据', files: s?.storage.financials_files,   size: s?.storage.financials_size_mb },
                 { label: '日度估值', files: s?.storage.valuation_daily_files, size: s?.storage.valuation_daily_size_mb },
+                { label: 'PIT Reference', files: s?.storage.pit_reference_files, size: s?.storage.pit_reference_size_mb },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between text-[11px]">
                   <span className="text-muted">{item.label}</span>
@@ -1119,6 +1213,66 @@ export function Data() {
       </AnimatePresence>
 
       <AnimatePresence>
+        {openSettings === 'pit-reference' && (
+          <SettingsModal title="PIT Reference · 快照维护" onClose={() => setOpenSettings(null)}>
+            <div className="space-y-4">
+              <div className="rounded-card border border-border bg-base/30 p-4 space-y-3">
+                <div>
+                  <div className="text-sm font-medium text-foreground">盘后自动快照</div>
+                  <div className="text-[11px] text-muted mt-1">
+                    历史 PIT 表由离线 builder 生成；盘后任务只冻结同花顺当日快照，不回填历史日期。
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Pill label="历史行" value={(pitReference.data?.summary.history_rows ?? 0).toLocaleString()} />
+                  <Pill label="快照行" value={(pitReference.data?.summary.snapshot_rows ?? 0).toLocaleString()} />
+                  <Pill label="最新快照" value={pitReference.data?.summary.latest_snapshot_date ?? '—'} />
+                </div>
+                {!pitReference.data?.summary.hithink_configured && (
+                  <div className="rounded-btn border border-warning/30 bg-warning/8 px-3 py-2 text-[11px] text-warning/90">
+                    未配置同花顺 API Key，盘后任务会跳过快照冻结；已有历史 PIT 表仍可用于回测。
+                  </div>
+                )}
+                <button
+                  onClick={() => syncPitReference.mutate()}
+                  disabled={syncPitReference.isPending || !!activeJobId}
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
+                >
+                  {syncPitReference.isPending ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      同步中…
+                    </>
+                  ) : (
+                    <>同步今日快照</>
+                  )}
+                </button>
+                {syncPitReference.data?.status === 'skipped' && (
+                  <div className="text-[11px] text-warning/90">
+                    已跳过：{syncPitReference.data.reason ?? syncPitReference.data.message ?? '未配置同花顺 API Key'}
+                  </div>
+                )}
+                {syncPitReference.data?.status === 'failed' && (
+                  <div className="text-[11px] text-danger">
+                    同步失败：{(syncPitReference.data.errors ?? []).join('; ') || '未知错误'}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-foreground">历史 PIT 表</div>
+                {renderPitRows(pitHistoryEntries, 'history')}
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-foreground">同花顺快照表</div>
+                {renderPitRows(pitSnapshotEntries, 'snapshot')}
+              </div>
+            </div>
+          </SettingsModal>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {openSettings === 'index' && (
           <SettingsModal title="指数 · 手动获取" onClose={() => setOpenSettings(null)}>
             <div className="space-y-4">
@@ -1267,8 +1421,8 @@ export function Data() {
                   </p>
                   <ul className="mt-2 text-[11px] text-muted leading-relaxed space-y-0.5">
                     <li>· 个股维表、日 K、除权因子</li>
-                    <li>· Enriched 指标数据、分钟 K</li>
-                    <li>· 财务数据、指数、ETF</li>
+	                    <li>· Enriched 指标数据、分钟 K</li>
+	                    <li>· 财务数据、指数、ETF、PIT Reference</li>
                   </ul>
                   <p className="mt-2 text-[11px] text-danger/90">
                     操作不可恢复，需重新执行同步才能恢复数据。

@@ -1925,6 +1925,9 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  pitReferenceStatus: () => request<PitReferenceStatus>('/api/pit-reference/status'),
+  syncPitReferenceSnapshots: () =>
+    request<PitReferenceSyncResult>('/api/pit-reference/sync-snapshots', { method: 'POST' }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -2591,6 +2594,7 @@ export interface PipelineJob {
     enriched_days: number
     index_count?: number
     index_daily_rows?: number
+    pit_reference_rows?: number
     minute_rows: number
     skipped_stages?: string[]
   } | null
@@ -2660,6 +2664,8 @@ export interface DataStatus {
     financials_size_mb?: number
     valuation_daily_files?: number
     valuation_daily_size_mb?: number
+    pit_reference_files?: number
+    pit_reference_size_mb?: number
     ext_data_files?: number
     ext_data_size_mb?: number
     total_size_mb: number
@@ -2670,6 +2676,51 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface PitReferenceTableStatus {
+  label: string
+  rows: number
+  earliest_date?: string | null
+  latest_date?: string | null
+  symbols_covered: number
+  path_exists?: boolean
+  sources?: string[]
+  provenance_counts?: Record<string, number>
+  latest_snapshot_date?: string | null
+  earliest_snapshot_date?: string | null
+  snapshots?: number
+  manifest?: {
+    logical_snapshot?: string | null
+    status?: string | null
+    published_rows?: number
+    provenance?: string | null
+    empty_reason?: string | null
+  } | null
+}
+
+export interface PitReferenceStatus {
+  history: Record<string, PitReferenceTableStatus>
+  snapshots: Record<string, PitReferenceTableStatus>
+  summary: {
+    history_rows: number
+    snapshot_rows: number
+    rows: number
+    earliest_date: string | null
+    latest_date: string | null
+    latest_snapshot_date: string | null
+    hithink_configured: boolean
+  }
+}
+
+export interface PitReferenceSyncResult {
+  status: 'published' | 'skipped' | 'failed'
+  reason?: string
+  message?: string
+  snapshot_date: string
+  tables: Record<string, number>
+  published_rows: number
+  errors?: string[]
 }
 
 export interface EnrichedField {

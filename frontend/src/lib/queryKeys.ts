@@ -48,6 +48,7 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  pitReferenceStatus:   ['pit-reference-status'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
   etfRepairHistory:     ['etf-repair-history'] as const,

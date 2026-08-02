@@ -508,6 +508,7 @@ def _compute_storage(data_dir: Path) -> dict:
         "instruments": data_dir / "instruments",
         "ext_data": data_dir / "ext_data",
         "valuation_daily": data_dir / "valuation_daily",
+        "pit_reference": data_dir / "pit_reference",
     }
     stats = {}
     total_size = 0
@@ -646,7 +647,7 @@ def clear_data(request: Request):
         "kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "kline_minute",
         "adj_factor", "adj_factor_etf", "instruments", "instruments_index", "instruments_etf", "pools", "financials",
         "valuation_daily",
-        "backtest_results", "screener_results", "ai_cache",
+        "backtest_results", "screener_results", "ai_cache", "pit_reference",
     ):
         d = data_dir / sub
         if d.exists():
@@ -807,6 +808,42 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "asset_type": "资产类型(etf)",
         "source": "数据源",
     },
+    "pit_index_membership_events": {
+        "index_symbol": "指数代码",
+        "member_symbol": "成分证券代码",
+        "member_code": "成分证券纯数字代码",
+        "member_name": "成分证券名称",
+        "effective_from": "PIT 生效开始日期(含)",
+        "effective_to": "PIT 生效结束日期(不含,为空表示仍有效或来源未给出)",
+        "source": "原始来源",
+        "provenance": "来源口径,历史事件为 historical_event",
+        "raw_hash": "原始行哈希",
+    },
+    "pit_industry_membership_history": {
+        "member_symbol": "证券代码",
+        "member_code": "证券纯数字代码",
+        "member_name": "证券名称",
+        "industry_standard": "行业分类标准",
+        "industry_code": "行业代码",
+        "industry_name": "行业名称",
+        "effective_from": "PIT 生效开始日期(含)",
+        "effective_to": "PIT 生效结束日期(不含,为空表示仍有效)",
+        "source": "原始来源",
+        "provenance": "来源口径,历史事件为 historical_event",
+        "raw_hash": "原始行哈希",
+    },
+    "pit_instrument_lifecycle_events": {
+        "symbol": "证券代码",
+        "name": "证券名称",
+        "exchange": "交易所",
+        "event_date": "生命周期事件日期",
+        "event_type": "事件类型(listed/suspended/delisted 等)",
+        "event_status": "生命周期状态分组",
+        "reason": "退市或暂停原因",
+        "source": "原始来源",
+        "provenance": "来源口径,历史事件为 historical_event",
+        "raw_hash": "原始行哈希",
+    },
 }
 
 # view 名 → DuckDB 视图名
@@ -823,6 +860,9 @@ _SCHEMA_VIEWS: dict[str, str] = {
     "minute": "kline_minute",
     "adj_factor": "adj_factor",
     "instruments": "instruments",
+    "pit_index_membership_events": "pit_index_membership_events",
+    "pit_industry_membership_history": "pit_industry_membership_history",
+    "pit_instrument_lifecycle_events": "pit_instrument_lifecycle_events",
 }
 
 
