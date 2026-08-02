@@ -118,13 +118,6 @@ function rankChangeTone(value: number | null | undefined) {
   return value > 0 ? 'text-[#55d6c8]' : 'text-[#ffbd4a]'
 }
 
-function quantile(values: number[], q: number) {
-  if (!values.length) return 0
-  const sorted = [...values].sort((a, b) => a - b)
-  const index = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * q)))
-  return sorted[index]
-}
-
 function MetricCard({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
     <div className={cn(PANEL, 'relative overflow-hidden px-5 py-5')}>
@@ -193,13 +186,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
       .filter((rank): rank is number => rank != null && Number.isFinite(rank))
     if (!ranks.length) return null
     const rawMax = Math.max(...ranks)
-    const rawMin = Math.min(...ranks)
-    const focusCap = rawMax > 80
-      ? Math.max(42, Math.min(80, Math.ceil((quantile(ranks, 0.72) + 8) / 4) * 4))
-      : Math.ceil((rawMax + 4) / 4) * 4
-    const yMin = Math.max(1, Math.floor(rawMin - 2))
-    const yMax = Math.max(focusCap, yMin + 8)
-    const folded = rawMax > yMax
+    const yMax = Math.max(32, 2 ** Math.ceil(Math.log2(rawMax + 1)))
     const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
 
     return {
@@ -220,11 +207,8 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
           const rows = Array.isArray(params) ? params : [params]
           const date = rows[0]?.axisValue ?? ''
           const body = rows.map((row: any) => {
-            const rawRank = row?.data?.rawRank ?? row?.value
-            const clipped = row?.data?.clipped
             const marker = row?.marker ?? ''
-            const suffix = clipped ? ' · 低位折叠' : ''
-            return marker + row.seriesName + ': 第 ' + (rawRank ?? '--') + ' 名' + suffix
+            return marker + row.seriesName + ': 第 ' + (row?.value ?? '--') + ' 名'
           }).join('<br/>')
           return '<div style="font-weight:600;margin-bottom:6px">' + date + '</div>' + body
         },
@@ -238,18 +222,19 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
         axisTick: { show: false },
       },
       yAxis: {
-        type: 'value',
+        type: 'log',
+        logBase: 2,
         inverse: true,
-        min: yMin,
+        min: 1,
         max: yMax,
-        minInterval: 1,
-        splitNumber: 4,
+        splitNumber: 6,
         axisLabel: {
           color: 'rgba(232,224,255,0.64)',
           fontSize: 11,
-          formatter: (value: number) => folded && value >= yMax ? '#' + Math.round(yMax) + '+' : '#' + Math.round(value),
+          formatter: (value: number) => '#' + Math.round(value),
         },
         splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+        minorSplitLine: { show: false },
         axisLine: { show: false },
         axisTick: { show: false },
       },
@@ -267,15 +252,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
           symbol: 'circle',
           symbolSize: 6,
           connectNulls: false,
-          data: dates.map(date => {
-            const rank = byDate.get(date)
-            if (rank == null) return null
-            return {
-              value: Math.min(rank, yMax),
-              rawRank: rank,
-              clipped: rank > yMax,
-            }
-          }),
+          data: dates.map(date => byDate.get(date) ?? null),
           lineStyle: {
             width: 2.6,
             color,
@@ -303,7 +280,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
     <div className={cn(PANEL, 'overflow-hidden')}>
       <div className="border-b border-white/10 px-5 py-5">
         <div className="text-xl font-semibold tracking-tight text-white">近 30 日排名轨迹</div>
-        <div className="mt-1 text-sm text-[#aa9ac7]">悬停查看日期与各标的名次</div>
+        <div className="mt-1 text-sm text-[#aa9ac7]">对数排名轴展示低位名次，悬停查看真实排名</div>
         <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2">
           {trends.map((trend, index) => (
             <div key={trend.thscode} className="flex items-center gap-2 text-sm text-[#c8bce0]">
@@ -510,7 +487,7 @@ export function MarketHeat() {
                     <div className="flex items-start gap-3">
                       <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#d36aff]" />
                       <div className="text-sm leading-relaxed text-[#aa9ac7]">
-                        代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；明显低位排名会折叠到图底部，悬停可查看原始名次。
+                        代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；低位名次用对数坐标压缩展示，悬停可查看真实排名。
                       </div>
                     </div>
                   </div>
