@@ -69,6 +69,7 @@ const VIEW_CONFIG: Array<{
 const PANEL = 'rounded-[24px] border border-[#34224d] bg-[#130a21]/88 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur'
 const ROW_PANEL = 'rounded-[18px] border border-[#2c1e40] bg-[#160c25]/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]'
 const CHART_PALETTE = ['#FDBA4D', '#C06BFF', '#55D6C8']
+const PRICE_CHART_PALETTE = ['#38BDF8', '#FB7185', '#A3E635']
 const PRICE_QUERY_DAYS = 45
 const PRICE_DISPLAY_POINTS = 30
 
@@ -287,7 +288,7 @@ function TrendChart({
     }] : []
 
     return {
-      color: CHART_PALETTE,
+      color: showPriceOverlay ? [...CHART_PALETTE, ...PRICE_CHART_PALETTE] : CHART_PALETTE,
       animationDuration: 360,
       animationEasing: 'cubicOut',
       backgroundColor: 'transparent',
@@ -358,7 +359,7 @@ function TrendChart({
             showSymbol: false,
             symbol: 'circle',
             symbolSize: 6,
-            connectNulls: false,
+            connectNulls: true,
             data: dates.map(date => byDate.get(date) ?? null),
             lineStyle: {
               width: 2.6,
@@ -375,7 +376,7 @@ function TrendChart({
           }
         }),
         ...(showPriceOverlay ? priceSeries.map((series, index) => {
-          const color = CHART_PALETTE[index % CHART_PALETTE.length]
+          const color = PRICE_CHART_PALETTE[index % PRICE_CHART_PALETTE.length]
           const byDate = new Map(series.points.map(point => [point.date, point]))
           return {
             name: (series.name || series.ticker) + ' 股价',
@@ -385,7 +386,7 @@ function TrendChart({
             showSymbol: false,
             symbol: 'circle',
             symbolSize: 5,
-            connectNulls: false,
+            connectNulls: true,
             data: dates.map(date => {
               const point = byDate.get(date)
               return point
@@ -393,10 +394,12 @@ function TrendChart({
                 : null
             }),
             lineStyle: {
-              width: 1.8,
+              width: 2,
               type: 'dashed' as const,
-              opacity: 0.72,
+              opacity: 0.86,
               color,
+              shadowBlur: 7,
+              shadowColor: color + '55',
             },
             itemStyle: { color },
             emphasis: {
@@ -469,16 +472,22 @@ function TrendChart({
             const price = priceSeries.find(series => series.thscode === trend.thscode)
             const latest = price?.points[price.points.length - 1]
             const priceReturn = latest ? latest.index / 100 - 1 : null
+            const rankColor = CHART_PALETTE[index % CHART_PALETTE.length]
+            const priceColor = PRICE_CHART_PALETTE[index % PRICE_CHART_PALETTE.length]
             return (
               <div key={trend.thscode} className="flex items-center gap-2 text-sm text-[#c8bce0]">
                 <span
                   className="h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
+                  style={{ backgroundColor: rankColor }}
                 />
                 <span>{trend.name || trend.ticker}</span>
                 {showPriceOverlay && latest && (
                   <>
-                    <span className="font-mono text-[#efe8ff]">¥{fmtNumber(latest.close, 2)}</span>
+                    <span
+                      className="h-0 w-5 border-t-2 border-dashed"
+                      style={{ borderColor: priceColor }}
+                    />
+                    <span className="font-mono" style={{ color: priceColor }}>¥{fmtNumber(latest.close, 2)}</span>
                     <span className={cn('font-mono text-xs', rankChangeTone(priceReturn))}>
                       {priceReturn != null ? fmtPct(priceReturn) : '--'}
                     </span>
