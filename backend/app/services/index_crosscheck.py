@@ -64,37 +64,58 @@ def fetch_easy_tdx_index_daily(
     timeout: float = 8.0,
     page_size: int = 800,
     max_pages: int = 10,
+    max_hosts: int = 8,
 ) -> pl.DataFrame:
     """Fetch index daily bars without persisting or invoking collectors."""
     from easy_tdx import TdxClient
+    from easy_tdx.config import get_best_host, get_known_hosts, get_port, save_best_host
     from easy_tdx.models.enums import KlineCategory
 
     parts: list[pl.DataFrame] = []
-    with TdxClient.from_best_host(
-        timeout=timeout,
-        ping_timeout=3.0,
-        heartbeat_interval=0,
-    ) as client:
-        for symbol in sorted(set(symbols)):
+    hosts = list(dict.fromkeys([get_best_host(), *get_known_hosts()]))[:max_hosts]
+    for symbol in sorted(set(symbols)):
+        symbol_parts: list[pl.DataFrame] = []
+        for host in hosts:
             try:
-                market = _market_for_symbol(symbol)
-                code = symbol.split(".", 1)[0]
-                for page in range(max_pages):
-                    frame = client.get_index_bars(
-                        market,
-                        code,
-                        KlineCategory.DAY,
-                        page * page_size,
-                        page_size,
-                    )
-                    normalized = _normalize_easy_tdx_bars(frame, symbol)
-                    if normalized.is_empty():
-                        break
-                    parts.append(normalized.filter(pl.col("date") <= end_date))
-                    if normalized["date"].min() <= start_date or normalized.height < page_size:
-                        break
+                with TdxClient(
+                    host,
+                    get_port(),
+                    timeout=min(timeout, 3.0),
+                    auto_reconnect=False,
+                    heartbeat_interval=0,
+                ) as client:
+                    market = _market_for_symbol(symbol)
+                    code = symbol.split(".", 1)[0]
+                    for page in range(max_pages):
+                        frame = client.get_index_bars(
+                            market,
+                            code,
+                            KlineCategory.DAY,
+                            page * page_size,
+                            page_size,
+                        )
+                        normalized = _normalize_easy_tdx_bars(frame, symbol)
+                        if normalized.is_empty():
+                            break
+                        symbol_parts.append(normalized.filter(pl.col("date") <= end_date))
+                        if (
+                            normalized["date"].min() <= start_date
+                            or normalized.height < page_size
+                        ):
+                            break
+                if symbol_parts:
+                    save_best_host(host)
+                    parts.extend(symbol_parts)
+                    break
             except Exception as exc:  # noqa: BLE001
-                logger.warning("EasyTDX 指数 %s 核验失败 (%s)", symbol, type(exc).__name__)
+                logger.debug(
+                    "EasyTDX 指数 %s 节点 %s 核验失败 (%s)",
+                    symbol,
+                    host,
+                    type(exc).__name__,
+                )
+        if not symbol_parts:
+            logger.warning("EasyTDX 指数 %s 在所有节点均无可用数据", symbol)
     if not parts:
         return pl.DataFrame()
     return (

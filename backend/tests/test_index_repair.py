@@ -11,6 +11,7 @@ from app.services import index_repair
 from app.services.index_repair import (
     remove_index_repair_shadow,
     repair_confirmed_index_daily,
+    repair_consensus_index_daily,
 )
 
 
@@ -85,6 +86,61 @@ def _repair(tmp_path, evidence_path, corroboration_path, *, apply=False, remaini
         expected_remaining_rows=remaining,
         apply=apply,
     )
+
+
+def _write_consensus_evidence(tmp_path, row: dict):
+    source = {field: row[field] for field in ("open", "high", "low", "close", "volume", "amount")}
+    evidence = {
+        "schema_version": 2,
+        "sources": {
+            "easy_tdx": {"status": "available"},
+            "astock_data_eastmoney": {"status": "available"},
+        },
+        "astock_data": {"recipe_revision": "test"},
+        "rows": [{
+            "symbol": row["symbol"],
+            "date": row["date"].isoformat(),
+            "status": "replacement_confirmed",
+            "changed_fields": ["amount", "volume"],
+            "related_corrupt_fields": ["volume"],
+            "tickflow": source,
+            "replacement": {"volume": 20.0, "amount": 2000.0},
+            "references": {
+                "easy_tdx": {**source, "volume": 20.0, "amount": 2000.0},
+                "astock_data_eastmoney": {**source, "volume": 20.0, "amount": 2000.0},
+            },
+            "field_consensus": {
+                "volume": {"value": 20.0, "sources": ["easy_tdx", "astock_data_eastmoney"]},
+                "amount": {"value": 2000.0, "sources": ["easy_tdx", "astock_data_eastmoney"]},
+            },
+        }],
+    }
+    path = tmp_path / "consensus.json"
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    return path
+
+
+def test_consensus_index_repair_publishes_related_corrupt_fields(tmp_path):
+    trade_date = date(2026, 7, 30)
+    row = _daily_row(trade_date, volume=10.0)
+    _write_tables(tmp_path, {trade_date: [row]})
+    evidence_path = _write_consensus_evidence(tmp_path, row)
+
+    published = repair_consensus_index_daily(
+        tmp_path,
+        evidence_path,
+        expected_rows=1,
+        expected_remaining_rows=0,
+        apply=True,
+    )
+
+    repaired = pl.read_parquet(
+        tmp_path / "kline_index_daily" / f"date={trade_date}" / "part.parquet"
+    )
+    assert repaired["volume"].to_list() == [20.0]
+    assert repaired["amount"].to_list() == [2000.0]
+    assert published["replacement_source"] == "multi_source_consensus"
+    assert published["replacement_records"][0]["related_corrupt_fields"] == ["volume"]
 
 
 def test_index_repair_validates_then_switches_both_tables_with_rollback(tmp_path):

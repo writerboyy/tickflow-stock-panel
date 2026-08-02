@@ -73,14 +73,17 @@ def _validate_index_daily_with_crosscheck(frame: pl.DataFrame) -> pl.DataFrame:
     try:
         return _validate_index_daily(frame)
     except IndexDailyQualityError as exc:
-        from app.services.index_crosscheck import crosscheck_index_daily, crosscheck_summary
+        from app.services.index_consensus import (
+            consensus_summary,
+            crosscheck_index_daily_consensus,
+        )
 
         if exc.invalid_rows.is_empty():
             raise
-        result = crosscheck_index_daily(exc.invalid_rows)
-        summary = crosscheck_summary(result)
-        logger.error("TickFlow 指数日线异常，EasyTDX 只读核验: %s", summary)
-        raise IndexDailyQualityError(f"{exc}; EasyTDX 核验: {summary}", exc.invalid_rows) from exc
+        result = crosscheck_index_daily_consensus(exc.invalid_rows)
+        summary = consensus_summary(result)
+        logger.error("TickFlow 指数日线异常，备用源只读核验: %s", summary)
+        raise IndexDailyQualityError(f"{exc}; 备用源核验: {summary}", exc.invalid_rows) from exc
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:

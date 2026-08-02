@@ -11,7 +11,7 @@
 3. EasyTDX 分红历史有 7,259 / 51,390 行 `cash_per_share` 不能由当前分红方案解析公式复现，影响 3,421 个标的。该表只能作为辅助记录日上下文，不能用于权威复权或事件回放。
 4. 指数日线质量门禁命中 835 行、覆盖 7 个指数，其中 495 行为负成交量；`000691.SH` 另有 638 行约 `1e18` 的异常成交额（与负量重叠 298 行），符合有符号 32 位溢出/字段解码或单位放大错误特征。
 
-整改后当前状态：前 3 组 P1 已完成代码修复和生产重算；股票 enriched、valuation 仍各为 6,160,370 个唯一键，EasyTDX 分红 7,259 行差异已归零并从 4,005 个文件压缩为 27 个年度文件，股票分钟 149,179 行空 OHLC 已清除。严格强化开盘啦归档回放后又发现龙虎榜席位明细旧主键会覆盖同股同方向不同上榜原因的记录，现已将主键升级为 `(symbol,side,log_id)` 并从原始归档恢复 78 行，720 行修复为 798 行。指数异常同源在线重拉的 8,477 行与本地逐字段一致，远端本身仍返回异常值；异常后 EasyTDX 只读核验覆盖 825/835 行，确认 485 行 TickFlow 异常、发现 340 行源间冲突，另有 10 行无通达信数据。BaoStock 将成交量从股除以 100 转为手后覆盖 187 个异常键，全部与 EasyTDX 一致。经用户明确授权，已用 EasyTDX 替换全部 485 个确认键中被门禁判错的字段，并同步修复指数 enriched；两表行数和唯一键仍各为 704,552，当前剩余 340 行源冲突和 10 行无覆盖异常。后续异常批次仍继续拒绝发布，不自动替换未重新确认的数据。财务 8 组冲突也仍存在，当前账号没有 TickFlow financial 能力，无法取得 revision 证据，禁止按文件顺序猜测修复。分钟历史覆盖不足、指数分钟缺失和 depth5 历史不可回补仍是能力边界。
+整改后当前状态：前 3 组 P1 已完成代码修复和生产重算；股票 enriched、valuation 仍各为 6,160,370 个唯一键，EasyTDX 分红 7,259 行差异已归零并从 4,005 个文件压缩为 27 个年度文件，股票分钟 149,179 行空 OHLC 已清除。严格强化开盘啦归档回放后又发现龙虎榜席位明细旧主键会覆盖同股同方向不同上榜原因的记录，现已将主键升级为 `(symbol,side,log_id)` 并从原始归档恢复 78 行，720 行修复为 798 行。指数异常先经 EasyTDX/BaoStock 修复 485 个确认键；随后接入 BaoStock 与 A-Stock-Data 备用源共识，使用 EasyTDX+Baidu 修复 `000691.SH` 剩余 340 个成交额/成交量关联异常，并用 Tencent 加 TickFlow 精确 `uint32` 还原证据修复 `000902.SH`、`000985.SH` 的 10 个负量键。最终 `kline_index_daily` 与 `kline_index_enriched` 各 704,552 行/唯一键不变，质量门禁剩余异常 0，日线与 enriched 的 OHLCVA 差异 0。后续异常批次仍继续拒绝发布，不自动替换未重新确认的数据。财务 8 组冲突仍存在；A-Stock-Data/Sina 只能提供当前数值佐证（6 组完整、2 组部分），没有公告 revision/update 元数据，禁止按文件顺序或当前网页值猜测修复。分钟历史覆盖不足、指数分钟缺失和 depth5 历史不可回补仍是能力边界。
 
 原始只读审计阶段没有启动应用、collector、刷新或重建任务。原因是应用启动会注册并可能触发后台采集，不符合“审计前后市场数据不变”的约束。后续生产整改及其数据变更单独记录在 11.2.1 和 11.5，不能与原始只读基线混为一谈。
 
@@ -45,8 +45,8 @@
 | `kline_daily` | 日频；`symbol,date`；`date=YYYY-MM-DD` | 1,211 文件，6,160,370 行，`2021-08-02..2026-07-31` | TickFlow；价格元/股、成交量股、成交额元；enriched、回测、筛选、行情 API | 通过 |
 | `kline_daily_enriched` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与日线逐键对齐 | TickFlow 派生；前复权 OHLC、原始价、股本、换手率、连板；策略/回测/监控 | 通过：已按历史名称和当前股本 source snapshot 全量重建 |
 | `valuation_daily` | 日频；`symbol,date`；按日分区 | 6,160,370 行，与 enriched 逐键对齐 | TickFlow 派生；金额元、比率倍数；估值 API/策略 | **部分通过**：公式和股本输入已重建，但财务 8 组冲突仍未取得 revision 证据 |
-| `kline_index_daily` | 日频；`symbol,date`；按日分区 | 704,552 行，`2021-08-02..2026-07-31` | TickFlow 指数行情；指数看板/市场背景 | **不通过**：原 835 行中已按证据修复 485 行，仍有 340 行异常成交额和 10 行负成交量 |
-| `kline_index_enriched` | 日频；`symbol,date`；按日分区 | 704,552 行，与指数日线逐键对齐 | 指数派生；监控/市场概览 | **不通过**：已同步修复 485 行，仍继承原表剩余 350 行异常 |
+| `kline_index_daily` | 日频；`symbol,date`；按日分区 | 704,552 行，`2021-08-02..2026-07-31` | TickFlow 指数行情；指数看板/市场背景 | 通过：原 835 行异常已按外部证据分两轮影子修复，当前质量门禁异常 0 |
+| `kline_index_enriched` | 日频；`symbol,date`；按日分区 | 704,552 行，与指数日线逐键对齐 | 指数派生；监控/市场概览 | 通过：与指数日线逐键及 OHLCVA 对齐，当前质量门禁异常 0 |
 | `kline_etf_daily` | 日频；`symbol,date`；按日分区 | 1,123,552 行，`2021-08-02..2026-07-31` | TickFlow ETF 行情；ETF 回测/策略/行情 API | 通过 |
 | `kline_etf_enriched` | 日频；`symbol,date`；按日分区 | 1,123,552 行，与 ETF 日线逐键对齐 | TickFlow 派生；ETF 策略/监控 | 通过 |
 | `kline_minute` | 分钟；`symbol,datetime`；按交易日分区 | 327 文件，386,663,172 行，`2025-03-28..2026-07-31` | TickFlow；北京时间左开右闭，`09:30` 为竞价例外；分钟回测/分时 | **部分通过**：空 OHLC 已清除，历史覆盖仍不足 |
@@ -130,8 +130,8 @@
 
 - 股票、ETF、指数日线均无重复 `(symbol,date)`、必需字段空值、非正价格、OHLC 关系错误或分区日期错位；指数的负成交量和异常成交额单列如下。
 - 股票/ETF/指数代码分别通过独立目录和维表路由，没有发现跨资产主键串表。
-- 股票、ETF 日线和各自 enriched 的键、原始 OHLCV 完全一致；指数日线/enriched 也逐键一致，但共同包含指数源异常。
-- 原始指数负成交量为 495 行、7 个 symbol：`000011.SH` 5 行、`000691.SH` 298 行、`000902.SH` 6 行、`000985.SH` 4 行、`399317.SZ` 6 行、`399379.SZ` 93 行、`399380.SZ` 83 行。`000691.SH` 的 638 行异常成交额中有 298 行与负量重叠，因此原质量门禁合计命中 835 个唯一键，范围为 `2021-08-02..2026-07-30`。确认值替换后，485 个修复键均通过门禁；当前剩余 `000691.SH` 340 行异常成交额、`000902.SH` 6 行负量和 `000985.SH` 4 行负量，共 350 个唯一键。
+- 股票、ETF、指数日线和各自 enriched 的键、原始 OHLCV/金额完全一致；指数日线/enriched 的 joined 行数为 704,552，OHLCVA mismatch 均为 0。
+- 原始指数负成交量为 495 行、7 个 symbol：`000011.SH` 5 行、`000691.SH` 298 行、`000902.SH` 6 行、`000985.SH` 4 行、`399317.SZ` 6 行、`399379.SZ` 93 行、`399380.SZ` 83 行。`000691.SH` 的 638 行异常成交额中有 298 行与负量重叠，因此原质量门禁合计命中 835 个唯一键，范围为 `2021-08-02..2026-07-30`。两轮证据替换后，`kline_index_daily` 与 `kline_index_enriched` 均为 704,552 行/唯一键，负成交量、负成交额、`amount > 1e16`、OHLC 关系错误和质量门禁 invalid rows 均为 0。
 
 ### 5.2 分钟数据
 
@@ -345,7 +345,7 @@ fetch
 
 EasyTDX/开盘啦的上线顺序保持 A-D 不变。当前可判定为：阶段 A 已完成生产修复和回滚留存；阶段 B 的核心采集骨架已落地；阶段 C 的逐端点隔离、完整分页、严格全归档回放和龙虎榜迁移已完成代码及生产验收；阶段 D 已具备 manifest、机器可读健康门禁和 EasyTDX 分红 compaction，但外部告警接入、开盘啦小文件 compaction 和全市场真实中断恢复演练仍未完成。
 
-### 7.5 指数异常的 EasyTDX/BaoStock 三源核验
+### 7.5 指数异常的 EasyTDX/BaoStock/A-Stock-Data 备用源核验
 
 核验对象是数据湖基线中 `2021-08-02..2026-07-30` 的 835 个质量门禁异常键；数据湖本身截至 `2026-07-31`。EasyTDX 首次核验执行于 `2026-08-02 10:16 +08:00`，BaoStock 第三源核验执行于 `10:22`，EasyTDX 在 `10:27` 复跑结果一致。生产入口仅在 TickFlow 批次未通过 `_validate_index_daily` 后调用 EasyTDX，对齐 `(symbol,date)` 和 `open,high,low,close,volume,amount`，输出以下状态并继续拒绝发布：
 
@@ -370,7 +370,7 @@ BaoStock 使用临时依赖对 7 个指数查询相同区间的未复权日线�
 
 合计 187 个异常键得到 EasyTDX+BaoStock 双重确认，且没有三源冲突；298 个键只有 EasyTDX 单源确认；340 个键存在 TickFlow/EasyTDX 冲突且 BaoStock 无覆盖；10 个键两个辅助源均无覆盖。典型样本 `399379.SZ/2026-07-30` 的 TickFlow 成交量为 `-1,519,207,481` 手，EasyTDX 为 `2,775,759,872` 手，两者相差 `2^32`；BaoStock 为 `277,575,981,452` 股，即 `2,775,759,814.52` 手，同时价格和成交额与 TickFlow 合法字段、EasyTDX 都在容差内一致，确认是 TickFlow 成交量有符号溢出。`000691.SH/2021-08-03` 的 TickFlow 成交额约为 `2.3220621017e18`，EasyTDX 为 `23,220,621,312`，约相差 `1e8`，但成交量又发生源间冲突且 BaoStock 无该指数数据，不能据此自动修复。
 
-用户明确授权后，187 个双辅助源确认键和 298 个 EasyTDX 单源确认键已一起替换。修复器只修改证据中被质量门禁判错的字段：每张表修正 485 个 `volume` 和其中 298 个 `amount`，OHLC 及其他合法字段保持不变；`kline_index_daily` 与 `kline_index_enriched` 通过同一证据影子重建并协调切换。未完成目标仍由外部证据不足造成：`000691.SH` 的 340 个冲突键需要第三个有覆盖且口径可证明的指数源或 TickFlow revision；`000902.SH`、`000985.SH` 的 10 个键需要可覆盖该指数的参考源。后续取得证据时继续使用同一影子修复流程，不能扩大为对未来异常的静默自动替换。
+用户明确授权后，187 个双辅助源确认键和 298 个 EasyTDX 单源确认键已一起替换。随后又接入 BaoStock 与 A-Stock-Data 的 Baidu、Eastmoney、Tencent 后端，对剩余 350 个键生成第二轮只读共识证据：EasyTDX+Baidu 确认 `000691.SH` 的 340 行成交额及关联成交量异常；Tencent OHLCV 加 TickFlow 精确 `uint32` 还原确认 `000902.SH` 6 行和 `000985.SH` 4 行负量。第二轮 evidence hash 为 `2fb2016e48b8739655fe61ed4a60d0a1e5d6b4c58b87be4d09b6176763202de5`，repair `20260802T040305Z-83278ab8` 已发布；每张表新增修正 690 个字段值，最终 `kline_index_daily` 与 `kline_index_enriched` 仍各 704,552 行/唯一键，质量门禁异常 0，OHLCVA joined mismatch 0。BaoStock 当前环境连接超时、Eastmoney 当前网络 `RemoteDisconnected` 均 fail-closed；A-Stock-Data/Baidu 必须使用指数 group，错误同代码股票响应会被 OHLC 身份检查拒绝。后续异常仍只能走冻结证据、影子重建和人工授权修复流程，不能扩大为静默自动替换。
 
 ## 8. 指标公式与独立验证
 
@@ -442,8 +442,8 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 | 已解决 P1 | 历史 ST 连板 14,105 个字段行差异 | 已接入历史名称、全量重建并保留旧目录；新旧表对应列实际改动 7,433/6,672 行 |
 | 已解决 P1 | 盘中 MACD/BOLL/波动率/极值/RSI 和窗口 gate | 已统一批量公式、完整历史窗口和逐列一致性测试 |
 | 已解决 P1 | EasyTDX 分红 7,259 行错误 | 已影子校验、原子发布并保留 4,005 文件旧目录；冻结公式剩余差异 0 |
-| 部分解决 P1 | 指数负量/异常成交额 | 187 个双源确认键和 298 个 EasyTDX 单源确认键已按授权影子修复；两表只改 485 个 `volume` 和 298 个 `amount`。仍有 340 个源冲突、10 个无辅助覆盖键等待补充证据 |
-| 阻塞 P2 | 财务原表重复及 8 组冲突 | 下游已拒绝同键冲突；当前无 financial 能力，无法在线核源，必须取得供应商 revision/update ID 后修复并重建 valuation |
+| 已解决 P1 | 指数负量/异常成交额 | 485 个 EasyTDX/BaoStock 确认键和 350 个备用源共识键已按授权影子修复；两表当前 704,552 行/唯一键不变，质量门禁异常 0 |
+| 阻塞 P2 | 财务原表重复及 8 组冲突 | 下游已拒绝同键冲突；A-Stock-Data/Sina 可佐证部分当前数值，但没有公告 revision/update 元数据，必须取得供应商修订证据后修原表并重建 valuation |
 | 已解决 P2 | 股本源刷新后派生漂移 | enriched/valuation 已按固定 source snapshot 全量重建并保留旧目录 |
 | 部分解决 P2 | 股票分钟空 OHLC 和分钟覆盖不足 | 149,179 行空 OHLC 已清除；覆盖 manifest/fail-closed 已落地，历史覆盖不足仍保留为能力边界 |
 | 已解决 P2 | KDJ 零区间为 NaN | 批量与增量统一中性 RSV 并补恒定价格测试 |
@@ -461,7 +461,7 @@ MA、EMA5/10/20/30/60、KDJ、ATR、量比、动量、涨跌幅/额和振幅均 
 - EasyTDX 业绩快报全表为空；全市场采集结果和 30 标的在线样本均没有正式快报章节，因此判为合理空数据，但不能证明未来出现快报时的实际落盘行为；parser/collector 定向测试承担该契约验证。
 - 在线抽样只能证明审计时点的 30 个标的和两个开盘啦端点，不等于供应商所有代码、所有历史日期的 SLA。
 - 入库健康 CLI 当前为 `no_data`，因为活动 `_ingestion` 在只读审计后已清理；门禁行为已由故障注入测试证明，但真实告警必须等下一次受控采集产生 manifest 后验收。
-- 财务 8 组冲突和指数的 350 个未确认异常仍保留在数据湖中；前者缺 financial 能力，后者因源冲突或双辅助源无覆盖而不可定论。已确认的 485 个指数键已有完整 replacement record、证据 hash、发布 hash 和回滚目录。其余“已解决”项均有生产 repair manifest、source snapshot 或回滚目录证明，不能仅以测试通过替代数据验收。
+- 财务 8 组冲突仍保留在数据湖中；A-Stock-Data/Sina 仅能证明当前披露页中的部分数值，不能证明哪条 TickFlow 同键记录在 PIT 上应被保留。指数原 835 个异常键已全部有 replacement record、证据 hash、发布 hash 和回滚目录，当前生产表质量门禁异常为 0。其余“已解决”项均有生产 repair manifest、source snapshot 或回滚目录证明，不能仅以测试通过替代数据验收。
 
 ## 11. 证据与验证记录
 
@@ -558,7 +558,7 @@ git diff --check custom...HEAD
 
 指数异常核验增量实现的定向测试为 `12 passed in 0.55s`，后端全量为 `985 passed, 13 warnings in 16.11s`；Ruff 和 `git diff --check` 均通过。EasyTDX CLI 对实际 835 个异常键在 10:16 和 10:27 两次都返回相同计数，并因存在未解决冲突按设计以退出码 1 结束；BaoStock 通过 `uv run --with baostock` 临时加载，没有加入项目依赖。在线核验窗口内 `kline_index_daily` 和 `kline_index_enriched` 新增 mtime 文件数为 0；canonical 市场数据文件的名称/size/mtime 清单摘要在核验前后均为 `e21119e1...17e2`，指数日线及 enriched Parquet 内容清单摘要为 `3e6191d0...95d4`。
 
-确认值替换实现新增证据计数、源值漂移、双表一致、未确认异常保留、第二张表发布失败和 manifest 发布失败回滚测试；最终相关定向测试为 `17 passed in 0.48s`，发布后全量为 `990 passed, 13 warnings in 15.35s`，Ruff 与 `git diff --check` 通过。独立 Polars 对账证明两表各 704,552 行/唯一键不变、日线与 enriched OHLCVA 差异 0、除 `volume` 485 行和 `amount` 298 行外其余列差异 0；485 个修复键剩余异常 0，全表剩余异常 350。
+确认值替换实现新增证据计数、源值漂移、双表一致、未确认异常保留、第二张表发布失败和 manifest 发布失败回滚测试；最终相关定向测试为 `17 passed in 0.48s`，发布后全量为 `990 passed, 13 warnings in 15.35s`，Ruff 与 `git diff --check` 通过。备用源共识增量测试覆盖 BaoStock、A-Stock-Data、Sina 财务核源和 consensus repair；生产发布后独立 Polars 对账证明两表各 704,552 行/唯一键不变、质量门禁异常 0、日线与 enriched OHLCVA 差异 0。
 
 ### 11.5 生产整改与外部阻塞证据
 
@@ -571,8 +571,8 @@ git diff --check custom...HEAD
 | valuation | 6,160,370 行和唯一键不变；按新 enriched 和固定财务 source snapshot 重建 | 旧目录 `.valuation_daily.pre-rebuild-20260801T190039Z`；财务原表 8 组冲突仍需供应商核源后再次重建 |
 | 开盘啦龙虎榜明细 | 720 -> 798 行；恢复 78 行；`(symbol,side,log_id)` 798 个唯一键；schema v2；字段 contract hash `2481d895...53c0` | 旧目录 `timeseries.pre-repair-20260801T205054Z-84730081` 和旧配置可回滚；修复仅修改该表 3 个活动文件 |
 | 开盘啦回放 | 20,112/20,112 归档解析成功；错误 0；12 张表 schema/类型/分区/主键/字段值全部通过；`/30` 2,681 份均为 `valid_empty` | 报告写到 `/tmp`；除已声明的龙虎榜修复外不修改数据湖 |
-| 指数在线核源 | 7 个指数、8,477 行在线 TickFlow 与本地逐 OHLCVA 字段一致；835 个门禁异常键再由 EasyTDX 核验 825 个，BaoStock 标准化单位后覆盖 187 个且全部与 EasyTDX 一致 | 340 个源冲突、10 个双辅助源无覆盖；等待上游 revision 或补充可覆盖参考源 |
-| 指数确认值替换 | repair `20260802T025013Z-a0fadefe`：两表各 704,552 行/唯一键不变；393 分区重写、818 分区硬链接；每表仅改 `volume` 485、`amount` 298；修复键剩余异常 0，全表剩余异常 350 | 原表备份 `.kline_index_daily.pre-repair-20260802T025013Z-a0fadefe`、`.kline_index_enriched.pre-repair-20260802T025013Z-a0fadefe`；源/发布 hash 和 485 条 replacement record 写入两表 manifest |
-| 财务在线核源 | 当前 `financial_capability=False`，8 组冲突无法在线取证 | 保留 fail-closed；取得 Expert 能力或供应商 revision 后再修原表和 valuation |
+| 指数在线核源 | 7 个指数、8,477 行在线 TickFlow 与本地逐 OHLCVA 字段一致；第一轮 EasyTDX/BaoStock 修复 485 个键；第二轮 EasyTDX+Baidu/Tencent 共识确认剩余 350 个键 | BaoStock 当前环境超时、Eastmoney 当前网络 `RemoteDisconnected`，均 fail-closed；不影响已确认键发布 |
+| 指数确认值替换 | repair `20260802T025013Z-a0fadefe` 修复首轮 485 键；repair `20260802T040305Z-83278ab8` 修复剩余 350 键。最终两表各 704,552 行/唯一键不变，质量门禁异常 0，第二轮每表改 690 个字段值 | 两轮均有 shadow rebuild、manifest、证据 hash、发布 hash 和回滚目录；第二轮证据 hash `2fb2016e48b8739655fe61ed4a60d0a1e5d6b4c58b87be4d09b6176763202de5` |
+| 财务在线核源 | A-Stock-Data/Sina 当前值只读核对 8 组冲突：6 组完整数值佐证、2 组部分佐证、0 组可修 | 保留 fail-closed；缺少公告 revision/update 元数据，取得供应商修订证据后再修原表和 valuation |
 
 本轮数据执行前确认 `3011`、`3018` 无监听进程；没有调用 EasyTDX/开盘啦在线 collector。龙虎榜修复从已有 72 份归档重建，执行窗口内 `data/` 新 mtime 仅出现在该表的 `config.json`、`part.parquet` 和 `repair-manifest.json`；备份文件 hash 与修复前活动文件逐字节一致。指数替换同样在应用无监听时执行，只读取已冻结的 `/tmp` 证据；EasyTDX/BaoStock 证据 hash 分别为 `e587fccb...9273`、`765a7c9c...14c0`，日线源/发布 tree hash 为 `a3b656f2...8283`/`8013d688...af42`，enriched 为 `416ba906...5872`/`fe0df042...bdab`，两个备份复核与源 hash 一致。`TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP=1` 已随本轮实现落地，但它只跳过启动首拉，不禁用到点 cron。

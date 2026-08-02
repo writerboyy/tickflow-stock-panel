@@ -84,16 +84,17 @@ def test_crosscheck_rejects_anomalous_easy_tdx_as_both_anomalous() -> None:
 
 def test_index_quality_failure_includes_crosscheck_summary(monkeypatch) -> None:
     monkeypatch.setattr(
-        "app.services.index_crosscheck.crosscheck_index_daily",
+        "app.services.index_consensus.crosscheck_index_daily_consensus",
         lambda _rows: {
             "status": "complete",
             "requested_rows": 1,
-            "matched_rows": 1,
-            "status_counts": {"tickflow_anomaly_confirmed": 1},
+            "confirmed_rows": 1,
+            "sources": {},
+            "status_counts": {"replacement_confirmed": 1},
         },
     )
 
-    with pytest.raises(IndexDailyQualityError, match="tickflow_anomaly_confirmed=1"):
+    with pytest.raises(IndexDailyQualityError, match="replacement_confirmed=1"):
         index_sync._validate_index_daily_with_crosscheck(pl.DataFrame([_row()]))
 
 
@@ -105,7 +106,7 @@ def test_missing_tickflow_fields_do_not_trigger_crosscheck(monkeypatch) -> None:
         called = True
         return {}
 
-    monkeypatch.setattr("app.services.index_crosscheck.crosscheck_index_daily", crosscheck)
+    monkeypatch.setattr("app.services.index_consensus.crosscheck_index_daily_consensus", crosscheck)
 
     with pytest.raises(IndexDailyQualityError, match="缺少字段"):
         index_sync._validate_index_daily_with_crosscheck(pl.DataFrame({"symbol": ["000001.SH"]}))

@@ -157,6 +157,82 @@ def _load_replacements(
     }
 
 
+def _load_consensus_replacements(
+    evidence_path: Path,
+    *,
+    expected_rows: int,
+) -> tuple[dict[tuple[str, date], dict[str, Any]], dict[str, Any]]:
+    evidence = _read_json(evidence_path)
+    if evidence.get("schema_version") != 2:
+        raise ValueError("multi-source repair evidence must use schema version 2")
+    rows = evidence.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("multi-source repair evidence has no rows list")
+    replacements: dict[tuple[str, date], dict[str, Any]] = {}
+    for item in rows:
+        if item.get("status") != "replacement_confirmed":
+            continue
+        symbol = str(item.get("symbol") or "")
+        trade_date = date.fromisoformat(str(item.get("date")))
+        key = symbol, trade_date
+        if not symbol or key in replacements:
+            raise ValueError("multi-source repair evidence contains an invalid or duplicate key")
+        source = item.get("tickflow")
+        replacement = item.get("replacement")
+        references = item.get("references")
+        consensus = item.get("field_consensus")
+        changed_fields = item.get("changed_fields")
+        if not all(isinstance(value, dict) for value in (source, replacement, references, consensus)):
+            raise ValueError(f"multi-source repair evidence is incomplete for {symbol}/{trade_date}")
+        if not isinstance(changed_fields, list) or not changed_fields:
+            raise ValueError(f"multi-source repair has no changed fields for {symbol}/{trade_date}")
+        changes = set(changed_fields)
+        unknown = sorted(changes - set(_ANOMALY_FIELDS.values()))
+        if unknown:
+            raise ValueError(f"unsupported consensus repair fields for {symbol}/{trade_date}: {unknown}")
+        for field in _FIELDS:
+            if source.get(field) is None:
+                raise ValueError(f"multi-source repair is missing TickFlow {field}")
+        for field in changes:
+            field_evidence = consensus.get(field)
+            agreeing = field_evidence.get("sources") if isinstance(field_evidence, dict) else None
+            if not isinstance(agreeing, list) or len(set(agreeing)) < 2:
+                raise ValueError(f"consensus repair has insufficient evidence for {field}")
+            if replacement.get(field) is None or not _same(
+                replacement[field], field_evidence.get("value")
+            ):
+                raise ValueError(f"multi-source repair replacement differs from consensus for {field}")
+        uses_uint32_recovery = any(
+            "tickflow_uint32_recovery" in consensus[field]["sources"] for field in changes
+        )
+        replacements[key] = {
+            "source": {field: float(source[field]) for field in _FIELDS},
+            "replacement": {
+                field: float(replacement[field]) if field in changes else None
+                for field in ("volume", "amount")
+            },
+            "changed_fields": sorted(changes),
+            "evidence_level": (
+                "external_source_plus_exact_uint32_recovery"
+                if uses_uint32_recovery
+                else "multi_source_consensus"
+            ),
+            "references": references,
+            "field_consensus": {field: consensus[field] for field in sorted(changes)},
+            "related_corrupt_fields": item.get("related_corrupt_fields") or [],
+        }
+    if len(replacements) != expected_rows:
+        raise ValueError(
+            f"consensus repair row count changed: expected {expected_rows}, got {len(replacements)}"
+        )
+    return replacements, {
+        "consensus_evidence_hash": _file_hash(evidence_path),
+        "reference_sources": evidence.get("sources") or {},
+        "astock_data": evidence.get("astock_data") or {},
+        "derived_evidence": evidence.get("derived_evidence") or {},
+    }
+
+
 def _partition_date(path: Path) -> date:
     return date.fromisoformat(path.parent.name.removeprefix("date="))
 
@@ -262,26 +338,17 @@ def _validate_shadow(
         )
 
 
-def repair_confirmed_index_daily(
+def _repair_index_daily(
     data_dir: Path,
-    evidence_path: Path,
+    replacements: dict[tuple[str, date], dict[str, Any]],
+    evidence_meta: dict[str, Any],
     *,
-    corroboration_path: Path | None = None,
-    expected_rows: int,
-    expected_dual_source_rows: int,
     expected_remaining_rows: int,
+    replacement_source: str,
+    replacement_policy: str,
     apply: bool = False,
 ) -> dict[str, Any]:
-    """Validate or publish replacements for evidence-confirmed index fields."""
     data_dir = Path(data_dir)
-    evidence_path = Path(evidence_path)
-    corroboration_path = Path(corroboration_path) if corroboration_path else None
-    replacements, evidence_meta = _load_replacements(
-        evidence_path,
-        corroboration_path,
-        expected_rows=expected_rows,
-        expected_dual_source_rows=expected_dual_source_rows,
-    )
     replacement_dates = {key[1] for key in replacements}
     repair_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
     shadow_parent = data_dir / f".index-confirmed-repair-{repair_id}"
@@ -340,8 +407,8 @@ def repair_confirmed_index_daily(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": "validated",
             "primary_key": ["symbol", "date"],
-            "replacement_source": "easy_tdx",
-            "replacement_policy": "replace_only_quality_gate_invalid_fields",
+            "replacement_source": replacement_source,
+            "replacement_policy": replacement_policy,
             "confirmed_rows": len(replacements),
             "changed_field_values_per_table": sum(
                 len(value["changed_fields"]) for value in replacements.values()
@@ -410,6 +477,61 @@ def repair_confirmed_index_daily(
         if all(root.exists() for root in source_roots.values()):
             shutil.rmtree(shadow_parent, ignore_errors=True)
         raise
+
+
+def repair_confirmed_index_daily(
+    data_dir: Path,
+    evidence_path: Path,
+    *,
+    corroboration_path: Path | None = None,
+    expected_rows: int,
+    expected_dual_source_rows: int,
+    expected_remaining_rows: int,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Validate or publish the original EasyTDX-led repair evidence."""
+    evidence_path = Path(evidence_path)
+    corroboration_path = Path(corroboration_path) if corroboration_path else None
+    replacements, evidence_meta = _load_replacements(
+        evidence_path,
+        corroboration_path,
+        expected_rows=expected_rows,
+        expected_dual_source_rows=expected_dual_source_rows,
+    )
+    return _repair_index_daily(
+        Path(data_dir),
+        replacements,
+        evidence_meta,
+        expected_remaining_rows=expected_remaining_rows,
+        replacement_source="easy_tdx",
+        replacement_policy="replace_only_quality_gate_invalid_fields",
+        apply=apply,
+    )
+
+
+def repair_consensus_index_daily(
+    data_dir: Path,
+    evidence_path: Path,
+    *,
+    expected_rows: int,
+    expected_remaining_rows: int,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Validate or publish replacements backed by field-level multi-source consensus."""
+    evidence_path = Path(evidence_path)
+    replacements, evidence_meta = _load_consensus_replacements(
+        evidence_path,
+        expected_rows=expected_rows,
+    )
+    return _repair_index_daily(
+        Path(data_dir),
+        replacements,
+        evidence_meta,
+        expected_remaining_rows=expected_remaining_rows,
+        replacement_source="multi_source_consensus",
+        replacement_policy="replace_consensus_confirmed_anomalous_and_correlated_fields",
+        apply=apply,
+    )
 
 
 def remove_index_repair_shadow(path: Path) -> None:
