@@ -12,11 +12,9 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
-import { PageHeader } from '@/components/PageHeader'
 import { api, type MarketHeatItem, type MarketHeatListKey, type MarketHeatRadar } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { QK } from '@/lib/queryKeys'
-import { useChartTheme } from '@/lib/theme'
 import { useECharts } from './backtest/charts/useECharts'
 
 const VIEW_CONFIG: Array<{
@@ -25,41 +23,44 @@ const VIEW_CONFIG: Array<{
   shortLabel: string
   description: string
   icon: typeof Flame
-  tone: string
+  accent: string
 }> = [
   {
     key: 'hot_day',
     label: '热股榜 · 24小时',
-    shortLabel: '热股 24H',
+    shortLabel: '热股 · 24h',
     description: '同花顺当前热股榜，day 表示 24 小时榜。',
     icon: Flame,
-    tone: 'from-orange-500/20 to-rose-500/10 text-orange-300',
+    accent: 'text-[#ffbd4a]',
   },
   {
     key: 'hot_hour',
     label: '热股榜 · 小时',
-    shortLabel: '热股 小时',
+    shortLabel: '热股 · 1h',
     description: '同花顺当前热股榜小时周期。',
     icon: Flame,
-    tone: 'from-amber-500/20 to-orange-500/10 text-amber-300',
+    accent: 'text-[#f47bff]',
   },
   {
     key: 'skyrocket_day',
     label: '飙升榜 · 24小时',
-    shortLabel: '飙升 24H',
+    shortLabel: '飙升 · 24h',
     description: '同花顺飙升榜，与热股榜排名逻辑不同。',
     icon: Sparkles,
-    tone: 'from-cyan-500/20 to-blue-500/10 text-cyan-300',
+    accent: 'text-[#55d6c8]',
   },
   {
     key: 'skyrocket_hour',
     label: '飙升榜 · 小时',
-    shortLabel: '飙升 小时',
+    shortLabel: '飙升 · 1h',
     description: '同花顺飙升榜小时周期。',
     icon: Sparkles,
-    tone: 'from-sky-500/20 to-violet-500/10 text-sky-300',
+    accent: 'text-[#c06bff]',
   },
 ]
+
+const PANEL = 'rounded-[24px] border border-[#34224d] bg-[#130a21]/88 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur'
+const ROW_PANEL = 'rounded-[18px] border border-[#2c1e40] bg-[#160c25]/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]'
 
 function fmtNumber(value: number | null | undefined, digits = 2) {
   if (value == null || !Number.isFinite(Number(value))) return '--'
@@ -83,11 +84,6 @@ function fmtDateTime(value: string | null | undefined) {
   })
 }
 
-function rankChangeClass(value: number | null | undefined) {
-  if (value == null || value === 0) return 'text-muted'
-  return value > 0 ? 'text-sky-400' : 'text-amber-400'
-}
-
 function fmtRankChange(value: number | null | undefined) {
   if (value == null) return '--'
   if (value > 0) return `+${value}`
@@ -106,15 +102,20 @@ function trendLabel(value: string | null | undefined) {
 
 function directionMeta(direction: string | null | undefined) {
   if (direction === 'improving') {
-    return { label: '名次改善', cls: 'text-sky-300 bg-sky-400/10 border-sky-400/25' }
+    return { label: '名次改善', cls: 'text-[#55d6c8] bg-[#55d6c8]/10 border-[#55d6c8]/30' }
   }
   if (direction === 'weakening') {
-    return { label: '名次回落', cls: 'text-amber-300 bg-amber-400/10 border-amber-400/25' }
+    return { label: '名次回落', cls: 'text-[#ffbd4a] bg-[#ffbd4a]/10 border-[#ffbd4a]/30' }
   }
   if (direction === 'flat') {
-    return { label: '区间持平', cls: 'text-zinc-300 bg-zinc-400/10 border-zinc-400/20' }
+    return { label: '区间持平', cls: 'text-[#d7c8f5] bg-white/5 border-white/10' }
   }
-  return { label: '样本不足', cls: 'text-muted bg-elevated border-border' }
+  return { label: '样本不足', cls: 'text-[#aa9ac7] bg-white/5 border-white/10' }
+}
+
+function rankChangeTone(value: number | null | undefined) {
+  if (value == null || value === 0) return 'text-[#aa9ac7]'
+  return value > 0 ? 'text-[#55d6c8]' : 'text-[#ffbd4a]'
 }
 
 function quantile(values: number[], q: number) {
@@ -124,56 +125,63 @@ function quantile(values: number[], q: number) {
   return sorted[index]
 }
 
-function SummaryCard({ label, value, hint }: { label: string; value: string; hint: string }) {
+function MetricCard({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
-    <div className="rounded-xl border border-border bg-surface/80 px-4 py-3">
-      <div className="text-[11px] text-muted">{label}</div>
-      <div className="mt-1 text-xl font-semibold text-foreground">{value}</div>
-      <div className="mt-1 text-[11px] text-secondary">{hint}</div>
+    <div className={cn(PANEL, 'relative overflow-hidden px-5 py-5')}>
+      <div className="absolute -right-6 -top-10 h-24 w-24 rounded-full bg-[#a855f7]/18" />
+      <div className="relative text-sm font-medium text-[#b8a9d4]">{label}</div>
+      <div className="relative mt-3 text-4xl font-semibold leading-none tracking-tight text-white sm:text-5xl">
+        {value}
+      </div>
+      <div className="relative mt-3 text-sm text-[#a899c1]">{hint}</div>
     </div>
   )
 }
 
 function RankingTable({ items }: { items: MarketHeatItem[] }) {
+  const maxHeat = Math.max(...items.map(item => Number(item.heat) || 0), 1)
+
   return (
-    <div className="overflow-x-auto rounded-xl border border-border bg-surface/80">
-      <table className="min-w-[760px] w-full text-sm">
-        <thead className="bg-elevated/70 text-xs text-muted">
-          <tr>
-            <th className="w-16 px-3 py-2 text-left font-medium">排名</th>
-            <th className="px-3 py-2 text-left font-medium">股票</th>
-            <th className="px-3 py-2 text-right font-medium">热度</th>
-            <th className="px-3 py-2 text-right font-medium">排名变化</th>
-            <th className="px-3 py-2 text-left font-medium">趋势方向</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-border">
-          {items.map(item => (
-            <tr key={item.thscode} className="transition-colors hover:bg-elevated/40">
-              <td className="px-3 py-2 font-mono text-foreground">#{item.rank ?? '--'}</td>
-              <td className="px-3 py-2">
-                <div className="font-medium text-foreground">{item.name || '--'}</div>
-                <div className="font-mono text-[11px] text-muted">{item.thscode}</div>
-              </td>
-              <td className="px-3 py-2 text-right font-mono text-foreground">{fmtNumber(item.heat)}</td>
-              <td className={cn('px-3 py-2 text-right font-mono', rankChangeClass(item.rank_change))}>
-                {fmtRankChange(item.rank_change)}
-              </td>
-              <td className="px-3 py-2">
-                <span className="inline-flex rounded-full border border-border bg-elevated/60 px-2 py-0.5 text-xs text-secondary">
-                  {trendLabel(item.rank_trend)}
-                </span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="space-y-3">
+      {items.map(item => {
+        const heat = Number(item.heat) || 0
+        const width = Math.max(4, Math.min(100, (heat / maxHeat) * 100))
+        return (
+          <div key={item.thscode} className={cn(ROW_PANEL, 'px-5 py-4 transition-colors hover:border-[#c06bff]/45 hover:bg-[#1b0f2d]')}>
+            <div className="grid grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-4">
+              <div className="font-mono text-3xl font-semibold leading-none text-[#d36aff]">
+                #{item.rank ?? '--'}
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-base font-semibold text-white">{item.name || '--'}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-[#aa9ac7]">
+                  <span className="font-mono">{item.thscode}</span>
+                  <span>·</span>
+                  <span>{trendLabel(item.rank_trend)}</span>
+                  <span className={cn('font-mono', rankChangeTone(item.rank_change))}>
+                    {fmtRankChange(item.rank_change)}
+                  </span>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="font-mono text-sm font-semibold text-white">{fmtNumber(item.heat, 0)}</div>
+                <div className="mt-1 text-[11px] text-[#8f7ba9]">热度</div>
+              </div>
+            </div>
+            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[#261a36]">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-[#c06bff] via-[#f47bff] to-[#ffbd4a]"
+                style={{ width: `${width}%` }}
+              />
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
 
 function TrendChart({ data }: { data: MarketHeatRadar }) {
-  const ct = useChartTheme()
   const trends = useMemo(() => Object.values(data.trends), [data.trends])
   const option = useMemo<EChartsOption | null>(() => {
     const dates = Array.from(
@@ -193,6 +201,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
     const yMax = Math.max(focusCap, yMin + 8)
     const folded = rawMax > yMax
     const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
+
     return {
       color: palette,
       animationDuration: 360,
@@ -282,7 +291,7 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
         }
       }),
     }
-  }, [ct, trends])
+  }, [trends])
   const chartRef = useECharts(option, [option])
 
   if (!option) {
@@ -291,13 +300,13 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
 
   const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
   return (
-    <div className="rounded-2xl border border-violet-400/15 bg-[#12091f] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
-      <div className="border-b border-white/10 px-4 py-4">
-        <div className="text-base font-semibold tracking-tight text-white">近 30 日排名轨迹</div>
-        <div className="mt-1 text-xs text-violet-200/60">悬停查看日期与各标的名次，滚轮或双指可探索区间</div>
-        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+    <div className={cn(PANEL, 'overflow-hidden')}>
+      <div className="border-b border-white/10 px-5 py-5">
+        <div className="text-xl font-semibold tracking-tight text-white">近 30 日排名轨迹</div>
+        <div className="mt-1 text-sm text-[#aa9ac7]">悬停查看日期与各标的名次</div>
+        <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2">
           {trends.map((trend, index) => (
-            <div key={trend.thscode} className="flex items-center gap-2 text-xs text-violet-100/78">
+            <div key={trend.thscode} className="flex items-center gap-2 text-sm text-[#c8bce0]">
               <span
                 className="h-2.5 w-2.5 rounded-full"
                 style={{ backgroundColor: palette[index % palette.length] }}
@@ -307,9 +316,52 @@ function TrendChart({ data }: { data: MarketHeatRadar }) {
           ))}
         </div>
       </div>
-      <div className="px-2 pb-3 pt-4">
-        <div ref={chartRef} className="h-72 w-full" />
+      <div className="px-3 pb-4 pt-5">
+        <div ref={chartRef} className="h-[420px] w-full xl:h-[520px]" />
       </div>
+    </div>
+  )
+}
+
+function OverlapPanel({ overlap }: { overlap: MarketHeatRadar['overlaps'][number] | undefined }) {
+  return (
+    <div className={cn(PANEL, 'p-5')}>
+      <div className="flex items-center gap-2">
+        <ArrowDownUp className="h-4 w-4 text-[#c06bff]" />
+        <h3 className="text-base font-semibold text-white">榜单重合度</h3>
+      </div>
+      {overlap ? (
+        <div className="mt-4">
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <div className="text-sm text-[#d9cff0]">{overlap.label}</div>
+              <div className="mt-1 text-sm text-[#9f8bbd]">重合 {overlap.count} 只 · 覆盖 {fmtPct(overlap.ratio)}</div>
+            </div>
+            <div className="font-mono text-3xl font-semibold text-white">{overlap.count}</div>
+          </div>
+          <div className="mt-4 space-y-2">
+            {overlap.items.slice(0, 5).map(item => (
+              <div key={item.thscode} className="flex items-center justify-between gap-3 rounded-2xl border border-[#2b1e3f] bg-[#170d26]/80 px-3 py-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-white">{item.name}</div>
+                  <div className="font-mono text-xs text-[#9f8bbd]">{item.thscode}</div>
+                </div>
+                <div className="text-right text-xs text-[#c8bce0]">
+                  <div>#{item.left.rank ?? '--'} / #{item.right.rank ?? '--'}</div>
+                  <div>热度 {fmtNumber(item.left.heat, 0)} / {fmtNumber(item.right.heat, 0)}</div>
+                </div>
+              </div>
+            ))}
+            {overlap.items.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-[#34224d] px-4 py-5 text-center text-sm text-[#9f8bbd]">
+                当前两类榜单暂无重合股票。
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 text-sm text-[#9f8bbd]">暂无重合度数据。</div>
+      )}
     </div>
   )
 }
@@ -333,200 +385,163 @@ export function MarketHeat() {
     return item.key === 'hot_vs_skyrocket_hour'
   }) ?? data?.overlaps[0]
   const trendRows = data ? Object.values(data.trends) : []
+  const dayOverlap = data?.overlaps.find(item => item.key === 'hot_vs_skyrocket_day')
 
   return (
-    <div className="min-h-full bg-base">
-      <PageHeader
-        title="市场热度与飙升雷达"
-        subtitle="同花顺特色数据"
-        right={(
-          <button
-            onClick={() => query.refetch()}
-            disabled={query.isFetching}
-            className="inline-flex items-center gap-2 rounded-btn border border-border bg-surface px-3 py-1.5 text-xs text-secondary transition-colors hover:bg-elevated disabled:opacity-60"
-          >
-            {query.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            刷新
-          </button>
-        )}
-      />
-
-      <main className="space-y-4 p-4 sm:p-5">
-        {query.isLoading && (
-          <div className="grid min-h-[360px] place-items-center rounded-xl border border-border bg-surface">
-            <div className="flex items-center gap-2 text-sm text-muted">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              正在读取同花顺热股与飙升榜…
+    <div className="min-h-full overflow-hidden bg-[#07040d] text-[#f7f1ff]">
+      <main className="relative px-4 py-6 sm:px-6 lg:px-8">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_78%_6%,rgba(126,34,206,0.34),transparent_32%),radial-gradient(circle_at_16%_0%,rgba(236,72,153,0.16),transparent_26%),linear-gradient(180deg,#160823_0%,#07040d_34%,#090510_100%)]" />
+        <div className="relative mx-auto max-w-[1680px] space-y-6">
+          <section className="pt-2 sm:pt-4">
+            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="inline-flex w-fit items-center gap-2 rounded-full border border-[#34224d] bg-[#130a21]/86 px-3 py-1.5 text-sm text-[#c8bce0]">
+                <span className="h-2 w-2 rounded-full bg-[#ef4444] shadow-[0_0_18px_rgba(239,68,68,0.9)]" />
+                同花顺/Fuyao · 当前快照
+              </div>
+              <button
+                onClick={() => query.refetch()}
+                disabled={query.isFetching}
+                className="inline-flex w-fit items-center gap-2 rounded-full border border-[#5b3b7a] bg-[#171024]/80 px-4 py-2 text-sm font-medium text-[#f4edff] transition-colors hover:border-[#c06bff] hover:bg-[#211333] disabled:opacity-60"
+              >
+                {query.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                刷新
+              </button>
             </div>
-          </div>
-        )}
 
-        {query.isError && (
-          <EmptyState
-            icon={AlertTriangle}
-            title="热榜数据暂不可用"
-            hint={query.error instanceof Error ? query.error.message : '请检查同花顺/Fuyao API Key 和网络连接。'}
-          />
-        )}
-
-        {data && activeList && (
-          <>
-            <section className="overflow-hidden rounded-2xl border border-border bg-surface">
-              <div className={cn('bg-gradient-to-r px-5 py-4', activeConfig.tone)}>
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                  <div>
-                    <div className="flex items-center gap-2 text-sm font-medium">
-                      <ActiveIcon className="h-4 w-4" />
-                      {activeConfig.label}
-                    </div>
-                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
-                      市场热度与飙升雷达
-                    </h2>
-                    <p className="mt-1 max-w-3xl text-sm text-secondary">{activeConfig.description}</p>
-                  </div>
-                  <div className="text-xs text-muted lg:text-right">
-                    <div>榜单时间：{fmtDateTime(activeList.timestamp_iso)}</div>
-                    <div>生成时间：{fmtDateTime(data.generated_at)}</div>
-                  </div>
+            <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-end">
+              <div>
+                <div className={cn('mb-3 flex items-center gap-2 text-sm font-semibold', activeConfig.accent)}>
+                  <ActiveIcon className="h-4 w-4" />
+                  {activeConfig.label}
                 </div>
+                <h1 className="max-w-5xl text-5xl font-semibold leading-[0.96] tracking-tight text-white sm:text-6xl xl:text-7xl">
+                  市场热度与<span className="text-[#d36aff]">飙升雷达</span>
+                </h1>
+                <p className="mt-6 max-w-4xl text-lg font-medium leading-relaxed text-[#b7a9cf] sm:text-xl">
+                  用排名速度、榜单重合和多标的轨迹观察关注度变化，不把热度与飙升合成投资评分。
+                </p>
               </div>
-
-              <div className="border-t border-border p-3">
-                <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
-                  {VIEW_CONFIG.map(view => {
-                    const Icon = view.icon
-                    const list = data.lists[view.key]
-                    const active = view.key === activeKey
-                    return (
-                      <button
-                        key={view.key}
-                        onClick={() => setActiveKey(view.key)}
-                        className={cn(
-                          'rounded-xl border px-3 py-3 text-left transition-colors',
-                          active ? 'border-sky-400/40 bg-sky-400/10' : 'border-border bg-elevated/40 hover:bg-elevated',
-                        )}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                            <Icon className="h-4 w-4" />
-                            {view.shortLabel}
-                          </span>
-                          <span className="text-xs text-muted">{list.summary.count} 只</span>
-                        </div>
-                        <div className="mt-2 text-xs text-secondary">
-                          热度峰值 {fmtNumber(list.summary.top_heat)}
-                        </div>
-                      </button>
-                    )
-                  })}
-                </div>
+              <div className="border-l-4 border-[#c06bff] px-6 py-3 text-[#b7a9cf]">
+                <div className="font-semibold text-[#efe8ff]">排名越小越靠前</div>
+                <div className="mt-2 leading-relaxed">榜单热度口径彼此独立</div>
+                <div className="mt-3 text-sm text-[#8f7ba9]">榜单时间：{fmtDateTime(activeList?.timestamp_iso)}</div>
               </div>
-            </section>
+            </div>
+          </section>
 
-            <section className="grid gap-3 md:grid-cols-4">
-              <SummaryCard label="榜单样本" value={`${activeList.summary.count} 只`} hint="接口当前返回数量" />
-              <SummaryCard label="热度峰值" value={fmtNumber(activeList.summary.top_heat)} hint="当前视图最高热度" />
-              <SummaryCard label="平均热度" value={fmtNumber(activeList.summary.avg_heat)} hint="当前榜单算术平均" />
-              <SummaryCard
-                label="排名变化"
-                value={`+${activeList.summary.positive_rank_change_count} / -${activeList.summary.negative_rank_change_count}`}
-                hint="仅展示变化方向，不作为交易信号"
+          {query.isLoading && (
+            <div className={cn(PANEL, 'grid min-h-[360px] place-items-center')}>
+              <div className="flex items-center gap-2 text-sm text-[#b7a9cf]">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                正在读取同花顺热股与飙升榜…
+              </div>
+            </div>
+          )}
+
+          {query.isError && (
+            <div className={cn(PANEL, 'min-h-[360px]')}>
+              <EmptyState
+                icon={AlertTriangle}
+                title="热榜数据暂不可用"
+                hint={query.error instanceof Error ? query.error.message : '请检查同花顺/Fuyao API Key 和网络连接。'}
               />
-            </section>
+            </div>
+          )}
 
-            <section className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.95fr)]">
-              <div className="space-y-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h3 className="text-base font-semibold text-foreground">{activeList.title}</h3>
-                    <p className="text-xs text-muted">统计周期：{activeList.period === 'day' ? '24 小时' : '小时'} · 数据源：{data.source_label}</p>
-                  </div>
-                  <span className="rounded-full border border-border bg-elevated px-2.5 py-1 text-xs text-secondary">
-                    {fmtDateTime(activeList.timestamp_iso)}
-                  </span>
-                </div>
-                {activeList.items.length > 0 ? (
-                  <RankingTable items={activeList.items} />
-                ) : (
-                  <EmptyState icon={Info} title="当前榜单为空" hint="同花顺接口返回了空列表，可能与休市、数据就绪状态或权限有关。" />
-                )}
-              </div>
+          {data && activeList && (
+            <>
+              <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <MetricCard label="24 小时热股" value={fmtNumber(data.lists.hot_day.summary.count, 0)} hint="热股榜样本" />
+                <MetricCard label="24 小时飙升" value={fmtNumber(data.lists.skyrocket_day.summary.count, 0)} hint="排名跃迁样本" />
+                <MetricCard label="双榜重合" value={fmtNumber(dayOverlap?.count, 0)} hint="前 30 名交集" />
+                <MetricCard label="趋势跟踪" value={fmtNumber(trendRows.length, 0)} hint="代表股票 · 近 30 日" />
+              </section>
 
-              <aside className="space-y-4">
-                <div className="rounded-xl border border-border bg-surface/80 p-4">
-                  <div className="flex items-center gap-2">
-                    <ArrowDownUp className="h-4 w-4 text-sky-300" />
-                    <h3 className="text-sm font-semibold text-foreground">榜单重合度</h3>
+              <section className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(380px,0.85fr)]">
+                <div className={cn(PANEL, 'overflow-hidden')}>
+                  <div className="flex flex-col gap-4 border-b border-white/10 px-5 py-5 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h2 className="text-xl font-semibold text-white">热度雷达</h2>
+                      <p className="mt-2 text-sm text-[#aa9ac7]">按榜单与周期切换；排名条按当前视图热度归一。</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:flex">
+                      {VIEW_CONFIG.map(view => {
+                        const active = view.key === activeKey
+                        return (
+                          <button
+                            key={view.key}
+                            onClick={() => setActiveKey(view.key)}
+                            className={cn(
+                              'rounded-xl border px-4 py-2 text-sm font-semibold transition-colors',
+                              active
+                                ? 'border-[#d36aff] bg-[#c06bff]/16 text-white shadow-[0_0_24px_rgba(192,107,255,0.18)]'
+                                : 'border-[#34224d] bg-[#171024]/80 text-[#c8bce0] hover:border-[#7e4fad] hover:text-white',
+                            )}
+                          >
+                            {view.shortLabel}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </div>
-                  {selectedOverlap ? (
-                    <div className="mt-3">
-                      <div className="flex items-end justify-between">
-                        <div>
-                          <div className="text-sm text-foreground">{selectedOverlap.label}</div>
-                          <div className="mt-1 text-xs text-muted">
-                            重合 {selectedOverlap.count} 只 · 覆盖 {fmtPct(selectedOverlap.ratio)}
-                          </div>
-                        </div>
+                  <div className="px-5 py-5">
+                    <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                      <div>
+                        <h3 className="text-lg font-semibold text-white">{activeList.title}</h3>
+                        <p className="mt-1 text-sm text-[#9f8bbd]">{activeConfig.description}</p>
                       </div>
-                      <div className="mt-3 space-y-2">
-                        {selectedOverlap.items.slice(0, 6).map(item => (
-                          <div key={item.thscode} className="rounded-lg border border-border bg-elevated/40 p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-medium text-foreground">{item.name}</div>
-                                <div className="font-mono text-[11px] text-muted">{item.thscode}</div>
-                              </div>
-                              <div className="text-right text-xs text-secondary">
-                                <div>#{item.left.rank ?? '--'} / #{item.right.rank ?? '--'}</div>
-                                <div>热度 {fmtNumber(item.left.heat, 1)} / {fmtNumber(item.right.heat, 1)}</div>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                        {selectedOverlap.items.length === 0 && (
-                          <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted">
-                            当前两类榜单暂无重合股票。
-                          </div>
-                        )}
+                      <div className="text-sm text-[#8f7ba9]">
+                        统计周期：{activeList.period === 'day' ? '24 小时' : '小时'} · {fmtDateTime(activeList.timestamp_iso)}
                       </div>
                     </div>
-                  ) : (
-                    <div className="mt-3 text-sm text-muted">暂无重合度数据。</div>
-                  )}
+                    {activeList.items.length > 0 ? (
+                      <RankingTable items={activeList.items} />
+                    ) : (
+                      <div className={cn(ROW_PANEL, 'min-h-[260px]')}>
+                        <EmptyState icon={Info} title="当前榜单为空" hint="同花顺接口返回了空列表，可能与休市、数据就绪状态或权限有关。" />
+                      </div>
+                    )}
+                  </div>
                 </div>
 
-                <div className="space-y-3">
+                <aside className="space-y-5">
                   <TrendChart data={data} />
-                  <div className="rounded-xl border border-border bg-surface/80 p-3 text-xs leading-relaxed text-muted">
-                    代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；明显低位排名会折叠到图底部，悬停可查看原始名次。
+                  <div className={cn(PANEL, 'p-5')}>
+                    <div className="flex items-start gap-3">
+                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#d36aff]" />
+                      <div className="text-sm leading-relaxed text-[#aa9ac7]">
+                        代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；明显低位排名会折叠到图底部，悬停可查看原始名次。
+                      </div>
+                    </div>
                   </div>
                   <div className="grid gap-2">
                     {trendRows.map(trend => {
                       const meta = directionMeta(trend.analysis.direction)
                       return (
-                        <div key={trend.thscode} className="flex items-center justify-between gap-2 rounded-lg bg-elevated/40 px-3 py-2">
+                        <div key={trend.thscode} className="flex items-center justify-between gap-3 rounded-2xl border border-[#2b1e3f] bg-[#170d26]/80 px-4 py-3">
                           <div className="min-w-0">
-                            <div className="truncate text-sm font-medium text-foreground">{trend.name}</div>
-                            <div className="font-mono text-[11px] text-muted">{trend.thscode}</div>
+                            <div className="truncate text-sm font-semibold text-white">{trend.name}</div>
+                            <div className="font-mono text-xs text-[#9f8bbd]">{trend.thscode}</div>
                           </div>
-                          <span className={cn('shrink-0 rounded-full border px-2 py-0.5 text-xs', meta.cls)}>
+                          <span className={cn('shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium', meta.cls)}>
                             {meta.label}
                           </span>
                         </div>
                       )
                     })}
                   </div>
-                </div>
-              </aside>
-            </section>
+                  <OverlapPanel overlap={selectedOverlap} />
+                </aside>
+              </section>
 
-            <section className="rounded-xl border border-border bg-surface/80 p-4 text-xs leading-relaxed text-secondary">
-              <div>数据源：{data.source_label}。{data.delay_boundary}</div>
-              <div>趋势窗口：{data.trend_window.start_date} 至 {data.trend_window.end_date}，自然日 {data.trend_window.natural_days} 天。</div>
-              <div className="mt-1 text-warning">{data.disclaimer}</div>
-            </section>
-          </>
-        )}
+              <section className={cn(PANEL, 'p-5 text-sm leading-relaxed text-[#aa9ac7]')}>
+                <div>数据源：{data.source_label}。{data.delay_boundary}</div>
+                <div>趋势窗口：{data.trend_window.start_date} 至 {data.trend_window.end_date}，自然日 {data.trend_window.natural_days} 天。</div>
+                <div className="mt-1 text-[#ffbd4a]">{data.disclaimer}</div>
+              </section>
+            </>
+          )}
+        </div>
       </main>
     </div>
   )
