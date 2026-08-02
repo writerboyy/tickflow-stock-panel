@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import polars as pl
+import pytest
 
 from app.plugins.baostock.index_candidates import (
     INDEX_CONSTITUENT_CANDIDATES_TABLE,
@@ -58,6 +59,16 @@ class _FakeBaoStock:
 class _FailingCollector:
     def collect_hs300_snapshots(self, snapshot_dates):
         raise RuntimeError("offline")
+
+
+class _BlacklistedLoginResult:
+    error_code = "10001011"
+    error_msg = "blacklisted"
+
+
+class _BlacklistedBaoStock(_FakeBaoStock):
+    def login(self) -> _BlacklistedLoginResult:
+        return _BlacklistedLoginResult()
 
 
 class _ClosedSocket:
@@ -200,6 +211,16 @@ def test_baostock_socket_wrapper_fails_fast_on_closed_connection():
         raise AssertionError("closed BaoStock socket should fail fast")
 
     assert socket.timeout == 3.0
+
+
+def test_baostock_collector_reports_blacklisted_login_code(tmp_path):
+    collector = BaoStockIndexCandidateCollector(tmp_path, bs_module=_BlacklistedBaoStock())
+
+    with pytest.raises(RuntimeError) as exc:
+        collector.collect_hs300_snapshots([date(2020, 1, 3)])
+
+    assert "error_code=10001011" in str(exc.value)
+    assert "blacklist" in str(exc.value)
 
 
 def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):

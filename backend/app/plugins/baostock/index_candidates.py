@@ -38,6 +38,7 @@ _BAOSTOCK_LOCK = threading.Lock()
 _INDEX_QUERY_METHODS = {
     "000300.SH": "query_hs300_stocks",
 }
+_BAOSTOCK_BLACKLIST_ERROR_CODE = "10001011"
 
 
 class _SocketWithTimeout:
@@ -87,6 +88,15 @@ def _parse_date(value: object) -> date | None:
 
 def _member_code(symbol: str) -> str:
     return symbol.split(".", 1)[0] if "." in symbol else symbol
+
+
+def _login_error_message(login: Any) -> str:
+    error_code = str(getattr(login, "error_code", ""))
+    error_msg = str(getattr(login, "error_msg", ""))
+    message = f"BaoStock login failed: error_code={error_code} error_msg={error_msg}"
+    if error_code == _BAOSTOCK_BLACKLIST_ERROR_CODE:
+        message += "; IP is in BaoStock blacklist, contact BaoStock QQ group administrator"
+    return message
 
 
 def _table_root(data_dir: Path, table: str) -> Path:
@@ -241,9 +251,7 @@ class BaoStockIndexCandidateCollector:
             try:
                 login = bs.login()
                 if getattr(login, "error_code", "0") != "0":
-                    raise RuntimeError(
-                        f"BaoStock login failed: {getattr(login, 'error_msg', '')}"
-                    )
+                    raise RuntimeError(_login_error_message(login))
                 try:
                     query = getattr(bs, method_name)
                     for index, snapshot_date in enumerate(dates):
