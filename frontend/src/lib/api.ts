@@ -632,6 +632,97 @@ export interface LimitLadderResult {
   sealed_counts_down?: { real: number; fake: number; pending: number }
 }
 
+// ===== Market Heat / Skyrocket Radar =====
+export type MarketHeatListKey = 'hot_day' | 'hot_hour' | 'skyrocket_day' | 'skyrocket_hour'
+export type MarketHeatListType = 'hot' | 'skyrocket'
+export type MarketHeatPeriod = 'day' | 'hour'
+
+export interface MarketHeatItem {
+  thscode: string
+  ticker: string
+  name: string
+  rank: number | null
+  heat: number | null
+  rank_change: number | null
+  rank_trend: string
+}
+
+export interface MarketHeatSummary {
+  count: number
+  top_heat: number | null
+  avg_heat: number | null
+  positive_rank_change_count: number
+  negative_rank_change_count: number
+  flat_rank_change_count: number
+  trend_counts: Record<string, number>
+}
+
+export interface MarketHeatList {
+  key: MarketHeatListKey
+  list_type: MarketHeatListType
+  period: MarketHeatPeriod
+  title: string
+  timestamp: number | string | null
+  timestamp_iso: string | null
+  items: MarketHeatItem[]
+  summary: MarketHeatSummary
+}
+
+export interface MarketHeatTrendPoint {
+  thscode: string
+  ticker: string
+  date: string
+  date_ms?: number | null
+  rank: number | null
+}
+
+export interface MarketHeatTrend {
+  thscode: string
+  ticker: string
+  name: string
+  timestamp: number | string | null
+  timestamp_iso: string | null
+  points: MarketHeatTrendPoint[]
+  analysis: {
+    direction: 'improving' | 'weakening' | 'flat' | 'insufficient' | string
+    first_rank: number | null
+    latest_rank: number | null
+    rank_delta: number | null
+    points: number
+  }
+}
+
+export interface MarketHeatOverlapItem {
+  thscode: string
+  ticker: string
+  name: string
+  left: Pick<MarketHeatItem, 'rank' | 'heat' | 'rank_change' | 'rank_trend'>
+  right: Pick<MarketHeatItem, 'rank' | 'heat' | 'rank_change' | 'rank_trend'>
+}
+
+export interface MarketHeatOverlap {
+  key: string
+  label: string
+  left_key: MarketHeatListKey
+  right_key: MarketHeatListKey
+  count: number
+  ratio: number
+  items: MarketHeatOverlapItem[]
+}
+
+export interface MarketHeatRadar {
+  source: string
+  source_label: string
+  generated_at: string
+  delay_boundary: string
+  disclaimer: string
+  trend_window: { start_date: string; end_date: string; natural_days: number }
+  lists: Record<MarketHeatListKey, MarketHeatList>
+  overlaps: MarketHeatOverlap[]
+  trend_targets: MarketHeatItem[]
+  trends: Record<string, MarketHeatTrend>
+}
+
 // ===== Backtest =====
 export interface BacktestResult {
   run_id: string
@@ -1836,6 +1927,8 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+  marketHeatRadar: (trendDays = 30) =>
+    request<MarketHeatRadar>(`/api/market-heat/radar?trend_days=${trendDays}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number) =>

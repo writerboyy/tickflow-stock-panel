@@ -41,6 +41,7 @@ export const QK = {
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
+  marketHeatRadar:      (trendDays: number = 30) => ['market-heat-radar', trendDays] as const,
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,

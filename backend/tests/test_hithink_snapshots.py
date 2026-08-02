@@ -163,6 +163,7 @@ def test_hithink_client_requires_explicit_api_key(monkeypatch):
     monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
     monkeypatch.setattr(hithink_client_module.settings, "hithink_finance_api_key", "")
+    monkeypatch.setattr(hithink_client_module, "_read_credentials_env_api_key", lambda: "")
 
     with pytest.raises(HiThinkAuthError):
         HiThinkClient(api_key="")._api_key()

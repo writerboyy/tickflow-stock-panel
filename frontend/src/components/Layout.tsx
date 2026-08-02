@@ -77,6 +77,7 @@ const nav = [
   { to: '/paper-trading', label: '模拟', icon: WalletCards },
   { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
+  { to: '/market-heat', label: '热股雷达', icon: Sparkles },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
   { to: '/financials', label: '财务分析', icon: FileText },
