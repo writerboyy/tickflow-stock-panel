@@ -30,6 +30,10 @@ _MAX_REASONABLE_INDEX_AMOUNT = 1e15
 class IndexDailyQualityError(ValueError):
     """Raised when provider index bars cannot be safely persisted."""
 
+    def __init__(self, message: str, invalid_rows: pl.DataFrame | None = None) -> None:
+        super().__init__(message)
+        self.invalid_rows = invalid_rows if invalid_rows is not None else pl.DataFrame()
+
 
 def _validate_index_daily(frame: pl.DataFrame) -> pl.DataFrame:
     required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
@@ -60,8 +64,23 @@ def _validate_index_daily(frame: pl.DataFrame) -> pl.DataFrame:
         for row in invalid.select("symbol", "date").unique().sort(["symbol", "date"]).head(8).iter_rows(named=True)
     )
     raise IndexDailyQualityError(
-        "指数日线包含负成交量、异常成交额或非法 OHLC，拒绝发布批次: " + sample
+        "指数日线包含负成交量、异常成交额或非法 OHLC，拒绝发布批次: " + sample,
+        invalid,
     )
+
+
+def _validate_index_daily_with_crosscheck(frame: pl.DataFrame) -> pl.DataFrame:
+    try:
+        return _validate_index_daily(frame)
+    except IndexDailyQualityError as exc:
+        from app.services.index_crosscheck import crosscheck_index_daily, crosscheck_summary
+
+        if exc.invalid_rows.is_empty():
+            raise
+        result = crosscheck_index_daily(exc.invalid_rows)
+        summary = crosscheck_summary(result)
+        logger.error("TickFlow 指数日线异常，EasyTDX 只读核验: %s", summary)
+        raise IndexDailyQualityError(f"{exc}; EasyTDX 核验: {summary}", exc.invalid_rows) from exc
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:
@@ -278,7 +297,7 @@ def sync_and_persist_index_daily(
         )
         if raw.is_empty():
             continue
-        raw = _validate_index_daily(raw)
+        raw = _validate_index_daily_with_crosscheck(raw)
 
         repo.append_index_daily(raw)
         enriched = compute_enriched(raw, factors=None, instruments=None)
