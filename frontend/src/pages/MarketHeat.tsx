@@ -65,8 +65,6 @@ const CHART_PALETTE = ['#FDBA4D', '#C06BFF', '#55D6C8']
 const PRICE_QUERY_DAYS = 45
 const PRICE_DISPLAY_POINTS = 30
 
-type TrendMode = 'rank' | 'price'
-
 function fmtNumber(value: number | null | undefined, digits = 2) {
   if (value == null || !Number.isFinite(Number(value))) return '--'
   return Number(value).toLocaleString('zh-CN', { maximumFractionDigits: digits })
@@ -211,15 +209,15 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
 
 function TrendChart({
   data,
-  mode,
-  onModeChange,
+  showPriceOverlay,
+  onPriceOverlayChange,
   priceRows,
   priceLoading,
   priceError,
 }: {
   data: MarketHeatRadar
-  mode: TrendMode
-  onModeChange: (mode: TrendMode) => void
+  showPriceOverlay: boolean
+  onPriceOverlayChange: (show: boolean) => void
   priceRows: Record<string, KlineRow[]>
   priceLoading: boolean
   priceError: unknown
@@ -227,113 +225,42 @@ function TrendChart({
   const trends = useMemo(() => Object.values(data.trends), [data.trends])
   const priceSeries = useMemo(() => buildPriceSeries(trends, priceRows), [priceRows, trends])
   const option = useMemo<EChartsOption | null>(() => {
-    if (mode === 'price') {
-      const dates = Array.from(
-        new Set(priceSeries.flatMap(series => series.points.map(point => point.date).filter(Boolean))),
-      ).sort()
-      if (!dates.length || !priceSeries.length) return null
-
-      return {
-        color: CHART_PALETTE,
-        animationDuration: 360,
-        animationEasing: 'cubicOut',
-        backgroundColor: 'transparent',
-        grid: { left: 54, right: 18, top: 8, bottom: 34 },
-        tooltip: {
-          trigger: 'axis',
-          backgroundColor: 'rgba(15,8,28,0.96)',
-          borderColor: 'rgba(255,255,255,0.12)',
-          borderWidth: 1,
-          padding: [10, 12],
-          extraCssText: 'border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.35);',
-          textStyle: { color: '#F8F5FF', fontSize: 12 },
-          formatter: (params: any) => {
-            const rows = Array.isArray(params) ? params : [params]
-            const date = rows[0]?.axisValue ?? ''
-            const body = rows.map((row: any) => {
-              const marker = row?.marker ?? ''
-              const close = row?.data?.close
-              const value = Number(row?.value)
-              return marker + row.seriesName + ': ¥' + fmtNumber(close, 2)
-                + ' · ' + (Number.isFinite(value) ? fmtNumber(value, 1) : '--')
-            }).join('<br/>')
-            return '<div style="font-weight:600;margin-bottom:6px">' + date + '</div>' + body
-          },
-        },
-        xAxis: {
-          type: 'category',
-          data: dates,
-          boundaryGap: false,
-          axisLabel: { color: 'rgba(232,224,255,0.62)', fontSize: 11, hideOverlap: true },
-          axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
-          axisTick: { show: false },
-        },
-        yAxis: {
-          type: 'value',
-          scale: true,
-          axisLabel: {
-            color: 'rgba(232,224,255,0.64)',
-            fontSize: 11,
-            formatter: (value: number) => fmtNumber(value, 0),
-          },
-          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
-          axisLine: { show: false },
-          axisTick: { show: false },
-        },
-        dataZoom: [
-          { type: 'inside', throttle: 60, zoomOnMouseWheel: true, moveOnMouseMove: true },
-        ],
-        series: priceSeries.map((series, index) => {
-          const color = CHART_PALETTE[index % CHART_PALETTE.length]
-          const byDate = new Map(series.points.map(point => [point.date, point]))
-          return {
-            name: series.name || series.ticker,
-            type: 'line',
-            smooth: 0.25,
-            showSymbol: false,
-            symbol: 'circle',
-            symbolSize: 6,
-            connectNulls: false,
-            data: dates.map(date => {
-              const point = byDate.get(date)
-              return point
-                ? { value: Number(point.index.toFixed(2)), close: point.close, date: point.date }
-                : null
-            }),
-            lineStyle: {
-              width: 2.6,
-              color,
-              shadowBlur: 8,
-              shadowColor: color + '55',
-            },
-            itemStyle: { color },
-            emphasis: {
-              focus: 'series',
-              lineStyle: { width: 3.2 },
-              itemStyle: { borderWidth: 2, borderColor: '#fff' },
-            },
-          }
-        }),
-      }
-    }
-
-    const dates = Array.from(
+    const rankDates = Array.from(
       new Set(trends.flatMap(trend => trend.points.map(point => point.date).filter(Boolean))),
     ).sort()
-    if (!dates.length || !trends.length) return null
+    if (!rankDates.length || !trends.length) return null
     const ranks = trends
       .flatMap(trend => trend.points.map(point => point.rank))
       .filter((rank): rank is number => rank != null && Number.isFinite(rank))
     if (!ranks.length) return null
+    const priceDates = showPriceOverlay
+      ? priceSeries.flatMap(series => series.points.map(point => point.date).filter(Boolean))
+      : []
+    const dates = Array.from(new Set([...rankDates, ...priceDates])).sort()
     const rawMax = Math.max(...ranks)
     const yMax = Math.max(32, 2 ** Math.ceil(Math.log2(rawMax + 1)))
+    const priceYAxis = showPriceOverlay ? [{
+      type: 'value' as const,
+      scale: true,
+      position: 'right' as const,
+      name: '股价=100',
+      nameTextStyle: { color: 'rgba(232,224,255,0.48)', fontSize: 11 },
+      axisLabel: {
+        color: 'rgba(232,224,255,0.48)',
+        fontSize: 11,
+        formatter: (value: number) => fmtNumber(value, 0),
+      },
+      splitLine: { show: false },
+      axisLine: { show: false },
+      axisTick: { show: false },
+    }] : []
 
     return {
       color: CHART_PALETTE,
       animationDuration: 360,
       animationEasing: 'cubicOut',
       backgroundColor: 'transparent',
-      grid: { left: 54, right: 18, top: 8, bottom: 34 },
+      grid: { left: 54, right: showPriceOverlay ? 52 : 18, top: 8, bottom: 34 },
       tooltip: {
         trigger: 'axis',
         backgroundColor: 'rgba(15,8,28,0.96)',
@@ -347,6 +274,11 @@ function TrendChart({
           const date = rows[0]?.axisValue ?? ''
           const body = rows.map((row: any) => {
             const marker = row?.marker ?? ''
+            if (row?.data?.close != null) {
+              const value = Number(row?.value)
+              return marker + row.seriesName + ': ¥' + fmtNumber(row.data.close, 2)
+                + ' · ' + (Number.isFinite(value) ? fmtNumber(value, 1) : '--')
+            }
             return marker + row.seriesName + ': 第 ' + (row?.value ?? '--') + ' 名'
           }).join('<br/>')
           return '<div style="font-weight:600;margin-bottom:6px">' + date + '</div>' + body
@@ -360,54 +292,91 @@ function TrendChart({
         axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
         axisTick: { show: false },
       },
-      yAxis: {
-        type: 'log',
-        logBase: 2,
-        inverse: true,
-        min: 1,
-        max: yMax,
-        splitNumber: 6,
-        axisLabel: {
-          color: 'rgba(232,224,255,0.64)',
-          fontSize: 11,
-          formatter: (value: number) => '#' + Math.round(value),
+      yAxis: [
+        {
+          type: 'log',
+          logBase: 2,
+          inverse: true,
+          min: 1,
+          max: yMax,
+          splitNumber: 6,
+          axisLabel: {
+            color: 'rgba(232,224,255,0.64)',
+            fontSize: 11,
+            formatter: (value: number) => '#' + Math.round(value),
+          },
+          splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+          minorSplitLine: { show: false },
+          axisLine: { show: false },
+          axisTick: { show: false },
         },
-        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
-        minorSplitLine: { show: false },
-        axisLine: { show: false },
-        axisTick: { show: false },
-      },
+        ...priceYAxis,
+      ],
       dataZoom: [
         { type: 'inside', throttle: 60, zoomOnMouseWheel: true, moveOnMouseMove: true },
       ],
-      series: trends.map((trend, index) => {
-        const color = CHART_PALETTE[index % CHART_PALETTE.length]
-        const byDate = new Map(trend.points.map(point => [point.date, point.rank]))
-        return {
-          name: trend.name || trend.ticker,
-          type: 'line',
-          smooth: 0.25,
-          showSymbol: false,
-          symbol: 'circle',
-          symbolSize: 6,
-          connectNulls: false,
-          data: dates.map(date => byDate.get(date) ?? null),
-          lineStyle: {
-            width: 2.6,
-            color,
-            shadowBlur: 8,
-            shadowColor: color + '55',
-          },
-          itemStyle: { color },
-          emphasis: {
-            focus: 'series',
-            lineStyle: { width: 3.2 },
-            itemStyle: { borderWidth: 2, borderColor: '#fff' },
-          },
-        }
-      }),
+      series: [
+        ...trends.map((trend, index) => {
+          const color = CHART_PALETTE[index % CHART_PALETTE.length]
+          const byDate = new Map(trend.points.map(point => [point.date, point.rank]))
+          return {
+            name: trend.name || trend.ticker,
+            type: 'line' as const,
+            smooth: 0.25,
+            yAxisIndex: 0,
+            showSymbol: false,
+            symbol: 'circle',
+            symbolSize: 6,
+            connectNulls: false,
+            data: dates.map(date => byDate.get(date) ?? null),
+            lineStyle: {
+              width: 2.6,
+              color,
+              shadowBlur: 8,
+              shadowColor: color + '55',
+            },
+            itemStyle: { color },
+            emphasis: {
+              focus: 'series' as const,
+              lineStyle: { width: 3.2 },
+              itemStyle: { borderWidth: 2, borderColor: '#fff' },
+            },
+          }
+        }),
+        ...(showPriceOverlay ? priceSeries.map((series, index) => {
+          const color = CHART_PALETTE[index % CHART_PALETTE.length]
+          const byDate = new Map(series.points.map(point => [point.date, point]))
+          return {
+            name: (series.name || series.ticker) + ' 股价',
+            type: 'line' as const,
+            smooth: 0.25,
+            yAxisIndex: 1,
+            showSymbol: false,
+            symbol: 'circle',
+            symbolSize: 5,
+            connectNulls: false,
+            data: dates.map(date => {
+              const point = byDate.get(date)
+              return point
+                ? { value: Number(point.index.toFixed(2)), close: point.close, date: point.date }
+                : null
+            }),
+            lineStyle: {
+              width: 1.8,
+              type: 'dashed' as const,
+              opacity: 0.72,
+              color,
+            },
+            itemStyle: { color },
+            emphasis: {
+              focus: 'series' as const,
+              lineStyle: { width: 2.6, opacity: 1 },
+            },
+          }
+        }) : []),
+      ],
     }
-  }, [mode, priceSeries, trends])
+  }, [priceSeries, showPriceOverlay, trends])
   const emptyOption = useMemo<EChartsOption>(() => ({
     backgroundColor: 'transparent',
     grid: { left: 54, right: 18, top: 8, bottom: 34 },
@@ -427,50 +396,35 @@ function TrendChart({
   }), [])
   const chartRef = useECharts(option ?? emptyOption, [option, emptyOption])
 
-  const title = mode === 'rank' ? '近 30 日排名轨迹' : '近 30 个交易日股价走势'
-  const subtitle = mode === 'rank'
-    ? '对数排名轴展示低位名次，悬停查看真实排名；滚轮/触控可缩放区间'
-    : '收盘价首个可用交易日=100，悬停查看真实价格；滚轮/触控可缩放区间'
-  const emptyTitle = mode === 'price'
-    ? (priceLoading ? '正在读取股价走势' : '暂无股价走势')
-    : '暂无排名轨迹'
-  const emptyHint = mode === 'price'
-    ? (priceError instanceof Error
-        ? priceError.message
-        : '当前代表股票暂未返回可绘制的本地日 K 收盘价。')
-    : '热股榜前三名暂未返回可绘制的近 30 日排名数据。'
+  const priceOverlayHint = priceError instanceof Error
+    ? priceError.message
+    : '当前代表股票暂未返回可叠加的本地日 K 收盘价。'
 
   return (
     <div className={cn(PANEL, 'overflow-hidden')}>
       <div className="border-b border-white/10 px-5 py-5">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <div className="text-xl font-semibold tracking-tight text-white">{title}</div>
-            <div className="mt-1 text-sm text-[#aa9ac7]">{subtitle}</div>
+            <div className="text-xl font-semibold tracking-tight text-white">个股热度排名轨迹</div>
+            <div className="mt-1 text-sm text-[#aa9ac7]">
+              对数排名轴展示低位名次；可按需叠加股价，右轴为首个可用交易日=100
+            </div>
           </div>
-          <div className="inline-flex w-fit rounded-full border border-[#3a2852] bg-[#0f081a]/80 p-1">
-            {([
-              ['rank', '排名'],
-              ['price', '股价'],
-            ] as const).map(([nextMode, label]) => {
-              const active = mode === nextMode
-              return (
-                <button
-                  key={nextMode}
-                  type="button"
-                  onClick={() => onModeChange(nextMode)}
-                  className={cn(
-                    'rounded-full px-3 py-1.5 text-xs font-semibold transition-colors',
-                    active
-                      ? 'bg-[#c06bff] text-white shadow-[0_0_18px_rgba(192,107,255,0.35)]'
-                      : 'text-[#b8a9d4] hover:bg-white/5 hover:text-white',
-                  )}
-                >
-                  {label}
-                </button>
-              )
-            })}
-          </div>
+          <button
+            type="button"
+            onClick={() => onPriceOverlayChange(!showPriceOverlay)}
+            className={cn(
+              'inline-flex w-fit items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold transition-colors',
+              showPriceOverlay
+                ? 'border-[#c06bff] bg-[#c06bff]/18 text-white shadow-[0_0_18px_rgba(192,107,255,0.28)]'
+                : 'border-[#3a2852] bg-[#0f081a]/80 text-[#b8a9d4] hover:border-[#7e4fad] hover:text-white',
+            )}
+          >
+            {showPriceOverlay && priceLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (
+              <span className={cn('h-2.5 w-2.5 rounded-full', showPriceOverlay ? 'bg-[#55d6c8]' : 'bg-[#5f4b78]')} />
+            )}
+            叠加股价
+          </button>
         </div>
         <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2">
           {trends.map((trend, index) => {
@@ -484,7 +438,7 @@ function TrendChart({
                   style={{ backgroundColor: CHART_PALETTE[index % CHART_PALETTE.length] }}
                 />
                 <span>{trend.name || trend.ticker}</span>
-                {mode === 'price' && latest && (
+                {showPriceOverlay && latest && (
                   <>
                     <span className="font-mono text-[#efe8ff]">¥{fmtNumber(latest.close, 2)}</span>
                     <span className={cn('font-mono text-xs', rankChangeTone(priceReturn))}>
@@ -495,7 +449,15 @@ function TrendChart({
               </div>
             )
           })}
+          {showPriceOverlay && (
+            <div className="text-xs text-[#8f7ba9]">实线=排名 · 虚线=股价</div>
+          )}
         </div>
+        {showPriceOverlay && !priceLoading && (!priceSeries.length || !!priceError) && (
+          <div className="mt-3 rounded-2xl border border-[#ffbd4a]/20 bg-[#ffbd4a]/8 px-3 py-2 text-xs text-[#ffcf77]">
+            {priceOverlayHint}
+          </div>
+        )}
       </div>
       <div className="px-3 pb-4 pt-5">
         <div className="relative h-[420px] w-full xl:h-[520px]">
@@ -503,9 +465,9 @@ function TrendChart({
           {!option && (
             <div className="absolute inset-0 grid place-items-center px-6 text-center">
               <EmptyState
-                icon={priceLoading ? Loader2 : TrendingUp}
-                title={emptyTitle}
-                hint={emptyHint}
+                icon={TrendingUp}
+                title="暂无排名轨迹"
+                hint="热股榜前三名暂未返回可绘制的近 30 日排名数据。"
               />
             </div>
           )}
@@ -560,7 +522,7 @@ function OverlapPanel({ overlap }: { overlap: MarketHeatRadar['overlaps'][number
 
 export function MarketHeat() {
   const [activeKey, setActiveKey] = useState<MarketHeatListKey>('hot_day')
-  const [trendMode, setTrendMode] = useState<TrendMode>('rank')
+  const [showPriceOverlay, setShowPriceOverlay] = useState(false)
   const query = useQuery({
     queryKey: QK.marketHeatRadar(30),
     queryFn: () => api.marketHeatRadar(30),
@@ -586,7 +548,7 @@ export function MarketHeat() {
   const priceQuery = useQuery({
     queryKey: QK.marketHeatPriceTrend(trendSymbolKey, PRICE_QUERY_DAYS),
     queryFn: () => api.klineDailyBatch(trendSymbols, PRICE_QUERY_DAYS),
-    enabled: trendSymbols.length > 0,
+    enabled: showPriceOverlay && trendSymbols.length > 0,
     staleTime: 5 * 60_000,
     placeholderData: previous => previous,
   })
@@ -606,12 +568,12 @@ export function MarketHeat() {
               <button
                 onClick={() => {
                   query.refetch()
-                  if (trendMode === 'price' && trendSymbols.length > 0) priceQuery.refetch()
+                  if (showPriceOverlay && trendSymbols.length > 0) priceQuery.refetch()
                 }}
-                disabled={query.isFetching || (trendMode === 'price' && priceQuery.isFetching)}
+                disabled={query.isFetching || (showPriceOverlay && priceQuery.isFetching)}
                 className="inline-flex w-fit items-center gap-2 rounded-full border border-[#5b3b7a] bg-[#171024]/80 px-4 py-2 text-sm font-medium text-[#f4edff] transition-colors hover:border-[#c06bff] hover:bg-[#211333] disabled:opacity-60"
               >
-                {query.isFetching || (trendMode === 'price' && priceQuery.isFetching) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                {query.isFetching || (showPriceOverlay && priceQuery.isFetching) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                 刷新
               </button>
             </div>
@@ -715,8 +677,8 @@ export function MarketHeat() {
                 <aside className="space-y-5">
                   <TrendChart
                     data={data}
-                    mode={trendMode}
-                    onModeChange={setTrendMode}
+                    showPriceOverlay={showPriceOverlay}
+                    onPriceOverlayChange={setShowPriceOverlay}
                     priceRows={priceQuery.data?.data ?? {}}
                     priceLoading={priceQuery.isFetching}
                     priceError={priceQuery.error}
@@ -725,7 +687,7 @@ export function MarketHeat() {
                     <div className="flex items-start gap-3">
                       <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#d36aff]" />
                       <div className="text-sm leading-relaxed text-[#aa9ac7]">
-                        代表股票取热股榜 24 小时前三。排名轨迹来自同花顺热股历史排名；股价走势来自本地日 K 收盘价并按首个可用交易日归一化，不构成买卖信号。
+                        代表股票取热股榜 24 小时前三。默认只展示同花顺热股历史排名；打开“叠加股价”后，虚线来自本地日 K 收盘价并按首个可用交易日归一化，不构成买卖信号。
                       </div>
                     </div>
                   </div>
