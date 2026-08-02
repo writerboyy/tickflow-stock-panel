@@ -7,12 +7,13 @@ import polars as pl
 from app.plugins.baostock.index_candidates import (
     INDEX_CONSTITUENT_CANDIDATES_TABLE,
     BaoStockIndexCandidateCollector,
+    _SocketWithTimeout,
     normalize_index_constituent_candidates,
     partition_path,
 )
 from app.plugins.pit_history.storage import INDEX_MEMBERSHIP_EVENTS_TABLE, table_path
 from app.services import pit_reference
-from scripts.collect_baostock_hs300_candidates import candidate_dates, main
+from scripts.collect_baostock_hs300_candidates import candidate_dates, main, query_dates
 
 
 class _LoginResult:
@@ -57,6 +58,18 @@ class _FakeBaoStock:
 class _FailingCollector:
     def collect_hs300_snapshots(self, snapshot_dates):
         raise RuntimeError("offline")
+
+
+class _ClosedSocket:
+    def __init__(self) -> None:
+        self.timeout = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def recv(self, size: int) -> bytes:
+        del size
+        return b""
 
 
 def _write_daily_dates(data_dir, dates: list[date]) -> None:
@@ -175,6 +188,20 @@ def test_sync_baostock_candidates_returns_failed_without_partial_claim(tmp_path)
     assert result["errors"] == ["index_constituent_candidates: offline"]
 
 
+def test_baostock_socket_wrapper_fails_fast_on_closed_connection():
+    socket = _ClosedSocket()
+    wrapped = _SocketWithTimeout(socket, 3.0)
+
+    try:
+        wrapped.recv(8192)
+    except ConnectionError as exc:
+        assert "BaoStock socket closed" in str(exc)
+    else:
+        raise AssertionError("closed BaoStock socket should fail fast")
+
+    assert socket.timeout == 3.0
+
+
 def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):
     _write_daily_dates(
         tmp_path,
@@ -235,5 +262,46 @@ def test_collect_baostock_candidates_dry_run_does_not_publish(tmp_path, capsys):
     assert result == 0
     output = capsys.readouterr().out
     assert "candidate_dates=2" in output
+    assert "query_dates=2" in output
     assert "source=local_trading_dates" in output
     assert not (tmp_path / "pit_reference" / "baostock").exists()
+
+
+def test_collect_baostock_candidates_dry_run_skips_existing_and_caps_dates(tmp_path, capsys):
+    _write_daily_dates(
+        tmp_path,
+        [date(2021, 1, 4), date(2021, 1, 5), date(2021, 1, 6)],
+    )
+    existing = partition_path(
+        tmp_path,
+        INDEX_CONSTITUENT_CANDIDATES_TABLE,
+        date(2021, 1, 4),
+    )
+    existing.parent.mkdir(parents=True)
+    pl.DataFrame({"member_symbol": ["000001.SZ"]}).write_parquet(existing)
+
+    selected = query_dates(
+        tmp_path,
+        [date(2021, 1, 4), date(2021, 1, 5), date(2021, 1, 6)],
+        refresh_existing=False,
+    )
+    assert selected == [date(2021, 1, 5), date(2021, 1, 6)]
+
+    result = main([
+        "--data-dir",
+        str(tmp_path),
+        "--start-date",
+        "2021-01-01",
+        "--end-date",
+        "2021-01-06",
+        "--max-dates",
+        "1",
+        "--dry-run",
+    ])
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "candidate_dates=3" in output
+    assert "query_dates=1" in output
+    assert "skipped_existing=1" in output
+    assert "range=2021-01-05..2021-01-05" in output

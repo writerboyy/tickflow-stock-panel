@@ -51,7 +51,8 @@ Examples:
       --allow-incomplete-index
 
     # BaoStock HS300 candidate snapshots for latest five years of local trading dates.
-    uv run python scripts/collect_baostock_hs300_candidates.py --years 5
+    # Existing snapshot partitions are skipped by default; keep this single-process.
+    uv run python scripts/collect_baostock_hs300_candidates.py --years 5 --sleep-seconds 1
 
     # Cached AKShare/Cninfo industry-change export and exchange delisting export.
     uv run python scripts/build_pit_history_from_raw.py \

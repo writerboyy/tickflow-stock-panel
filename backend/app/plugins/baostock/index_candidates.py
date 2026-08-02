@@ -12,6 +12,7 @@ import importlib
 import os
 import socket
 import threading
+import time
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
@@ -39,6 +40,21 @@ _INDEX_QUERY_METHODS = {
 }
 
 
+class _SocketWithTimeout:
+    def __init__(self, value: Any, timeout: float) -> None:
+        self._value = value
+        self._value.settimeout(timeout)
+
+    def recv(self, *args: Any, **kwargs: Any) -> bytes:
+        data = self._value.recv(*args, **kwargs)
+        if data == b"":
+            raise ConnectionError("BaoStock socket closed")
+        return data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._value, name)
+
+
 class _SocketModuleWithTimeout:
     def __init__(self, original: Any, timeout: float) -> None:
         self._original = original
@@ -46,8 +62,7 @@ class _SocketModuleWithTimeout:
 
     def socket(self, *args: Any, **kwargs: Any):
         value = self._original.socket(*args, **kwargs)
-        value.settimeout(self._timeout)
-        return value
+        return _SocketWithTimeout(value, self._timeout)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._original, name)
@@ -176,10 +191,12 @@ class BaoStockIndexCandidateCollector:
         bs_module: Any | None = None,
         *,
         timeout: float = 5.0,
+        query_delay_seconds: float = 0.0,
     ) -> None:
         self.data_dir = Path(data_dir)
         self._bs_module = bs_module
         self._timeout = timeout
+        self._query_delay_seconds = query_delay_seconds
 
     def collect_hs300_snapshots(
         self,
@@ -229,7 +246,7 @@ class BaoStockIndexCandidateCollector:
                     )
                 try:
                     query = getattr(bs, method_name)
-                    for snapshot_date in dates:
+                    for index, snapshot_date in enumerate(dates):
                         result = query(date=snapshot_date.isoformat())
                         rows = _result_rows(result)
                         raw_payloads[snapshot_date.isoformat()] = {
@@ -246,6 +263,8 @@ class BaoStockIndexCandidateCollector:
                         if not frame.is_empty():
                             publish_candidate_snapshot(self.data_dir, snapshot_date, frame)
                             frames.append(frame)
+                        if self._query_delay_seconds > 0 and index < len(dates) - 1:
+                            time.sleep(self._query_delay_seconds)
                 finally:
                     bs.logout()
             finally:

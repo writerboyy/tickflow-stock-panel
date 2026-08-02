@@ -15,7 +15,11 @@ from pathlib import Path
 import polars as pl
 
 from app.config import settings
-from app.plugins.baostock.index_candidates import BaoStockIndexCandidateCollector
+from app.plugins.baostock.index_candidates import (
+    INDEX_CONSTITUENT_CANDIDATES_TABLE,
+    BaoStockIndexCandidateCollector,
+    partition_path,
+)
 
 
 def local_trading_dates(data_dir: Path, start_date: date, end_date: date) -> list[date]:
@@ -61,6 +65,16 @@ def candidate_dates(
     return [], "none"
 
 
+def query_dates(data_dir: Path, dates: Iterable[date], *, refresh_existing: bool) -> list[date]:
+    if refresh_existing:
+        return list(dates)
+    return [
+        item
+        for item in dates
+        if not partition_path(data_dir, INDEX_CONSTITUENT_CANDIDATES_TABLE, item).exists()
+    ]
+
+
 def _date_arg(value: str) -> date:
     return date.fromisoformat(value)
 
@@ -84,6 +98,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         help="Use weekdays when local kline_daily trading dates are unavailable",
     )
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument(
+        "--sleep-seconds",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep between BaoStock date queries",
+    )
+    parser.add_argument("--max-dates", type=int)
+    parser.add_argument(
+        "--refresh-existing",
+        action="store_true",
+        help="Re-query dates whose candidate snapshot partition already exists",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -91,33 +117,51 @@ def main(argv: Iterable[str] | None = None) -> int:
         parser.error("--years must be positive")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.sleep_seconds < 0:
+        parser.error("--sleep-seconds must be non-negative")
+    if args.max_dates is not None and args.max_dates <= 0:
+        parser.error("--max-dates must be positive")
 
     end_date = args.end_date
     start_date = args.start_date or (end_date - timedelta(days=365 * args.years))
-    dates, source = candidate_dates(
+    all_dates, source = candidate_dates(
         args.data_dir,
         start_date=start_date,
         end_date=end_date,
         weekday_fallback=args.weekday_fallback,
     )
-    if not dates:
+    if not all_dates:
         print(
             "candidate_dates=0 source=none "
             "message=no local trading dates; pass --weekday-fallback to use weekdays"
         )
         return 2
+    dates = query_dates(args.data_dir, all_dates, refresh_existing=args.refresh_existing)
+    skipped_existing = len(all_dates) - len(dates)
+    if args.max_dates is not None:
+        dates = dates[: args.max_dates]
+    if not dates:
+        print(
+            f"candidate_dates={len(all_dates)} query_dates=0 source={source} "
+            f"skipped_existing={skipped_existing} message=all candidate snapshots exist"
+        )
+        return 0
     if args.dry_run:
         print(
-            f"candidate_dates={len(dates)} source={source} "
-            f"range={_range_label(dates)} dry_run=true"
+            f"candidate_dates={len(all_dates)} query_dates={len(dates)} source={source} "
+            f"skipped_existing={skipped_existing} range={_range_label(dates)} dry_run=true"
         )
         return 0
 
-    collector = BaoStockIndexCandidateCollector(args.data_dir, timeout=args.timeout)
+    collector = BaoStockIndexCandidateCollector(
+        args.data_dir,
+        timeout=args.timeout,
+        query_delay_seconds=args.sleep_seconds,
+    )
     rows = collector.collect_hs300_snapshots(dates)
     print(
-        f"published_rows={rows} candidate_dates={len(dates)} "
-        f"source={source} range={_range_label(dates)}"
+        f"published_rows={rows} candidate_dates={len(all_dates)} query_dates={len(dates)} "
+        f"source={source} skipped_existing={skipped_existing} range={_range_label(dates)}"
     )
     return 0
 
