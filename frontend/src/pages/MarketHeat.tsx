@@ -117,6 +117,13 @@ function directionMeta(direction: string | null | undefined) {
   return { label: '样本不足', cls: 'text-muted bg-elevated border-border' }
 }
 
+function quantile(values: number[], q: number) {
+  if (!values.length) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * q)))
+  return sorted[index]
+}
+
 function SummaryCard({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
     <div className="rounded-xl border border-border bg-surface/80 px-4 py-3">
@@ -167,82 +174,144 @@ function RankingTable({ items }: { items: MarketHeatItem[] }) {
 
 function TrendChart({ data }: { data: MarketHeatRadar }) {
   const ct = useChartTheme()
+  const trends = useMemo(() => Object.values(data.trends), [data.trends])
   const option = useMemo<EChartsOption | null>(() => {
-    const trends = Object.values(data.trends)
     const dates = Array.from(
       new Set(trends.flatMap(trend => trend.points.map(point => point.date).filter(Boolean))),
     ).sort()
     if (!dates.length || !trends.length) return null
-    const palette = ['#38BDF8', '#F59E0B', '#A78BFA']
+    const ranks = trends
+      .flatMap(trend => trend.points.map(point => point.rank))
+      .filter((rank): rank is number => rank != null && Number.isFinite(rank))
+    if (!ranks.length) return null
+    const rawMax = Math.max(...ranks)
+    const rawMin = Math.min(...ranks)
+    const focusCap = rawMax > 80
+      ? Math.max(42, Math.min(80, Math.ceil((quantile(ranks, 0.72) + 8) / 4) * 4))
+      : Math.ceil((rawMax + 4) / 4) * 4
+    const yMin = Math.max(1, Math.floor(rawMin - 2))
+    const yMax = Math.max(focusCap, yMin + 8)
+    const folded = rawMax > yMax
+    const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
     return {
       color: palette,
-      animation: false,
-      grid: { left: 44, right: 18, top: 24, bottom: 58 },
+      animationDuration: 360,
+      animationEasing: 'cubicOut',
+      backgroundColor: 'transparent',
+      grid: { left: 54, right: 18, top: 8, bottom: 34 },
       tooltip: {
         trigger: 'axis',
-        backgroundColor: ct.tooltipBg,
-        borderColor: ct.tooltipBorder,
-        textStyle: { color: ct.tooltipText },
-        valueFormatter: value => (value == null ? '--' : `第 ${value} 名`),
-      },
-      legend: {
-        top: 0,
-        right: 8,
-        textStyle: { color: ct.text },
-        itemWidth: 10,
-        itemHeight: 8,
+        backgroundColor: 'rgba(15,8,28,0.96)',
+        borderColor: 'rgba(255,255,255,0.12)',
+        borderWidth: 1,
+        padding: [10, 12],
+        extraCssText: 'border-radius:12px;box-shadow:0 18px 40px rgba(0,0,0,.35);',
+        textStyle: { color: '#F8F5FF', fontSize: 12 },
+        formatter: (params: any) => {
+          const rows = Array.isArray(params) ? params : [params]
+          const date = rows[0]?.axisValue ?? ''
+          const body = rows.map((row: any) => {
+            const rawRank = row?.data?.rawRank ?? row?.value
+            const clipped = row?.data?.clipped
+            const marker = row?.marker ?? ''
+            const suffix = clipped ? ' · 低位折叠' : ''
+            return marker + row.seriesName + ': 第 ' + (rawRank ?? '--') + ' 名' + suffix
+          }).join('<br/>')
+          return '<div style="font-weight:600;margin-bottom:6px">' + date + '</div>' + body
+        },
       },
       xAxis: {
         type: 'category',
         data: dates,
-        axisLabel: { color: ct.text, fontSize: 10 },
-        axisLine: { lineStyle: { color: ct.border } },
+        boundaryGap: false,
+        axisLabel: { color: 'rgba(232,224,255,0.62)', fontSize: 11, hideOverlap: true },
+        axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
         axisTick: { show: false },
       },
       yAxis: {
         type: 'value',
         inverse: true,
+        min: yMin,
+        max: yMax,
         minInterval: 1,
-        name: '排名',
-        nameTextStyle: { color: ct.text },
-        axisLabel: { color: ct.text, formatter: '#{value}' },
-        splitLine: { lineStyle: { color: ct.grid } },
+        splitNumber: 4,
+        axisLabel: {
+          color: 'rgba(232,224,255,0.64)',
+          fontSize: 11,
+          formatter: (value: number) => folded && value >= yMax ? '#' + Math.round(yMax) + '+' : '#' + Math.round(value),
+        },
+        splitLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+        axisLine: { show: false },
+        axisTick: { show: false },
       },
       dataZoom: [
-        { type: 'inside', throttle: 60 },
-        {
-          type: 'slider',
-          height: 18,
-          bottom: 18,
-          borderColor: ct.border,
-          fillerColor: ct.zoomFill,
-          handleSize: 12,
-          textStyle: { color: ct.text },
-        },
+        { type: 'inside', throttle: 60, zoomOnMouseWheel: true, moveOnMouseMove: true },
       ],
       series: trends.map((trend, index) => {
+        const color = palette[index % palette.length]
         const byDate = new Map(trend.points.map(point => [point.date, point.rank]))
         return {
-          name: `${trend.name || trend.ticker} ${trend.ticker}`,
+          name: trend.name || trend.ticker,
           type: 'line',
-          smooth: true,
-          symbolSize: 7,
+          smooth: 0.25,
+          showSymbol: false,
+          symbol: 'circle',
+          symbolSize: 6,
           connectNulls: false,
-          data: dates.map(date => byDate.get(date) ?? null),
-          lineStyle: { width: 2 },
-          itemStyle: { color: palette[index % palette.length] },
-          emphasis: { focus: 'series' },
+          data: dates.map(date => {
+            const rank = byDate.get(date)
+            if (rank == null) return null
+            return {
+              value: Math.min(rank, yMax),
+              rawRank: rank,
+              clipped: rank > yMax,
+            }
+          }),
+          lineStyle: {
+            width: 2.6,
+            color,
+            shadowBlur: 8,
+            shadowColor: color + '55',
+          },
+          itemStyle: { color },
+          emphasis: {
+            focus: 'series',
+            lineStyle: { width: 3.2 },
+            itemStyle: { borderWidth: 2, borderColor: '#fff' },
+          },
         }
       }),
     }
-  }, [ct, data])
+  }, [ct, trends])
   const chartRef = useECharts(option, [option])
 
   if (!option) {
     return <EmptyState icon={TrendingUp} title="暂无排名轨迹" hint="热股榜前三名暂未返回可绘制的近 30 日排名数据。" />
   }
 
-  return <div ref={chartRef} className="h-80 w-full" />
+  const palette = ['#FDBA4D', '#C06BFF', '#55D6C8']
+  return (
+    <div className="rounded-2xl border border-violet-400/15 bg-[#12091f] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+      <div className="border-b border-white/10 px-4 py-4">
+        <div className="text-base font-semibold tracking-tight text-white">近 30 日排名轨迹</div>
+        <div className="mt-1 text-xs text-violet-200/60">悬停查看日期与各标的名次，滚轮或双指可探索区间</div>
+        <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2">
+          {trends.map((trend, index) => (
+            <div key={trend.thscode} className="flex items-center gap-2 text-xs text-violet-100/78">
+              <span
+                className="h-2.5 w-2.5 rounded-full"
+                style={{ backgroundColor: palette[index % palette.length] }}
+              />
+              <span>{trend.name || trend.ticker}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="px-2 pb-3 pt-4">
+        <div ref={chartRef} className="h-72 w-full" />
+      </div>
+    </div>
+  )
 }
 
 export function MarketHeat() {
@@ -426,18 +495,12 @@ export function MarketHeat() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-border bg-surface/80 p-4">
-                  <div className="flex items-center gap-2">
-                    <TrendingUp className="h-4 w-4 text-amber-300" />
-                    <h3 className="text-sm font-semibold text-foreground">近 30 日排名轨迹</h3>
+                <div className="space-y-3">
+                  <TrendChart data={data} />
+                  <div className="rounded-xl border border-border bg-surface/80 p-3 text-xs leading-relaxed text-muted">
+                    代表股票取热股榜 24 小时前三。排名数字越小代表榜内位置越靠前；明显低位排名会折叠到图底部，悬停可查看原始名次。
                   </div>
-                  <p className="mt-1 text-xs text-muted">
-                    代表股票取热股榜 24小时前三；名次数字越小代表榜内位置越靠前。
-                  </p>
-                  <div className="mt-3">
-                    <TrendChart data={data} />
-                  </div>
-                  <div className="mt-3 grid gap-2">
+                  <div className="grid gap-2">
                     {trendRows.map(trend => {
                       const meta = directionMeta(trend.analysis.direction)
                       return (
