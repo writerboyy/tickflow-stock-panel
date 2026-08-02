@@ -15,6 +15,10 @@ Important boundaries:
 
 - Historical rows must come from event/history exports. Current snapshots cannot
   be used to fill dates before their snapshot_date.
+- BaoStock `query_hs300_stocks(date=...)` is accepted only as a dated CSI 300
+  constituent candidate snapshot under `pit_reference/baostock`; it is not
+  promoted into `index_membership_events` without separate effective-from/to
+  evidence.
 - effective_to is treated as an exclusive upper bound by backtests:
   effective_from <= trade_date < effective_to.
 - The lifecycle table records only events present in the raw file. A row with

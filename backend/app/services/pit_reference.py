@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ from app.plugins.hithink.storage import (
     INSTRUMENT_LIFECYCLE_TABLE,
     SOURCE as HITHINK_SOURCE,
     THS_SECTOR_CONSTITUENTS_TABLE,
+)
+from app.plugins.baostock.index_candidates import (
+    BaoStockIndexCandidateCollector,
+    INDEX_CONSTITUENT_CANDIDATES_TABLE,
+    SOURCE as BAOSTOCK_SOURCE,
 )
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_EVENTS_TABLE,
@@ -65,14 +71,22 @@ _SNAPSHOT_TABLES: dict[str, dict[str, Any]] = {
     INDEX_CONSTITUENTS_TABLE: {
         "label": "同花顺指数成分快照",
         "symbol_col": "member_symbol",
+        "source": HITHINK_SOURCE,
     },
     THS_SECTOR_CONSTITUENTS_TABLE: {
         "label": "同花顺行业成分快照",
         "symbol_col": "member_symbol",
+        "source": HITHINK_SOURCE,
     },
     INSTRUMENT_LIFECYCLE_TABLE: {
         "label": "同花顺 observed 生命周期",
         "symbol_col": "symbol",
+        "source": HITHINK_SOURCE,
+    },
+    INDEX_CONSTITUENT_CANDIDATES_TABLE: {
+        "label": "BaoStock 沪深300候选快照",
+        "symbol_col": "member_symbol",
+        "source": BAOSTOCK_SOURCE,
     },
 }
 
@@ -203,22 +217,25 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
     }, frame)
 
 
-def _snapshot_root(data_dir: Path, table: str) -> Path:
-    return Path(data_dir) / "pit_reference" / HITHINK_SOURCE / table
+def _snapshot_root(data_dir: Path, table: str, source: str) -> Path:
+    return Path(data_dir) / "pit_reference" / source / table
 
 
 def _snapshot_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> dict[str, Any]:
-    root = _snapshot_root(data_dir, table)
+    source = str(meta.get("source") or HITHINK_SOURCE)
+    root = _snapshot_root(data_dir, table, source)
     partitions = sorted(root.glob("snapshot_date=*/part.parquet"))
     if not partitions:
         return {
             "label": meta["label"],
+            "source": source,
             "rows": 0,
             "latest_snapshot_date": None,
             "earliest_snapshot_date": None,
             "snapshots": 0,
             "symbols_covered": 0,
-            "manifest": _latest_manifest(data_dir, HITHINK_SOURCE, table),
+            "manifest": _latest_manifest(data_dir, source, table),
+            **_snapshot_quality(table),
         }
 
     latest = partitions[-1]
@@ -227,13 +244,29 @@ def _snapshot_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> 
     symbol_col = str(meta["symbol_col"])
     return {
         "label": meta["label"],
+        "source": source,
         "rows": frame.height,
         "latest_snapshot_date": snapshot_dates[-1],
         "earliest_snapshot_date": snapshot_dates[0],
         "snapshots": len(partitions),
         "symbols_covered": int(frame[symbol_col].n_unique()) if symbol_col in frame.columns else 0,
         "provenance_counts": _provenance_counts(frame),
-        "manifest": _latest_manifest(data_dir, HITHINK_SOURCE, table),
+        "manifest": _latest_manifest(data_dir, source, table),
+        **_snapshot_quality(table),
+    }
+
+
+def _snapshot_quality(table: str) -> dict[str, Any]:
+    if table != INDEX_CONSTITUENT_CANDIDATES_TABLE:
+        return {}
+    return {
+        "candidate_source": {
+            "strict_backtest_usable": False,
+            "message": (
+                "BaoStock dated constituents are candidate snapshots; do not use them "
+                "as strict PIT intervals without separate effective-from/to evidence"
+            ),
+        }
     }
 
 
@@ -348,4 +381,33 @@ def sync_hithink_snapshots(
         "tables": tables,
         "published_rows": sum(tables.values()),
         "errors": errors,
+    }
+
+
+def sync_baostock_index_candidates(
+    data_dir: Path,
+    *,
+    snapshot_dates: Iterable[date] | None = None,
+    collector: BaoStockIndexCandidateCollector | None = None,
+) -> dict[str, Any]:
+    dates = tuple(snapshot_dates or (date.today(),))
+    data_dir = Path(data_dir)
+    collector = collector or BaoStockIndexCandidateCollector(data_dir)
+    try:
+        rows = collector.collect_hs300_snapshots(dates)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "source": BAOSTOCK_SOURCE,
+            "tables": {},
+            "published_rows": 0,
+            "errors": [f"{INDEX_CONSTITUENT_CANDIDATES_TABLE}: {exc}"],
+        }
+    return {
+        "status": "published",
+        "source": BAOSTOCK_SOURCE,
+        "snapshot_dates": [item.isoformat() for item in dates],
+        "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: rows},
+        "published_rows": rows,
+        "errors": [],
     }
