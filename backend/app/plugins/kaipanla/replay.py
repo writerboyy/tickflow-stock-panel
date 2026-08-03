@@ -49,7 +49,7 @@ from app.plugins.kaipanla.storage import (
     _normalize_rows,
 )
 from app.services.ext_data import ExtConfigStore
-from app.services.ingestion_manifest import stable_content_hash
+from app.services.ingestion_manifest import load_ingestion_manifest, stable_content_hash
 
 
 _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
@@ -74,6 +74,10 @@ _IGNORED_COMPARE_FIELDS = {
     "post_collected_at",
 }
 _VIRTUAL_PARTITION_FIELDS = {"report_date"}
+_FAIL_CLOSED_FUND_ENDPOINTS = frozenset({
+    "fund_capital_net",
+    "fund_large_order_statistics",
+})
 _EXPECTED_DTYPES = {
     "string": pl.String,
     "int": pl.Int64,
@@ -87,6 +91,28 @@ def _archive_files(root: Path) -> list[Path]:
         path
         for path in root.rglob("*")
         if path.is_file() and (path.name.endswith(".json") or path.name.endswith(".json.gz"))
+    )
+
+
+def _fund_reconciliation_policy(
+    data_dir: Path,
+    endpoint: str,
+    archive_date: date,
+) -> tuple[bool, frozenset[str] | None]:
+    manifest = load_ingestion_manifest(
+        data_dir,
+        "kaipanla",
+        endpoint,
+        archive_date.isoformat(),
+    )
+    expected = manifest.get("expected_batches")
+    expected_batches = (
+        frozenset(str(batch) for batch in expected) if isinstance(expected, list) else None
+    )
+    return (
+        manifest.get("status") == "incomplete"
+        and not int(manifest.get("published_rows") or 0),
+        expected_batches,
     )
 
 
@@ -403,25 +429,42 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
     conflicting_field_updates: dict[str, int] = defaultdict(int)
     errors: list[dict[str, str]] = []
     parser_versions: set[str] = set()
+    fund_policies: dict[tuple[str, date], tuple[bool, frozenset[str] | None]] = {}
 
     for path in files:
         endpoint = path.parent.name
         stats = endpoint_stats[endpoint]
         stats["archives"] += 1
         try:
+            archive_date = _archive_date(path)
             payload, parser_version = _unwrap_archive(_read_json(path))
             if parser_version:
                 parser_versions.add(parser_version)
-            records = _parse_archive(endpoint, payload, _archive_date(path), path)
+            records = _parse_archive(endpoint, payload, archive_date, path)
             stats["parsed_rows"] += len(records)
             if not records:
                 stats["valid_empty"] += 1
-            archive_keys: set[tuple[str, ...]] = set()
+            exclude_archive = False
+            if endpoint in _FAIL_CLOSED_FUND_ENDPOINTS:
+                policy_key = (endpoint, archive_date)
+                if policy_key not in fund_policies:
+                    fund_policies[policy_key] = _fund_reconciliation_policy(
+                        data_dir,
+                        endpoint,
+                        archive_date,
+                    )
+                exclude_all, expected_batches = fund_policies[policy_key]
+                exclude_archive = exclude_all or (
+                    expected_batches is not None
+                    and _code_context(path) not in expected_batches
+                )
+            if exclude_archive:
+                stats["excluded_from_reconciliation"] = (
+                    stats.get("excluded_from_reconciliation", 0) + 1
+                )
+                continue
             for table, partition, row in records:
                 key = _row_key(table, partition, row)
-                if key in archive_keys:
-                    raise ValueError(f"archive contains duplicate primary key: {key}")
-                archive_keys.add(key)
                 current = dict(replay_rows[table].get(key, {}))
                 if current:
                     replay_revisions[table] += 1

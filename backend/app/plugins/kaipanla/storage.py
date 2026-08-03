@@ -462,8 +462,19 @@ def _path_lock(path: Path) -> threading.Lock:
 
 
 def _normalize_rows(rows: list[dict], data_dir: Path) -> list[dict]:
-    codes = [str(row.get("symbol") or row.get("code") or "") for row in rows]
-    normalized = normalize_symbol(pl.Series("symbol", codes), build_code_lookup(data_dir)).to_list()
+    codes = [
+        str(row.get("code") or row.get("symbol") or "").split(".", 1)[0]
+        for row in rows
+    ]
+    lookup = build_code_lookup(data_dir)
+    for code in codes:
+        if len(code) != 6 or not code.isdigit() or code in lookup:
+            continue
+        if code.startswith("900"):
+            lookup[code] = f"{code}.SH"
+        elif code.startswith(("4", "8", "9")):
+            lookup[code] = f"{code}.BJ"
+    normalized = normalize_symbol(pl.Series("symbol", codes), lookup).to_list()
     result = []
     for row, symbol in zip(rows, normalized, strict=True):
         if not symbol:
@@ -500,6 +511,7 @@ def atomic_upsert(data_dir: Path, table_id: str, trade_date: date, rows: list[di
 
     with _path_lock(path):
         existing_rows = pl.read_parquet(path).to_dicts() if path.exists() else []
+        existing_rows = _normalize_rows(existing_rows, data_dir)
         merged = {str(row.get("symbol")): row for row in existing_rows if row.get("symbol")}
         for row in incoming:
             symbol = str(row["symbol"])
@@ -559,6 +571,8 @@ def atomic_upsert_records(
 
     with _path_lock(path):
         existing_rows = pl.read_parquet(path).to_dicts() if path.exists() else []
+        if any("symbol" in row or "code" in row for row in existing_rows):
+            existing_rows = _normalize_rows(existing_rows, data_dir)
         merged = {record_key(row): row for row in existing_rows if all(row.get(field) not in (None, "") for field in key_fields)}
         for row in incoming:
             key = record_key(row)

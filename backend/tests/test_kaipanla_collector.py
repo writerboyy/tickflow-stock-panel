@@ -23,6 +23,7 @@ from app.plugins.kaipanla.storage import (
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
 )
+from app.services.ingestion_manifest import update_ingestion_manifest
 
 
 AUCTION_ROW = [
@@ -385,6 +386,50 @@ async def test_fund_collection_pages_market_flow_and_fans_out_all_stock_codes(tm
 
 
 @pytest.mark.asyncio
+async def test_scheduled_funds_collects_latest_completed_trading_date(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: date(2026, 8, 3))
+    monkeypatch.setattr(
+        collector_module,
+        "recent_trading_dates",
+        lambda _data_dir, _limit: [date(2026, 7, 31), date(2026, 8, 3)],
+    )
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"fund_interval": {"List": []}}, calls),
+    )
+
+    assert await collector._scheduled_funds() == 0
+
+    assert calls == [
+        (
+            "fund_interval",
+            {
+                "DStart": "2026-07-31",
+                "DEnd": "2026-07-31",
+                "Index": 0,
+                "st": 1000,
+            },
+        )
+    ]
+
+
+def test_stock_codes_exclude_symbols_outside_target_trading_window(tmp_path):
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({
+        "code": ["000003", "600126", "603001"],
+        "type": ["stock", "stock", "stock"],
+        "list_date": [date(1991, 1, 14), date(2015, 6, 29), date(2026, 8, 1)],
+        "delist_date": [date(2002, 6, 14), None, None],
+    }).write_parquet(tmp_path / "instruments" / "instruments.parquet")
+
+    collector = KaipanlaCollector(tmp_path)
+
+    assert collector._stock_codes(date(2026, 7, 31)) == ["600126"]
+
+
+@pytest.mark.asyncio
 async def test_northbound_collection_writes_report_period_sector_and_stock_records(tmp_path, monkeypatch):
     _configured(monkeypatch)
     calls = []
@@ -526,6 +571,53 @@ async def test_fund_detail_endpoints_fail_independently(tmp_path, monkeypatch):
     assert capital_manifest["status"] == "incomplete"
     assert capital_manifest["failed_batches"] == ["600126"]
     assert statistics_manifest["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_fund_detail_retries_transient_source_error_at_lower_concurrency(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    (tmp_path / "instruments").mkdir()
+    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
+        tmp_path / "instruments" / "instruments.parquet"
+    )
+    attempts = 0
+
+    def capital_response(_params):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient")
+        return {"trend": [["15:00", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]}
+
+    responses = {
+        "fund_interval": {
+            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
+        },
+        "fund_capital_net": capital_response,
+        "fund_large_order_statistics": {
+            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
+        },
+    }
+    update_ingestion_manifest(
+        tmp_path,
+        "kaipanla",
+        "fund_capital_net",
+        "2026-07-10",
+        status="incomplete",
+        batches={"000003": {"status": "source_error"}},
+    )
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
+
+    await collector.collect_funds(date(2026, 7, 10))
+
+    manifest = json.loads((
+        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+        / "fund_capital_net" / "2026-07-10.json"
+    ).read_text())
+    assert attempts == 2
+    assert manifest["status"] == "complete"
+    assert manifest["failed_batches"] == []
+    assert set(manifest["batches"]) == {"600126"}
 
 
 @pytest.mark.asyncio
@@ -749,12 +841,12 @@ def test_fund_stock_pool_requires_current_code_and_type_schema(tmp_path):
     )
     collector = KaipanlaCollector(tmp_path)
 
-    assert collector._stock_codes() == ["600126"]
+    assert collector._stock_codes(date(2026, 7, 31)) == ["600126"]
 
     pl.DataFrame({"code": ["600126"]}).write_parquet(
         tmp_path / "instruments" / "instruments.parquet"
     )
-    assert collector._stock_codes() == []
+    assert collector._stock_codes(date(2026, 7, 31)) == []
 
 
 def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(

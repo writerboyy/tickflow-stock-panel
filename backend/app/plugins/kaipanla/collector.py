@@ -281,7 +281,16 @@ class KaipanlaCollector:
         return await self._run_safely("auction_catch_up", self.catch_up_auction)
 
     async def _scheduled_funds(self) -> int:
-        return await self._run_safely("funds", self.collect_funds, cn_today())
+        today = cn_today()
+        completed_dates = [
+            trade_date
+            for trade_date in recent_trading_dates(self.data_dir, 60)
+            if trade_date < today
+        ]
+        if not completed_dates:
+            logger.warning("开盘啦资金采集缺少已完成交易日")
+            return 0
+        return await self._run_safely("funds", self.collect_funds, max(completed_dates))
 
     async def _scheduled_northbound(self) -> int:
         return await self._run_safely("northbound", self.collect_northbound)
@@ -296,7 +305,7 @@ class KaipanlaCollector:
             "sector_constituents", self.collect_sector_constituents, cn_today(), self._northbound_plate_ids()
         )
 
-    def _stock_codes(self) -> list[str]:
+    def _stock_codes(self, trade_date: date) -> list[str]:
         path = self.data_dir / "instruments" / "instruments.parquet"
         if not path.exists():
             return []
@@ -307,8 +316,19 @@ class KaipanlaCollector:
             if not {"code", "type"}.issubset(available):
                 logger.warning("开盘啦资金池缺少 code/type 列")
                 return []
-            frame = pl.read_parquet(path, columns=["code", "type"])
+            lifecycle_columns = [
+                column for column in ("list_date", "delist_date") if column in available
+            ]
+            frame = pl.read_parquet(path, columns=["code", "type", *lifecycle_columns])
             frame = frame.filter(pl.col("type") == "stock")
+            if "list_date" in lifecycle_columns:
+                frame = frame.filter(
+                    pl.col("list_date").is_null() | (pl.col("list_date") <= trade_date)
+                )
+            if "delist_date" in lifecycle_columns:
+                frame = frame.filter(
+                    pl.col("delist_date").is_null() | (pl.col("delist_date") > trade_date)
+                )
             return sorted({str(code) for code in frame["code"].to_list() if code})
         except Exception as exc:  # noqa: BLE001
             logger.warning("开盘啦资金池读取失败 (%s)", type(exc).__name__)
@@ -431,99 +451,125 @@ class KaipanlaCollector:
                 schema_version=1,
             )
 
-            codes = self._stock_codes()
+            codes = self._stock_codes(trade_date)
             semaphore = asyncio.Semaphore(16)
             capital_failures: set[str] = set()
             statistics_failures: set[str] = set()
 
-            async def collect_one(code: str) -> tuple[dict | None, dict | None]:
+            async def collect_one(
+                code: str,
+                *,
+                collect_capital: bool = True,
+                collect_statistics: bool = True,
+            ) -> tuple[dict | None, dict | None]:
                 async with semaphore:
                     capital_row: dict | None = None
                     statistics_row: dict | None = None
-                    try:
-                        capital = await client.request(
-                            "fund_capital_net",
-                            {"StockID": code, "Date": trade_date.strftime("%Y-%m-%d")},
-                        )
-                        archive_raw(self.data_dir, "fund_capital_net", trade_date, capital, code)
-                        capital_row = parse_capital_net(capital, code)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            "fund_capital_net",
-                            trade_date.isoformat(),
-                            code,
-                            status="completed",
-                            row_count=1,
-                            content_hash=stable_content_hash(capital_row),
-                            source_content_hash=stable_content_hash(capital),
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=codes,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        capital_failures.add(code)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            "fund_capital_net",
-                            trade_date.isoformat(),
-                            code,
-                            status="source_error",
-                            error_code=type(exc).__name__,
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=codes,
-                        )
-                        logger.warning("开盘啦分时大单采集失败 (%s)", type(exc).__name__)
-                    try:
-                        stats = await client.request(
-                            "fund_large_order_statistics",
-                            {"StockID": code, "Index": 0, "st": 120},
-                        )
-                        archive_raw(
-                            self.data_dir,
-                            "fund_large_order_statistics",
-                            trade_date,
-                            stats,
-                            code,
-                        )
-                        statistics_row = parse_large_order_statistics(stats, code, trade_date)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            "fund_large_order_statistics",
-                            trade_date.isoformat(),
-                            code,
-                            status="completed" if statistics_row else "valid_empty",
-                            row_count=1 if statistics_row else 0,
-                            content_hash=(
-                                stable_content_hash(statistics_row) if statistics_row else None
-                            ),
-                            source_content_hash=stable_content_hash(stats),
-                            empty_reason=None if statistics_row else "valid_empty",
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=codes,
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        statistics_failures.add(code)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            "fund_large_order_statistics",
-                            trade_date.isoformat(),
-                            code,
-                            status="source_error",
-                            error_code=type(exc).__name__,
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=codes,
-                        )
-                        logger.warning("开盘啦日度大单采集失败 (%s)", type(exc).__name__)
+                    if collect_capital:
+                        try:
+                            capital = await client.request(
+                                "fund_capital_net",
+                                {"StockID": code, "Date": trade_date.strftime("%Y-%m-%d")},
+                            )
+                            archive_raw(
+                                self.data_dir, "fund_capital_net", trade_date, capital, code
+                            )
+                            capital_row = parse_capital_net(capital, code)
+                            capital_failures.discard(code)
+                            record_ingestion_batch(
+                                self.data_dir,
+                                "kaipanla",
+                                "fund_capital_net",
+                                trade_date.isoformat(),
+                                code,
+                                status="completed",
+                                row_count=1,
+                                content_hash=stable_content_hash(capital_row),
+                                source_content_hash=stable_content_hash(capital),
+                                parser_version="kaipanla_v1",
+                                schema_version=1,
+                                expected_batches=codes,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            capital_failures.add(code)
+                            record_ingestion_batch(
+                                self.data_dir,
+                                "kaipanla",
+                                "fund_capital_net",
+                                trade_date.isoformat(),
+                                code,
+                                status="source_error",
+                                error_code=type(exc).__name__,
+                                parser_version="kaipanla_v1",
+                                schema_version=1,
+                                expected_batches=codes,
+                            )
+                            logger.warning("开盘啦分时大单采集失败 (%s)", type(exc).__name__)
+                    if collect_statistics:
+                        try:
+                            stats = await client.request(
+                                "fund_large_order_statistics",
+                                {"StockID": code, "Index": 0, "st": 120},
+                            )
+                            archive_raw(
+                                self.data_dir,
+                                "fund_large_order_statistics",
+                                trade_date,
+                                stats,
+                                code,
+                            )
+                            statistics_row = parse_large_order_statistics(
+                                stats, code, trade_date
+                            )
+                            statistics_failures.discard(code)
+                            record_ingestion_batch(
+                                self.data_dir,
+                                "kaipanla",
+                                "fund_large_order_statistics",
+                                trade_date.isoformat(),
+                                code,
+                                status="completed" if statistics_row else "valid_empty",
+                                row_count=1 if statistics_row else 0,
+                                content_hash=(
+                                    stable_content_hash(statistics_row)
+                                    if statistics_row
+                                    else None
+                                ),
+                                source_content_hash=stable_content_hash(stats),
+                                empty_reason=None if statistics_row else "valid_empty",
+                                parser_version="kaipanla_v1",
+                                schema_version=1,
+                                expected_batches=codes,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            statistics_failures.add(code)
+                            record_ingestion_batch(
+                                self.data_dir,
+                                "kaipanla",
+                                "fund_large_order_statistics",
+                                trade_date.isoformat(),
+                                code,
+                                status="source_error",
+                                error_code=type(exc).__name__,
+                                parser_version="kaipanla_v1",
+                                schema_version=1,
+                                expected_batches=codes,
+                            )
+                            logger.warning("开盘啦日度大单采集失败 (%s)", type(exc).__name__)
                     return capital_row, statistics_row
 
-            details = await asyncio.gather(*(collect_one(code) for code in codes))
+            details = list(await asyncio.gather(*(collect_one(code) for code in codes)))
+            retry_codes = sorted(capital_failures | statistics_failures)
+            if retry_codes:
+                semaphore = asyncio.Semaphore(4)
+                details.extend(await asyncio.gather(*(
+                    collect_one(
+                        code,
+                        collect_capital=code in capital_failures,
+                        collect_statistics=code in statistics_failures,
+                    )
+                    for code in retry_codes
+                )))
 
         capital_rows = [row for row, _ in details if row] if not capital_failures else []
         statistics_rows = [row for _, row in details if row] if not statistics_failures else []
@@ -531,6 +577,15 @@ class KaipanlaCollector:
             ("fund_capital_net", capital_failures, capital_rows),
             ("fund_large_order_statistics", statistics_failures, statistics_rows),
         ):
+            current_batches = (
+                load_ingestion_manifest(
+                    self.data_dir,
+                    "kaipanla",
+                    dataset,
+                    trade_date.isoformat(),
+                ).get("batches")
+                or {}
+            )
             update_ingestion_manifest(
                 self.data_dir,
                 "kaipanla",
@@ -540,6 +595,7 @@ class KaipanlaCollector:
                 expected_batches=codes,
                 failed_batches=sorted(failures),
                 published_rows=len(rows),
+                batches={code: current_batches[code] for code in codes},
                 parser_version="kaipanla_v1",
                 schema_version=1,
             )
@@ -900,7 +956,7 @@ class KaipanlaCollector:
     async def collect_shareholder_changes(self, report_date: date) -> int:
         """按报告期采集全 A 股十大流通股东。"""
         semaphore = asyncio.Semaphore(8)
-        codes = self._stock_codes()
+        codes = self._stock_codes(report_date)
         failed_codes: set[str] = set()
 
         async with self._client_factory() as client:

@@ -9,6 +9,7 @@ import polars as pl
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     NORTHBOUND_SECTOR_TABLE,
+    SHAREHOLDER_COUNT_TABLE,
     TABLE_IDS,
     archive_raw,
     atomic_upsert,
@@ -106,6 +107,46 @@ def test_atomic_upsert_records_keeps_multiple_plate_rows(tmp_path):
     assert rows[0]["plate_name"] == "板块甲"
     assert rows[0]["holding_amount"] == 12.5
     assert rows[1]["plate_name"] == "板块乙"
+
+
+def test_atomic_upsert_records_repairs_stale_exchange_suffix(tmp_path):
+    trade_date = date(2026, 6, 30)
+    atomic_upsert_records(
+        tmp_path,
+        SHAREHOLDER_COUNT_TABLE,
+        trade_date,
+        [
+            {"report_date": "2026-06-30", "code": "900916", "symbol": "900916"},
+            {"report_date": "2026-06-30", "code": "920258", "symbol": "920258"},
+        ],
+        ("symbol",),
+    )
+    path = (
+        tmp_path
+        / "ext_data"
+        / SHAREHOLDER_COUNT_TABLE
+        / "timeseries"
+        / "date=2026-06-30"
+        / "part.parquet"
+    )
+    stale = pl.read_parquet(path).with_columns(
+        pl.concat_str(pl.col("code"), pl.lit(".SZ")).alias("symbol")
+    )
+    stale.write_parquet(path)
+
+    atomic_upsert_records(
+        tmp_path,
+        SHAREHOLDER_COUNT_TABLE,
+        trade_date,
+        [{"report_date": "2026-06-30", "code": "600126", "symbol": "600126"}],
+        ("symbol",),
+    )
+
+    assert pl.read_parquet(path).sort("code")["symbol"].to_list() == [
+        "600126.SH",
+        "900916.SH",
+        "920258.BJ",
+    ]
 
 
 def test_archive_raw_defaults_to_gzip_without_storing_request_parameters(tmp_path):
