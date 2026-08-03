@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # 注意:Free 模式 SDK 实际走 free-api(免费数据通道),但 UI 显示统一用默认节点。
 DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
 CUSTOM_DATA_SOURCE_DISABLED_DETAIL = (
-    "用户自定义 HTTP 数据源已禁用；请使用 TickFlow、BaoStock 或内置插件"
+    "用户自定义 HTTP 数据源已禁用；请使用 TickFlow、Tushare、BaoStock 或内置插件"
 )
 
 
@@ -224,6 +224,119 @@ def clear_tickflow_key(request: Request) -> dict:
         "current_endpoint": tf_client.current_endpoint(),
         "capabilities_count": len(capset.all()),
     }
+
+
+class TushareKeyIn(BaseModel):
+    api_key: str = Field(min_length=1, max_length=256)
+
+
+def _tushare_status(*, probes: dict | None = None) -> dict:
+    from app.services.tushare_history import TUSHARE_PROXY_URL, load_tushare_key
+
+    key = load_tushare_key()
+    result = {
+        "configured": bool(key),
+        "api_key_masked": secrets_store.mask(key),
+        "endpoint": TUSHARE_PROXY_URL,
+        "datasets": ["daily", "adj_factor", "minute"],
+    }
+    if probes is not None:
+        result["probes"] = probes
+    return result
+
+
+@router.get("/tushare")
+def get_tushare_status() -> dict:
+    """Return local Tushare configuration without making a network request."""
+    return _tushare_status()
+
+
+@router.put("/tushare")
+def save_tushare_connection(req: TushareKeyIn) -> dict:
+    """Validate a Tushare key against the fixed proxy, then save it locally."""
+    from app.data_providers import custom as custom_sources
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        save_tushare_key,
+    )
+
+    key = req.api_key.strip()
+    try:
+        client = TushareProxyClient(
+            key,
+            attempts=1,
+            limiter=GlobalRateLimiter(0),
+        )
+        client.request(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": "20250102", "end_date": "20250103"},
+        )
+    except (ValueError, TusharePermissionError) as exc:
+        raise HTTPException(status_code=400, detail="Tushare Key 无效、已过期或无基础接口权限") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="Tushare Proxy 连通性验证失败") from exc
+    save_tushare_key(key)
+    custom_sources.load_all()
+    return _tushare_status()
+
+
+@router.post("/tushare/test")
+def test_tushare_connection() -> dict:
+    """Probe representative history APIs and return only redacted results."""
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        load_tushare_key,
+    )
+
+    key = load_tushare_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
+    client = TushareProxyClient(key, attempts=1, limiter=GlobalRateLimiter(0.2))
+    samples = {
+        "daily": ("daily", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250102"}),
+        "adj_factor": ("adj_factor", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250103"}),
+        "stock_minute": ("stk_mins", {"ts_code": "000001.SZ", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+        "etf_minute": ("etf_mins", {"ts_code": "510300.SH", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+    }
+    probes: dict[str, dict] = {}
+    for dataset, (api_name, params) in samples.items():
+        try:
+            response = client.request(api_name, params)
+            probes[dataset] = {
+                "status": "ok" if response.items else "empty",
+                "rows": len(response.items),
+                "fields": list(response.fields),
+            }
+        except TusharePermissionError:
+            probes[dataset] = {"status": "blocked", "rows": 0, "fields": []}
+        except Exception:  # noqa: BLE001
+            probes[dataset] = {"status": "error", "rows": 0, "fields": []}
+    return _tushare_status(probes=probes)
+
+
+@router.delete("/tushare")
+def clear_tushare_connection() -> dict:
+    """Clear the key and fail closed to TickFlow for future pulls."""
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+    from app.services.tushare_history import clear_tushare_key
+
+    clear_tushare_key()
+    updates: dict[str, str] = {}
+    if preferences.get_daily_data_provider() == "tushare":
+        updates["daily_data_provider"] = "tickflow"
+    if preferences.get_adj_factor_provider() == "tushare":
+        updates["adj_factor_provider"] = "same_as_daily"
+    if preferences.get_minute_data_provider() == "tushare":
+        updates["minute_data_provider"] = "tickflow"
+    if updates:
+        preferences.save(updates)
+    custom_sources.load_all()
+    return _tushare_status()
 
 
 @router.post("/onboarding/complete")
@@ -589,6 +702,11 @@ def update_data_providers(req: DataProvidersIn) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
+    if "tushare" in updates.values():
+        from app.services.tushare_history import load_tushare_key
+
+        if not load_tushare_key():
+            raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
     if updates:
         preferences.save(updates)
     return {

@@ -109,6 +109,13 @@ class MyConfig:
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
+- **`backend/app/plugins/tushare/`** — 无额外依赖的 Tushare 历史行情插件
+  - 通过固定的 HTTPS 代理调用标准 Tushare HTTP 协议,不安装 Tushare SDK。
+  - 在「设置 -> 数据源」卡片中配置并验证 Key,可选择股票/ETF/指数日K、股票/ETF
+    复权因子及股票/ETF 1分钟K；实时行情继续使用 TickFlow。
+  - 日线成交量从手转换为股、成交额从千元转换为元；分钟接口保持供应商返回的股/元单位。
+  - 分钟价格在写入 canonical 表前按累计复权因子转换为前复权价格。Key 只保存在本机
+    `data/user_data/secrets.json`；清除 Key 后未来拉取回到 TickFlow,已落盘 Parquet 不受影响。
 
 ## 路由机制(无需关心, 仅参考)
 

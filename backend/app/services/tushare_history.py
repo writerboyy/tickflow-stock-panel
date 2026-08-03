@@ -313,9 +313,9 @@ def _secret_path(data_dir: Path | None = None) -> Path:
     return path
 
 
-def save_tushare_key_from_stdin(stream: Any, *, data_dir: Path | None = None) -> str:
-    """Read one key without echoing it and persist it with mode 0600."""
-    value = str(stream.readline()).strip()
+def save_tushare_key(value: str, *, data_dir: Path | None = None) -> str:
+    """Validate and persist a Tushare key with mode 0600."""
+    value = str(value).strip()
     if not value or len(value) > 256 or any(ch.isspace() for ch in value):
         raise ValueError("invalid Tushare API key")
     path = _secret_path(data_dir)
@@ -344,6 +344,11 @@ def save_tushare_key_from_stdin(stream: Any, *, data_dir: Path | None = None) ->
     except OSError:
         pass
     return value
+
+
+def save_tushare_key_from_stdin(stream: Any, *, data_dir: Path | None = None) -> str:
+    """Read one key without echoing it and persist it with mode 0600."""
+    return save_tushare_key(str(stream.readline()), data_dir=data_dir)
 
 
 def load_tushare_key(*, data_dir: Path | None = None) -> str:
@@ -811,14 +816,17 @@ class TushareHistoryBackfill:
                     timestamps = [item for item in valid["datetime"].to_list()] if not valid.is_empty() else []
                     oldest = min(timestamps) if timestamps else None
                     previous = datetime.fromisoformat(cursor)
-                    if oldest is None or oldest >= previous:
+                    if oldest is None or oldest > previous:
+                        raise BackfillBlocked(f"minute cursor did not strictly decrease for {symbol}")
+                    next_cursor = oldest - timedelta(minutes=1)
+                    if next_cursor >= previous:
                         raise BackfillBlocked(f"minute cursor did not strictly decrease for {symbol}")
                     _atomic_parquet(frame, page_root / f"page-{page_number:06d}.parquet")
                     raw_pages.append(frame)
                     state.update(
                         {
                             "pages": page_number + 1,
-                            "cursor": (oldest - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "cursor": next_cursor.strftime("%Y-%m-%d %H:%M:%S"),
                             "rows": int(state.get("rows", 0)) + valid.height,
                             "last_page_hash": stable_content_hash(response.raw),
                         }

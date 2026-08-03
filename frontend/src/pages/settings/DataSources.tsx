@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, Database, FileWarning, Link2, Plus, RefreshCw, Trash2, Zap } from 'lucide-react'
+import { Check, Database, FileWarning, KeyRound, Link2, Plus, RefreshCw, Trash2, Zap } from 'lucide-react'
 import { api, type DataSourceItem, type PluginDataSourceItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -19,6 +19,7 @@ export function SettingsDataSourcesPanel() {
   const qc = useQueryClient()
   const prefs = usePreferences()
   const sources = useQuery({ queryKey: QK.dataSources, queryFn: api.dataSources })
+  const tushare = useQuery({ queryKey: QK.tushare, queryFn: api.tushareStatus })
   const [selected, setSelected] = useState<string>('tickflow') // 当前在右侧编辑的源 name
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
@@ -72,6 +73,7 @@ export function SettingsDataSourcesPanel() {
       qc.invalidateQueries({ queryKey: QK.preferences })
       toast('数据源已切换', 'success')
     },
+    onError: (error: Error) => toast(error.message, 'error'),
   })
 
   const editExisting = useMutation({
@@ -169,6 +171,7 @@ export function SettingsDataSourcesPanel() {
             const isSelected = selected === item.name
             const plugin = pluginMap.get(item.name)
             const pluginUnavailable = plugin && !plugin.available
+            const tushareUnconfigured = item.name === 'tushare' && !tushare.data?.configured
             const installing = installMut.isPending && installMut.variables === item.name
             const uninstalling = uninstallMut.isPending && uninstallMut.variables === item.name
             return (
@@ -218,10 +221,22 @@ export function SettingsDataSourcesPanel() {
                         <Zap className="h-2.5 w-2.5" /> 安装
                       </button>
                     )
+                  ) : tushareUnconfigured ? (
+                    <span className="inline-flex items-center gap-1 text-[9px] text-warning shrink-0">
+                      <KeyRound className="h-2.5 w-2.5" /> 需配置
+                    </span>
                   ) : isActive ? (
                     <span className="inline-flex items-center gap-0.5 text-[9px] text-accent shrink-0">
                       <Check className="h-2.5 w-2.5" /> 使用中
                     </span>
+                  ) : item.name === 'tushare' ? (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); switchProvider.mutate(item.name) }}
+                      disabled={switchProvider.isPending}
+                      className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent/10 text-accent hover:bg-accent/20 transition-colors disabled:opacity-50"
+                    >
+                      使用
+                    </button>
                   ) : plugin ? (
                     /* 已安装插件: 使用 + 卸载 */
                     <div className="flex items-center gap-1 shrink-0">
@@ -326,6 +341,12 @@ export function SettingsDataSourcesPanel() {
             <TickFlowDetail
               active={activeName === 'tickflow'}
               onSwitch={() => switchProvider.mutate('tickflow')}
+              switching={switchProvider.isPending}
+            />
+          ) : selected === 'tushare' ? (
+            <TushareDetail
+              isActive={activeName === 'tushare'}
+              onSwitch={() => switchProvider.mutate('tushare')}
               switching={switchProvider.isPending}
             />
           ) : selected === '__new__' || customList.some(c => c.name === selected) ? (
@@ -481,6 +502,163 @@ function KaipanlaConnection() {
           保存连接
         </button>
       </form>
+    </section>
+  )
+}
+
+function TushareDetail({ isActive, onSwitch, switching }: {
+  isActive: boolean
+  onSwitch: () => void
+  switching: boolean
+}) {
+  const qc = useQueryClient()
+  const [apiKey, setApiKey] = useState('')
+  const status = useQuery({ queryKey: QK.tushare, queryFn: api.tushareStatus })
+  const save = useMutation({
+    mutationFn: () => api.saveTushareKey(apiKey.trim()),
+    onSuccess: () => {
+      setApiKey('')
+      qc.invalidateQueries({ queryKey: QK.tushare })
+      qc.invalidateQueries({ queryKey: QK.dataSources })
+      toast('Tushare Key 已验证并保存', 'success')
+    },
+    onError: (error: Error) => toast(error.message, 'error'),
+  })
+  const test = useMutation({
+    mutationFn: api.testTushare,
+    onError: (error: Error) => toast(error.message, 'error'),
+  })
+  const clear = useMutation({
+    mutationFn: api.clearTushareKey,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.tushare })
+      qc.invalidateQueries({ queryKey: QK.dataSources })
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      toast('Tushare Key 已清除', 'success')
+    },
+    onError: (error: Error) => toast(error.message, 'error'),
+  })
+  const configured = status.data?.configured ?? false
+  const probes = test.data?.probes
+  const probeLabels: Record<string, string> = {
+    daily: '股票日K',
+    adj_factor: '复权因子',
+    stock_minute: '股票1分钟',
+    etf_minute: 'ETF 1分钟',
+  }
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+        <div className="flex items-start gap-4 min-w-0">
+          <div className="h-11 w-11 rounded-lg bg-accent/10 flex items-center justify-center shrink-0">
+            <KeyRound className="h-5 w-5 text-accent" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-semibold text-foreground">Tushare</h3>
+              <span className="text-[10px] text-muted/60 uppercase tracking-wider border border-border rounded px-1.5 py-0.5">
+                历史行情
+              </span>
+              {isActive && (
+                <span className="inline-flex items-center gap-1 text-[10px] text-accent bg-accent/10 px-1.5 py-0.5 rounded">
+                  <Check className="h-2.5 w-2.5" /> 当前使用
+                </span>
+              )}
+            </div>
+            <div className="mt-1.5 flex items-center gap-2 text-xs text-secondary">
+              <span className={`h-1.5 w-1.5 rounded-full ${configured ? 'bg-accent' : 'bg-muted/40'}`} />
+              <span>{status.isLoading ? '检查中' : configured ? `已配置 ${status.data?.api_key_masked}` : '未配置 Key'}</span>
+            </div>
+          </div>
+        </div>
+        {configured && (
+          <button
+            type="button"
+            title="清除 Tushare Key"
+            aria-label="清除 Tushare Key"
+            disabled={clear.isPending}
+            onClick={() => {
+              if (window.confirm('清除后将自动回退 TickFlow，已下载的本地数据不会删除。确认继续？')) {
+                clear.mutate()
+              }
+            }}
+            className="h-8 w-8 inline-flex items-center justify-center rounded-btn text-muted hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {['股票/ETF/指数日K', '股票/ETF复权', '股票1分钟', 'ETF 1分钟'].map(label => (
+          <span key={label} className="text-[10px] text-secondary border border-border/60 bg-elevated/20 rounded px-2 py-1">
+            {label}
+          </span>
+        ))}
+        <span className="text-[10px] text-muted border border-border/60 rounded px-2 py-1">无实时行情</span>
+      </div>
+
+      <form
+        className="flex flex-col sm:flex-row gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (apiKey.trim()) save.mutate()
+        }}
+      >
+        <input
+          type="password"
+          value={apiKey}
+          onChange={event => setApiKey(event.target.value)}
+          placeholder={configured ? '输入新 Key 以替换' : 'Tushare API Key'}
+          autoComplete="off"
+          aria-label="Tushare API Key"
+          className="min-w-0 flex-1 rounded-btn border border-border bg-base px-3 py-2 text-xs text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60"
+        />
+        <button
+          type="submit"
+          disabled={!apiKey.trim() || save.isPending}
+          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-btn bg-accent text-white text-xs font-medium hover:bg-accent/90 transition-colors disabled:opacity-50"
+        >
+          {save.isPending && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+          验证并保存
+        </button>
+      </form>
+
+      {configured && (
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          {!isActive && (
+            <button
+              onClick={onSwitch}
+              disabled={switching}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-btn bg-accent/10 text-accent hover:bg-accent/20 text-xs font-medium transition-colors disabled:opacity-50"
+            >
+              <Zap className="h-3.5 w-3.5" /> 使用 Tushare
+            </button>
+          )}
+          <button
+            onClick={() => test.mutate()}
+            disabled={test.isPending}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-btn border border-border text-secondary hover:text-foreground hover:bg-elevated/40 text-xs transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${test.isPending ? 'animate-spin' : ''}`} />
+            检测接口
+          </button>
+        </div>
+      )}
+
+      {probes && (
+        <div className="mt-4 grid grid-cols-2 lg:grid-cols-4 gap-2">
+          {Object.entries(probes).map(([name, result]) => (
+            <div key={name} className="border-t border-border/60 pt-2">
+              <div className="text-[10px] text-muted">{probeLabels[name] || name}</div>
+              <div className={`mt-0.5 text-xs font-medium ${result.status === 'ok' ? 'text-accent' : result.status === 'empty' ? 'text-warning' : 'text-danger'}`}>
+                {result.status === 'ok' ? `${result.rows} 行` : result.status === 'empty' ? '空响应' : result.status === 'blocked' ? '无权限' : '请求失败'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   )
 }

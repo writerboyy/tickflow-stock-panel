@@ -1072,6 +1072,20 @@ export interface DataSourcesResponse {
   config_dir: string
 }
 
+export interface TushareProbeResult {
+  status: 'ok' | 'empty' | 'blocked' | 'error'
+  rows: number
+  fields: string[]
+}
+
+export interface TushareStatus {
+  configured: boolean
+  api_key_masked: string
+  endpoint: string
+  datasets: string[]
+  probes?: Record<string, TushareProbeResult>
+}
+
 export interface DataSourceTestResult {
   provider: string
   dataset: string
@@ -1601,6 +1615,16 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
+  tushareStatus: () => request<TushareStatus>('/api/settings/tushare'),
+  saveTushareKey: (apiKey: string) =>
+    request<TushareStatus>('/api/settings/tushare', {
+      method: 'PUT',
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  testTushare: () =>
+    request<TushareStatus>('/api/settings/tushare/test', { method: 'POST' }),
+  clearTushareKey: () =>
+    request<TushareStatus>('/api/settings/tushare', { method: 'DELETE' }),
   kaipanlaStatus: () => request<KaipanlaStatus>('/api/settings/kaipanla'),
   saveKaipanlaConnection: (sourceUrl: string) =>
     request<KaipanlaStatus>('/api/settings/kaipanla', {

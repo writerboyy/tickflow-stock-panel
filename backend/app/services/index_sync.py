@@ -328,7 +328,10 @@ def sync_and_persist_index_daily(
     否则取 index_instruments 表全量(指数+ETF 合并存储)。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
+    has_custom_daily = kline_sync._provider_has_dataset(
+        preferences.get_daily_data_provider(), "daily"
+    )
+    if not capset.has(Cap.KLINE_DAILY_BATCH) and not has_custom_daily:
         return 0
 
     if symbols_override:
@@ -361,6 +364,7 @@ def sync_and_persist_index_daily(
             batch_size=None,
             start_time=start_time,
             end_time=end_time,
+            asset_type="index",
         )
         if raw.is_empty():
             continue
@@ -422,7 +426,10 @@ def sync_and_persist_etf_daily(
     """同步 ETF 日K到独立 kline_etf_* parquet,并计算 ETF enriched。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    if not capset.has(Cap.KLINE_DAILY_BATCH):
+    has_custom_daily = kline_sync._provider_has_dataset(
+        preferences.get_daily_data_provider(), "daily"
+    )
+    if not capset.has(Cap.KLINE_DAILY_BATCH) and not has_custom_daily:
         return 0
 
     if symbols_override:
@@ -455,6 +462,7 @@ def sync_and_persist_etf_daily(
             batch_size=None,
             start_time=start_time,
             end_time=end_time,
+            asset_type="etf",
         )
         if raw.is_empty():
             continue

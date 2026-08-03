@@ -106,7 +106,8 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     asset_type: AssetType = "stock") -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
@@ -115,6 +116,19 @@ def sync_daily_batch(symbols: list[str],
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
     """
+    provider_name = preferences.get_daily_data_provider()
+    if _provider_has_dataset(provider_name, "daily"):
+        from app.data_providers import custom as custom_sources
+
+        provider = custom_sources.get_provider(provider_name)
+        return provider.get_daily(
+            symbols,
+            start_time=start_time,
+            end_time=end_time,
+            asset_type=asset_type,
+            on_chunk_done=on_chunk_done,
+        )
+
     tf = get_client()
     out: list[pl.DataFrame] = []
     chunks = chunked(symbols, batch_size)
@@ -162,6 +176,18 @@ def sync_daily_batch(symbols: list[str],
     if not out:
         return pl.DataFrame()
     return pl.concat(out, how="diagonal_relaxed")
+
+
+def _provider_has_dataset(provider_name: str, dataset: str) -> bool:
+    if provider_name == "tickflow":
+        return False
+    try:
+        from app.data_providers import custom as custom_sources
+
+        return custom_sources.provider_has_dataset(provider_name, dataset)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("provider %s dataset %s resolution failed: %s", provider_name, dataset, exc)
+        return False
 
 
 def sync_and_persist_daily_batch(

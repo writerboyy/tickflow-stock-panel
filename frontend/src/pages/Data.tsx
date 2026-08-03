@@ -199,9 +199,13 @@ export function Data() {
     staleTime: 60_000,
   })
   const activeProvider = prefs.data?.daily_data_provider || 'tickflow'
-  const activeDataSourceName = activeProvider === 'tickflow'
-    ? 'TickFlow'
-    : (dataSources.data?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
+  const selectableSources = [
+    ...(dataSources.data?.builtin ?? []),
+    ...(dataSources.data?.plugins ?? []),
+    ...(dataSources.data?.custom ?? []),
+  ]
+  const activeDataSource = selectableSources.find(source => source.name === activeProvider)
+  const activeDataSourceName = activeDataSource?.display_name || activeProvider
 
   // tierKey → 自定义数据集名映射 (用于数据画像 CapBadge 显示数据源名而非 TickFlow 档位)
   const TIERKEY_TO_DATASET: Record<string, string> = {
@@ -214,7 +218,7 @@ export function Data() {
   }
   // 当前 custom 源支持的数据集集合
   const activeCustomDatasets = activeProvider !== 'tickflow'
-    ? new Set(dataSources.data?.custom?.find(s => s.name === activeProvider)?.datasets || [])
+    ? new Set(activeDataSource?.datasets || [])
     : new Set<string>()
   // 给定 tierKey, 返回 custom provider 显示名 (走 custom 时) 或 null (走 TickFlow)
   const getCustomProviderName = (tierKey: string): string | null => {
@@ -265,9 +269,11 @@ export function Data() {
   const quoteStatus = useQuoteStatus()
   const toggleQuote = useToggleRealtimeQuotes()
 
-  const hasAdjCap = !!caps.data?.capabilities?.['adj_factor']
+  const hasAdjCap = !!caps.data?.capabilities?.['adj_factor'] || activeCustomDatasets.has('adj_factor')
   const hasDailyBatchCap = !!caps.data?.capabilities?.['kline.daily.batch']
-  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
+  const minuteProvider = prefs.data?.minute_data_provider || 'tickflow'
+  const minuteSource = selectableSources.find(source => source.name === minuteProvider)
+  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch'] || !!minuteSource?.datasets.includes('minute')
   const indexAuto = prefs.data?.pipeline_pull_index ?? true
   const etfAuto = prefs.data?.pipeline_pull_etf ?? false
   const etfMinuteAuto = prefs.data?.etf_minute_sync_enabled ?? false

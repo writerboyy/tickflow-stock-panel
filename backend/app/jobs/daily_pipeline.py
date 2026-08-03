@@ -386,7 +386,10 @@ def run_now(
     pull_index = _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
-    if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
+    custom_daily_available = kline_sync._provider_has_dataset(
+        _prefs.get_daily_data_provider(), "daily"
+    )
+    if (capset.has(Cap.KLINE_DAILY_BATCH) or custom_daily_available) and (pull_index or pull_etf):
         _types = []
         if pull_index:
             _types.append("指数")
@@ -434,7 +437,13 @@ def run_now(
                 etf_inst = repo.get_etf_instruments()
                 if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
                     etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
-                if etf_symbols and capset.has(Cap.ADJ_FACTOR):
+                etf_adj_provider = _prefs.get_adj_factor_provider()
+                if etf_adj_provider == "same_as_daily":
+                    etf_adj_provider = _prefs.get_daily_data_provider()
+                custom_etf_adj_available = kline_sync._provider_has_dataset(
+                    etf_adj_provider, "adj_factor"
+                )
+                if etf_symbols and (capset.has(Cap.ADJ_FACTOR) or custom_etf_adj_available):
                     try:
                         emit("sync_index", 88, "同步 ETF 除权因子…")
                         from datetime import datetime, timedelta
@@ -545,9 +554,14 @@ def run_now(
     minute_on = preferences.get_minute_sync_enabled()
     etf_minute_on = preferences.get_etf_minute_sync_enabled()
     minute_days = preferences.get_minute_sync_days()
+    minute_provider = preferences.get_minute_data_provider()
+    _, minute_fallback, minute_provider_error = kline_sync._resolve_minute_provider(minute_provider)
+    if minute_provider_error is not None:
+        logger.warning("minute provider %s resolution failed: %s", minute_provider, minute_provider_error)
+    can_sync_minute = capset.has(Cap.KLINE_MINUTE_BATCH) or not minute_fallback
     written_minute = 0
     written_etf_minute = 0
-    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+    if minute_on and can_sync_minute:
         minute_start = today - _td(days=minute_days)
         emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
         logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
@@ -571,7 +585,7 @@ def run_now(
             logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
             logger.info("sync_minute skipped: user disabled")
-    if etf_minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+    if etf_minute_on and can_sync_minute:
         etf_minute_start = today - _td(days=minute_days)
         emit("sync_etf_minute", 93, f"获取 ETF 分钟K [{etf_minute_start} ~ {today}]…")
         etf_minute_symbols = _resolve_etf_minute_symbols(repo)
