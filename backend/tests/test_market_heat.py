@@ -198,3 +198,11 @@ def test_market_heat_api_reports_missing_hithink_key(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert "未配置同花顺/Fuyao API Key" in response.json()["detail"]
+
+
+def test_market_heat_router_is_registered_on_main_app() -> None:
+    from app.main import app
+
+    paths = {route.path for route in app.routes}
+    assert "/api/market-heat/radar" in paths
+    assert "/api/market-heat/trend" in paths

@@ -376,6 +376,7 @@ export function Data() {
     sync_pit_reference: 'pit_reference',
     sync_minute: 'minute',
     extend_minute: 'minute',
+    sync_etf_minute: 'etf_minute',
     compute_regime: 'regime',
     // regime 软失败时入 skipped_stages 的是 'regime'(非 stage 名), 也映射到该卡片
     regime: 'regime',
