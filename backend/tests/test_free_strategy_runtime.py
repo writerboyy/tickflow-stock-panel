@@ -1965,3 +1965,34 @@ def on_bar(context, bars):
 
     assert result["orders"][0]["status"] == "skipped"
     assert result["orders"][0]["reason"] == "目标仓位无需调整或不足一手"
+
+
+def test_target_zero_sells_entire_odd_lot_position():
+    source = """
+def on_bar(context, bars):
+    context.order_target('X', 0)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            asset_type="stock",
+            fill_policy="close",
+            lot_size=100,
+            min_commission=0,
+            fees_pct=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+        ),
+    )
+    engine.account.cash = 0
+    engine.account.positions = {"X": 39.4310143993996}
+    engine.account.available = {"X": 39.4310143993996}
+    engine.account.avg_cost = {"X": 8.23}
+
+    result = engine.run([
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
+    ])
+
+    assert result["positions"]["X"] == 0
+    assert result["orders"][0]["status"] == "filled"
+    assert result["fills"][0]["quantity"] == pytest.approx(39.4310143993996)

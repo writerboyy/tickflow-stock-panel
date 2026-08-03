@@ -1072,6 +1072,82 @@ def scheduled_market(*symbols: str) -> MarketData:
     })
 
 
+def test_scheduled_open_callback_waits_for_first_continuous_minute_bar():
+    source = """
+def initialize(context):
+    context.schedule(close_position, '09:30', symbols=['X'])
+
+def close_position(context):
+    context.state['executed_at'] = context.now.isoformat()
+    context.order_target('X', 0)
+"""
+    repo = ScheduledRepository([
+        minute_row("X", datetime(2024, 1, 2, 9, 31), 10.0),
+    ])
+    market = scheduled_market("X")
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            asset_type="stock",
+            benchmark_symbol="X",
+            fill_policy="close",
+            lot_size=100,
+            min_commission=0,
+            fees_pct=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+        ),
+    )
+    engine.account.cash = 0
+    engine.account.positions = {"X": 100.0}
+    engine.account.available = {"X": 100.0}
+    engine.account.avg_cost = {"X": 10.0}
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 9, 31),
+        "stock",
+        "1m",
+    )
+
+    assert engine.context.state["executed_at"] == "2024-01-02T09:31:00"
+    assert engine.account.positions["X"] == 0
+    assert engine.account.orders[0].status == "filled"
+    assert engine.account.fills[0].timestamp == "2024-01-02T09:31:00"
+
+
+def test_scheduled_open_callback_fails_closed_without_opening_minute_data():
+    source = """
+def initialize(context):
+    context.schedule(run, '09:30', symbols=['X'])
+
+def run(context):
+    context.state['executed'] = True
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    with pytest.raises(ValueError, match="09:30 定时任务缺少可交易分钟K"):
+        advance_scheduled_session(
+            ScheduledRepository([]),
+            engine,
+            scheduled_market("X"),
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 2, 9, 31),
+            "stock",
+            "1m",
+        )
+
+    assert "executed" not in engine.context.state
+
+
 def test_scheduled_lunch_event_uses_latest_visible_bar_and_dynamic_universe():
     source = """
 def initialize(context):

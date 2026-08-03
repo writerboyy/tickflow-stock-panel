@@ -1297,7 +1297,7 @@ export interface PaperEvent {
   signal_type?: string
   strategy?: string
   trading_date?: string
-  decision?: 'rebalance' | 'hold' | 'empty'
+  decision?: 'rebalance' | 'hold' | 'empty' | 'risk_off'
   regime?: string
   raw_regime?: string
   target_symbols?: string[]

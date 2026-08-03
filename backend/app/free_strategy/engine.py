@@ -998,7 +998,14 @@ class FreeStrategyEngine:
             else buy_commission_rate
         )
         lot = max(1, self.config.lot_size)
-        qty = math.floor(qty / lot) * lot
+        liquidates_position = (
+            side == "sell"
+            and order.side == "target"
+            and target is not None
+            and target <= 0
+        )
+        if not liquidates_position:
+            qty = math.floor(qty / lot) * lot
         if side == "sell":
             bought_today = (
                 self.config.settlement == "t1"
@@ -1574,10 +1581,16 @@ class FreeStrategyEngine:
         self._next_timestamp = timestamp
         self._update_market(timestamp, bars_now)
 
-    def run_scheduled_event(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
+    def run_scheduled_event(
+        self,
+        timestamp: datetime,
+        bars: Iterable[Bar],
+        *,
+        scheduled_at: str | None = None,
+    ) -> None:
         self.update_scheduled_market(timestamp, bars)
         self._fill_immediate_orders(self._session_bars, timestamp)
-        current_time = timestamp.strftime("%H:%M")
+        current_time = scheduled_at or timestamp.strftime("%H:%M")
         for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
             if not done and at == current_time:
                 self._run_scheduled_callback(callback, at)

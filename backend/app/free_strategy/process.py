@@ -1338,8 +1338,10 @@ def _scheduled_snapshot(
     timestamp: datetime,
     asset_type: str,
     timeframe: str,
+    *,
+    symbols: list[str] | None = None,
 ) -> list[Bar]:
-    symbols = _scheduled_symbols(engine, timestamp)
+    symbols = _scheduled_symbols(engine, timestamp) if symbols is None else symbols
     _ensure_scheduled_market_data(
         repo, market, symbols, timestamp.date() - timedelta(days=45), timestamp.date(), asset_type,
     )
@@ -1555,8 +1557,48 @@ def advance_scheduled_session(
     for at in due_times:
         timestamp = datetime.combine(day, time.fromisoformat(at))
         _process_scheduled_fills(repo, engine, market, timestamp, asset_type, timeframe)
-        snapshot = _scheduled_snapshot(repo, engine, market, timestamp, asset_type, timeframe)
-        engine.run_scheduled_event(timestamp, snapshot)
+        symbols = _scheduled_symbols(engine, timestamp)
+        snapshot = _scheduled_snapshot(
+            repo,
+            engine,
+            market,
+            timestamp,
+            asset_type,
+            timeframe,
+            symbols=symbols,
+        )
+        event_timestamp = timestamp
+        if timestamp.time() == time(9, 30) and not any(
+            bar.tradable and not bar.suspended for bar in snapshot
+        ):
+            first_continuous_minute = timestamp + timedelta(minutes=1)
+            if first_continuous_minute <= cutoff:
+                opening_snapshot = _scheduled_snapshot(
+                    repo,
+                    engine,
+                    market,
+                    first_continuous_minute,
+                    asset_type,
+                    timeframe,
+                    symbols=symbols,
+                )
+                if any(bar.tradable and not bar.suspended for bar in opening_snapshot):
+                    event_timestamp = first_continuous_minute
+                    snapshot = opening_snapshot
+            if event_timestamp == timestamp:
+                raise ValueError(
+                    f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
+                )
+        if event_timestamp > timestamp:
+            _process_scheduled_fills(
+                repo,
+                engine,
+                market,
+                event_timestamp,
+                asset_type,
+                timeframe,
+            )
+        engine.run_scheduled_event(event_timestamp, snapshot, scheduled_at=at)
     _process_scheduled_fills(repo, engine, market, cutoff, asset_type, timeframe)
     if finalize:
         closing_time = max(cutoff, datetime.combine(day, time(15, 0)))

@@ -126,13 +126,20 @@ function decisionReasonText(event: PaperEvent) {
   return reason ? (DECISION_REASON_LABEL[reason] ?? reason) : '已完成当日决策'
 }
 
+function decisionLabel(event: PaperEvent) {
+  if (event.decision === 'rebalance') return '调仓'
+  if (event.decision === 'hold') return '继续持有'
+  if (!(event.target_symbols ?? []).length && (event.holding_symbols ?? []).length) return '计划清仓'
+  return '保持空仓'
+}
+
 function eventText(event: PaperEvent, symbolNames: Record<string, string> = {}) {
   const symbol = event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : ''
   if (event.type === 'fill') return `${event.side === 'buy' ? '买入' : '卖出'} ${symbol} ${Number(event.quantity ?? 0).toLocaleString()} 股 @ ${Number(event.price ?? 0).toFixed(3)}`
   if (event.type === 'rejected') return `${symbol || '委托'}：${event.reason ?? '已拒绝'}`
   if (event.type === 'risk') return String(event.reason ?? '风控锁定')
   if (event.type === 'signal') {
-    const label = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
+    const label = decisionLabel(event)
     const targets = (event.target_symbols ?? []).map(item => formatInstrumentLabel(item, symbolNames[item])).join('、') || '空仓'
     return `${label} · 目标 ${targets} · ${decisionReasonText(event)}`
   }
@@ -221,17 +228,22 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
   </div>
 }
 
-function LatestDecision({ event, instrumentLabel }: { event?: PaperEvent; instrumentLabel: (symbol: unknown) => string }) {
+function LatestDecision({ event, instrumentLabel, actualHoldingSymbols }: { event?: PaperEvent; instrumentLabel: (symbol: unknown) => string; actualHoldingSymbols: string[] }) {
   if (!event) return <div className="grid min-h-52 place-items-center px-5 text-center text-xs text-muted">当日暂无策略决策</div>
-  const decisionLabel = event.decision === 'rebalance' ? '调仓' : event.decision === 'hold' ? '继续持有' : '保持空仓'
-  const decisionTone = event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
   const targets = event.target_symbols ?? []
   const holdings = event.holding_symbols ?? []
+  const clearing = !targets.length && holdings.length > 0
+  const actualHoldings = new Set(actualHoldingSymbols)
+  const remaining = clearing ? holdings.filter(symbol => actualHoldings.has(symbol)) : []
+  const clearingIncomplete = clearing && remaining.length > 0
+  const label = clearingIncomplete ? '清仓未完成' : decisionLabel(event)
+  const decisionTone = clearingIncomplete ? 'text-warning' : event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
   return <div className="space-y-3 px-4 py-3 text-xs">
-    <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{decisionLabel}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
+    <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{label}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
     <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
       <span className="text-muted">目标标的</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
       <span className="text-muted">决策前持仓</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
+      {clearing ? <><span className="text-muted">执行结果</span><span className={clearingIncomplete ? 'text-warning' : 'text-success'}>{clearingIncomplete ? `未完成，仍持有 ${remaining.length} 只` : '已完成'}</span></> : null}
       <span className="text-muted">决策原因</span><span className="leading-5">{decisionReasonText(event)}</span>
     </div>
   </div>
@@ -585,7 +597,7 @@ export function PaperTrading() {
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
           <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart rows={visibleEquityRows} /></div>
-          <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} /></div>
+          <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} actualHoldingSymbols={positions.map(([symbol]) => symbol)} /></div>
         </section>
 
         {syncLabel(account) || account.market_mode === 'poll_3s' || account.market_mode === 'websocket' ? <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
