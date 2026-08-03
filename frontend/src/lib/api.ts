@@ -1279,6 +1279,8 @@ export interface PaperAccount {
   cash: number
   equity?: number
   return_pct?: number
+  today_return_pct?: number | null
+  today_return_date?: string | null
   drawdown_pct?: number
   max_drawdown_pct?: number
   valuation?: {

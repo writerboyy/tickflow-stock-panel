@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import multiprocessing as mp
 import shutil
 import threading
@@ -58,6 +59,47 @@ def _public_paper_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _paper_daily_return(result: dict[str, Any], store: PaperAccountStore) -> dict[str, Any]:
+    """Return the latest session return without confusing it with cumulative return."""
+    rows = store.equity_curve(str(result.get("id")))
+    if not rows:
+        return {"today_return_pct": None, "today_return_date": None}
+
+    valuation = result.get("valuation") if isinstance(result.get("valuation"), dict) else {}
+    valuation_date = str(valuation.get("date") or "")[:10] if valuation.get("live") else ""
+    latest_date = valuation_date or str(rows[-1].get("timestamp") or "")[:10]
+    current_equity = result.get("equity") if valuation_date else rows[-1].get("equity")
+    try:
+        current = float(current_equity)
+    except (TypeError, ValueError):
+        current = math.nan
+    if not latest_date or not math.isfinite(current):
+        return {"today_return_pct": None, "today_return_date": latest_date or None}
+
+    previous_close = next(
+        (
+            float(row["equity"])
+            for row in reversed(rows)
+            if str(row.get("timestamp") or "")[:10] < latest_date
+            and math.isfinite(float(row.get("equity")))
+        ),
+        None,
+    )
+    baseline = previous_close
+    if baseline is None:
+        config = result.get("config") if isinstance(result.get("config"), dict) else {}
+        try:
+            baseline = float(config.get("initial_capital"))
+        except (TypeError, ValueError):
+            baseline = math.nan
+    if baseline is None or not math.isfinite(baseline) or baseline <= 0:
+        return {"today_return_pct": None, "today_return_date": latest_date}
+    return {
+        "today_return_pct": (current - baseline) / baseline * 100,
+        "today_return_date": latest_date,
+    }
+
+
 def _valued_paper_state(
     state: dict[str, Any],
     supervisor: PaperTradingSupervisor | None,
@@ -71,17 +113,20 @@ def _valued_paper_state(
             store.max_drawdown_pct(str(state["id"])),
         )
     result["max_drawdown_pct"] = persisted_max_drawdown
-    if supervisor is None or state.get("status") != "running":
-        return result
-    valuation = supervisor.live_valuation(state)
-    result["valuation"] = valuation
-    if valuation.get("live"):
-        for key in ("equity", "return_pct", "drawdown_pct"):
-            result[key] = valuation[key]
-        result["max_drawdown_pct"] = max(
-            persisted_max_drawdown,
-            float(valuation.get("max_drawdown_pct") or valuation["drawdown_pct"]),
-        )
+    if supervisor is not None and state.get("status") == "running":
+        valuation = supervisor.live_valuation(state)
+        result["valuation"] = valuation
+        if valuation.get("live"):
+            for key in ("equity", "return_pct", "drawdown_pct"):
+                result[key] = valuation[key]
+            result["max_drawdown_pct"] = max(
+                persisted_max_drawdown,
+                float(valuation.get("max_drawdown_pct") or valuation["drawdown_pct"]),
+            )
+    result.update(_paper_daily_return(result, store) if store is not None else {
+        "today_return_pct": None,
+        "today_return_date": None,
+    })
     return result
 
 

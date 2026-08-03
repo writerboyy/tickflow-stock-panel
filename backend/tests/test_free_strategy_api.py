@@ -652,6 +652,51 @@ def test_paper_detail_uses_persisted_curve_without_private_continuation_fields(t
     assert "state" not in payload
 
 
+def test_paper_account_views_expose_latest_session_return(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper-daily",
+        "name": "当日收益测试",
+        "status": "paused",
+        "equity": 120,
+        "return_pct": 20,
+        "config": {"initial_capital": 100},
+    })
+    store.upsert_equity_curve("paper-daily", [
+        {
+            "timestamp": "2026-07-31T15:00:00",
+            "equity": 100,
+            "cash": 100,
+            "nav": 1,
+            "drawdown_pct": 0,
+            "positions": {},
+            "source": "paper",
+        },
+        {
+            "timestamp": "2026-08-03T15:00:00",
+            "equity": 120,
+            "cash": 120,
+            "nav": 1.2,
+            "drawdown_pct": 0,
+            "positions": {},
+            "source": "paper",
+        },
+    ])
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    client = TestClient(app)
+
+    listed = client.get("/api/free-strategies/paper/accounts").json()["accounts"][0]
+    detail = client.get("/api/free-strategies/paper/accounts/paper-daily").json()
+
+    assert listed["today_return_pct"] == 20
+    assert listed["today_return_date"] == "2026-08-03"
+    assert detail["today_return_pct"] == 20
+    assert detail["today_return_date"] == "2026-08-03"
+
+
 def test_paper_account_endpoints_overlay_live_valuation_without_persisting_it(tmp_path):
     store = PaperAccountStore(tmp_path)
     stored = store.save({
