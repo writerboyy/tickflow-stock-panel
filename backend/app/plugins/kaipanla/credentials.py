@@ -13,6 +13,7 @@ ALLOWED_HOSTS = frozenset(
         "apphis.longhuvip.com",
         "apphwshhq.longhuvip.com",
         "applhb.longhuvip.com",
+        "apphq.longhuvip.com",
     }
 )
 EXPECTED_PATH = "/w1/api/index.php"

@@ -63,6 +63,7 @@ class QuoteSubscriber:
         self._quote_updated = False
         self._strategy_results_updated = False
         self._depth_updated = False
+        self._large_orders_updated = False
         self._alerts: list[dict] = []
         self._reviews: list[str] = []
 
@@ -78,12 +79,14 @@ class QuoteSubscriber:
                 "quote_updated": self._quote_updated,
                 "strategy_results_updated": self._strategy_results_updated,
                 "depth_updated": self._depth_updated,
+                "large_orders_updated": self._large_orders_updated,
                 "alerts": self._alerts,
                 "reviews": self._reviews,
             }
             self._quote_updated = False
             self._strategy_results_updated = False
             self._depth_updated = False
+            self._large_orders_updated = False
             self._alerts = []
             self._reviews = []
             self._event.clear()
@@ -111,6 +114,7 @@ class QuoteSubscriber:
                 not self._quote_updated
                 and not self._strategy_results_updated
                 and not self._depth_updated
+                and not self._large_orders_updated
                 and not self._reviews
             ):
                 self._event.clear()
@@ -128,6 +132,11 @@ class QuoteSubscriber:
     def notify_depth(self) -> None:
         with self._lock:
             self._depth_updated = True
+            self._event.set()
+
+    def notify_large_orders(self) -> None:
+        with self._lock:
+            self._large_orders_updated = True
             self._event.set()
 
 
@@ -383,6 +392,24 @@ class QuoteService:
     def remove_fetch_listener(self, callback: Callable[[], None]) -> None:
         with self._lock:
             self._fetch_listeners.discard(callback)
+
+    def get_latest_quotes(self, symbols: set[str] | None = None) -> list[dict]:
+        """返回行情轮询已经缓存的快照，不触发任何数据源请求。"""
+        requested = {str(symbol).strip().upper() for symbol in symbols or set() if str(symbol).strip()}
+        with self._lock:
+            values = list(self._latest_quotes.values())
+        rows = []
+        for quote in values:
+            symbol = str(quote.get("symbol") or "").strip().upper()
+            if not symbol or requested and symbol not in requested:
+                continue
+            rows.append({key: value for key, value in quote.items() if not key.startswith("_")})
+        return rows
+
+    def notify_large_orders_updated(self) -> None:
+        """大单后台聚合完成后触发独立 SSE 事件。"""
+        for sub in self._snapshot_subscribers():
+            sub.notify_large_orders()
 
     def set_symbol_consumer(self, consumer_id: str, symbols: set[str]) -> None:
         """注册需要随现有轮询补拉的少量标的。"""

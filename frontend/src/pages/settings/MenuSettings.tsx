@@ -33,6 +33,7 @@ interface NavEntry {
 const BUILTIN_PAGES: NavEntry[] = [
   { id: '/', label: '看板', type: 'builtin', visible: true },
   { id: '/watchlist', label: '自选', type: 'builtin', visible: true },
+  { id: '/large-orders', label: '实时大单', type: 'builtin', visible: true },
   { id: '/screener', label: '策略', type: 'builtin', visible: true },
   { id: '/backtest', label: '回测', type: 'builtin', visible: true },
   { id: '/free-strategy', label: '量化策略', type: 'builtin', visible: true },

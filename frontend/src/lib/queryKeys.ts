@@ -20,6 +20,7 @@ export const QK = {
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
   indexQuotes:    ['index-quotes'] as const,
+  largeOrders:   ['large-orders'] as const,
   indexList:      ['index-list'] as const,
 
   // Watchlist
@@ -114,4 +115,5 @@ export const SSE_INVALIDATE_PREFIXES = [
   'index-quotes',
   'overview-market',
   'limit-ladder',
+  'large-orders',
 ] as const

@@ -286,6 +286,66 @@ export interface IndexQuote {
   [key: string]: any
 }
 
+export interface LargeOrderStatus {
+  enabled: boolean
+  running: boolean
+  data_source: 'kaipanla' | 'proxy_only' | string
+  mode: 'live' | 'stale' | string
+  stale: boolean
+  coverage_count: number
+  candidate_count: number
+  precise_count: number
+  last_updated_ms: number | null
+  last_error?: string | null
+  market_phase?: string | null
+  is_trading_hours?: boolean
+  config_version?: string
+  deep_dive_budget?: number
+}
+
+export interface LargeOrderRow {
+  symbol: string
+  name: string
+  score: number
+  confidence: 'high' | 'medium' | 'low' | string
+  source: 'kaipanla' | 'tick_proxy' | string
+  data_quality: 'precise' | 'proxy_only' | string
+  active_buy_amount: number
+  active_sell_amount: number
+  net_buy_amount: number
+  buy_ratio: number
+  max_order_amount: number
+  cancel_rate: number
+  change_pct: number
+  freshness_ms: number
+  large_threshold: number
+  zscore: number
+  ofi?: number
+  book_imbalance?: number
+  explanation: string
+  windows?: Record<string, {
+    amount: number
+    buy: number
+    sell: number
+    net: number
+    buy_ratio: number
+    zscore: number
+    threshold: number
+    max_order: number
+  }>
+}
+
+export interface LargeOrderTape {
+  symbol: string
+  name?: string
+  source: string
+  last_deep_ms?: number | null
+  error?: string | null
+  trades: Array<Record<string, any>>
+  intents: Array<Record<string, any>>
+  timeline: Array<{ ts: number; amount: number; buy: number; sell: number; price: number }>
+}
+
 // ===== Screener =====
 export interface ScreenerStrategy {
   id: string
@@ -1112,6 +1172,15 @@ export interface Preferences {
   minute_intraday_refresh: boolean
   minute_intraday_refresh_interval: number
   monitor_ext_fields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
+  large_orders?: {
+    enabled: boolean
+    score_threshold: number
+    cooldown_seconds: number
+    deep_dive_interval_seconds: number
+    max_deep_dive_symbols: number
+    candidate_limit: number
+    version: string
+  }
 }
 
 /** 监控中心 ext 字段单项配置 (行业/概念标签的来源 + 显示裁剪) */
@@ -1124,7 +1193,7 @@ export interface MonitorExtFieldItem {
   hiddenIndices?: number[]
 }
 export interface StrategyAlertEvent {
-  source: 'strategy' | 'depth'
+  source: 'strategy' | 'depth' | 'large_order' | string
   type: string
   strategy_id?: string
   symbol?: string
@@ -1659,6 +1728,24 @@ export const api = {
     request<{ rows: IndexQuote[]; count: number; source?: string }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
+  largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
+  largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all') =>
+    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; stale: boolean }>(
+      `/api/large-orders/ranking?window=${window}&scope=${scope}`,
+    ),
+  largeOrdersTape: (symbol: string) =>
+    request<LargeOrderTape>(`/api/large-orders/${encodeURIComponent(symbol)}/tape`),
+  updateLargeOrdersPreferences: (payload: {
+    enabled?: boolean
+    score_threshold?: number
+    cooldown_seconds?: number
+    deep_dive_interval_seconds?: number
+    max_deep_dive_symbols?: number
+    candidate_limit?: number
+  }) => request<{ large_orders: NonNullable<Preferences['large_orders']> }>(
+    '/api/settings/preferences/large-orders',
+    { method: 'POST', body: JSON.stringify(payload) },
+  ),
   updateRealtimeMonitorConfig: (cfg: {
     sse_refresh_pages?: Record<string, boolean>
     strategy_monitor_enabled?: boolean

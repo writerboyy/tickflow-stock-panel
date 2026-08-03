@@ -562,6 +562,58 @@ def get_realtime_quote_scope() -> dict:
     }
 
 
+# ===== 实时大单 =====
+
+_LARGE_ORDER_DEFAULTS = {
+    "large_orders_enabled": True,
+    "large_orders_score_threshold": 75,
+    "large_orders_cooldown_seconds": 120,
+    "large_orders_deep_dive_interval_seconds": 60,
+    "large_orders_max_deep_dive_symbols": 3,
+    "large_orders_candidate_limit": 50,
+    "large_orders_config_version": "large_orders_v1",
+}
+
+
+def get_large_orders_preferences() -> dict:
+    data = load()
+    def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
+        try:
+            value = int(data.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(lower, min(upper, value))
+
+    return {
+        "enabled": bool(data.get("large_orders_enabled", _LARGE_ORDER_DEFAULTS["large_orders_enabled"])),
+        "score_threshold": bounded_int("large_orders_score_threshold", 75, 50, 100),
+        "cooldown_seconds": bounded_int("large_orders_cooldown_seconds", 120, 30, 3600),
+        "deep_dive_interval_seconds": bounded_int("large_orders_deep_dive_interval_seconds", 60, 15, 600),
+        "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
+        "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
+        "version": str(data.get("large_orders_config_version", "large_orders_v1")),
+    }
+
+
+def set_large_orders_preferences(updates: dict) -> dict:
+    allowed = {
+        "enabled": "large_orders_enabled",
+        "score_threshold": "large_orders_score_threshold",
+        "cooldown_seconds": "large_orders_cooldown_seconds",
+        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
+        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
+        "candidate_limit": "large_orders_candidate_limit",
+    }
+    saved: dict = {}
+    for key, storage_key in allowed.items():
+        if key not in updates or updates[key] is None:
+            continue
+        saved[storage_key] = bool(updates[key]) if key == "enabled" else int(updates[key])
+    if saved:
+        save(saved)
+    return get_large_orders_preferences()
+
+
 def get_sse_refresh_pages() -> dict[str, bool]:
     """返回每个页面的 SSE 刷新开关。"""
     stored = load().get("sse_refresh_pages", {})

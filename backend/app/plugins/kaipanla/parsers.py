@@ -11,6 +11,25 @@ class ResponseShapeError(ValueError):
     pass
 
 
+_TRADE_DIRECTIONS = {
+    1: "passive_sell",
+    2: "active_buy",
+    3: "passive_buy",
+    4: "active_sell",
+}
+
+
+def _direction(value: object, field: str, mapping: dict[int, str]) -> tuple[int, str]:
+    number = _int(value, field)
+    if number is None or number not in mapping:
+        raise ResponseShapeError(f"{field} 方向未知")
+    return number, mapping[number]
+
+
+def _event_id(*values: object) -> str:
+    return ":".join(str(value) for value in values)
+
+
 def _text(value: object, field: str, *, required: bool = False) -> str | None:
     if value is None:
         if required:
@@ -149,6 +168,91 @@ def parse_large_order_statistics(payload: dict, code: str, trade_date: date) -> 
             "main_net_amount_over_300k": tdjl + ddjl if tdjl is not None and ddjl is not None else None,
         }
     return None
+
+
+def parse_large_order_trades(payload: dict, code: str) -> list[dict]:
+    """解析开盘啦 /13 大单成交，严格保留六列已知字段。"""
+    rows = _rows(payload, "List")
+    result: list[dict] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != 6:
+            raise ResponseShapeError(f"List[{index}] 必须恰好包含 6 列")
+        direction_code, direction = _direction(row[0], f"List[{index}].direction", _TRADE_DIRECTIONS)
+        timestamp = _int(row[1], f"List[{index}].timestamp")
+        if timestamp is None:
+            raise ResponseShapeError(f"List[{index}].timestamp 缺失")
+        volume = _float(row[2], f"List[{index}].volume")
+        amount = _float(row[3], f"List[{index}].amount")
+        price = _float(row[4], f"List[{index}].price")
+        event_time = _text(row[5], f"List[{index}].time", required=True)
+        event_id = _event_id(code, timestamp, direction_code, volume, amount, price)
+        if event_id in seen:
+            continue
+        seen.add(event_id)
+        result.append(
+            {
+                "event_id": event_id,
+                "symbol": code,
+                "code": code,
+                "direction_code": direction_code,
+                "direction": direction,
+                "timestamp": timestamp,
+                "time": event_time,
+                "volume": volume,
+                "amount": amount,
+                "price": price,
+                "source": "kaipanla_13",
+            }
+        )
+    return result
+
+
+def parse_large_order_intents(payload: dict, code: str) -> list[dict]:
+    """解析开盘啦 /14 委托；未知的第十列只作为 raw_tail 保存。"""
+    rows = _rows(payload, "List")
+    result: list[dict] = []
+    seen: set[str] = set()
+    for index, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != 10:
+            raise ResponseShapeError(f"List[{index}] 必须恰好包含 10 列")
+        side_code = _int(row[5], f"List[{index}].side")
+        if side_code not in (1, 2):
+            raise ResponseShapeError(f"List[{index}].side 方向未知")
+        event_time = _text(row[0], f"List[{index}].time", required=True)
+        order_id = _text(row[1], f"List[{index}].order_id", required=True)
+        price = _float(row[2], f"List[{index}].price")
+        volume = _float(row[3], f"List[{index}].volume")
+        amount = _float(row[4], f"List[{index}].amount")
+        limit_flag = _int(row[7], f"List[{index}].limit_flag")
+        cancel_flag = _int(row[8], f"List[{index}].cancel_flag")
+        if limit_flag not in (0, 1) or cancel_flag not in (0, 1):
+            raise ResponseShapeError(f"List[{index}] 涨停/撤单标记无效")
+        timestamp = _int(row[9], f"List[{index}].timestamp")
+        event_id = _event_id(code, order_id, event_time, side_code, amount, cancel_flag)
+        if event_id in seen:
+            continue
+        seen.add(event_id)
+        result.append(
+            {
+                "event_id": event_id,
+                "symbol": code,
+                "code": code,
+                "time": event_time,
+                "order_id": order_id,
+                "price": price,
+                "volume": volume,
+                "amount": amount,
+                "side_code": side_code,
+                "side": "buy" if side_code == 1 else "sell",
+                "limit_flag": bool(limit_flag),
+                "cancel_flag": bool(cancel_flag),
+                "timestamp": timestamp,
+                "raw_tail": row[6],
+                "source": "kaipanla_14",
+            }
+        )
+    return result
 
 
 def parse_northbound_sector(payload: dict) -> tuple[date, list[dict]]:

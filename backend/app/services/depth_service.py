@@ -94,6 +94,27 @@ class DepthService:
     def set_app_state(self, app_state) -> None:
         self._app_state = app_state
 
+    def get_cached_metrics(self, symbols: set[str] | None = None) -> dict[str, dict[str, float]]:
+        """读取已有盘口缓存，不触发 depth.batch 请求。"""
+        requested = {str(symbol).strip().upper() for symbol in symbols or set() if str(symbol).strip()}
+        with self._lock:
+            items = list(self._sealed_cache.items())
+        result: dict[str, dict[str, float]] = {}
+        for symbol, value in items:
+            symbol = str(symbol).strip().upper()
+            if requested and symbol not in requested:
+                continue
+            bid = float(value.get("bid1_vol") or 0)
+            ask = float(value.get("ask1_vol") or 0)
+            total = bid + ask
+            if total <= 0:
+                continue
+            result[symbol] = {
+                "book_imbalance": (bid - ask) / total,
+                "ofi": (bid - ask),
+            }
+        return result
+
     # ================================================================
     # 生命周期
     # ================================================================

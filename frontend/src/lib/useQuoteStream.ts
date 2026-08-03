@@ -177,6 +177,10 @@ export function useQuoteStream(
         qc.invalidateQueries({ queryKey: ['overview-market'] })
       })
 
+      es.addEventListener('large_orders_updated', () => {
+        qc.invalidateQueries({ queryKey: QK.largeOrders })
+      })
+
       es.addEventListener('strategy_alert', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data)

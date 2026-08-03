@@ -354,6 +354,15 @@ class DataProvidersIn(BaseModel):
     financial_data_provider: str | None = None
 
 
+class LargeOrderPreferencesIn(BaseModel):
+    enabled: bool | None = None
+    score_threshold: int | None = Field(default=None, ge=50, le=100)
+    cooldown_seconds: int | None = Field(default=None, ge=30, le=3600)
+    deep_dive_interval_seconds: int | None = Field(default=None, ge=15, le=600)
+    max_deep_dive_symbols: int | None = Field(default=None, ge=0, le=10)
+    candidate_limit: int | None = Field(default=None, ge=10, le=200)
+
+
 class DatasetFieldMapItem(BaseModel):
     source: str
     target: str
@@ -457,7 +466,19 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        "large_orders": preferences.get_large_orders_preferences(),
     }
+
+
+@router.post("/preferences/large-orders")
+def save_large_order_preferences(body: LargeOrderPreferencesIn, request: Request) -> dict:
+    updates = body.model_dump(exclude_none=True)
+    service = getattr(request.app.state, "large_order_service", None)
+    if service is not None:
+        return {"large_orders": service.update_preferences(updates)}
+    from app.services import preferences
+
+    return {"large_orders": preferences.set_large_orders_preferences(updates)}
 
 
 @router.get("/data-sources")

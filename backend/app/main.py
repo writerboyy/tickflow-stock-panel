@@ -17,7 +17,9 @@ from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
 from app.plugins.kaipanla.router import router as kaipanla_router
+from app.api import large_orders
 from app.services.quote_service import QuoteService
+from app.services.large_order_service import LargeOrderService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
@@ -90,6 +92,10 @@ async def lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    large_order_service = LargeOrderService(qs)
+    large_order_service.set_app_state(app.state)
+    app.state.large_order_service = large_order_service
+    large_order_service.start()
     qs.boot_check()
 
     # QuoteService 需要访问 strategy_monitor 等单例
@@ -307,6 +313,9 @@ async def lifespan(app: FastAPI):
     paper_supervisor = getattr(app.state, "paper_supervisor", None)
     if paper_supervisor:
         paper_supervisor.close()
+    large_order_service = getattr(app.state, "large_order_service", None)
+    if large_order_service:
+        large_order_service.stop()
     qs = getattr(app.state, "quote_service", None)
     if qs:
         qs.shutdown()
@@ -405,6 +414,7 @@ app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(large_orders.router)
 app.include_router(kaipanla_router)
 app.include_router(strategy.router)
 app.include_router(signals.router)

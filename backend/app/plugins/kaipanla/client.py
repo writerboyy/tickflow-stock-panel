@@ -16,6 +16,34 @@ _HEADERS = {
 }
 
 _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
+    13: (
+        "POST",
+        "apphq.longhuvip.com",
+        {
+            "Order": "0",
+            "a": "GetStockDaDanTrendIncremental",
+            "c": "StockL2Data",
+            "Index": "0",
+            "Money": "2",
+            "IsBS": "0",
+            "apiv": "w31",
+        },
+    ),
+    14: (
+        "POST",
+        "apphq.longhuvip.com",
+        {
+            "a": "GetWeiTuo_W14",
+            "c": "StockL2Data",
+            "st": "3000",
+            "Tur": "30",
+            "Type": "2",
+            "Vol": "500",
+            "VType": "1",
+            "VOrder": "0",
+            "apiv": "w39",
+        },
+    ),
     115: (
         "POST",
         "apphwhq.longhuvip.com",

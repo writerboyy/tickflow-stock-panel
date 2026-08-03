@@ -14,6 +14,8 @@ from app.plugins.kaipanla.parsers import (
     parse_dragon_tiger_movement,
     parse_interval_stock,
     parse_large_order_statistics,
+    parse_large_order_trades,
+    parse_large_order_intents,
     parse_lhb_detail,
     parse_lhb_list,
     parse_limitup,
@@ -26,6 +28,43 @@ from app.plugins.kaipanla.parsers import (
     parse_shareholder_changes,
     parse_shareholder_count_changes,
 )
+
+
+def test_large_order_trade_parser_maps_direction_and_deduplicates():
+    rows = parse_large_order_trades(
+        {
+            "List": [
+                ["2", "1778651941", "1075", "1011575", "9.41", "2026-05-13 13:59:01"],
+                ["2", "1778651941", "1075", "1011575", "9.41", "2026-05-13 13:59:01"],
+                ["4", "1778651942", "200", "188200", "9.41", "2026-05-13 13:59:02"],
+            ]
+        },
+        "600126",
+    )
+    assert len(rows) == 2
+    assert rows[0]["direction"] == "active_buy"
+    assert rows[1]["direction"] == "active_sell"
+    assert rows[0]["event_id"].startswith("600126:")
+    with pytest.raises(ResponseShapeError, match="6 列"):
+        parse_large_order_trades({"List": [["2"]]}, "600126")
+
+
+def test_large_order_intent_parser_keeps_cancel_and_limit_flags():
+    rows = parse_large_order_intents(
+        {
+            "List": [["09:30:01", "123", "10.5", "1000", "1050000", "1", "unknown", "1", "0", "1778651941"]]
+        },
+        "000001",
+    )
+    assert rows[0]["side"] == "buy"
+    assert rows[0]["limit_flag"] is True
+    assert rows[0]["cancel_flag"] is False
+    assert rows[0]["raw_tail"] == "unknown"
+    with pytest.raises(ResponseShapeError, match="撤单标记"):
+        parse_large_order_intents(
+            {"List": [["09:30:01", "123", "10.5", "1000", "1050000", "1", "x", "1", "2", "1778651941"]]},
+            "000001",
+        )
 
 
 AUCTION_ROW = [
