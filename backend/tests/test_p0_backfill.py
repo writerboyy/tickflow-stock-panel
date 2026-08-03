@@ -13,6 +13,7 @@ from app.services.p0_backfill import (
     BackfillBlocked,
     BackfillConfig,
     _dedupe_or_raise,
+    _merge_adj_frames,
     _merge_daily_frames,
     _symbols_from_data,
     run_p0_backfill,
@@ -206,6 +207,23 @@ def test_daily_merge_blocks_meaningful_source_revision() -> None:
 
     with pytest.raises(BackfillBlocked, match="conflicting duplicate keys"):
         _merge_daily_frames(existing, incoming)
+
+
+def test_adj_merge_accepts_source_revision_and_reports_it() -> None:
+    existing = pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "trade_date": [date(2024, 1, 2)],
+            "ex_factor": [1.1],
+        }
+    )
+    incoming = existing.with_columns(pl.lit(1.2).alias("ex_factor"))
+
+    merged, report = _merge_adj_frames(existing, incoming)
+
+    assert merged["ex_factor"].item() == pytest.approx(1.2)
+    assert report["revision_groups"] == 1
+    assert report["samples"][0]["symbol"] == "600000.SH"
 
 
 def test_missing_capability_blocks_before_source_fetch(tmp_path: Path) -> None:

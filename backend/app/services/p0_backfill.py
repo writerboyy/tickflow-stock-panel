@@ -950,15 +950,51 @@ def _merge_daily(shadow: Path, run_root: Path) -> tuple[list[Path], dict[str, An
     )
 
 
-def _merge_adj_factor(shadow: Path, run_root: Path) -> Path:
+def _merge_adj_frames(
+    existing: pl.DataFrame, incoming: pl.DataFrame
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Merge adjustment factors, retaining an audit trail for source revisions."""
+    existing = _dedupe_or_raise(existing, _ADJ_KEY, "adj_factor")
+    incoming = _dedupe_or_raise(incoming, _ADJ_KEY, "adj_factor")
+    if existing.is_empty():
+        return incoming.sort(list(_ADJ_KEY)), {"revision_groups": 0, "samples": []}
+    if incoming.is_empty():
+        return existing.sort(list(_ADJ_KEY)), {"revision_groups": 0, "samples": []}
+
+    overlap = existing.join(incoming, on=list(_ADJ_KEY), how="inner", suffix="_incoming")
+    conflicts = overlap.filter(
+        (pl.col("ex_factor").is_null() & pl.col("ex_factor_incoming").is_not_null())
+        | (pl.col("ex_factor").is_not_null() & pl.col("ex_factor_incoming").is_null())
+        | (
+            pl.col("ex_factor").is_not_null()
+            & pl.col("ex_factor_incoming").is_not_null()
+            & ((pl.col("ex_factor") - pl.col("ex_factor_incoming")).abs() > 0.0)
+        )
+    )
+    samples = (
+        conflicts.select(
+            [
+                *list(_ADJ_KEY),
+                "ex_factor",
+                "ex_factor_incoming",
+            ]
+        )
+        .head(20)
+        .to_dicts()
+    )
+    retained = existing.join(incoming.select(list(_ADJ_KEY)), on=list(_ADJ_KEY), how="anti")
+    merged = pl.concat([retained, incoming], how="diagonal_relaxed").sort(list(_ADJ_KEY))
+    return merged, {"revision_groups": conflicts.height, "samples": samples}
+
+
+def _merge_adj_factor(shadow: Path, run_root: Path) -> tuple[Path, dict[str, Any]]:
     batches = _load_batch_frames(run_root, "adj_factor")
     target = shadow / "adj_factor" / "all.parquet"
     existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
-    merged = _merge_existing_and_batches(existing, batches, _ADJ_KEY, "adj_factor")
-    if merged.is_empty():
-        raise BackfillBlocked("no staged adjustment factors")
+    incoming = pl.concat(batches, how="diagonal_relaxed") if batches else pl.DataFrame()
+    merged, report = _merge_adj_frames(existing, incoming)
     _write_batch(target, merged)
-    return target
+    return target, report
 
 
 def _merge_financials(shadow: Path, run_root: Path) -> list[Path]:
@@ -1104,7 +1140,8 @@ def run_p0_backfill(
             manifest["daily_revision_report"] = daily_revision_report
             publish_targets.append("kline_daily")
         if "adj_factor" in config.datasets:
-            _merge_adj_factor(shadow, run_root)
+            _, adj_revision_report = _merge_adj_factor(shadow, run_root)
+            manifest["adj_revision_report"] = adj_revision_report
             publish_targets.append("adj_factor/all.parquet")
         if "financials" in config.datasets:
             _merge_financials(shadow, run_root)
