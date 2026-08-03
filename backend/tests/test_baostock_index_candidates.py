@@ -314,6 +314,33 @@ def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):
     assert source == "local_trading_dates"
 
 
+def test_baostock_candidate_dates_ignore_extra_daily_columns(tmp_path):
+    root = tmp_path / "kline_daily"
+    first = root / "date=2021-01-04"
+    second = root / "date=2021-01-05"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [date(2021, 1, 4)],
+    }).write_parquet(first / "part.parquet")
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [date(2021, 1, 5)],
+        "quote_ts": ["2021-01-05T15:00:00+08:00"],
+    }).write_parquet(second / "part.parquet")
+
+    dates, source = candidate_dates(
+        tmp_path,
+        start_date=date(2021, 1, 1),
+        end_date=date(2021, 1, 6),
+        weekday_fallback=False,
+    )
+
+    assert dates == [date(2021, 1, 4), date(2021, 1, 5)]
+    assert source == "local_trading_dates"
+
+
 def test_baostock_candidate_dates_require_explicit_weekday_fallback(tmp_path):
     dates, source = candidate_dates(
         tmp_path,

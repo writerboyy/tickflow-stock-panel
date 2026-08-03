@@ -29,7 +29,7 @@ def local_trading_dates(data_dir: Path, start_date: date, end_date: date) -> lis
     if not files:
         return []
     frame = (
-        pl.scan_parquet([str(path) for path in files])
+        pl.scan_parquet([str(path) for path in files], extra_columns="ignore")
         .select(pl.col("date").cast(pl.Date).alias("date"))
         .filter(pl.col("date").is_between(start_date, end_date))
         .unique()
