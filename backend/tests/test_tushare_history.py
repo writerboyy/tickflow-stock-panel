@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
 from pathlib import Path
+import threading
 
 import polars as pl
 import pytest
@@ -77,6 +79,33 @@ def test_http_client_retries_429_and_does_not_log_or_expose_key():
     client = th.TushareProxyClient("very-secret", opener=opener, attempts=3, limiter=th.GlobalRateLimiter(0), backoff=lambda _: None)
     assert client.request("daily").code == 0
     assert calls == 3
+
+
+def test_global_rate_limiter_is_shared_across_worker_threads(monkeypatch):
+    now = 0.0
+    sleeps = []
+
+    def monotonic():
+        return now
+
+    def sleep(delay):
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    monkeypatch.setattr(th.time, "monotonic", monotonic)
+    monkeypatch.setattr(th.time, "sleep", sleep)
+    limiter = th.GlobalRateLimiter(0.2)
+    barrier = threading.Barrier(4)
+
+    def wait_once(_index):
+        barrier.wait(timeout=2)
+        limiter.wait()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(wait_once, range(4)))
+
+    assert sleeps == pytest.approx([0.2, 0.2, 0.2])
 
 
 def test_normalize_and_forward_adjustment_preserve_volume_and_amount():
@@ -161,6 +190,70 @@ def test_adjustment_and_minute_phases_are_resumable(tmp_path):
     minute_params = next(params for api, params in client.calls if api == "stk_mins")
     assert minute_params["start_date"] == "1990-01-01 00:00:00"
     assert minute_params["end_date"].count("-") == 2
+    item = json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "manifest.json").read_text())["phases_state"]["stock_minute"]["items"]["000001.SZ"]
+    assert item["pages"] == 1
+    assert item["cursor"] == "2025-01-02 09:30:00"
+    assert item["last_page_hash"]
+
+
+def test_adjustment_and_minute_phases_use_four_workers(tmp_path):
+    symbols = tuple(f"00000{index}.SZ" for index in range(1, 5))
+
+    class ParallelClient:
+        def __init__(self):
+            self.barriers = {
+                "adj_factor": threading.Barrier(4),
+                "stk_mins": threading.Barrier(4),
+            }
+            self.threads = {"adj_factor": set(), "stk_mins": set()}
+            self.lock = threading.Lock()
+
+        def request(self, api_name, params):
+            symbol = params["ts_code"]
+            with self.lock:
+                self.threads[api_name].add(threading.current_thread().name)
+            self.barriers[api_name].wait(timeout=2)
+            if api_name == "adj_factor":
+                fields = ("ts_code", "trade_date", "adj_factor")
+                items = ((symbol, "2025-01-02", 1.0),)
+            else:
+                fields = ("ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount")
+                items = ((symbol, "2025-01-02 09:31:00", 10, 10, 10, 10, 1, 10),)
+            raw = {"code": 0, "data": {"fields": list(fields), "items": [list(items[0])]}}
+            return th.TushareResponse(api_name, 0, "", fields, items, raw)
+
+    client = ParallelClient()
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="four-workers", phases=("adjustment", "stock_minute"), symbols=symbols),
+        client,
+    )
+    result = run.run()
+
+    assert result["status"] == "completed"
+    assert len(client.threads["adj_factor"]) == 4
+    assert len(client.threads["stk_mins"]) == 4
+    manifest = json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "four-workers" / "manifest.json").read_text())
+    for symbol in symbols:
+        assert manifest["phases_state"]["adjustment"]["items"][symbol]["status"] == "completed"
+        assert manifest["phases_state"]["stock_minute"]["items"][symbol]["status"] == "completed"
+
+
+def test_manifest_updates_are_thread_safe(tmp_path):
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="thread-safe", phases=("stock_minute",), symbols=("000001.SZ",)),
+        _FakeClient(),
+    )
+
+    def record(index):
+        run._record("stock_minute", f"symbol-{index}", status="running", rows=index)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(record, range(40)))
+
+    manifest = json.loads(run.manifest_path.read_text())
+    items = manifest["phases_state"]["stock_minute"]["items"]
+    assert len(items) == 40
+    assert items["symbol-39"]["rows"] == 39
 
 
 def test_universe_fetches_stock_statuses_separately(tmp_path):

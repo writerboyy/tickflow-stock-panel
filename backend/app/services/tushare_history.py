@@ -8,6 +8,7 @@ provider: after a successful publish all reads continue to use local parquet.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
@@ -569,6 +570,7 @@ class TushareHistoryBackfill:
     def __init__(self, config: BackfillConfig, client: TushareProxyClient) -> None:
         self.config = config.normalized()
         self.client = client
+        self._manifest_lock = threading.RLock()
         self.run_id = self.config.run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
         self.run_root = self.config.data_dir / "backfill_state" / "tushare_proxy" / _safe_part(self.run_id)
         self.manifest_path = self.run_root / "manifest.json"
@@ -610,20 +612,28 @@ class TushareHistoryBackfill:
         return value
 
     def _save(self, **updates: Any) -> None:
-        self.manifest.update(updates)
-        self.manifest["updated_at"] = _utc_now()
-        _atomic_json(self.manifest_path, self.manifest)
+        with self._manifest_lock:
+            self.manifest.update(updates)
+            self.manifest["updated_at"] = _utc_now()
+            _atomic_json(self.manifest_path, self.manifest)
 
     def _phase(self, name: str) -> dict[str, Any]:
         phases = self.manifest.setdefault("phases_state", {})
         return phases.setdefault(name, {"status": "pending", "items": {}})
 
     def _record(self, phase: str, key: str, **updates: Any) -> None:
-        state = self._phase(phase)
-        items = state.setdefault("items", {})
-        item = items.setdefault(key, {})
-        item.update(updates)
-        self._save()
+        with self._manifest_lock:
+            state = self._phase(phase)
+            items = state.setdefault("items", {})
+            item = items.setdefault(key, {})
+            item.update(updates)
+            self._save()
+
+    def _item_state(self, phase: str, key: str, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._manifest_lock:
+            state = self._phase(phase)
+            item = state.setdefault("items", {}).setdefault(key, dict(default or {}))
+            return dict(item)
 
     def _archive(self, api_name: str, key: str, response: TushareResponse) -> None:
         archive_source_payload(self.config.data_dir, "tushare_proxy", api_name, self.run_id, key, response.raw, parser_version="tushare_proxy_v1")
@@ -735,12 +745,13 @@ class TushareHistoryBackfill:
     def _fetch_adjustment(self, kind: str, api_name: str, symbols: list[str]) -> None:
         phase = self._phase("adjustment")
         phase["status"] = "running"
-        for symbol in symbols:
+
+        def fetch_one(symbol: str) -> None:
             assert_disk_reserve(self.config.data_dir)
-            state = phase["items"].get(symbol, {})
+            state = self._item_state("adjustment", symbol)
             path = self.run_root / "batches" / "adjustment" / kind / f"{_safe_part(symbol)}.parquet"
             if state.get("status") == "completed" and path.exists():
-                continue
+                return
             try:
                 response = self.client.request(api_name, {"ts_code": symbol})
                 self._archive(api_name, symbol, response)
@@ -755,6 +766,8 @@ class TushareHistoryBackfill:
                 self._record("adjustment", symbol, status="blocked", api=api_name, reason="permission_or_auth", error=type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 self._record("adjustment", symbol, status="retry", api=api_name, error=type(exc).__name__)
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="tushare-adjustment") as executor:
+            list(executor.map(fetch_one, symbols))
         phase["status"] = "completed"
         self._save()
 
@@ -763,16 +776,28 @@ class TushareHistoryBackfill:
         phase = self._phase(phase_name)
         phase["status"] = "running"
         today = date.today()
-        for symbol in symbols:
+
+        def fetch_one(symbol: str) -> None:
             assert_disk_reserve(self.config.data_dir)
-            state = phase["items"].setdefault(symbol, {"status": "pending", "pages": 0})
             page_root = self.run_root / "batches" / phase_name / _safe_part(symbol)
-            if state.get("status") == "completed":
+            raw_root = self.config.data_dir / "tushare_archive" / ("minute_stock_raw" if kind == "stock" else "minute_etf_raw") / f"symbol={_safe_part(symbol)}"
+            raw_path = raw_root / "part.parquet"
+            state = self._item_state(phase_name, symbol, {"status": "pending", "pages": 0})
+            if state.get("status") == "completed" and raw_path.exists():
                 self._clear_minute_pages(page_root)
-                continue
-            cursor = str(state.get("cursor") or f"{today.isoformat()} 23:59:59")
-            raw_pages = [pl.read_parquet(path) for path in sorted(page_root.glob("page-*.parquet"))]
-            state["pages"] = max(int(state.get("pages", 0)), len(raw_pages))
+                return
+            page_paths = sorted(page_root.glob("page-*.parquet"))
+            raw_pages = [pl.read_parquet(path) for path in page_paths]
+            staged_rows = sum(validate_minute_frame(page)[0].height for page in raw_pages)
+            if raw_pages:
+                last_valid, _ = validate_minute_frame(raw_pages[-1])
+                if last_valid.is_empty():
+                    raise BackfillBlocked(f"staged minute page has no valid cursor for {symbol}")
+                cursor = (last_valid["datetime"].min() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                cursor = str(state.get("cursor") or f"{today.isoformat()} 23:59:59")
+            state.update({"pages": len(raw_pages), "rows": staged_rows, "cursor": cursor})
+            self._record(phase_name, symbol, status="running", pages=state["pages"], rows=state["rows"], cursor=cursor)
             try:
                 while True:
                     page_number = int(state.get("pages", 0))
@@ -790,11 +815,23 @@ class TushareHistoryBackfill:
                         raise BackfillBlocked(f"minute cursor did not strictly decrease for {symbol}")
                     _atomic_parquet(frame, page_root / f"page-{page_number:06d}.parquet")
                     raw_pages.append(frame)
-                    state["pages"] = page_number + 1
-                    state["cursor"] = (oldest - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
-                    state["rows"] = int(state.get("rows", 0)) + valid.height
-                    state["last_page_hash"] = stable_content_hash(response.raw)
-                    self._save()
+                    state.update(
+                        {
+                            "pages": page_number + 1,
+                            "cursor": (oldest - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                            "rows": int(state.get("rows", 0)) + valid.height,
+                            "last_page_hash": stable_content_hash(response.raw),
+                        }
+                    )
+                    self._record(
+                        phase_name,
+                        symbol,
+                        status="running",
+                        pages=state["pages"],
+                        cursor=state["cursor"],
+                        rows=state["rows"],
+                        last_page_hash=state["last_page_hash"],
+                    )
                     if len(response.items) < MAX_MINUTE_ROWS:
                         state.update({"status": "completed", "reason": "provider_page_short", "cursor": state["cursor"]})
                         break
@@ -802,14 +839,16 @@ class TushareHistoryBackfill:
                     frame = pl.concat(raw_pages, how="vertical_relaxed").unique(subset=["symbol", "datetime"], keep="last").sort(["symbol", "datetime"])
                 else:
                     frame = normalize_rows([], asset_type=kind)
-                raw_root = self.config.data_dir / "tushare_archive" / ("minute_stock_raw" if kind == "stock" else "minute_etf_raw") / f"symbol={_safe_part(symbol)}"
-                _atomic_parquet(frame, raw_root / "part.parquet")
+                _atomic_parquet(frame, raw_path)
                 self._record(phase_name, symbol, status="completed", rows=frame.height, min_datetime=str(frame["datetime"].min()) if frame.height else None, max_datetime=str(frame["datetime"].max()) if frame.height else None, content_hash=stable_content_hash(frame.to_dicts()))
                 self._clear_minute_pages(page_root)
             except TusharePermissionError as exc:
                 self._record(phase_name, symbol, status="blocked", reason="permission_or_auth", error=type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 self._record(phase_name, symbol, status="failed", error=type(exc).__name__, message=str(exc)[:240])
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix=f"tushare-{phase_name}") as executor:
+            list(executor.map(fetch_one, symbols))
         phase["status"] = "completed"
         self._save()
 
