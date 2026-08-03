@@ -33,6 +33,23 @@ class _BaoStockResult:
         return self._rows[self._idx]
 
 
+class _StockBasicResult:
+    error_code = "0"
+    error_msg = ""
+    fields = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
+
+    def __init__(self, rows: list[list[str]]) -> None:
+        self._rows = rows
+        self._idx = -1
+
+    def next(self) -> bool:
+        self._idx += 1
+        return self._idx < len(self._rows)
+
+    def get_row_data(self) -> list[str]:
+        return self._rows[self._idx]
+
+
 class _FakeBaoStock:
     def __init__(self) -> None:
         self.queries: list[dict] = []
@@ -56,6 +73,56 @@ class _FakeBaoStock:
                 "10.2", "10.5", "10.1", "10.4", "2000", "20800", "2",
             ],
         ])
+
+    def query_stock_basic(self):
+        return _StockBasicResult([
+            ["sh.600000", "浦发银行", "1999-11-10", "", "1", "1"],
+            ["sh.600001", "邯郸钢铁", "1998-01-22", "2009-12-29", "1", "0"],
+            ["sh.000001", "上证指数", "1991-07-15", "", "2", "1"],
+        ])
+
+
+def test_baostock_provider_normalizes_stock_basic_lifecycle_fields():
+    fake = _FakeBaoStock()
+    provider = BaoStockProvider(bs_module=fake)
+
+    df = provider.get_instruments("stock")
+
+    assert fake.logout_count == 1
+    assert df.select([
+        "symbol",
+        "name",
+        "code",
+        "exchange",
+        "list_date",
+        "listing_date",
+        "delist_date",
+        "status",
+        "source",
+    ]).to_dicts() == [
+        {
+            "symbol": "600000.SH",
+            "name": "浦发银行",
+            "code": "600000",
+            "exchange": "SH",
+            "list_date": datetime(1999, 11, 10).date(),
+            "listing_date": datetime(1999, 11, 10).date(),
+            "delist_date": None,
+            "status": "active",
+            "source": "baostock",
+        },
+        {
+            "symbol": "600001.SH",
+            "name": "邯郸钢铁",
+            "code": "600001",
+            "exchange": "SH",
+            "list_date": datetime(1998, 1, 22).date(),
+            "listing_date": datetime(1998, 1, 22).date(),
+            "delist_date": datetime(2009, 12, 29).date(),
+            "status": "delisted",
+            "source": "baostock",
+        },
+    ]
 
 
 def test_baostock_provider_normalizes_supported_coarse_minute_rows():

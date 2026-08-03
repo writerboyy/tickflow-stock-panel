@@ -19,6 +19,10 @@ Important boundaries:
   constituent candidate snapshot under `pit_reference/baostock`; it is not
   promoted into `index_membership_events` without separate effective-from/to
   evidence.
+- BaoStock `query_stock_basic` can supplement recent stock listing/delisting
+  dates into `instrument_lifecycle_events` and `instruments`; it still lacks
+  delisting decision, delisting-period and reason fields, so lifecycle
+  completeness remains partial.
 - effective_to is treated as an exclusive upper bound by backtests:
   effective_from <= trade_date < effective_to.
 - The lifecycle table records only events present in the raw file. A row with
@@ -53,6 +57,10 @@ Examples:
     # BaoStock HS300 candidate snapshots for latest five years of local trading dates.
     # Existing snapshot partitions are skipped by default; keep this single-process.
     uv run python scripts/collect_baostock_hs300_candidates.py --years 5 --sleep-seconds 1
+
+    # BaoStock stock lifecycle supplement for latest five years.
+    # This also applies list_date/delist_date/status to data/instruments.
+    uv run python scripts/collect_baostock_lifecycle.py --years 5
 
     # If direct BaoStock TCP is blocked, use an HTTP CONNECT proxy.
     uv run python scripts/collect_baostock_hs300_candidates.py \

@@ -12,6 +12,7 @@ from app.plugins.hithink.storage import (
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_EVENTS_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
+    INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     publish_history_table,
 )
 from app.services import pit_reference
@@ -160,3 +161,92 @@ def test_pit_reference_sync_uses_injected_collector(tmp_path):
     assert calls[0][0] == "index"
     assert calls[1][0] == "sector"
     assert calls[2] == ("lifecycle", date(2026, 8, 2), 0)
+
+
+def test_pit_reference_sync_baostock_lifecycle_updates_instruments(tmp_path):
+    inst_path = tmp_path / "instruments" / "instruments.parquet"
+    inst_path.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "name": ["浦发银行"],
+        "code": ["600000"],
+        "exchange": ["SH"],
+    }).write_parquet(inst_path)
+
+    class Collector:
+        def collect_stock_lifecycle(self, *, start_date, end_date, years):
+            assert start_date is None
+            assert end_date == date(2026, 8, 3)
+            assert years == 5
+            frame = pl.DataFrame({
+                "symbol": ["600000.SH", "600001.SH", "600001.SH", "600003.SH"],
+                "name": ["浦发银行", "邯郸钢铁", "邯郸钢铁", "仅上市事件"],
+                "exchange": ["SH", "SH", "SH", "SH"],
+                "event_date": [
+                    date(1999, 11, 10),
+                    date(1998, 1, 22),
+                    date(2024, 1, 3),
+                    date(2022, 1, 4),
+                ],
+                "event_type": ["listed", "listed", "delisted", "listed"],
+                "event_status": ["listed", "listed", "delisted", "listed"],
+                "reason": ["", "", "", ""],
+                "source": ["baostock", "baostock", "baostock", "baostock"],
+                "provenance": [
+                    "historical_event",
+                    "historical_event",
+                    "historical_event",
+                    "historical_event",
+                ],
+                "raw_hash": ["a", "b", "c", "d"],
+            })
+            publish_history_table(tmp_path, INSTRUMENT_LIFECYCLE_EVENTS_TABLE, frame)
+            return {
+                "source_rows": 2,
+                "candidate_rows": 2,
+                "published_rows": 4,
+                "total_table_rows": 4,
+                "start_date": date(2021, 8, 3),
+                "end_date": date(2026, 8, 3),
+            }
+
+    result = pit_reference.sync_baostock_lifecycle(
+        tmp_path,
+        end_date=date(2026, 8, 3),
+        collector=Collector(),
+    )
+
+    assert result["status"] == "published"
+    assert result["tables"] == {INSTRUMENT_LIFECYCLE_EVENTS_TABLE: 4}
+    assert result["instrument_matched_symbols"] == 1
+    assert result["instrument_appended_symbols"] == 1
+    stored = pl.read_parquet(inst_path).sort("symbol")
+    assert stored["symbol"].to_list() == ["600000.SH", "600001.SH"]
+    assert stored.select(["symbol", "listing_date", "list_date", "delist_date", "status"]).to_dicts() == [
+        {
+            "symbol": "600000.SH",
+            "listing_date": date(1999, 11, 10),
+            "list_date": date(1999, 11, 10),
+            "delist_date": None,
+            "status": "active",
+        },
+        {
+            "symbol": "600001.SH",
+            "listing_date": date(1998, 1, 22),
+            "list_date": date(1998, 1, 22),
+            "delist_date": date(2024, 1, 3),
+            "status": "delisted",
+        },
+    ]
+
+
+def test_pit_reference_sync_baostock_lifecycle_reports_failure(tmp_path):
+    class Collector:
+        def collect_stock_lifecycle(self, *, start_date, end_date, years):
+            raise RuntimeError("offline")
+
+    result = pit_reference.sync_baostock_lifecycle(tmp_path, collector=Collector())
+
+    assert result["status"] == "failed"
+    assert result["published_rows"] == 0
+    assert result["errors"] == ["instrument_lifecycle_events: offline"]

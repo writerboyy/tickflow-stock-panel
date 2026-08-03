@@ -12,12 +12,23 @@ from app.plugins.baostock.index_candidates import (
     normalize_index_constituent_candidates,
     partition_path,
 )
+from app.plugins.baostock.instrument_lifecycle import (
+    BaoStockInstrumentLifecycleCollector,
+    lookback_start,
+)
 from app.plugins.baostock.socket_proxy import (
     force_proxy_enabled,
     iter_proxy_candidates,
     parse_http_proxy_url,
 )
-from app.plugins.pit_history.storage import INDEX_MEMBERSHIP_EVENTS_TABLE, table_path
+from app.plugins.pit_history.storage import (
+    INDEX_MEMBERSHIP_EVENTS_TABLE,
+    INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
+    normalize_instrument_lifecycle_events,
+    publish_history_table,
+    read_history_table,
+    table_path,
+)
 from app.services import pit_reference
 from scripts.collect_baostock_hs300_candidates import candidate_dates, main, query_dates
 
@@ -59,6 +70,38 @@ class _FakeBaoStock:
     def query_hs300_stocks(self, date: str = "") -> _BaoStockResult:
         self.queries.append(date)
         return _BaoStockResult(self.by_date.get(date, []))
+
+
+class _StockBasicResult:
+    error_code = "0"
+    error_msg = ""
+    fields = ["code", "code_name", "ipoDate", "outDate", "type", "status"]
+
+    def __init__(self, rows: list[list[str]]) -> None:
+        self._rows = rows
+        self._idx = -1
+
+    def next(self) -> bool:
+        self._idx += 1
+        return self._idx < len(self._rows)
+
+    def get_row_data(self) -> list[str]:
+        return self._rows[self._idx]
+
+
+class _FakeBaoStockBasic:
+    def __init__(self, rows: list[list[str]]) -> None:
+        self.rows = rows
+        self.logout_count = 0
+
+    def login(self) -> _LoginResult:
+        return _LoginResult()
+
+    def logout(self) -> None:
+        self.logout_count += 1
+
+    def query_stock_basic(self) -> _StockBasicResult:
+        return _StockBasicResult(self.rows)
 
 
 class _FailingCollector:
@@ -194,6 +237,76 @@ def test_baostock_collector_publishes_candidate_snapshots_and_manifest(tmp_path)
     )
     assert manifest.exists()
     assert not table_path(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE).exists()
+
+
+def test_baostock_lifecycle_collector_publishes_recent_overlap_and_keeps_existing(tmp_path):
+    existing = normalize_instrument_lifecycle_events(
+        [
+            {
+                "证券代码": "600002",
+                "证券简称": "齐鲁石化",
+                "上市日期": "1998-04-08",
+                "终止上市日期": "2006-04-24",
+            }
+        ],
+        source="exchange",
+    )
+    publish_history_table(tmp_path, INSTRUMENT_LIFECYCLE_EVENTS_TABLE, existing)
+    fake = _FakeBaoStockBasic([
+        ["sh.600000", "浦发银行", "1999-11-10", "", "1", "1"],
+        ["sh.600001", "邯郸钢铁", "1998-01-22", "2024-01-03", "1", "0"],
+        ["sz.000003", "PT金田A", "1991-07-03", "2019-12-31", "1", "0"],
+        ["sz.300999", "未来新股", "2027-01-01", "", "1", "1"],
+    ])
+    collector = BaoStockInstrumentLifecycleCollector(tmp_path, bs_module=fake)
+
+    result = collector.collect_stock_lifecycle(
+        start_date=date(2021, 1, 1),
+        end_date=date(2026, 1, 1),
+    )
+
+    assert fake.logout_count == 1
+    assert result["source_rows"] == 4
+    assert result["candidate_rows"] == 2
+    assert result["published_rows"] == 3
+    assert result["total_table_rows"] == 5
+    frame = read_history_table(tmp_path, INSTRUMENT_LIFECYCLE_EVENTS_TABLE)
+    assert frame.select(["symbol", "event_type", "event_date", "source"]).to_dicts() == [
+        {
+            "symbol": "600000.SH",
+            "event_type": "listed",
+            "event_date": date(1999, 11, 10),
+            "source": "baostock",
+        },
+        {
+            "symbol": "600001.SH",
+            "event_type": "listed",
+            "event_date": date(1998, 1, 22),
+            "source": "baostock",
+        },
+        {
+            "symbol": "600001.SH",
+            "event_type": "delisted",
+            "event_date": date(2024, 1, 3),
+            "source": "baostock",
+        },
+        {
+            "symbol": "600002.SH",
+            "event_type": "listed",
+            "event_date": date(1998, 4, 8),
+            "source": "exchange",
+        },
+        {
+            "symbol": "600002.SH",
+            "event_type": "delisted",
+            "event_date": date(2006, 4, 24),
+            "source": "exchange",
+        },
+    ]
+
+
+def test_baostock_lifecycle_lookback_handles_leap_day():
+    assert lookback_start(date(2024, 2, 29), years=5) == date(2019, 2, 28)
 
 
 def test_pit_reference_status_reports_baostock_candidate_as_non_strict(tmp_path):

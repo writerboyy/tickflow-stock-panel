@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import polars as pl
@@ -37,7 +37,7 @@ _EXCHANGE_SUFFIX_TO_PREFIX = {
 
 class BaoStockProvider:
     name = "baostock"
-    capabilities = ProviderCapabilities(minute=True)
+    capabilities = ProviderCapabilities(instruments=True, minute=True)
 
     def __init__(self, bs_module: Any | None = None) -> None:
         self._bs_module = bs_module
@@ -46,8 +46,19 @@ class BaoStockProvider:
     def supports_minute_freq(freq: str = "1m") -> bool:
         return _normalize_freq(freq, strict=False) is not None
 
-    def get_instruments(self, asset_type: AssetType) -> pl.DataFrame:  # noqa: ARG002
-        return pl.DataFrame()
+    def get_instruments(self, asset_type: AssetType) -> pl.DataFrame:
+        if asset_type != "stock":
+            return pl.DataFrame()
+        bs = self._baostock()
+        login = bs.login()
+        if getattr(login, "error_code", "0") != "0":
+            raise RuntimeError(f"BaoStock login failed: {getattr(login, 'error_msg', '')}")
+        try:
+            result = bs.query_stock_basic()
+            rows = _result_rows(result, error_prefix="BaoStock query_stock_basic failed")
+        finally:
+            bs.logout()
+        return _normalize_baostock_stock_basic(rows)
 
     def get_daily(
         self,
@@ -146,17 +157,10 @@ class BaoStockProvider:
             frequency=frequency,
             adjustflag="2",
         )
-        if getattr(rs, "error_code", "0") != "0":
-            raise RuntimeError(
-                f"BaoStock query_history_k_data_plus failed for {code}: "
-                f"{getattr(rs, 'error_msg', '')}"
-            )
-        rows: list[dict[str, str]] = []
-        fields = list(getattr(rs, "fields", []))
-        while rs.next():
-            values = rs.get_row_data()
-            rows.append({field: values[pos] for pos, field in enumerate(fields)})
-        return rows
+        return _result_rows(
+            rs,
+            error_prefix=f"BaoStock query_history_k_data_plus failed for {code}",
+        )
 
 
 def _normalize_freq(freq: str, *, strict: bool) -> str | None:
@@ -189,6 +193,86 @@ def _from_baostock_code(code: str) -> str | None:
     if exchange is None or not raw_code:
         return None
     return f"{raw_code}.{exchange}"
+
+
+def _exchange_from_symbol(symbol: str) -> str:
+    parts = str(symbol or "").strip().upper().split(".")
+    return parts[1] if len(parts) == 2 else ""
+
+
+def _code_from_symbol(symbol: str) -> str:
+    return str(symbol or "").split(".", 1)[0]
+
+
+def _parse_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _result_rows(result: Any, *, error_prefix: str) -> list[dict[str, str]]:
+    if getattr(result, "error_code", "0") != "0":
+        raise RuntimeError(f"{error_prefix}: {getattr(result, 'error_msg', '')}")
+    fields = list(getattr(result, "fields", []))
+    rows: list[dict[str, str]] = []
+    while result.next():
+        values = result.get_row_data()
+        rows.append({field: values[pos] for pos, field in enumerate(fields)})
+    return rows
+
+
+def _normalize_status(value: Any, delist_date: date | None) -> str:
+    text = str(value or "").strip()
+    if text == "1":
+        return "active"
+    if text == "0" or delist_date is not None:
+        return "delisted"
+    return text or "unknown"
+
+
+def _normalize_baostock_stock_basic(rows: list[dict[str, str]]) -> pl.DataFrame:
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        raw_type = str(row.get("type") or "").strip()
+        if raw_type != "1":
+            continue
+        symbol = _from_baostock_code(row.get("code", ""))
+        if symbol is None:
+            continue
+        list_date = _parse_date(row.get("ipoDate"))
+        delist_date = _parse_date(row.get("outDate"))
+        normalized.append({
+            "symbol": symbol,
+            "name": str(row.get("code_name") or "").strip() or symbol,
+            "code": _code_from_symbol(symbol),
+            "exchange": _exchange_from_symbol(symbol),
+            "asset_type": "stock",
+            "source": "baostock",
+            "list_date": list_date,
+            "listing_date": list_date,
+            "delist_date": delist_date,
+            "status": _normalize_status(row.get("status"), delist_date),
+            "source_type": raw_type,
+        })
+    if not normalized:
+        return pl.DataFrame()
+    return pl.DataFrame(normalized).select([
+        pl.col("symbol").cast(pl.String),
+        pl.col("name").cast(pl.String),
+        pl.col("code").cast(pl.String),
+        pl.col("exchange").cast(pl.String),
+        pl.col("asset_type").cast(pl.String),
+        pl.col("source").cast(pl.String),
+        pl.col("list_date").cast(pl.Date),
+        pl.col("listing_date").cast(pl.Date),
+        pl.col("delist_date").cast(pl.Date),
+        pl.col("status").cast(pl.String),
+        pl.col("source_type").cast(pl.String),
+    ]).unique(subset=["symbol"], keep="last").sort("symbol")
 
 
 def _parse_baostock_datetime(date_value: Any, time_value: Any) -> datetime | None:

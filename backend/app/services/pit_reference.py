@@ -30,6 +30,10 @@ from app.plugins.baostock.index_candidates import (
     INDEX_CONSTITUENT_CANDIDATES_TABLE,
     SOURCE as BAOSTOCK_SOURCE,
 )
+from app.plugins.baostock.instrument_lifecycle import (
+    DEFAULT_LOOKBACK_YEARS as BAOSTOCK_LIFECYCLE_LOOKBACK_YEARS,
+    BaoStockInstrumentLifecycleCollector,
+)
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_EVENTS_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
@@ -409,5 +413,50 @@ def sync_baostock_index_candidates(
         "snapshot_dates": [item.isoformat() for item in dates],
         "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: rows},
         "published_rows": rows,
+        "errors": [],
+    }
+
+
+def sync_baostock_lifecycle(
+    data_dir: Path,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    years: int = BAOSTOCK_LIFECYCLE_LOOKBACK_YEARS,
+    collector: BaoStockInstrumentLifecycleCollector | None = None,
+) -> dict[str, Any]:
+    data_dir = Path(data_dir)
+    collector = collector or BaoStockInstrumentLifecycleCollector(data_dir)
+    try:
+        result = collector.collect_stock_lifecycle(
+            start_date=start_date,
+            end_date=end_date,
+            years=years,
+        )
+        from app.services import instrument_sync
+
+        instrument_result = instrument_sync.apply_lifecycle_supplement(data_dir)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "source": BAOSTOCK_SOURCE,
+            "tables": {},
+            "published_rows": 0,
+            "errors": [f"{INSTRUMENT_LIFECYCLE_EVENTS_TABLE}: {exc}"],
+        }
+    return {
+        "status": "published",
+        "source": BAOSTOCK_SOURCE,
+        "start_date": result["start_date"].isoformat(),
+        "end_date": result["end_date"].isoformat(),
+        "years": years,
+        "tables": {INSTRUMENT_LIFECYCLE_EVENTS_TABLE: result["published_rows"]},
+        "published_rows": result["published_rows"],
+        "source_rows": result["source_rows"],
+        "candidate_rows": result["candidate_rows"],
+        "total_table_rows": result["total_table_rows"],
+        "instrument_rows": instrument_result["rows"],
+        "instrument_matched_symbols": instrument_result["matched_symbols"],
+        "instrument_appended_symbols": instrument_result["appended_symbols"],
         "errors": [],
     }
