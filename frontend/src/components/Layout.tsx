@@ -94,7 +94,7 @@ const nav = [
 ] as const
 
 const CUSTOM_NAV_PARENT_ID = '__custom__'
-const CUSTOM_NAV_IDS = new Set(['/free-strategy', '/market-heat', '/large-orders'])
+const CUSTOM_NAV_IDS = new Set(['/free-strategy', '/market-heat', '/large-orders', '/backtest'])
 
 type NavItem = {
   to: string
@@ -464,22 +464,14 @@ export function Layout() {
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
   const visibleFlatNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
   const customChildren = visibleFlatNavItems.filter(item => CUSTOM_NAV_IDS.has(item.to))
-  const visibleNavItems: NavItem[] = []
-  let customInserted = false
-  for (const item of visibleFlatNavItems) {
-    if (CUSTOM_NAV_IDS.has(item.to)) {
-      if (!customInserted && customChildren.length > 0) {
-        visibleNavItems.push({
-          to: CUSTOM_NAV_PARENT_ID,
-          label: '自定义',
-          icon: Layers3,
-          children: customChildren,
-        })
-        customInserted = true
-      }
-      continue
-    }
-    visibleNavItems.push(item)
+  const visibleNavItems: NavItem[] = visibleFlatNavItems.filter(item => !CUSTOM_NAV_IDS.has(item.to))
+  if (customChildren.length > 0) {
+    visibleNavItems.push({
+      to: CUSTOM_NAV_PARENT_ID,
+      label: '自定义',
+      icon: Layers3,
+      children: customChildren,
+    })
   }
   const customActive = customChildren.some(item => item.to === location.pathname)
   const [customExpanded, setCustomExpanded] = useState(true)
