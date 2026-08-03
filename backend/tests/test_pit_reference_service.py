@@ -4,6 +4,11 @@ from datetime import date
 
 import polars as pl
 
+from app.plugins.baostock.index_candidates import (
+    INDEX_CONSTITUENT_CANDIDATES_TABLE,
+    normalize_index_constituent_candidates,
+    publish_candidate_snapshot,
+)
 from app.plugins.hithink.storage import (
     INDEX_CONSTITUENTS_TABLE,
     INSTRUMENT_LIFECYCLE_TABLE,
@@ -24,7 +29,7 @@ class MissingHiThinkClient:
         raise pit_reference.HiThinkAuthError("missing")
 
 
-def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_path):
+def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
     monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
     monkeypatch.delenv("FUYAO_TOKEN", raising=False)
     monkeypatch.delenv("API_KEY", raising=False)
@@ -67,6 +72,24 @@ def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_
             }
         ),
     )
+    publish_history_table(
+        tmp_path,
+        INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
+        pl.DataFrame(
+            {
+                "symbol": ["600519.SH", "000001.SZ"],
+                "name": ["贵州茅台", "平安银行"],
+                "exchange": ["SH", "SZ"],
+                "event_date": [date(2001, 8, 27), date(1991, 4, 3)],
+                "event_type": ["listed", "listed"],
+                "event_status": ["listed", "listed"],
+                "reason": ["", ""],
+                "source": ["baostock", "akshare_exchange"],
+                "provenance": ["historical_event", "historical_event"],
+                "raw_hash": ["d", "e"],
+            }
+        ),
+    )
     publish_snapshot(
         tmp_path,
         INDEX_CONSTITUENTS_TABLE,
@@ -86,25 +109,31 @@ def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_
             }
         ),
     )
+    candidate_date = date(2026, 8, 2)
+    publish_candidate_snapshot(
+        tmp_path,
+        candidate_date,
+        normalize_index_constituent_candidates(
+            [{"code": "sh.600519", "code_name": "贵州茅台"}],
+            index_symbol="000300.SH",
+            index_name="沪深300",
+            snapshot_date=candidate_date,
+        ),
+    )
 
     status = pit_reference.get_status(tmp_path)
 
-    assert status["summary"]["history_rows"] == 3
+    assert status["summary"]["source"] == "baostock"
+    assert status["summary"]["history_rows"] == 1
     assert status["summary"]["snapshot_rows"] == 1
     assert status["summary"]["earliest_date"] == "2001-08-27"
     assert status["summary"]["latest_snapshot_date"] == "2026-08-02"
-    assert status["summary"]["hithink_configured"] is False
     assert status["summary"]["strict_index_membership_usable"] is False
-    assert status["history"][INDEX_MEMBERSHIP_EVENTS_TABLE]["symbols_covered"] == 2
-    assert status["history"][INDEX_MEMBERSHIP_EVENTS_TABLE]["strict_backtest"]["status"] == "incomplete"
-    assert (
-        status["history"][INDUSTRY_MEMBERSHIP_HISTORY_TABLE]["industry_join"][
-            "requires_industry_standard"
-        ]
-        is True
-    )
-    assert status["snapshots"][INDEX_CONSTITUENTS_TABLE]["provenance_counts"] == {
-        "snapshot_frozen": 1
+    assert set(status["history"]) == {INSTRUMENT_LIFECYCLE_EVENTS_TABLE}
+    assert set(status["snapshots"]) == {INDEX_CONSTITUENT_CANDIDATES_TABLE}
+    assert status["history"][INSTRUMENT_LIFECYCLE_EVENTS_TABLE]["sources"] == ["baostock"]
+    assert status["snapshots"][INDEX_CONSTITUENT_CANDIDATES_TABLE]["provenance_counts"] == {
+        "candidate_snapshot": 1
     }
 
 
@@ -161,6 +190,56 @@ def test_pit_reference_sync_uses_injected_collector(tmp_path):
     assert calls[0][0] == "index"
     assert calls[1][0] == "sector"
     assert calls[2] == ("lifecycle", date(2026, 8, 2), 0)
+
+
+def test_pit_reference_syncs_baostock_only(monkeypatch, tmp_path):
+    calls = []
+
+    def sync_candidates(data_dir, *, snapshot_dates):
+        calls.append(("candidates", data_dir, tuple(snapshot_dates)))
+        return {
+            "status": "published",
+            "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: 300},
+            "published_rows": 300,
+            "errors": [],
+        }
+
+    def sync_lifecycle(data_dir, *, end_date, years):
+        calls.append(("lifecycle", data_dir, end_date, years))
+        return {
+            "status": "published",
+            "tables": {INSTRUMENT_LIFECYCLE_EVENTS_TABLE: 5587},
+            "published_rows": 5587,
+            "instrument_appended_symbols": 2,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(pit_reference, "sync_baostock_index_candidates", sync_candidates)
+    monkeypatch.setattr(pit_reference, "sync_baostock_lifecycle", sync_lifecycle)
+
+    result = pit_reference.sync_baostock_reference(
+        tmp_path,
+        snapshot_date=date(2026, 8, 3),
+    )
+
+    assert result == {
+        "status": "published",
+        "source": "baostock",
+        "snapshot_date": "2026-08-03",
+        "tables": {
+            INDEX_CONSTITUENT_CANDIDATES_TABLE: 300,
+            INSTRUMENT_LIFECYCLE_EVENTS_TABLE: 5587,
+        },
+        "published_rows": 5887,
+        "index_candidate_rows": 300,
+        "lifecycle_rows": 5587,
+        "instrument_appended_symbols": 2,
+        "errors": [],
+    }
+    assert calls == [
+        ("candidates", tmp_path, (date(2026, 8, 3),)),
+        ("lifecycle", tmp_path, date(2026, 8, 3), 5),
+    ]
 
 
 def test_pit_reference_sync_baostock_lifecycle_updates_instruments(tmp_path):

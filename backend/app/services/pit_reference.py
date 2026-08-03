@@ -1,15 +1,13 @@
 """PIT reference status and snapshot maintenance.
 
-Historical PIT tables are built by scripts/build_pit_history_from_raw.py.
-This service only summarizes those tables and freezes today's supplemental
-HiThink snapshots; it never uses a current snapshot to backfill historical
-membership.
+The data page and daily pipeline use BaoStock candidate snapshots and lifecycle
+events. Historical PIT builders and the optional HiThink collector remain
+available as explicit offline/manual tools.
 """
 from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
@@ -22,7 +20,6 @@ from app.plugins.hithink.collector import HiThinkSnapshotCollector
 from app.plugins.hithink.storage import (
     INDEX_CONSTITUENTS_TABLE,
     INSTRUMENT_LIFECYCLE_TABLE,
-    SOURCE as HITHINK_SOURCE,
     THS_SECTOR_CONSTITUENTS_TABLE,
 )
 from app.plugins.baostock.index_candidates import (
@@ -35,14 +32,10 @@ from app.plugins.baostock.instrument_lifecycle import (
     BaoStockInstrumentLifecycleCollector,
 )
 from app.plugins.pit_history.storage import (
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
-    INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     SOURCE as PIT_HISTORY_SOURCE,
-    summarize_industry_standards,
     summarize_lifecycle_completeness,
     table_path,
-    validate_index_membership_coverage,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,42 +44,16 @@ DEFAULT_INDEX_NAMES = {"000300.SH": "沪深300"}
 DEFAULT_SECTOR_TAGS = ("industry",)
 
 _HISTORY_TABLES: dict[str, dict[str, Any]] = {
-    INDEX_MEMBERSHIP_EVENTS_TABLE: {
-        "label": "PIT 指数成分",
-        "symbol_col": "member_symbol",
-        "start_col": "effective_from",
-        "end_col": "effective_to",
-    },
-    INDUSTRY_MEMBERSHIP_HISTORY_TABLE: {
-        "label": "PIT 行业历史",
-        "symbol_col": "member_symbol",
-        "start_col": "effective_from",
-        "end_col": "effective_to",
-    },
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE: {
-        "label": "退市生命周期",
+        "label": "BaoStock 股票生命周期",
         "symbol_col": "symbol",
         "start_col": "event_date",
         "end_col": None,
+        "source": BAOSTOCK_SOURCE,
     },
 }
 
 _SNAPSHOT_TABLES: dict[str, dict[str, Any]] = {
-    INDEX_CONSTITUENTS_TABLE: {
-        "label": "同花顺指数成分快照",
-        "symbol_col": "member_symbol",
-        "source": HITHINK_SOURCE,
-    },
-    THS_SECTOR_CONSTITUENTS_TABLE: {
-        "label": "同花顺行业成分快照",
-        "symbol_col": "member_symbol",
-        "source": HITHINK_SOURCE,
-    },
-    INSTRUMENT_LIFECYCLE_TABLE: {
-        "label": "同花顺 observed 生命周期",
-        "symbol_col": "symbol",
-        "source": HITHINK_SOURCE,
-    },
     INDEX_CONSTITUENT_CANDIDATES_TABLE: {
         "label": "BaoStock 沪深300候选快照",
         "symbol_col": "member_symbol",
@@ -99,21 +66,6 @@ def _date_text(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
-
-
-def _configured_api_key() -> bool:
-    value = (
-        os.getenv("HITHINK_FINANCE_API_KEY")
-        or os.getenv("FUYAO_TOKEN")
-        or os.getenv("API_KEY")
-        or ""
-    ).strip()
-    if value:
-        return True
-    try:
-        return bool(HiThinkClient()._api_key())
-    except HiThinkAuthError:
-        return False
 
 
 def _latest_manifest(data_dir: Path, source: str, table: str) -> dict[str, Any] | None:
@@ -153,14 +105,7 @@ def _decorate_history_status(
     frame: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
     frame = frame if frame is not None else pl.DataFrame()
-    if table == INDEX_MEMBERSHIP_EVENTS_TABLE:
-        status["strict_backtest"] = validate_index_membership_coverage(
-            frame,
-            index_symbol="000300.SH",
-        )
-    elif table == INDUSTRY_MEMBERSHIP_HISTORY_TABLE:
-        status["industry_join"] = summarize_industry_standards(frame)
-    elif table == INSTRUMENT_LIFECYCLE_EVENTS_TABLE:
+    if table == INSTRUMENT_LIFECYCLE_EVENTS_TABLE:
         status["lifecycle_completeness"] = summarize_lifecycle_completeness(frame)
     return status
 
@@ -179,6 +124,9 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
         })
 
     frame = pl.read_parquet(path)
+    source = meta.get("source")
+    if source and "source" in frame.columns:
+        frame = frame.filter(pl.col("source") == source)
     if frame.is_empty():
         return _decorate_history_status(table, {
             "label": meta["label"],
@@ -226,7 +174,7 @@ def _snapshot_root(data_dir: Path, table: str, source: str) -> Path:
 
 
 def _snapshot_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> dict[str, Any]:
-    source = str(meta.get("source") or HITHINK_SOURCE)
+    source = str(meta.get("source") or BAOSTOCK_SOURCE)
     root = _snapshot_root(data_dir, table, source)
     partitions = sorted(root.glob("snapshot_date=*/part.parquet"))
     if not partitions:
@@ -301,18 +249,14 @@ def get_status(data_dir: Path) -> dict[str, Any]:
         "history": history,
         "snapshots": snapshots,
         "summary": {
+            "source": BAOSTOCK_SOURCE,
             "history_rows": history_rows,
             "snapshot_rows": snapshot_rows,
             "rows": history_rows + snapshot_rows,
             "earliest_date": min(history_dates) if history_dates else None,
             "latest_date": max(history_dates) if history_dates else None,
             "latest_snapshot_date": max(latest_snapshots) if latest_snapshots else None,
-            "hithink_configured": _configured_api_key(),
-            "strict_index_membership_usable": bool(
-                history.get(INDEX_MEMBERSHIP_EVENTS_TABLE, {})
-                .get("strict_backtest", {})
-                .get("usable")
-            ),
+            "strict_index_membership_usable": False,
         },
     }
 
@@ -414,6 +358,49 @@ def sync_baostock_index_candidates(
         "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: rows},
         "published_rows": rows,
         "errors": [],
+    }
+
+
+def sync_baostock_reference(
+    data_dir: Path,
+    *,
+    snapshot_date: date | None = None,
+    years: int = BAOSTOCK_LIFECYCLE_LOOKBACK_YEARS,
+) -> dict[str, Any]:
+    """Sync the BaoStock-only reference datasets used by the data page."""
+    snapshot_date = snapshot_date or date.today()
+    candidate_result = sync_baostock_index_candidates(
+        data_dir,
+        snapshot_dates=(snapshot_date,),
+    )
+    lifecycle_result = sync_baostock_lifecycle(
+        data_dir,
+        end_date=snapshot_date,
+        years=years,
+    )
+
+    errors = [
+        *(f"index candidates: {item}" for item in candidate_result.get("errors") or []),
+        *(f"lifecycle: {item}" for item in lifecycle_result.get("errors") or []),
+    ]
+    tables = {
+        **(candidate_result.get("tables") or {}),
+        **(lifecycle_result.get("tables") or {}),
+    }
+    candidate_rows = int(candidate_result.get("published_rows") or 0)
+    lifecycle_rows = int(lifecycle_result.get("published_rows") or 0)
+    return {
+        "status": "failed" if errors else "published",
+        "source": BAOSTOCK_SOURCE,
+        "snapshot_date": snapshot_date.isoformat(),
+        "tables": tables,
+        "published_rows": candidate_rows + lifecycle_rows,
+        "index_candidate_rows": candidate_rows,
+        "lifecycle_rows": lifecycle_rows,
+        "instrument_appended_symbols": int(
+            lifecycle_result.get("instrument_appended_symbols") or 0
+        ),
+        "errors": errors,
     }
 
 

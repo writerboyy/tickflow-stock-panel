@@ -2826,6 +2826,8 @@ export interface PipelineJob {
     index_count?: number
     index_daily_rows?: number
     pit_reference_rows?: number
+    pit_reference_baostock_candidate_rows?: number
+    pit_reference_baostock_lifecycle_rows?: number
     minute_rows: number
     skipped_stages?: string[]
   } | null
@@ -2957,6 +2959,10 @@ export interface PitReferenceTableStatus {
     reason_event_rows: number
     message: string
   }
+  candidate_source?: {
+    strict_backtest_usable: boolean
+    message: string
+  }
   manifest?: {
     logical_snapshot?: string | null
     status?: string | null
@@ -2970,24 +2976,27 @@ export interface PitReferenceStatus {
   history: Record<string, PitReferenceTableStatus>
   snapshots: Record<string, PitReferenceTableStatus>
   summary: {
+    source: 'baostock'
     history_rows: number
     snapshot_rows: number
     rows: number
     earliest_date: string | null
     latest_date: string | null
     latest_snapshot_date: string | null
-    hithink_configured: boolean
     strict_index_membership_usable: boolean
   }
 }
 
 export interface PitReferenceSyncResult {
   status: 'published' | 'skipped' | 'failed'
+  source?: 'baostock'
   reason?: string
   message?: string
   snapshot_date: string
   tables: Record<string, number>
   published_rows: number
+  index_candidate_rows?: number
+  lifecycle_rows?: number
   errors?: string[]
 }
 

@@ -499,59 +499,41 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.4: PIT Reference 同步 — 冻结当天快照，并补充 BaoStock 股票生命周期。
+    # Step 2.4: PIT Reference 同步 — 只采集 BaoStock 候选快照和股票生命周期。
     pit_reference_rows = 0
+    pit_reference_baostock_candidate_rows = 0
     pit_reference_baostock_lifecycle_rows = 0
     pit_reference_instrument_appended_symbols = 0
-    pit_reference_any_published = False
     try:
-        emit("sync_pit_reference", 89, "同步 PIT Reference 快照…")
-        pit_result = pit_reference.sync_hithink_snapshots(repo.store.data_dir)
-        hithink_rows = int(pit_result.get("published_rows") or 0)
-        pit_reference_rows += hithink_rows
-        if pit_result.get("status") == "skipped":
-            emit("sync_pit_reference", 90, "PIT Reference HiThink 跳过: 未配置同花顺 API Key")
-            logger.info("sync_pit_reference skipped: %s", pit_result.get("reason"))
-        elif pit_result.get("status") == "failed":
-            errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
-            emit("sync_pit_reference", 90, f"PIT Reference HiThink 快照失败:{errors}")
-            stage_errors.append(f"PIT reference snapshots: {errors}")
-        else:
-            pit_reference_any_published = hithink_rows > 0
-            emit("sync_pit_reference", 90, f"PIT Reference HiThink 快照完成,{hithink_rows} 行")
-            logger.info("sync_pit_reference done: %s", pit_result)
-
-        emit("sync_pit_reference", 90, "同步 BaoStock 生命周期…")
-        baostock_result = pit_reference.sync_baostock_lifecycle(repo.store.data_dir)
-        pit_reference_baostock_lifecycle_rows = int(baostock_result.get("published_rows") or 0)
-        pit_reference_rows += pit_reference_baostock_lifecycle_rows
-        pit_reference_instrument_appended_symbols = int(
-            baostock_result.get("instrument_appended_symbols") or 0
+        emit("sync_pit_reference", 89, "同步 BaoStock PIT Reference…")
+        pit_result = pit_reference.sync_baostock_reference(repo.store.data_dir)
+        pit_reference_rows = int(pit_result.get("published_rows") or 0)
+        pit_reference_baostock_candidate_rows = int(
+            pit_result.get("index_candidate_rows") or 0
         )
-        if baostock_result.get("status") == "failed":
-            errors = "; ".join(str(item) for item in baostock_result.get("errors") or [])
-            emit("sync_pit_reference", 90, f"BaoStock 生命周期失败:{errors}")
-            stage_errors.append(f"BaoStock lifecycle: {errors}")
+        pit_reference_baostock_lifecycle_rows = int(
+            pit_result.get("lifecycle_rows") or 0
+        )
+        pit_reference_instrument_appended_symbols = int(
+            pit_result.get("instrument_appended_symbols") or 0
+        )
+        if pit_result.get("status") == "failed":
+            errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
+            emit("sync_pit_reference", 90, f"BaoStock PIT Reference 失败:{errors}")
+            stage_errors.append(f"BaoStock PIT reference: {errors}")
         else:
-            pit_reference_any_published = (
-                pit_reference_any_published
-                or pit_reference_baostock_lifecycle_rows > 0
-                or pit_reference_instrument_appended_symbols > 0
-            )
             emit(
                 "sync_pit_reference",
                 90,
-                f"BaoStock 生命周期完成,{pit_reference_baostock_lifecycle_rows} 行"
+                f"BaoStock 完成,候选快照 {pit_reference_baostock_candidate_rows} 行,"
+                f"生命周期 {pit_reference_baostock_lifecycle_rows} 行"
                 + (
                     f",追加退市标的 {pit_reference_instrument_appended_symbols} 只"
                     if pit_reference_instrument_appended_symbols else ""
                 ),
             )
-            logger.info("sync_baostock_lifecycle done: %s", baostock_result)
-        if not pit_reference_any_published and not any(
-            str(item).startswith(("PIT reference snapshots:", "BaoStock lifecycle:"))
-            for item in stage_errors
-        ):
+            logger.info("sync_baostock_reference done: %s", pit_result)
+        if pit_reference_rows == 0 and pit_result.get("status") != "failed":
             skipped.append("sync_pit_reference")
     except Exception as e:  # noqa: BLE001
         emit("sync_pit_reference", 90, f"PIT Reference 同步失败:{e}")
@@ -662,6 +644,7 @@ def run_now(
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
         "pit_reference_rows": pit_reference_rows,
+        "pit_reference_baostock_candidate_rows": pit_reference_baostock_candidate_rows,
         "pit_reference_baostock_lifecycle_rows": pit_reference_baostock_lifecycle_rows,
         "pit_reference_instrument_appended_symbols": pit_reference_instrument_appended_symbols,
         "minute_rows": written_minute,

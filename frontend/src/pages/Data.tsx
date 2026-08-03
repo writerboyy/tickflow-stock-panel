@@ -340,16 +340,15 @@ export function Data() {
     symbols_covered: Math.max(
       0,
       ...Object.values(pitReference.data?.history ?? {}).map(item => item.symbols_covered ?? 0),
+      ...Object.values(pitReference.data?.snapshots ?? {}).map(item => item.symbols_covered ?? 0),
     ),
     trading_days: 0,
   } : null
   const pitHint = pitSummary?.latest_snapshot_date
-    ? `历史表 · 快照 ${pitSummary.latest_snapshot_date}`
-    : '历史表 · 尚未冻结快照'
-  const pitSubLabel = pitSummary ? '指数成分 · 行业历史 · 生命周期' : undefined
-  const pitBadgeSuffix = pitSummary?.strict_index_membership_usable === false
-    ? '严格池不完整'
-    : pitSummary?.hithink_configured ? '盘后快照' : '未配置同花顺Key'
+    ? `BaoStock · 快照 ${pitSummary.latest_snapshot_date}`
+    : 'BaoStock · 尚无快照'
+  const pitSubLabel = pitSummary ? '沪深300候选 · 股票生命周期' : undefined
+  const pitBadgeSuffix = pitSummary ? '候选池 · 非严格PIT' : undefined
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
@@ -711,9 +710,8 @@ export function Data() {
 
   const pitHistoryEntries = Object.entries(pitReference.data?.history ?? {}) as [string, PitReferenceTableStatus][]
   const pitSnapshotEntries = Object.entries(pitReference.data?.snapshots ?? {}) as [string, PitReferenceTableStatus][]
-  const pitIndexAudit = pitReference.data?.history?.index_membership_events?.strict_backtest
-  const pitIndustryJoin = pitReference.data?.history?.industry_membership_history?.industry_join
   const pitLifecycle = pitReference.data?.history?.instrument_lifecycle_events?.lifecycle_completeness
+  const pitCandidate = pitReference.data?.snapshots?.index_constituent_candidates?.candidate_source
   const renderPitRows = (
     entries: [string, PitReferenceTableStatus][],
     mode: 'history' | 'snapshot',
@@ -722,12 +720,16 @@ export function Data() {
       {entries.map(([key, item]) => {
         const quality = item.strict_backtest
           ? (item.strict_backtest.usable ? '严格可用' : '严格不完整')
-          : item.industry_join
-            ? '需选单一行业标准'
-            : item.lifecycle_completeness
-              ? (item.lifecycle_completeness.complete_lifecycle ? '生命周期完整' : '生命周期部分')
-              : null
-        const qualityClass = item.strict_backtest?.usable === false || item.lifecycle_completeness?.complete_lifecycle === false
+          : item.candidate_source
+            ? '候选快照 · 非严格PIT'
+            : item.industry_join
+              ? '需选单一行业标准'
+              : item.lifecycle_completeness
+                ? (item.lifecycle_completeness.complete_lifecycle ? '生命周期完整' : '生命周期部分')
+                : null
+        const qualityClass = item.strict_backtest?.usable === false
+          || item.candidate_source?.strict_backtest_usable === false
+          || item.lifecycle_completeness?.complete_lifecycle === false
           ? 'text-warning'
           : 'text-muted'
         return (
@@ -1274,31 +1276,23 @@ export function Data() {
 
       <AnimatePresence>
         {openSettings === 'pit-reference' && (
-          <SettingsModal title="PIT Reference · 快照维护" onClose={() => setOpenSettings(null)}>
+          <SettingsModal title="PIT Reference · BaoStock" onClose={() => setOpenSettings(null)}>
             <div className="space-y-4">
               <div className="rounded-card border border-border bg-base/30 p-4 space-y-3">
                 <div>
-                  <div className="text-sm font-medium text-foreground">盘后自动快照</div>
+                  <div className="text-sm font-medium text-foreground">BaoStock 盘后同步</div>
                   <div className="text-[11px] text-muted mt-1">
-                    历史 PIT 表由离线 builder 生成；盘后任务只冻结同花顺当日快照，不回填历史日期。
+                    同步沪深300候选快照和股票生命周期；候选快照不作为严格 PIT 历史成分。
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-2">
-                  <Pill label="历史行" value={(pitReference.data?.summary.history_rows ?? 0).toLocaleString()} />
-                  <Pill label="快照行" value={(pitReference.data?.summary.snapshot_rows ?? 0).toLocaleString()} />
+                  <Pill label="生命周期" value={(pitReference.data?.summary.history_rows ?? 0).toLocaleString()} />
+                  <Pill label="候选快照" value={(pitReference.data?.summary.snapshot_rows ?? 0).toLocaleString()} />
                   <Pill label="最新快照" value={pitReference.data?.summary.latest_snapshot_date ?? '—'} />
                 </div>
-                {!pitReference.data?.summary.hithink_configured && (
+                {pitCandidate && !pitCandidate.strict_backtest_usable && (
                   <div className="rounded-btn border border-warning/30 bg-warning/8 px-3 py-2 text-[11px] text-warning/90">
-                    未配置同花顺 API Key，盘后任务会跳过快照冻结；严格回测需以后端完整性审计为准。
-                  </div>
-                )}
-                {pitIndexAudit && !pitIndexAudit.usable && (
-                  <div className="rounded-btn border border-danger/30 bg-danger/8 px-3 py-2 text-[11px] text-danger/90">
-                    沪深300历史成分不完整，不能作为严格 PIT 股票池。
-                    <span className="ml-1 font-mono">
-                      {pitIndexAudit.coverage_checks.map(item => `${item.date}:${item.members}`).join(' / ')}
-                    </span>
+                    BaoStock 提供的是候选快照，缺少成分调入调出的生效区间，严格 PIT 回测继续关闭。
                   </div>
                 )}
                 <button
@@ -1312,12 +1306,12 @@ export function Data() {
                       同步中…
                     </>
                   ) : (
-                    <>同步今日快照</>
+                    <>同步 BaoStock</>
                   )}
                 </button>
                 {syncPitReference.data?.status === 'skipped' && (
                   <div className="text-[11px] text-warning/90">
-                    已跳过：{syncPitReference.data.reason ?? syncPitReference.data.message ?? '未配置同花顺 API Key'}
+                    已跳过：{syncPitReference.data.reason ?? syncPitReference.data.message ?? '暂无可同步数据'}
                   </div>
                 )}
                 {syncPitReference.data?.status === 'failed' && (
@@ -1328,13 +1322,8 @@ export function Data() {
               </div>
 
               <div className="space-y-2">
-                <div className="text-xs font-medium text-foreground">历史 PIT 表</div>
+                <div className="text-xs font-medium text-foreground">BaoStock 股票生命周期</div>
                 {renderPitRows(pitHistoryEntries, 'history')}
-                {pitIndustryJoin?.requires_industry_standard && (
-                  <div className="text-[11px] text-muted">
-                    行业历史查询必须先选择一个分类标准；当前可用标准 {pitIndustryJoin.standards.length.toLocaleString()} 个。
-                  </div>
-                )}
                 {pitLifecycle && !pitLifecycle.complete_lifecycle && (
                   <div className="text-[11px] text-warning/90">
                     生命周期表为部分覆盖：缺少 {pitLifecycle.missing_event_types.join(', ') || '部分原因字段'}。
@@ -1342,7 +1331,7 @@ export function Data() {
                 )}
               </div>
               <div className="space-y-2">
-                <div className="text-xs font-medium text-foreground">同花顺快照表</div>
+                <div className="text-xs font-medium text-foreground">BaoStock 沪深300候选快照</div>
                 {renderPitRows(pitSnapshotEntries, 'snapshot')}
               </div>
             </div>
