@@ -40,6 +40,14 @@ _DAILY_KEY = ("symbol", "date")
 _ADJ_KEY = ("symbol", "trade_date")
 _FINANCIAL_KEY = ("symbol", "period_end", "announce_date")
 _DAILY_VALUE_COLUMNS = ("open", "high", "low", "close", "volume", "amount")
+_DAILY_VALUE_TOLERANCES = {
+    "open": 1e-6,
+    "high": 1e-6,
+    "low": 1e-6,
+    "close": 1e-6,
+    "volume": 0.5,
+    "amount": 100.0,
+}
 
 
 class BackfillBlocked(RuntimeError):
@@ -827,11 +835,97 @@ def _merge_existing_and_batches(
     return _dedupe_or_raise(pl.concat(frames, how="diagonal_relaxed"), key, label).sort(list(key))
 
 
-def _merge_daily(shadow: Path, run_root: Path) -> list[Path]:
+def _daily_difference_expr(
+    frame: pl.DataFrame,
+    *,
+    incoming_suffix: str = "_incoming",
+    tolerances: dict[str, float],
+) -> tuple[pl.Expr | None, list[str]]:
+    expressions: list[pl.Expr] = []
+    compared: list[str] = []
+    for column in _DAILY_VALUE_COLUMNS:
+        incoming = f"{column}{incoming_suffix}"
+        if column not in frame.columns or incoming not in frame.columns:
+            continue
+        left = pl.col(column)
+        right = pl.col(incoming)
+        both_present = left.is_not_null() & right.is_not_null()
+        differs = (
+            (left.is_null() & right.is_not_null())
+            | (left.is_not_null() & right.is_null())
+            | (
+                both_present
+                & ((left.cast(pl.Float64) - right.cast(pl.Float64)).abs() > tolerances[column])
+            )
+        )
+        expressions.append(differs)
+        compared.append(column)
+    if not expressions:
+        return None, compared
+    result = expressions[0]
+    for expression in expressions[1:]:
+        result = result | expression
+    return result, compared
+
+
+def _merge_daily_frames(
+    existing: pl.DataFrame, incoming: pl.DataFrame
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Merge daily rows with explicit tolerance for source representations."""
+    existing = _dedupe_or_raise(existing, _DAILY_KEY, "kline_daily")
+    incoming = _dedupe_or_raise(incoming, _DAILY_KEY, "kline_daily")
+    empty_report = {"tolerated_revision_groups": 0, "changed_fields": []}
+    if existing.is_empty():
+        return incoming.sort(list(_DAILY_KEY)), empty_report
+    if incoming.is_empty():
+        return existing.sort(list(_DAILY_KEY)), empty_report
+
+    overlap = existing.join(incoming, on=list(_DAILY_KEY), how="inner", suffix="_incoming")
+    meaningful_expr, compared = _daily_difference_expr(overlap, tolerances=_DAILY_VALUE_TOLERANCES)
+    raw_expr, _ = _daily_difference_expr(
+        overlap,
+        tolerances={column: 0.0 for column in _DAILY_VALUE_COLUMNS},
+    )
+    meaningful = overlap.filter(meaningful_expr) if meaningful_expr is not None else pl.DataFrame()
+    if not meaningful.is_empty():
+        sample_columns = [*list(_DAILY_KEY), *compared]
+        raise BackfillBlocked(
+            "kline_daily has conflicting duplicate keys: "
+            f"{meaningful.select(sample_columns).head(5).to_dicts()}"
+        )
+
+    tolerated = overlap.filter(raw_expr) if raw_expr is not None else pl.DataFrame()
+    changed_fields: list[str] = []
+    for column in compared:
+        column_expr, _ = _daily_difference_expr(
+            overlap,
+            tolerances={
+                candidate: 0.0 if candidate == column else float("inf")
+                for candidate in _DAILY_VALUE_COLUMNS
+            },
+        )
+        if column_expr is not None and not overlap.filter(column_expr).is_empty():
+            changed_fields.append(column)
+
+    retained = existing.join(incoming.select(list(_DAILY_KEY)), on=list(_DAILY_KEY), how="anti")
+    merged = pl.concat([retained, incoming], how="diagonal_relaxed").sort(list(_DAILY_KEY))
+    return merged, {
+        "tolerated_revision_groups": tolerated.height,
+        "changed_fields": sorted(changed_fields),
+    }
+
+
+def _merge_daily(shadow: Path, run_root: Path) -> tuple[list[Path], dict[str, Any]]:
     batch_frames = _load_batch_frames(run_root, "daily")
     if not batch_frames:
         raise BackfillBlocked("no staged daily batches")
     affected: set[date] = set()
+    revision_report: dict[str, Any] = {
+        "policy": "TickFlow incoming rows win; OHLC tolerance=1e-6, volume=0.5, amount=100",
+        "tolerated_revision_groups": 0,
+        "changed_fields": [],
+        "samples": [],
+    }
     for frame in batch_frames:
         affected.update(frame["date"].drop_nulls().to_list())
     target = shadow / "kline_daily"
@@ -842,9 +936,18 @@ def _merge_daily(shadow: Path, run_root: Path) -> list[Path]:
             [frame.filter(pl.col("date") == pl.lit(day)) for frame in batch_frames],
             how="diagonal_relaxed",
         )
-        merged = _merge_existing_and_batches(existing, [incoming], _DAILY_KEY, "kline_daily")
+        merged, day_report = _merge_daily_frames(existing, incoming)
         _write_batch(path, merged)
-    return [target / f"date={day.isoformat()}" / "part.parquet" for day in sorted(affected)]
+        revision_report["tolerated_revision_groups"] += day_report["tolerated_revision_groups"]
+        revision_report["changed_fields"] = sorted(
+            set(revision_report["changed_fields"]) | set(day_report["changed_fields"])
+        )
+        if day_report["tolerated_revision_groups"] and len(revision_report["samples"]) < 20:
+            revision_report["samples"].append({"date": day.isoformat(), **day_report})
+    return (
+        [target / f"date={day.isoformat()}" / "part.parquet" for day in sorted(affected)],
+        revision_report,
+    )
 
 
 def _merge_adj_factor(shadow: Path, run_root: Path) -> Path:
@@ -997,7 +1100,8 @@ def run_p0_backfill(
 
         publish_targets: list[str] = []
         if "daily" in config.datasets:
-            _merge_daily(shadow, run_root)
+            _, daily_revision_report = _merge_daily(shadow, run_root)
+            manifest["daily_revision_report"] = daily_revision_report
             publish_targets.append("kline_daily")
         if "adj_factor" in config.datasets:
             _merge_adj_factor(shadow, run_root)

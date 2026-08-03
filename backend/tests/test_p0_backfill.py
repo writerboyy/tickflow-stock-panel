@@ -13,6 +13,7 @@ from app.services.p0_backfill import (
     BackfillBlocked,
     BackfillConfig,
     _dedupe_or_raise,
+    _merge_daily_frames,
     _symbols_from_data,
     run_p0_backfill,
 )
@@ -179,6 +180,32 @@ def test_conflicting_duplicate_keys_are_rejected() -> None:
     )
     with pytest.raises(BackfillBlocked, match="conflicting duplicate"):
         _dedupe_or_raise(frame, ("symbol", "date"), "daily")
+
+
+def test_daily_merge_tolerates_source_rounding_and_float_noise() -> None:
+    existing = _daily("600000.SH", 10.0).with_columns(pl.lit(1000.0).alias("amount"))
+    incoming = existing.with_columns(
+        (pl.col("close") + 1e-8).alias("close"),
+        (pl.col("amount") + 51.0).alias("amount"),
+    )
+
+    merged, report = _merge_daily_frames(existing, incoming)
+
+    assert merged.height == 1
+    assert merged["close"].item() == pytest.approx(10.00000001)
+    assert merged["amount"].item() == pytest.approx(1051.0)
+    assert report == {
+        "tolerated_revision_groups": 1,
+        "changed_fields": ["amount", "close"],
+    }
+
+
+def test_daily_merge_blocks_meaningful_source_revision() -> None:
+    existing = _daily("600000.SH", 10.0)
+    incoming = existing.with_columns((pl.col("close") + 0.01).alias("close"))
+
+    with pytest.raises(BackfillBlocked, match="conflicting duplicate keys"):
+        _merge_daily_frames(existing, incoming)
 
 
 def test_missing_capability_blocks_before_source_fetch(tmp_path: Path) -> None:
