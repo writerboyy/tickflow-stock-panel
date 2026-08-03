@@ -14,9 +14,6 @@ SMALLCAP_INDEX_THRESHOLD = 18.72
 BAN_TRADE_DAYS = 5
 INDEX_SYMBOL = "399303.SZ"
 INDEX_HISTORY_BARS = (12 + 26 + 9) * 5
-SELL_COMMISSION_RATE = 0.0001
-MIN_COMMISSION = 5.0
-STAMP_TAX_RATE = 0.001
 
 
 def _state(context) -> dict[str, Any]:
@@ -605,12 +602,10 @@ def _monthly_adjustment(context) -> None:
     target = _select_stocks(context, require_snapshot=True)
     state["sorted_stocks"] = target
     current = _current_bars(context)
-    sold: list[str] = []
     for symbol in list(_held_symbols(context)):
-        if symbol not in target and _close_position(context, symbol):
-            sold.append(symbol)
-    available_cash = _estimated_cash_after_sells(context, sold, current)
-    _buy_missing_targets(context, target, current, available_cash=available_cash)
+        if symbol not in target:
+            _close_position(context, symbol)
+    _buy_missing_targets(context, target, current)
     _emit_decision(context, target, "monthly_adjustment")
 
 
@@ -625,58 +620,27 @@ def _close_position(context, symbol: str) -> bool:
     return True
 
 
-def _open_position(context, symbol: str, target_value: float, current: dict[str, Any]) -> bool:
+def _open_position(context, symbol: str, current: dict[str, Any]) -> bool:
     bar = current.get(symbol)
     if not _tradable_at_snapshot(symbol, bar):
         return False
-    context.order_target_value(symbol, target_value)
+    context.order_cash_weight(symbol, 1.0)
     return True
-
-
-def _estimated_cash_after_sells(
-    context,
-    sold: list[str],
-    current: dict[str, Any],
-) -> float:
-    available_cash = float(context.portfolio.cash)
-    available_positions = getattr(context.portfolio, "available_positions", {})
-    for symbol in sold:
-        bar = current.get(symbol)
-        if not _tradable_at_snapshot(symbol, bar, allow_held=True):
-            continue
-        position = float(context.portfolio.positions.get(symbol, 0.0))
-        quantity = min(position, float(available_positions.get(symbol, position)))
-        if quantity <= 0:
-            continue
-        gross = quantity * _bar_price(bar)
-        commission = max(MIN_COMMISSION, gross * SELL_COMMISSION_RATE)
-        available_cash += max(0.0, gross - commission - gross * STAMP_TAX_RATE)
-    return available_cash
 
 
 def _buy_missing_targets(
     context,
     target: list[str],
     current: dict[str, Any],
-    *,
-    available_cash: float | None = None,
 ) -> list[str]:
     held = _held_symbols(context)
-    buying_cash = (
-        float(context.portfolio.cash)
-        if available_cash is None else float(available_cash)
-    )
-    remaining_slots = max(0, len([symbol for symbol in target if symbol not in held]))
-    if remaining_slots <= 0 or buying_cash <= 0:
-        return []
     submitted: list[str] = []
     just_sold = set(_state(context).get("just_sold", []))
-    target_value = buying_cash / remaining_slots
     for symbol in target:
         if symbol in held or symbol in just_sold:
             continue
         bar = current.get(symbol)
-        if bar is not None and _open_position(context, symbol, target_value, current):
+        if bar is not None and _open_position(context, symbol, current):
             submitted.append(symbol)
     return submitted
 
@@ -708,13 +672,7 @@ def _check_limit_up_and_buy(context) -> None:
         return
     target = _select_stocks(context, require_snapshot=True)
     state["sorted_stocks"] = target
-    available_cash = _estimated_cash_after_sells(context, sold, current)
-    submitted = _buy_missing_targets(
-        context,
-        target,
-        current,
-        available_cash=available_cash,
-    )
+    submitted = _buy_missing_targets(context, target, current)
     if submitted or sold:
         _emit_decision(context, target, "limit_up_replacement")
 

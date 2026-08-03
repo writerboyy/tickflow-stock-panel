@@ -688,7 +688,7 @@ def test_performance_small_cap_close_position_submits_to_match_order_target_sema
     assert context.state["performance_small_cap"]["just_sold"] == ["000001.SZ"]
 
 
-def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position():
+def test_performance_small_cap_uses_equal_cash_weights_for_new_positions():
     now = datetime(2025, 7, 24, 9, 30)
     submitted = []
     symbols = ["000001.SZ", "000002.SZ", "000003.SZ"]
@@ -697,18 +697,18 @@ def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position
         for symbol in symbols
     }
     context = SimpleNamespace(
-        portfolio=SimpleNamespace(positions={}, cash=100_000),
+        portfolio=SimpleNamespace(positions={}),
         state={"performance_small_cap": {"just_sold": []}},
-        order_target_value=lambda symbol, value: submitted.append((symbol, value)),
+        order_cash_weight=lambda symbol, weight: submitted.append((symbol, weight)),
     )
 
     result = performance_small_cap._buy_missing_targets(context, symbols, bars)
 
     assert result == symbols
-    assert submitted == [(symbol, 100_000 / 3) for symbol in symbols]
+    assert submitted == [(symbol, 1.0) for symbol in symbols]
 
 
-def test_performance_small_cap_monthly_buy_budget_includes_expected_net_exit_proceeds(
+def test_performance_small_cap_monthly_rebalance_submits_cash_weight_after_exit(
     monkeypatch,
 ):
     now = datetime(2025, 8, 1, 9, 30)
@@ -743,8 +743,8 @@ def test_performance_small_cap_monthly_buy_budget_includes_expected_net_exit_pro
         order_target=lambda symbol, quantity: submitted.append(
             ("quantity", symbol, quantity)
         ),
-        order_target_value=lambda symbol, value: submitted.append(
-            ("value", symbol, value)
+        order_cash_weight=lambda symbol, weight: submitted.append(
+            ("weight", symbol, weight)
         ),
         emit_signal=lambda *_args, **_kwargs: None,
     )
@@ -763,7 +763,7 @@ def test_performance_small_cap_monthly_buy_budget_includes_expected_net_exit_pro
 
     assert submitted == [
         ("quantity", exit_symbol, 0),
-        ("value", new_symbol, 1_044),
+        ("weight", new_symbol, 1.0),
     ]
 
 
@@ -829,30 +829,6 @@ def initialize(context):
     ]
     assert engine.account.positions[exit_symbol] == 0
     assert engine.account.positions[new_symbol] == 100
-
-
-def test_performance_small_cap_does_not_budget_untradable_exit_proceeds():
-    now = datetime(2025, 8, 1, 9, 30)
-    exit_symbol = "000001.SZ"
-    context = SimpleNamespace(
-        portfolio=SimpleNamespace(
-            positions={exit_symbol: 100},
-            available_positions={exit_symbol: 100},
-            cash=50,
-        ),
-    )
-    bars = {
-        exit_symbol: Bar(
-            exit_symbol, now, 9, 9, 9, 9,
-            raw_close=9, limit_up=11, limit_down=9,
-        ),
-    }
-
-    assert performance_small_cap._estimated_cash_after_sells(
-        context,
-        [exit_symbol],
-        bars,
-    ) == 50
 
 
 def test_performance_small_cap_candidate_sort_uses_persisted_market_cap():
@@ -1567,11 +1543,45 @@ def on_bar(context, bars):
     ).run(bars)
 
     assert reserved["fills"] == []
-    assert post_fill["fills"][0]["quantity"] == 100
-    assert post_fill["checkpoint"]["account"]["cash"] == pytest.approx(-10)
+    assert post_fill["fills"] == []
+    assert post_fill["checkpoint"]["account"]["cash"] == pytest.approx(1_000)
 
 
-def test_target_buys_in_one_callback_share_the_pre_fill_cash_snapshot():
+def test_buy_requires_exact_gross_plus_minimum_commission():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    bar = Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10)
+
+    exact = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_005,
+            commission_pct=0,
+            min_commission=5,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([bar])
+    short = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_004.99,
+            commission_pct=0,
+            min_commission=5,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([bar])
+
+    assert exact["fills"][0]["quantity"] == 100
+    assert exact["checkpoint"]["account"]["cash"] == 0
+    assert short["fills"] == []
+    assert short["checkpoint"]["account"]["cash"] == pytest.approx(1_004.99)
+
+
+def test_target_buys_in_one_callback_share_remaining_cash_without_overdraft():
     source = """
 def on_bar(context, bars):
     context.order_target('X', 100)
@@ -1593,9 +1603,207 @@ def on_bar(context, bars):
 
     assert [(fill["symbol"], fill["quantity"]) for fill in result["fills"]] == [
         ("X", 100),
-        ("Y", 100),
     ]
-    assert result["checkpoint"]["account"]["cash"] == pytest.approx(-500)
+    assert result["orders"][1]["status"] == "skipped"
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(500)
+
+
+def test_reducing_target_percent_fills_before_ordinary_buy():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+    context.order_target_percent('OLD', 0)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_050,
+            commission_pct=0,
+            min_commission=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    )
+    engine.account.cash = 50
+    engine.account.positions = {"OLD": 100}
+    engine.account.available = {"OLD": 100}
+    engine.account.avg_cost = {"OLD": 10}
+
+    result = engine.run([
+        Bar("OLD", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+    ])
+
+    assert [(fill["symbol"], fill["side"]) for fill in result["fills"]] == [
+        ("OLD", "sell"),
+        ("X", "buy"),
+    ]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(50)
+
+
+def test_cash_weight_orders_allocate_actual_cash_after_same_callback_sells():
+    source = """
+def on_bar(context, bars):
+    context.order_target('OLD', 0)
+    context.order_cash_weight('X', 1)
+    context.order_cash_weight('Y', 1)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=2_050,
+            commission_pct=0,
+            min_commission=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    )
+    engine.account.cash = 50
+    engine.account.positions = {"OLD": 200}
+    engine.account.available = {"OLD": 200}
+    engine.account.avg_cost = {"OLD": 10}
+
+    result = engine.run([
+        Bar("OLD", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("Y", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+    ])
+
+    assert [(fill["symbol"], fill["side"], fill["quantity"]) for fill in result["fills"]] == [
+        ("OLD", "sell", 200),
+        ("X", "buy", 100),
+        ("Y", "buy", 100),
+    ]
+    assert [order["value"] for order in result["orders"][1:]] == [1_025, 1_025]
+    assert [row["cash_weight"] for row in result["transactions"][1:]] == [1.0, 1.0]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(50)
+
+
+def test_cash_weight_allocation_reserves_each_orders_commission():
+    source = """
+def on_bar(context, bars):
+    context.order_cash_weight('X', 1)
+    context.order_cash_weight('Y', 1)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=2_000,
+            commission_pct=0,
+            min_commission=5,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 1, 15), 1, 1, 1, 1),
+        Bar("Y", datetime(2024, 1, 1, 15), 1, 1, 1, 1),
+    ])
+
+    assert [(fill["symbol"], fill["quantity"], fill["fee"]) for fill in result["fills"]] == [
+        ("X", 900, 5),
+        ("Y", 900, 5),
+    ]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(190)
+
+
+def test_cash_weight_orders_do_not_spend_proceeds_from_failed_sells():
+    source = """
+def on_bar(context, bars):
+    context.order_target('OLD', 0)
+    context.order_cash_weight('X', 1)
+    context.order_cash_weight('Y', 1)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=2_050,
+            commission_pct=0,
+            min_commission=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    )
+    engine.account.cash = 50
+    engine.account.positions = {"OLD": 200}
+    engine.account.available = {"OLD": 200}
+    engine.account.avg_cost = {"OLD": 10}
+
+    result = engine.run([
+        Bar(
+            "OLD", datetime(2024, 1, 1, 15), 9, 9, 9, 9,
+            limit_down=9,
+        ),
+        Bar("X", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+        Bar("Y", datetime(2024, 1, 1, 15), 10, 10, 10, 10),
+    ])
+
+    assert result["fills"] == []
+    assert [order["status"] for order in result["orders"]] == [
+        "rejected",
+        "rejected",
+        "rejected",
+    ]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(50)
+
+
+@pytest.mark.parametrize("weight", [0, -1, float("nan")])
+def test_cash_weight_orders_reject_invalid_weights(weight):
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+
+    with pytest.raises(ValueError, match="现金分配权重必须是正数"):
+        engine.context.order_cash_weight("X", weight)
+
+
+def test_next_open_cash_weight_orders_use_actual_sell_proceeds():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.order_target('OLD', 0)
+        context.order_cash_weight('X', 1)
+        context.order_cash_weight('Y', 1)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=2_050,
+            commission_pct=0,
+            min_commission=0,
+            stamp_tax_pct=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="next_open",
+        ),
+    )
+    engine.account.cash = 50
+    engine.account.positions = {"OLD": 200}
+    engine.account.available = {"OLD": 200}
+    engine.account.avg_cost = {"OLD": 10}
+
+    bars = [
+        Bar(symbol, datetime(2024, 1, 1, 15), 10, 10, 10, 10)
+        for symbol in ("OLD", "X", "Y")
+    ] + [
+        Bar(symbol, datetime(2024, 1, 2, 9, 30), price, price, price, price)
+        for symbol, price in (("OLD", 12), ("X", 10), ("Y", 10))
+    ]
+    result = engine.run(bars)
+
+    assert [
+        (fill["symbol"], fill["side"], fill["quantity"], fill["timestamp"])
+        for fill in result["fills"]
+    ] == [
+        ("OLD", "sell", 200, "2024-01-02T09:30:00"),
+        ("X", "buy", 100, "2024-01-02T09:30:00"),
+        ("Y", "buy", 100, "2024-01-02T09:30:00"),
+    ]
+    assert [order["value"] for order in result["orders"][1:]] == [1_225, 1_225]
+    assert result["checkpoint"]["account"]["cash"] == pytest.approx(450)
 
 
 def test_sell_commission_can_differ_from_buy_commission():
@@ -2033,12 +2241,15 @@ def on_bar(context, bars):
         finalize_session=False,
     )
 
+    checkpoint = initial.checkpoint()
+    checkpoint["account"]["orders"][0].pop("cash_weight")
     resumed = FreeStrategyEngine(source, config=config)
-    resumed.restore_checkpoint(initial.checkpoint())
+    resumed.restore_checkpoint(checkpoint)
     result = resumed.run([Bar("X", datetime(2024, 1, 3, 9, 30), 11, 11, 11, 11)])
 
     assert result["fills"][0]["order_id"] == "o1"
     assert result["fills"][0]["timestamp"] == "2024-01-03T09:30:00"
+    assert result["orders"][0]["cash_weight"] is None
     assert result["positions"] == {"X": 100.0}
 
 

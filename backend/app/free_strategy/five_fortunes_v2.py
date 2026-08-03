@@ -35,7 +35,6 @@ WUFU_FIXED_FUND_FALLBACKS = {
     "501018.SH": "南方原油LOF",
 }
 CANDIDATE_SCORE_RATIO = 0.9
-ETF_PRICE_TICK = 0.001
 MOMENTUM_SCORE_MAX = 5.0
 WUFU2_VERSION = "2.0"
 WEAK_REGIME_PROXIES = ["000300.SH", "399101.SZ", "399006.SZ", "000510.SH"]
@@ -722,17 +721,8 @@ def _prepare_and_sell(context) -> None:
         "raw_regime": state.get("raw_regime"),
         "regime_changed": bool(state.get("regime_changed_today")),
     })
-    available_cash_after_sells = float(context.portfolio.cash)
     for symbol in held:
         if symbol not in targets and _can_trade(state, symbol):
-            raw_price = state["intraday"].get("raw_close", {}).get(symbol)
-            quantity = float(context.portfolio.positions.get(symbol, 0.0))
-            if raw_price is not None and float(raw_price) > 0 and quantity > 0:
-                sell_price = math.floor(
-                    float(raw_price) * (1 - 0.5 / 10_000) / ETF_PRICE_TICK + 0.5 + 1e-10
-                ) * ETF_PRICE_TICK
-                gross = quantity * sell_price
-                available_cash_after_sells += gross - max(5.0, gross * 0.0001)
             context.order_target_percent(symbol, 0.0)
     decision_type = (
         "empty" if not targets and not held
@@ -761,14 +751,13 @@ def _prepare_and_sell(context) -> None:
         f"五福2.0 13:10：状态={state['regime']}，过筛={len(filtered_rows)}，候选={len(candidate_rows)}，"
         f"目标={','.join(targets) or '空仓'}，卖出={','.join(symbol for symbol in held if symbol not in targets) or '无'}"
     )
-    _buy_targets(context, force=False, available_cash=available_cash_after_sells)
+    _buy_targets(context)
 
 
 def _buy_targets(
     context,
     *,
     force: bool = False,
-    available_cash: float | None = None,
 ) -> None:
     state = _state(context)
     targets = state.get("target", [])
@@ -781,11 +770,7 @@ def _buy_targets(
     ]
     submitted = []
     still_pending = []
-    remaining_cash = (
-        float(context.portfolio.cash)
-        if available_cash is None else float(available_cash)
-    )
-    for index, symbol in enumerate(targets_to_buy):
+    for symbol in targets_to_buy:
         if not _can_trade(state, symbol):
             continue
         if not force and not _intraday_trend_confirmed(state, symbol):
@@ -795,14 +780,7 @@ def _buy_targets(
         if raw_price is None or float(raw_price) <= 0:
             still_pending.append(symbol)
             continue
-        remaining = len(targets_to_buy) - index
-        target_value = math.floor(remaining_cash / remaining)
-        estimated_price = float(raw_price) * (1 + 0.0001 + 0.0001)
-        target_quantity = math.floor(target_value / estimated_price / 100) * 100
-        if target_quantity <= 0:
-            continue
-        context.order_target(symbol, target_quantity)
-        remaining_cash -= target_value
+        context.order_cash_weight(symbol, 1.0)
         submitted.append(symbol)
     state["pending_buy_etfs"] = still_pending
     if submitted:

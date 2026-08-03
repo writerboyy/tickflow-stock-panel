@@ -76,6 +76,7 @@ class Order:
     side: str
     quantity: float | None = None
     value: float | None = None
+    cash_weight: float | None = None
     target_quantity: float | None = None
     target_value: float | None = None
     target_percent: float | None = None
@@ -444,6 +445,12 @@ class Context:
 
     def sell(self, symbol: str, quantity: float | None = None, value: float | None = None, **kwargs: Any) -> None:
         self._engine.submit_order("sell", symbol, quantity=quantity, value=value, reason=kwargs.get("reason", ""))
+
+    def order_cash_weight(self, symbol: str, weight: float) -> None:
+        normalized = float(weight)
+        if not math.isfinite(normalized) or normalized <= 0:
+            raise ValueError("现金分配权重必须是正数")
+        self._engine.submit_order("buy", symbol, cash_weight=normalized)
 
     def order_target(self, symbol: str, quantity: float) -> None:
         self._engine.submit_order("target", symbol, target_quantity=quantity)
@@ -907,8 +914,36 @@ class FreeStrategyEngine:
             target = order.target_quantity
             if target is None and order.target_value is not None:
                 target = order.target_value / max(self._current_prices.get(order.symbol, 1.0), 0.01)
-            return 0 if target is not None and target < current else 1
-        return 1
+            if target is None and order.target_percent is not None:
+                target = (
+                    self.account.equity(self._current_close_prices)
+                    * order.target_percent
+                    / max(self._current_prices.get(order.symbol, 1.0), 0.01)
+                )
+            if target is not None and target < current:
+                return 0
+        return 2 if order.cash_weight is not None else 1
+
+    def _fill_orders(
+        self,
+        orders: Iterable[tuple[Order, datetime] | Order],
+        bars: BarsView,
+        timestamp: datetime,
+        field: str,
+    ) -> None:
+        values = [item[0] if isinstance(item, tuple) else item for item in orders]
+        ordered = sorted(values, key=self._sell_first)
+        weighted = [order for order in ordered if order.cash_weight is not None]
+        for order in ordered:
+            if order.cash_weight is None:
+                self._fill_order(order, bars.get(order.symbol), timestamp, field)
+        if not weighted:
+            return
+        cash_budget = max(0.0, self.account.cash)
+        total_weight = sum(float(order.cash_weight or 0.0) for order in weighted)
+        for order in weighted:
+            order.value = cash_budget * float(order.cash_weight or 0.0) / total_weight
+            self._fill_order(order, bars.get(order.symbol), timestamp, field)
 
     def _fill_immediate_orders(
         self,
@@ -916,20 +951,7 @@ class FreeStrategyEngine:
         timestamp: datetime,
         field: str = "close",
     ) -> None:
-        target_buy_cash: float | None = None
-        for order in sorted(self._immediate, key=self._sell_first):
-            cash_available = None
-            if order.side == "target" and self._order_increases_risk(order):
-                if target_buy_cash is None:
-                    target_buy_cash = self.account.cash
-                cash_available = target_buy_cash
-            self._fill_order(
-                order,
-                bars.get(order.symbol),
-                timestamp,
-                field,
-                cash_available=cash_available,
-            )
+        self._fill_orders(self._immediate, bars, timestamp, field)
         self._immediate.clear()
 
     def _fill_order(
@@ -938,8 +960,6 @@ class FreeStrategyEngine:
         bar: Bar | None,
         timestamp: datetime | None,
         field: str,
-        *,
-        cash_available: float | None = None,
     ) -> None:
         if bar is None and self.config.allow_stale_fills and timestamp is not None:
             trades_today = (order.symbol, timestamp.date()) in self._tradable_dates
@@ -1021,11 +1041,12 @@ class FreeStrategyEngine:
                 self.account.equity(self._current_close_prices) * self.risk_config.max_symbol_exposure_pct
                 - current * raw_price,
             )
-            available = self.account.cash if cash_available is None else cash_available
-            cash_gross = (
-                max(0.0, available - self.config.min_commission) / (1 + commission_rate)
-                if self.config.reserve_buy_fees
-                else max(0.0, available)
+            available = max(0.0, self.account.cash)
+            if order.cash_weight is not None and order.value is not None:
+                available = min(available, max(0.0, order.value))
+            cash_gross = min(
+                max(0.0, available - self.config.min_commission),
+                available / (1 + commission_rate),
             )
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
         if qty <= 0:
@@ -1039,20 +1060,32 @@ class FreeStrategyEngine:
         price_decimal = Decimal(str(price))
         if self.config.price_tick is not None:
             price_decimal = price_decimal.quantize(Decimal(str(self.config.price_tick)))
-        gross_decimal = Decimal(str(qty)) * price_decimal
-        commission = max(
-            Decimal(str(self.config.min_commission)),
-            gross_decimal * Decimal(str(commission_rate)),
-        )
-        fee_decimal = commission + (
-            gross_decimal * Decimal(str(self.config.stamp_tax_pct))
-            if side == "sell" and self.config.asset_type == "stock"
-            else Decimal(0)
-        )
+        while True:
+            gross_decimal = Decimal(str(qty)) * price_decimal
+            commission = max(
+                Decimal(str(self.config.min_commission)),
+                gross_decimal * Decimal(str(commission_rate)),
+            )
+            fee_decimal = commission + (
+                gross_decimal * Decimal(str(self.config.stamp_tax_pct))
+                if side == "sell" and self.config.asset_type == "stock"
+                else Decimal(0)
+            )
+            if side != "buy" or gross_decimal + fee_decimal <= Decimal(str(max(0.0, available))):
+                break
+            qty -= lot
+            if qty <= 0:
+                if order.side == "target":
+                    order.status = "skipped"
+                    order.reason = "目标仓位无需调整或不足一手"
+                else:
+                    order.status = "rejected"
+                    order.reason = "数量不足、现金不足或 T+1 未结算"
+                return
         gross = float(gross_decimal)
         fee = float(fee_decimal)
         if side == "buy":
-            self.account.cash -= gross + fee
+            self.account.cash = max(0.0, self.account.cash - gross - fee)
             old = self.account.positions.get(order.symbol, 0.0)
             self.account.avg_cost[order.symbol] = ((old * self.account.avg_cost.get(order.symbol, price)) + gross + fee) / (old + qty)
             if old <= 0 and order.symbol in self.account.positions:
@@ -1556,8 +1589,7 @@ class FreeStrategyEngine:
         self._update_market(timestamp, bars_now)
         due = [item for item in self.pending if item[0].symbol in bars_now]
         self.pending = [item for item in self.pending if item[0].symbol not in bars_now]
-        for order, _ in sorted(due, key=self._sell_first):
-            self._fill_order(order, bars_now.get(order.symbol), timestamp, "close")
+        self._fill_orders(due, bars_now, timestamp, "close")
         callback = self._callbacks.get("on_quote")
         if callback is not None:
             self._protected_call("on_quote 回调", callback, self.context, quote_view)
@@ -1611,8 +1643,7 @@ class FreeStrategyEngine:
             item for item in self.pending
             if item[1] >= timestamp or item[0].symbol not in bars_now
         ]
-        for order, _ in sorted(due, key=self._sell_first):
-            self._fill_order(order, bars_now.get(order.symbol), timestamp, "open")
+        self._fill_orders(due, bars_now, timestamp, "open")
         self.context._sync(self._current_close_prices)
 
     def run(
@@ -1659,8 +1690,7 @@ class FreeStrategyEngine:
             self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
             due = [p for p in self.pending if p[1] <= timestamp and p[0].symbol in bars_now]
             self.pending = [p for p in self.pending if p[1] > timestamp or p[0].symbol not in bars_now]
-            for order, _ in sorted(due, key=self._sell_first):
-                self._fill_order(order, bars_now.get(order.symbol), timestamp, "open")
+            self._fill_orders(due, bars_now, timestamp, "open")
             self.context.now = timestamp
             self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
             self.context._sync(self._current_close_prices)
@@ -1799,6 +1829,7 @@ class FreeStrategyEngine:
                 "executed_side": fills[-1].side if fills else None,
                 "quantity": order.quantity,
                 "value": order.value,
+                "cash_weight": order.cash_weight,
                 "target_quantity": order.target_quantity,
                 "target_value": order.target_value,
                 "target_percent": order.target_percent,

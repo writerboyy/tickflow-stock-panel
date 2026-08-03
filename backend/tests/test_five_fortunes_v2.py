@@ -149,7 +149,7 @@ def test_daily_decision_signal_uses_the_v2_identity(monkeypatch):
     monkeypatch.setattr(five, "_candidate_pool", lambda _rows, _regime: rows)
     monkeypatch.setattr(five, "_choose_targets", lambda *_args: ["159985.SZ"])
     monkeypatch.setattr(five, "_held_symbols", lambda _context: [])
-    monkeypatch.setattr(five, "_buy_targets", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(five, "_buy_targets", lambda _context: None)
 
     five._prepare_and_sell(Context())
 
@@ -183,7 +183,7 @@ def test_market_catalog_restores_source_lofs_missing_from_etf_dimension():
     assert "161226.SZ" not in dynamic_groups
 
 
-def test_buy_target_uses_reference_commission_and_slippage_sizing():
+def test_buy_target_submits_cash_weight_for_engine_allocation():
     class Portfolio:
         cash = 100_716.0
         positions = {}
@@ -209,8 +209,8 @@ def test_buy_target_uses_reference_commission_and_slippage_sizing():
         }
 
         @classmethod
-        def order_target(cls, symbol, quantity):
-            cls.orders.append((symbol, quantity))
+        def order_cash_weight(cls, symbol, weight):
+            cls.orders.append((symbol, weight))
 
         @staticmethod
         def log(_message):
@@ -218,7 +218,7 @@ def test_buy_target_uses_reference_commission_and_slippage_sizing():
 
     five._buy_targets(Context(), force=True)
 
-    assert Context.orders == [("588760.SH", 161_600)]
+    assert Context.orders == [("588760.SH", 1.0)]
 
 
 def test_minute_stop_loss_uses_reference_fixed_threshold():

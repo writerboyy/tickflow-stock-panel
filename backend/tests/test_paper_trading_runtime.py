@@ -820,8 +820,8 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
     order = Order(
         id="o1",
         symbol="159920.SZ",
-        side="target",
-        target_quantity=100,
+        side="buy",
+        cash_weight=1.0,
         submitted_at="2026-07-28T13:11:00",
         status="filled",
     )
@@ -855,6 +855,7 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
     event = next(row for row in store.events("paper") if row["type"] == "order")
     assert event["timestamp"] == "2026-07-28T13:11:00"
     assert event["executed_side"] == "buy"
+    assert event["cash_weight"] == 1.0
 
 
 def test_up_to_date_restart_preserves_live_sync_state(monkeypatch, tmp_path):
