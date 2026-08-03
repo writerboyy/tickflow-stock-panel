@@ -155,12 +155,37 @@ def test_adjustment_and_minute_phases_are_resumable(tmp_path):
     result = run.run()
     assert result["status"] == "completed"
     assert (tmp_path / "tushare_archive" / "minute_stock_raw" / "symbol=000001.SZ" / "part.parquet").exists()
-    assert list((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "stock_minute" / "000001.SZ").glob("page-*.parquet"))
+    assert not list((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "stock_minute" / "000001.SZ").glob("page-*.parquet"))
     assert (tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "adjustment" / "stock" / "000001.SZ.parquet").exists()
     assert json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "manifest.json").read_text())["phases_state"]["stock_minute"]["items"]["000001.SZ"]["status"] == "completed"
     minute_params = next(params for api, params in client.calls if api == "stk_mins")
     assert minute_params["start_date"] == "1990-01-01 00:00:00"
     assert minute_params["end_date"].count("-") == 2
+
+
+def test_universe_fetches_stock_statuses_separately(tmp_path):
+    class UniverseClient:
+        def __init__(self):
+            self.statuses = []
+
+        def request(self, api_name, params):
+            if api_name == "stock_basic":
+                status = params["list_status"]
+                self.statuses.append(status)
+                rows = ((f"00000{len(self.statuses)}.SZ", f"stock-{status}"),)
+                return th.TushareResponse(api_name, 0, "", ("ts_code", "name"), rows, {"code": 0, "data": {"fields": ["ts_code", "name"], "items": rows}})
+            if api_name == "etf_basic":
+                rows = (("510300.SH", "ETF"),)
+                return th.TushareResponse(api_name, 0, "", ("ts_code", "name"), rows, {"code": 0, "data": {"fields": ["ts_code", "name"], "items": rows}})
+            return th.TushareResponse(api_name, 0, "", (), (), {"code": 0, "data": {"fields": [], "items": []}})
+
+    client = UniverseClient()
+    result = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="universe", phases=("universe",)), client
+    ).run()
+    assert client.statuses == ["L", "D", "P"]
+    assert result["symbols"]["stocks"] == ["000001.SZ", "000002.SZ", "000003.SZ"]
+    assert result["symbols"]["etfs"] == ["510300.SH"]
 
 
 def test_publish_checks_all_partitions_before_replacing_any(tmp_path):
