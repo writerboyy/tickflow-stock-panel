@@ -1,13 +1,16 @@
 """Persist point-in-time daily valuation metrics derived from local data."""
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, timezone
+from functools import lru_cache
 import json
 import math
 import os
 from pathlib import Path
 import shutil
+from threading import RLock
 from typing import Any
 import uuid
 
@@ -323,16 +326,82 @@ def _valuation_rows(base: pl.DataFrame, event_frames: Mapping[str, pl.DataFrame]
     )
 
 
-def _partition_dates(directory: Path) -> list[date]:
+@lru_cache(maxsize=16)
+def _partition_dates_at_mtime(directory: str, _mtime_ns: int) -> tuple[date, ...]:
     dates: list[date] = []
-    if not directory.exists():
-        return dates
-    for child in directory.glob("date=*"):
+    for child in Path(directory).glob("date=*"):
         try:
             dates.append(date.fromisoformat(child.name.removeprefix("date=")))
         except ValueError:
             continue
-    return sorted(dates)
+    return tuple(sorted(dates))
+
+
+def _partition_dates(directory: Path) -> list[date]:
+    if not directory.exists():
+        return []
+    return list(_partition_dates_at_mtime(str(directory), directory.stat().st_mtime_ns))
+
+
+_MARKET_CAP_CACHE_LOCK = RLock()
+_MARKET_CAP_CACHE: dict[
+    str,
+    tuple[tuple[int, int], int, dict[str, float], set[str]],
+] = {}
+
+
+def _valuation_fingerprint(directory: Path) -> tuple[int, int]:
+    metadata = directory / "metadata.json"
+    return (
+        directory.stat().st_mtime_ns,
+        metadata.stat().st_mtime_ns if metadata.exists() else 0,
+    )
+
+
+def _read_market_cap_partition(directory: Path, day: date) -> dict[str, float]:
+    path = directory / f"date={day.isoformat()}" / "*.parquet"
+    try:
+        frame = (
+            pl.scan_parquet(str(path), missing_columns="insert")
+            .select("symbol", "market_cap")
+            .filter(pl.col("market_cap").is_finite() & (pl.col("market_cap") > 0))
+            .collect()
+        )
+    except Exception:
+        return {}
+    return {
+        str(symbol): float(market_cap)
+        for symbol, market_cap in frame.iter_rows()
+    }
+
+
+def _read_market_caps_fallback(
+    directory: Path,
+    symbols: list[str],
+    cutoff: date,
+) -> dict[str, float]:
+    if not symbols:
+        return {}
+    try:
+        frame = (
+            pl.scan_parquet(
+                str(directory / "**" / "*.parquet"),
+                missing_columns="insert",
+            )
+            .filter(pl.col("symbol").is_in(symbols) & (pl.col("date") <= cutoff))
+            .select("symbol", "date", "market_cap")
+            .filter(pl.col("market_cap").is_finite() & (pl.col("market_cap") > 0))
+            .sort(["symbol", "date"])
+            .group_by("symbol", maintain_order=True)
+            .tail(1)
+            .collect()
+        )
+    except Exception:
+        return {}
+    return {
+        str(symbol): float(market_cap)
+        for symbol, market_cap in frame.select("symbol", "market_cap").iter_rows()
+    }
 
 
 def load_daily_valuation_metadata(data_dir: Path) -> dict[str, Any]:
@@ -537,20 +606,39 @@ def load_latest_market_caps(
     directory = Path(data_dir) / TABLE_NAME
     if not symbols or not directory.exists():
         return {}
-    try:
-        frame = (
-            pl.scan_parquet(str(directory / "**" / "*.parquet"), missing_columns="insert")
-            .filter(pl.col("symbol").is_in(symbols) & (pl.col("date") <= cutoff))
-            .select("symbol", "date", "market_cap")
-            .filter(pl.col("market_cap").is_finite() & (pl.col("market_cap") > 0))
-            .sort(["symbol", "date"])
-            .group_by("symbol", maintain_order=True)
-            .tail(1)
-            .collect()
-        )
-    except Exception:
+    partition_dates = _partition_dates(directory)
+    latest_index = bisect_right(partition_dates, cutoff) - 1
+    if latest_index < 0:
         return {}
-    return {
-        str(symbol): float(market_cap)
-        for symbol, market_cap in frame.select("symbol", "market_cap").iter_rows()
-    }
+    fingerprint = _valuation_fingerprint(directory)
+    cache_key = str(directory)
+
+    with _MARKET_CAP_CACHE_LOCK:
+        cached = _MARKET_CAP_CACHE.get(cache_key)
+        can_advance = (
+            cached is not None
+            and cached[0] == fingerprint
+            and latest_index >= cached[1]
+        )
+        if can_advance:
+            previous_index, values, checked = cached[1], dict(cached[2]), set(cached[3])
+            for index in range(previous_index + 1, latest_index + 1):
+                partition = _read_market_cap_partition(directory, partition_dates[index])
+                values.update(partition)
+                checked.update(partition)
+        else:
+            values = _read_market_cap_partition(directory, partition_dates[latest_index])
+            checked = set(values)
+
+        missing = [symbol for symbol in symbols if symbol not in checked]
+        if missing:
+            values.update(_read_market_caps_fallback(directory, missing, cutoff))
+            checked.update(missing)
+        if cached is None or cached[0] != fingerprint or latest_index >= cached[1]:
+            _MARKET_CAP_CACHE[cache_key] = (
+                fingerprint,
+                latest_index,
+                values,
+                checked,
+            )
+        return {symbol: values[symbol] for symbol in symbols if symbol in values}

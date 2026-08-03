@@ -227,6 +227,89 @@ def test_load_latest_market_caps_reads_persisted_daily_values(tmp_path) -> None:
     ) == {"600000.SH": 1_200.0}
 
 
+def test_load_latest_market_caps_falls_back_for_symbol_missing_from_latest_partition(
+    tmp_path,
+) -> None:
+    directory = tmp_path / "valuation_daily"
+    earlier = directory / "date=2024-04-19" / "part.parquet"
+    latest = directory / "date=2024-04-22" / "part.parquet"
+    earlier.parent.mkdir(parents=True)
+    latest.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH", "600001.SH"],
+        "date": [date(2024, 4, 19), date(2024, 4, 19)],
+        "market_cap": [1_000.0, 2_000.0],
+    }).write_parquet(earlier)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2024, 4, 22)],
+        "market_cap": [1_200.0],
+    }).write_parquet(latest)
+
+    assert load_latest_market_caps(
+        tmp_path,
+        ["600000.SH", "600001.SH"],
+        date(2024, 4, 22),
+    ) == {"600000.SH": 1_200.0, "600001.SH": 2_000.0}
+
+
+def test_load_latest_market_caps_fast_path_scans_only_latest_partition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    directory = tmp_path / "valuation_daily" / "date=2024-04-22"
+    directory.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2024, 4, 22)],
+        "market_cap": [1_200.0],
+    }).write_parquet(directory / "part.parquet")
+    scanned: list[str] = []
+    original = pl.scan_parquet
+
+    def recording_scan(source, *args, **kwargs):
+        scanned.append(str(source))
+        return original(source, *args, **kwargs)
+
+    monkeypatch.setattr("app.services.daily_valuation.pl.scan_parquet", recording_scan)
+
+    assert load_latest_market_caps(
+        tmp_path,
+        ["600000.SH"],
+        date(2024, 4, 22),
+    ) == {"600000.SH": 1_200.0}
+    assert scanned == [str(directory / "*.parquet")]
+
+
+def test_load_latest_market_caps_advances_cached_snapshot_by_partition(tmp_path) -> None:
+    directory = tmp_path / "valuation_daily"
+    earlier = directory / "date=2024-04-19" / "part.parquet"
+    latest = directory / "date=2024-04-22" / "part.parquet"
+    earlier.parent.mkdir(parents=True)
+    latest.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH", "600001.SH"],
+        "date": [date(2024, 4, 19), date(2024, 4, 19)],
+        "market_cap": [1_000.0, 2_000.0],
+    }).write_parquet(earlier)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2024, 4, 22)],
+        "market_cap": [1_200.0],
+    }).write_parquet(latest)
+
+    assert load_latest_market_caps(
+        tmp_path,
+        ["600000.SH", "600001.SH"],
+        date(2024, 4, 19),
+    ) == {"600000.SH": 1_000.0, "600001.SH": 2_000.0}
+    assert load_latest_market_caps(
+        tmp_path,
+        ["600000.SH", "600001.SH"],
+        date(2024, 4, 22),
+    ) == {"600000.SH": 1_200.0, "600001.SH": 2_000.0}
+
+
 def test_daily_valuation_coverage_requires_previous_and_backtest_dates(tmp_path) -> None:
     for day in (date(2024, 4, 19), date(2024, 4, 22), date(2024, 4, 23)):
         _write_enriched(tmp_path, day)
