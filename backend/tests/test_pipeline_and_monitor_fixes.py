@@ -153,11 +153,23 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
         "sync_hithink_snapshots",
         lambda *_: {"status": "skipped", "published_rows": 0, "reason": "missing_hithink_api_key"},
     )
+    monkeypatch.setattr(
+        daily_pipeline.pit_reference,
+        "sync_baostock_lifecycle",
+        lambda *_: {
+            "status": "published",
+            "published_rows": 12,
+            "instrument_appended_symbols": 2,
+            "errors": [],
+        },
+    )
 
     result = daily_pipeline.run_now(repo, capset)
 
     assert result["etf_minute_rows"] == 321
-    assert "sync_pit_reference" in result["skipped_stages"]
+    assert result["pit_reference_baostock_lifecycle_rows"] == 12
+    assert result["pit_reference_instrument_appended_symbols"] == 2
+    assert "sync_pit_reference" not in result["skipped_stages"]
     assert "sync_etf_minute" not in result["skipped_stages"]
     assert len(sync_calls) == 1
     symbols, passed_repo, passed_capset, kwargs = sync_calls[0]

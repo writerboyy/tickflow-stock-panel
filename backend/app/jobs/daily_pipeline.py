@@ -499,27 +499,64 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.4: PIT Reference 快照同步 — 只冻结当天快照，不重建历史 PIT 表。
+    # Step 2.4: PIT Reference 同步 — 冻结当天快照，并补充 BaoStock 股票生命周期。
     pit_reference_rows = 0
+    pit_reference_baostock_lifecycle_rows = 0
+    pit_reference_instrument_appended_symbols = 0
+    pit_reference_any_published = False
     try:
         emit("sync_pit_reference", 89, "同步 PIT Reference 快照…")
         pit_result = pit_reference.sync_hithink_snapshots(repo.store.data_dir)
-        pit_reference_rows = int(pit_result.get("published_rows") or 0)
+        hithink_rows = int(pit_result.get("published_rows") or 0)
+        pit_reference_rows += hithink_rows
         if pit_result.get("status") == "skipped":
-            skipped.append("sync_pit_reference")
-            emit("sync_pit_reference", 90, "PIT Reference 跳过: 未配置同花顺 API Key")
+            emit("sync_pit_reference", 90, "PIT Reference HiThink 跳过: 未配置同花顺 API Key")
             logger.info("sync_pit_reference skipped: %s", pit_result.get("reason"))
         elif pit_result.get("status") == "failed":
             errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
-            emit("sync_pit_reference", 90, f"PIT Reference 快照失败:{errors}")
+            emit("sync_pit_reference", 90, f"PIT Reference HiThink 快照失败:{errors}")
             stage_errors.append(f"PIT reference snapshots: {errors}")
         else:
-            emit("sync_pit_reference", 90, f"PIT Reference 快照完成,{pit_reference_rows} 行")
+            pit_reference_any_published = hithink_rows > 0
+            emit("sync_pit_reference", 90, f"PIT Reference HiThink 快照完成,{hithink_rows} 行")
             logger.info("sync_pit_reference done: %s", pit_result)
+
+        emit("sync_pit_reference", 90, "同步 BaoStock 生命周期…")
+        baostock_result = pit_reference.sync_baostock_lifecycle(repo.store.data_dir)
+        pit_reference_baostock_lifecycle_rows = int(baostock_result.get("published_rows") or 0)
+        pit_reference_rows += pit_reference_baostock_lifecycle_rows
+        pit_reference_instrument_appended_symbols = int(
+            baostock_result.get("instrument_appended_symbols") or 0
+        )
+        if baostock_result.get("status") == "failed":
+            errors = "; ".join(str(item) for item in baostock_result.get("errors") or [])
+            emit("sync_pit_reference", 90, f"BaoStock 生命周期失败:{errors}")
+            stage_errors.append(f"BaoStock lifecycle: {errors}")
+        else:
+            pit_reference_any_published = (
+                pit_reference_any_published
+                or pit_reference_baostock_lifecycle_rows > 0
+                or pit_reference_instrument_appended_symbols > 0
+            )
+            emit(
+                "sync_pit_reference",
+                90,
+                f"BaoStock 生命周期完成,{pit_reference_baostock_lifecycle_rows} 行"
+                + (
+                    f",追加退市标的 {pit_reference_instrument_appended_symbols} 只"
+                    if pit_reference_instrument_appended_symbols else ""
+                ),
+            )
+            logger.info("sync_baostock_lifecycle done: %s", baostock_result)
+        if not pit_reference_any_published and not any(
+            str(item).startswith(("PIT reference snapshots:", "BaoStock lifecycle:"))
+            for item in stage_errors
+        ):
+            skipped.append("sync_pit_reference")
     except Exception as e:  # noqa: BLE001
-        emit("sync_pit_reference", 90, f"PIT Reference 快照失败:{e}")
+        emit("sync_pit_reference", 90, f"PIT Reference 同步失败:{e}")
         logger.warning("sync_pit_reference failed: %s", e)
-        stage_errors.append(f"PIT reference snapshots: {e}")
+        stage_errors.append(f"PIT reference sync: {e}")
 
     # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
@@ -552,6 +589,34 @@ def run_now(
             logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
             logger.info("sync_minute skipped: user disabled")
+    if etf_minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+        etf_minute_start = today - _td(days=minute_days)
+        emit("sync_etf_minute", 93, f"获取 ETF 分钟K [{etf_minute_start} ~ {today}]…")
+        etf_minute_symbols = _resolve_etf_minute_symbols(repo)
+        def _etf_minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+            emit(
+                "sync_etf_minute",
+                93,
+                f"ETF 分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+                stage_pct=int(100 * cur / tot) if tot else 100,
+                skip_log=True,
+            )
+        written_etf_minute = kline_sync.sync_and_persist_minute(
+            etf_minute_symbols,
+            repo,
+            capset,
+            days=minute_days,
+            on_chunk_done=_etf_minute_chunk_progress,
+            asset_type="etf",
+        )
+        emit("sync_etf_minute", 94, f"ETF 分钟K完成,{written_etf_minute} 行")
+        _invalidate("etf_minute")
+    else:
+        skipped.append("sync_etf_minute")
+        if etf_minute_on:
+            logger.info("sync_etf_minute skipped: no KLINE_MINUTE_BATCH capability")
+        else:
+            logger.info("sync_etf_minute skipped: user disabled")
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
@@ -597,7 +662,10 @@ def run_now(
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
         "pit_reference_rows": pit_reference_rows,
+        "pit_reference_baostock_lifecycle_rows": pit_reference_baostock_lifecycle_rows,
+        "pit_reference_instrument_appended_symbols": pit_reference_instrument_appended_symbols,
         "minute_rows": written_minute,
+        "etf_minute_rows": written_etf_minute,
         "regime_days": regime_days,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
