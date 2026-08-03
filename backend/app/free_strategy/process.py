@@ -1558,37 +1558,26 @@ def advance_scheduled_session(
         timestamp = datetime.combine(day, time.fromisoformat(at))
         _process_scheduled_fills(repo, engine, market, timestamp, asset_type, timeframe)
         symbols = _scheduled_symbols(engine, timestamp)
+        event_timestamp = timestamp
+        if timestamp.time() == time(9, 30):
+            event_timestamp = timestamp + timedelta(minutes=1)
+            if event_timestamp > cutoff:
+                continue
         snapshot = _scheduled_snapshot(
             repo,
             engine,
             market,
-            timestamp,
+            event_timestamp,
             asset_type,
             timeframe,
             symbols=symbols,
         )
-        event_timestamp = timestamp
         if timestamp.time() == time(9, 30) and not any(
             bar.tradable and not bar.suspended for bar in snapshot
         ):
-            first_continuous_minute = timestamp + timedelta(minutes=1)
-            if first_continuous_minute <= cutoff:
-                opening_snapshot = _scheduled_snapshot(
-                    repo,
-                    engine,
-                    market,
-                    first_continuous_minute,
-                    asset_type,
-                    timeframe,
-                    symbols=symbols,
-                )
-                if any(bar.tradable and not bar.suspended for bar in opening_snapshot):
-                    event_timestamp = first_continuous_minute
-                    snapshot = opening_snapshot
-            if event_timestamp == timestamp:
-                raise ValueError(
-                    f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
-                )
+            raise ValueError(
+                f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
+            )
         if event_timestamp > timestamp:
             _process_scheduled_fills(
                 repo,
