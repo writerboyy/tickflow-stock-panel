@@ -21,7 +21,8 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'etf' | 'minute' | 'financials' | 'regime'
+  | 'index' | 'pit_reference' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
+  | 'minute' | 'financials' | 'regime'
 
 interface CardDef {
   key: CardKey

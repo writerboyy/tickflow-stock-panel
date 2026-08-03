@@ -89,6 +89,12 @@ export function Data() {
     refetchInterval: activeJobId ? false : 30_000,
   })
 
+  const pitReference = useQuery({
+    queryKey: QK.pitReferenceStatus,
+    queryFn: api.pitReferenceStatus,
+    refetchInterval: activeJobId ? 2_000 : 60_000,
+  })
+
   const history = useQuery({
     queryKey: QK.pipelineJobs,
     queryFn: () => api.pipelineJobs(15),

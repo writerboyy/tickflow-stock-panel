@@ -3,7 +3,18 @@ import { motion } from 'framer-motion'
 import { X } from 'lucide-react'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
-export function SettingsModal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function SettingsModal({
+  title,
+  onClose,
+  children,
+  panelClassName = 'max-w-md',
+}: {
+  title: string
+  onClose: () => void
+  children: React.ReactNode
+  panelClassName?: string
+}) {
+  const titleId = useId()
   const backdrop = useDialogBackdrop(onClose)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
