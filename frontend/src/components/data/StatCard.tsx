@@ -22,6 +22,7 @@ export const CARD_META: Record<string, {
   etf_minute:  { capKey: 'kline.minute.batch',      tierReq: 'Pro+' },
   minute:      { capKey: 'kline.minute.batch',      tierReq: 'Pro+' },
   financials:  { capKey: 'financial',                tierReq: 'Expert' },
+  regime:      { capKey: '',                        tierReq: '' },
 }
 
 export function Pill({ label, value }: { label: string; value: number | string }) {

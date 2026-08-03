@@ -553,36 +553,31 @@ def run_now(
         else:
             logger.info("sync_minute skipped: user disabled")
 
-    if etf_minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
-        etf_minute_symbols = _resolve_etf_minute_symbols(repo)
-        if etf_minute_symbols:
-            minute_start = today - _td(days=minute_days)
-            emit("sync_etf_minute", 93, f"获取ETF分钟K [{minute_start} ~ {today}]…")
-            logger.info("sync_etf_minute: [%s ~ %s] start", minute_start, today)
-
-            def _etf_minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
-                emit("sync_etf_minute", 93 + int(cur / max(tot, 1)),
-                     f"ETF分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
-                     stage_pct=int(100 * cur / max(tot, 1)), skip_log=True)
-
-            written_etf_minute = kline_sync.sync_and_persist_minute(
-                etf_minute_symbols, repo, capset, days=minute_days,
-                on_chunk_done=_etf_minute_chunk_progress, asset_type="etf",
-            )
-            etf_minute_dir = repo.store.data_dir / "kline_etf_minute"
-            etf_minute_cover_days = len(list(etf_minute_dir.glob("date=*"))) if etf_minute_dir.exists() else 0
-            emit("sync_etf_minute", 94, f"ETF分钟K完成,覆盖 {etf_minute_cover_days} 天")
-            logger.info("sync_etf_minute: [%s ~ %s] done, %d days", minute_start, today, etf_minute_cover_days)
-            _invalidate("etf_minute")
-        else:
-            skipped.append("sync_etf_minute")
-            logger.warning("sync_etf_minute skipped: ETF instruments unavailable")
+    # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
+    # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
+    # 默认关闭: regime 是本地聚合计算(非拉取), 首次/regime 表为空时需全量回填
+    # 多日, 内存与耗时较高。用户可在数据页「市场环境」卡片设置里开启自动计算,
+    # 或直接在该页面点「重算」手动触发(不受此开关影响)。
+    regime_days = 0
+    from app.services import preferences as _prefs_regime
+    if not _prefs_regime.get_pipeline_regime_enabled():
+        skipped.append("regime")
+        logger.info("compute_regime skipped: user disabled (pipeline_regime_enabled=False)")
     else:
-        skipped.append("sync_etf_minute")
-        if etf_minute_on:
-            logger.info("sync_etf_minute skipped: no KLINE_MINUTE_BATCH capability")
-        else:
-            logger.info("sync_etf_minute skipped: user disabled")
+        try:
+            emit("compute_regime", 90, "计算市场环境…")
+            from app.services import regime_builder
+            from app.api.regime import invalidate_regime_cache
+            new_regime = regime_builder.compute_regime_incremental(repo, repo.store.data_dir)
+            regime_days = new_regime.height if not new_regime.is_empty() else 0
+            if regime_days:
+                invalidate_regime_cache()
+                logger.info("compute_regime: %d days", regime_days)
+            emit("compute_regime", 92, f"市场环境 {regime_days} 天")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compute_regime failed (soft): %s", e)
+            stage_errors.append(f"compute_regime: {e}")
+            skipped.append("regime")
 
     # Step 3: 刷新视图
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
@@ -603,7 +598,7 @@ def run_now(
         "etf_adj_factor_symbols": etf_adj_symbols,
         "pit_reference_rows": pit_reference_rows,
         "minute_rows": written_minute,
-        "etf_minute_rows": written_etf_minute,
+        "regime_days": regime_days,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,

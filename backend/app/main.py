@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -187,6 +187,7 @@ async def lifespan(app: FastAPI):
 
     # 策略引擎
     from app.strategy.engine import StrategyEngine
+    from app.strategy import config as strategy_config
     from app.strategy.monitor import StrategyMonitorService
     from app.services.screener import ScreenerService
 
@@ -196,9 +197,11 @@ async def lifespan(app: FastAPI):
         Path(__file__).resolve().parent / "strategy" / "builtin",
         store.data_dir / "strategies" / "custom",
         store.data_dir / "strategies" / "ai",
+        store.data_dir / "strategies" / "composite",
     ]
     strategy_engine = StrategyEngine(
         strategy_dirs=strategy_dirs,
+        override_loader=lambda sid: strategy_config.load_override(store.data_dir, sid),
     )
     app.state.strategy_engine = strategy_engine
     logger.info("strategy engine loaded: %d strategies", len(strategy_engine.list_strategies()))
@@ -391,7 +394,7 @@ app.include_router(free_strategy.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
-app.include_router(market_heat.router)
+app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
 app.include_router(pit_reference.router)

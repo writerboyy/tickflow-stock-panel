@@ -21,8 +21,7 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'pit_reference' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
-  | 'minute' | 'financials'
+  | 'index' | 'etf' | 'minute' | 'financials' | 'regime'
 
 interface CardDef {
   key: CardKey
@@ -48,6 +47,7 @@ export const DATA_CARD_DEFS: CardDef[] = [
   { key: 'minute',      label: '分钟 K',   desc: '分钟级K线(需 Pro+)',     defaultHiddenIfNoCap: true },
   { key: 'etf_minute',  label: 'ETF 分钟 K', desc: 'ETF 分钟级K线(需 Pro+)', defaultHiddenIfNoCap: true },
   { key: 'financials',  label: '财务数据', desc: '财报数据(需 Expert)',    defaultHiddenIfNoCap: true },
+  { key: 'regime',      label: '市场环境', desc: '每日环境状态(本地计算)', defaultHiddenIfNoCap: false },
 ]
 
 const DEFAULT_ORDER = DATA_CARD_DEFS.map(d => d.key)

@@ -403,6 +403,75 @@ export interface RpsRotationData {
   concept_count: number
 }
 
+// ===== 市场环境(Regime) =====
+export type RegimeState = 'strong' | 'lean_strong' | 'range' | 'lean_weak' | 'weak'
+
+export const REGIME_STATE_LABELS: Record<RegimeState, string> = {
+  strong: '强势',
+  lean_strong: '偏强',
+  range: '震荡',
+  lean_weak: '偏弱',
+  weak: '弱势',
+}
+
+export const REGIME_STATE_COLORS: Record<RegimeState, string> = {
+  strong: '#ef4444',      // 红(强)
+  lean_strong: '#f97316', // 橙
+  range: '#6b7280',       // 灰
+  lean_weak: '#3b82f6',   // 蓝
+  weak: '#10b981',        // 绿(弱)
+}
+
+export interface RegimeRow {
+  date: string
+  state: RegimeState
+  score: number
+  limit_up: number
+  limit_down: number
+  broken_limit: number
+  max_consecutive: number
+  seal_rate: number
+  up_count: number
+  down_count: number
+  up_ratio: number
+  index_pct: number
+  above_ma20_pct: number
+  total_amount: number
+  avg_turnover: number
+  // 4 个子维度分(0-100, 重算后才有; 旧数据可能缺) — 综合分的加权来源
+  avg_pct?: number
+  median_pct?: number
+  strong_up_pct?: number
+  strong_down_pct?: number
+  profit_score?: number
+  speculation_score?: number
+  resilience_score?: number
+  trend_score?: number
+}
+
+export interface RegimeHistory {
+  rows: RegimeRow[]
+  total: number
+}
+
+export interface RegimeStateItem {
+  state: RegimeState
+  label: string
+  count: number
+  pct: number
+}
+
+export interface RegimeStates {
+  distribution: RegimeStateItem[]
+  days: number
+}
+
+export interface RegimeCoverage {
+  rows: number
+  earliest_date: string | null
+  latest_date: string | null
+}
+
 // ===== 大盘复盘 =====
 export interface AiReviewReport {
   id: string
@@ -427,13 +496,20 @@ export interface StrategyParamDef {
   options?: string[]
 }
 
+export interface CompositeChildInfo {
+  id: string
+  name: string
+  source: string
+  weight: number
+}
+
 export interface StrategyDetail {
   id: string
   name: string
   description: string
   tags: string[]
-  source: 'builtin' | 'custom' | 'ai'
-  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy'
+  source: 'builtin' | 'custom' | 'ai' | 'composite'
+  execution_backend: 'polars_expr' | 'matrix_native' | 'python_history_legacy' | 'composite'
   asset_types: string[]
   timeframes: string[]
   version: string
@@ -455,6 +531,8 @@ export interface StrategyDetail {
   order_by: string
   descending: boolean
   limit: number
+  // 叠加策略(composite)专属: 子策略列表与合并模式。非 composite 时为 null。
+  composite_children?: CompositeChildInfo[] | null
 }
 
 export interface StrategyBuildResult {
@@ -473,7 +551,7 @@ export type StrategyBuildStreamEvent =
 export interface StrategyCodeSaveResult {
   ok: boolean
   strategy_id: string
-  source: 'ai' | 'custom'
+  source: 'ai' | 'custom' | 'composite'
   path: string
   meta: Record<string, any>
 }
@@ -825,6 +903,9 @@ export interface StrategyBacktestResult {
     score_max: number | null
     max_hold_days: number | null
     source: string
+    execution_backend?: string
+    // 叠加策略回测: 子策略构成与权重归因
+    composite_children?: { id: string; weight: number }[]
   }
   elapsed_ms: number
   error: string | null
@@ -999,6 +1080,9 @@ export interface Preferences {
   pipeline_pull_a_share: boolean
   pipeline_pull_etf: boolean
   pipeline_pull_index: boolean
+  pipeline_regime_enabled: boolean
+  regime_batch_days: number
+  regime_warmup_days: number
   pipeline_index_symbols: string
   pipeline_schedule: { hour: number; minute: number }
   instruments_schedule: { hour: number; minute: number }
@@ -1511,6 +1595,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(cfg),
     }),
+  updatePipelineRegimeEnabled: (enabled: boolean) =>
+    request<{ pipeline_regime_enabled: boolean }>('/api/settings/preferences/pipeline-regime-enabled', {
+      method: 'PUT',
+      body: JSON.stringify({ pipeline_regime_enabled: enabled }),
+    }),
+  updateRegimeBatchParams: (params: { batch_days?: number; warmup_days?: number }) =>
+    request<{ regime_batch_days: number; regime_warmup_days: number }>('/api/settings/preferences/regime-batch-params', {
+      method: 'PUT',
+      body: JSON.stringify(params),
+    }),
   updatePipelineIndexSymbols: (symbols: string) =>
     request<{ pipeline_index_symbols: string }>('/api/settings/preferences/pipeline-index-symbols', {
       method: 'PUT',
@@ -1940,8 +2034,28 @@ export const api = {
   },
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
-  rpsRotation: (days: number) =>
-    request<RpsRotationData>(`/api/rps/rotation?days=${days}`),
+  rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>
+    request<RpsRotationData>(`/api/rps/rotation?days=${days}${kind ? `&kind=${kind}` : ''}${level ? `&level=${level}` : ''}`),
+
+  // 市场环境(Regime)
+  regimeHistory: (start?: string, end?: string, limit?: number) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    if (limit) params.set('limit', String(limit))
+    const qs = params.toString()
+    return request<RegimeHistory>(`/api/regime/history${qs ? `?${qs}` : ''}`)
+  },
+  regimeLatest: () => request<{ row: RegimeRow | null }>('/api/regime/latest'),
+  regimeStates: (days = 60) => request<RegimeStates>(`/api/regime/states?days=${days}`),
+  regimeCoverage: () => request<RegimeCoverage>('/api/regime/coverage'),
+  regimeRecompute: (start?: string, end?: string) => {
+    const params = new URLSearchParams()
+    if (start) params.set('start', start)
+    if (end) params.set('end', end)
+    const qs = params.toString()
+    return request<{ ok: boolean; computed: number }>(`/api/regime/recompute${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
@@ -2427,7 +2541,7 @@ export const api = {
   },
 
   /** AI 概念轮动分析 — 流式 NDJSON。 */
-  async *rotationAnalyzeStream(days: number, focus?: string): AsyncGenerator<{
+  async *rotationAnalyzeStream(days: number, focus?: string, kind?: 'concept' | 'industry', level?: number): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     days?: number
     summary?: string
@@ -2437,7 +2551,7 @@ export const api = {
     const res = await fetch('/api/rps/rotation-analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, focus: focus ?? '' }),
+      body: JSON.stringify({ days, focus: focus ?? '', kind: kind ?? 'concept', level: level ?? null }),
     })
     if (!res.ok) {
       let detail = ''
@@ -2666,6 +2780,21 @@ export const api = {
     description?: string
   }) =>
     request<StrategyCodeSaveResult>('/api/strategies/code/save', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  /** 创建/更新叠加策略(composite): 声明式引用多个子策略 */
+  strategySaveComposite: (payload: {
+    strategy_id: string
+    name: string
+    description?: string
+    children: { strategy_id: string; weight: number }[]
+    merge_mode: 'union' | 'intersect'
+    min_confirm?: number
+    mode: 'create' | 'update'
+  }) =>
+    request<StrategyCodeSaveResult>('/api/strategies/composite/save', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
