@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import gc
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import polars as pl
 
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # exchanges.get_instruments 查询的交易所(沪深京)
 _EXCHANGES = ["SH", "SZ", "BJ"]
 _MAX_REASONABLE_INDEX_AMOUNT = 1e15
+_CONSENSUS_REPAIRABLE_FIELDS = frozenset({"volume", "amount"})
 
 
 class IndexDailyQualityError(ValueError):
@@ -82,8 +83,71 @@ def _validate_index_daily_with_crosscheck(frame: pl.DataFrame) -> pl.DataFrame:
             raise
         result = crosscheck_index_daily_consensus(exc.invalid_rows)
         summary = consensus_summary(result)
-        logger.error("TickFlow 指数日线异常，备用源只读核验: %s", summary)
+        repaired = _apply_consensus_replacements(frame, exc.invalid_rows, result)
+        if repaired is not None:
+            logger.warning("TickFlow 指数日线异常已由多源共识修复: %s", summary)
+            return repaired
+        logger.error("TickFlow 指数日线异常，备用源只读核验未闭合: %s", summary)
         raise IndexDailyQualityError(f"{exc}; 备用源核验: {summary}", exc.invalid_rows) from exc
+
+
+def _apply_consensus_replacements(
+    frame: pl.DataFrame,
+    invalid_rows: pl.DataFrame,
+    result: dict,
+) -> pl.DataFrame | None:
+    requested = int(result.get("requested_rows") or 0)
+    if (
+        result.get("status") != "complete"
+        or requested <= 0
+        or int(result.get("confirmed_rows") or 0) != requested
+    ):
+        return None
+
+    invalid_keys = {
+        (str(row["symbol"]), row["date"])
+        for row in invalid_rows.select("symbol", "date").unique().iter_rows(named=True)
+    }
+    replacements: dict[tuple[str, date], dict[str, float]] = {}
+    for item in result.get("rows") or []:
+        if item.get("status") != "replacement_confirmed":
+            return None
+        try:
+            key = (str(item["symbol"]), date.fromisoformat(str(item["date"])))
+        except (KeyError, ValueError):
+            return None
+        values = item.get("replacement")
+        if (
+            key in replacements
+            or not isinstance(values, dict)
+            or not values
+            or not set(values).issubset(_CONSENSUS_REPAIRABLE_FIELDS)
+        ):
+            return None
+        replacements[key] = values
+
+    if set(replacements) != invalid_keys or len(replacements) != requested:
+        return None
+
+    repaired = frame
+    for (symbol, trade_date), values in replacements.items():
+        predicate = (pl.col("symbol") == symbol) & (pl.col("date") == trade_date)
+        expressions = []
+        for field, value in values.items():
+            if field not in repaired.columns or not isinstance(value, (int, float)):
+                return None
+            expressions.append(
+                pl.when(predicate)
+                .then(pl.lit(value).cast(repaired.schema[field]))
+                .otherwise(pl.col(field))
+                .alias(field)
+            )
+        repaired = repaired.with_columns(expressions)
+
+    try:
+        return _validate_index_daily(repaired)
+    except IndexDailyQualityError:
+        return None
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:

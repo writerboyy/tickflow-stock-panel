@@ -82,7 +82,7 @@ def test_crosscheck_rejects_anomalous_easy_tdx_as_both_anomalous() -> None:
     assert result["status_counts"] == {"both_anomalous": 1}
 
 
-def test_index_quality_failure_includes_crosscheck_summary(monkeypatch) -> None:
+def test_index_quality_applies_consensus_confirmed_replacements(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.index_consensus.crosscheck_index_daily_consensus",
         lambda _rows: {
@@ -91,10 +91,43 @@ def test_index_quality_failure_includes_crosscheck_summary(monkeypatch) -> None:
             "confirmed_rows": 1,
             "sources": {},
             "status_counts": {"replacement_confirmed": 1},
+            "rows": [{
+                "symbol": "399379.SZ",
+                "date": "2026-07-30",
+                "status": "replacement_confirmed",
+                "replacement": {
+                    "volume": 2_775_759_872.0,
+                    "amount": 512_785_300_000.0,
+                },
+            }],
         },
     )
 
-    with pytest.raises(IndexDailyQualityError, match="replacement_confirmed=1"):
+    result = index_sync._validate_index_daily_with_crosscheck(pl.DataFrame([_row()]))
+
+    assert result["volume"].to_list() == [2_775_759_872.0]
+    assert result["amount"].to_list() == [512_785_300_000.0]
+
+
+def test_index_quality_failure_includes_crosscheck_summary(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.index_consensus.crosscheck_index_daily_consensus",
+        lambda _rows: {
+            "status": "partial",
+            "requested_rows": 1,
+            "confirmed_rows": 0,
+            "sources": {},
+            "status_counts": {"source_conflict": 1},
+            "rows": [{
+                "symbol": "399379.SZ",
+                "date": "2026-07-30",
+                "status": "source_conflict",
+                "replacement": {},
+            }],
+        },
+    )
+
+    with pytest.raises(IndexDailyQualityError, match="source_conflict=1"):
         index_sync._validate_index_daily_with_crosscheck(pl.DataFrame([_row()]))
 
 
