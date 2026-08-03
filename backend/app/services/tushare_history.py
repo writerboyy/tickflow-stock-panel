@@ -639,8 +639,8 @@ class TushareHistoryBackfill:
             "trade_cal": {"exchange": "SSE", "start_date": "20250101", "end_date": "20250110"},
             "adj_factor": {"ts_code": "000001.SZ", "start_date": "20250101", "end_date": "20250110"},
             "fund_adj": {"ts_code": "510300.SH", "start_date": "20250101", "end_date": "20250110"},
-            "stk_mins": {"ts_code": "000001.SZ", "start_date": "20250101 09:30:00", "end_date": "20250102 15:00:00", "freq": "1min"},
-            "etf_mins": {"ts_code": "510300.SH", "start_date": "20250101 09:30:00", "end_date": "20250102 15:00:00", "freq": "1min"},
+            "stk_mins": {"ts_code": "000001.SZ", "start_date": "2025-01-01 09:30:00", "end_date": "2025-01-02 15:00:00", "freq": "1min"},
+            "etf_mins": {"ts_code": "510300.SH", "start_date": "2025-01-01 09:30:00", "end_date": "2025-01-02 15:00:00", "freq": "1min"},
             "income": {"ts_code": "000001.SZ", "start_date": "20230101", "end_date": "20250110"},
             "index_daily": {"ts_code": "000001.SH", "start_date": "20250101", "end_date": "20250110"},
             "fund_nav": {"ts_code": "510300.SH", "start_date": "20230101", "end_date": "20250110"},
@@ -761,7 +761,7 @@ class TushareHistoryBackfill:
             try:
                 while True:
                     page_number = int(state.get("pages", 0))
-                    response = self.client.request(api_name, {"ts_code": symbol, "freq": "1min", "start_date": "19900101 00:00:00", "end_date": cursor, "limit": MAX_MINUTE_ROWS})
+                    response = self.client.request(api_name, {"ts_code": symbol, "freq": "1min", "start_date": "1990-01-01 00:00:00", "end_date": cursor, "limit": MAX_MINUTE_ROWS})
                     self._archive(api_name, f"{symbol}-page-{page_number:06d}", response)
                     if not response.items:
                         state.update({"status": "completed", "reason": "no_earlier_data", "cursor": cursor})
