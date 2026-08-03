@@ -158,6 +158,9 @@ def test_adjustment_and_minute_phases_are_resumable(tmp_path):
     assert list((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "stock_minute" / "000001.SZ").glob("page-*.parquet"))
     assert (tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "adjustment" / "stock" / "000001.SZ.parquet").exists()
     assert json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "manifest.json").read_text())["phases_state"]["stock_minute"]["items"]["000001.SZ"]["status"] == "completed"
+    minute_params = next(params for api, params in client.calls if api == "stk_mins")
+    assert minute_params["start_date"] == "1990-01-01 00:00:00"
+    assert minute_params["end_date"].count("-") == 2
 
 
 def test_publish_checks_all_partitions_before_replacing_any(tmp_path):
