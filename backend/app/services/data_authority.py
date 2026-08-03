@@ -345,6 +345,21 @@ REFERENCE_DATASETS: dict[tuple[ReferenceAssetType, ReferenceTimeframe], str] = {
     ("index", "1d"): "kline_index_daily",
 }
 
+# Temporary historical imports are subordinate to the existing provider.  A
+# caller may use these fields to label coverage reports, but must not route
+# daily or minute reads to the proxy after the key expires.
+TUSHARE_HISTORY_OVERLAP_POLICY = {
+    "overlap_key_owner": "tickflow",
+    "gap_fill_source": "tushare_proxy",
+    "conflict_action": "block_partition",
+    "runtime_source": "local_parquet_only",
+}
+
+
+def tushare_history_policy() -> dict[str, str]:
+    """Return a copy suitable for coverage manifests and capability reports."""
+    return dict(TUSHARE_HISTORY_OVERLAP_POLICY)
+
 
 def dataset_authority(dataset: str) -> DatasetAuthority | None:
     return PRIMARY_DATASETS.get(dataset) or DERIVED_DATASETS.get(dataset)
