@@ -30,6 +30,12 @@ from app import secrets_store
 from app.services.data_authority import tushare_history_policy
 from app.services.ingestion_manifest import archive_source_payload, stable_content_hash
 from app.services.minute_quality import minute_coverage_manifest
+from app.services.tushare_datasets import GROUPS, TushareDatasetSpec, resolve_datasets
+from app.services.tushare_ingestion import (
+    DEFAULT_HISTORY_START,
+    IngestionConfig,
+    TushareDatasetIngestion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +47,15 @@ MAX_WORKERS = 4
 
 PHASES = (
     "universe",
+    "reference",
+    "daily",
+    "financials",
+    "factors",
     "adjustment",
     "stock_minute",
     "etf_minute",
     "publish_minute",
+    "audit",
     "p0",
     "research",
 )
@@ -554,10 +565,16 @@ class BackfillConfig:
     run_id: str | None = None
     phases: tuple[str, ...] = PHASES
     symbols: tuple[str, ...] | None = None
+    etfs: tuple[str, ...] | None = None
+    indexes: tuple[str, ...] | None = None
     max_symbols: int | None = None
     rate_interval: float = DEFAULT_RATE_INTERVAL
     attempts: int = 4
     publish: bool = False
+    start: date = DEFAULT_HISTORY_START
+    end: date | None = None
+    datasets: tuple[str, ...] = ()
+    incremental: bool = False
 
     def normalized(self) -> "BackfillConfig":
         root = Path(self.data_dir).expanduser().resolve()
@@ -566,9 +583,32 @@ class BackfillConfig:
         if unknown:
             raise ValueError(f"unknown Tushare backfill phase(s): {', '.join(unknown)}")
         symbols = tuple(dict.fromkeys(str(item).strip().upper() for item in self.symbols or () if str(item).strip())) or None
+        etfs = tuple(dict.fromkeys(str(item).strip().upper() for item in self.etfs or () if str(item).strip())) or None
+        indexes = tuple(dict.fromkeys(str(item).strip().upper() for item in self.indexes or () if str(item).strip())) or None
         if self.max_symbols is not None and self.max_symbols <= 0:
             raise ValueError("max_symbols must be positive")
-        return BackfillConfig(root, self.run_id, phases, symbols, self.max_symbols, self.rate_interval, self.attempts, self.publish)
+        end = self.end or date.today()
+        if self.start > end:
+            raise ValueError("start must not be after end")
+        datasets = tuple(dict.fromkeys(str(item).strip() for item in self.datasets if str(item).strip()))
+        if datasets:
+            resolve_datasets(datasets)
+        return BackfillConfig(
+            data_dir=root,
+            run_id=self.run_id,
+            phases=phases,
+            symbols=symbols,
+            etfs=etfs,
+            indexes=indexes,
+            max_symbols=self.max_symbols,
+            rate_interval=self.rate_interval,
+            attempts=self.attempts,
+            publish=self.publish,
+            start=self.start,
+            end=end,
+            datasets=datasets,
+            incremental=self.incremental,
+        )
 
 
 class TushareHistoryBackfill:
@@ -589,17 +629,32 @@ class TushareHistoryBackfill:
                 raise BackfillBlocked("invalid Tushare backfill manifest") from exc
             if not isinstance(value, dict):
                 raise BackfillBlocked("invalid Tushare backfill manifest")
+            schema_version = int(value.get("schema_version") or 1)
             expected = {
                 "data_dir": str(self.config.data_dir),
                 "phases": list(self.config.phases),
-                "requested_symbols_hash": _symbol_hash(self.config.symbols or ()),
+                "requested_symbols_hash": _symbol_hash(self._requested_symbols()),
             }
+            if schema_version >= 2:
+                expected.update({
+                    "history_start": self.config.start.isoformat(),
+                    "history_end": (self.config.end or date.today()).isoformat(),
+                    "datasets": list(self.config.datasets),
+                    "incremental": self.config.incremental,
+                })
             for key, val in expected.items():
                 if value.get(key) != val:
                     raise BackfillBlocked(f"resume configuration mismatch for {key}")
+            # Schema v1 runs predate formal dataset controls. Preserve their
+            # completed batches and add only backward-compatible defaults.
+            value.setdefault("schema_version", schema_version)
+            value.setdefault("history_start", self.config.start.isoformat())
+            value.setdefault("history_end", (self.config.end or date.today()).isoformat())
+            value.setdefault("datasets", list(self.config.datasets))
+            value.setdefault("incremental", self.config.incremental)
             return value
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "tushare_proxy_history_backfill",
             "run_id": self.run_id,
             "data_dir": str(self.config.data_dir),
@@ -607,14 +662,25 @@ class TushareHistoryBackfill:
             "status": "staging",
             "created_at": _utc_now(),
             "updated_at": _utc_now(),
-            "symbols_hash": _symbol_hash(self.config.symbols or ()),
-            "requested_symbols_hash": _symbol_hash(self.config.symbols or ()),
+            "symbols_hash": _symbol_hash(self._requested_symbols()),
+            "requested_symbols_hash": _symbol_hash(self._requested_symbols()),
             "phases_state": {},
             "coverage": {},
             "publish": {"status": "not_requested", "conflicts": []},
+            "history_start": self.config.start.isoformat(),
+            "history_end": (self.config.end or date.today()).isoformat(),
+            "datasets": list(self.config.datasets),
+            "incremental": self.config.incremental,
         }
         _atomic_json(self.manifest_path, value)
         return value
+
+    def _requested_symbols(self) -> tuple[str, ...]:
+        return (
+            *(self.config.symbols or ()),
+            *(self.config.etfs or ()),
+            *(self.config.indexes or ()),
+        )
 
     def _save(self, **updates: Any) -> None:
         with self._manifest_lock:
@@ -658,10 +724,29 @@ class TushareHistoryBackfill:
             "etf_mins": {"ts_code": "510300.SH", "start_date": "2025-01-01 09:30:00", "end_date": "2025-01-02 15:00:00", "freq": "1min"},
             "income": {"ts_code": "000001.SZ", "start_date": "20230101", "end_date": "20250110"},
             "index_daily": {"ts_code": "000001.SH", "start_date": "20250101", "end_date": "20250110"},
+            "index_basic": {"market": "SSE"},
+            "index_member_all": {"index_code": "000300.SH"},
+            "index_weight": {"index_code": "000300.SH", "start_date": "20240101", "end_date": "20250110"},
+            "ci_index_member": {},
+            "namechange": {"ts_code": "000001.SZ", "start_date": "20200101", "end_date": "20250110"},
+            "suspend_d": {"ts_code": "000001.SZ", "start_date": "20250101", "end_date": "20250110"},
+            "dividend": {"ts_code": "000001.SZ", "start_date": "20230101", "end_date": "20250110"},
             "fund_nav": {"ts_code": "510300.SH", "start_date": "20230101", "end_date": "20250110"},
+            "fund_daily": {"ts_code": "510300.SH", "start_date": "20230101", "end_date": "20250110"},
         }
         samples.update({api: {"ts_code": "000001.SZ", "start_date": "20250101", "end_date": "20250110"} for api in PREFLIGHT_APIS if api not in samples})
-        for api_name in PREFLIGHT_APIS:
+        selected = (
+            [spec.api_name for spec in resolve_datasets(self.config.datasets)]
+            if self.config.datasets
+            else []
+        )
+        preflight_apis = tuple(dict.fromkeys([*PREFLIGHT_APIS, *selected]))
+        samples.update({
+            api: {"ts_code": "000001.SZ", "start_date": "20250101", "end_date": "20250110"}
+            for api in preflight_apis
+            if api not in samples
+        })
+        for api_name in preflight_apis:
             try:
                 response = self.client.request(api_name, samples[api_name])
                 status = "ok" if response.items else "empty_unconfirmed"
@@ -676,6 +761,190 @@ class TushareHistoryBackfill:
         self._save(preflight=result)
         return result
 
+    def _formal_specs(self) -> tuple[TushareDatasetSpec, ...]:
+        if self.config.datasets:
+            return resolve_datasets(self.config.datasets)
+        names: list[str] = []
+        for phase in ("reference", "daily", "financials", "factors"):
+            if phase in self.config.phases:
+                names.extend(GROUPS[phase])
+        if not names and "audit" in self.config.phases:
+            for phase in ("reference", "daily", "financials", "factors"):
+                names.extend(GROUPS[phase])
+        return resolve_datasets(names)
+
+    def _run_formal_datasets(
+        self,
+        stocks: list[str],
+        etfs: list[str],
+        indexes: list[str],
+    ) -> tuple[dict[str, Any], TushareDatasetIngestion | None]:
+        specs = self._formal_specs()
+        if not specs:
+            return {}, None
+        engine = TushareDatasetIngestion(
+            IngestionConfig(
+                self.config.data_dir,
+                self.run_id,
+                start=self.config.start,
+                end=self.config.end or date.today(),
+                publish=self.config.publish,
+                incremental=self.config.incremental,
+            ),
+            self.client,
+        )
+        if set(self.config.phases) == {"audit"}:
+            return {}, engine
+        result: dict[str, Any] = {}
+        for spec in specs:
+            phase = self._phase(spec.group)
+            phase["status"] = "running"
+            symbol_pool = etfs if spec.api_name == "fund_daily" else stocks
+            try:
+                collected = engine.collect(
+                    (spec,),
+                    symbols=symbol_pool,
+                    indexes=indexes,
+                )[spec.api_name]
+                if self.config.publish:
+                    published = engine.publish((spec,))[spec.api_name]
+                else:
+                    published = {"status": "staged_only"}
+                result[spec.api_name] = {"collect": collected, "publish": published}
+                phase.setdefault("items", {})[spec.api_name] = {
+                    "status": published["status"] if self.config.publish else collected["status"],
+                    "rows": collected["rows"],
+                    "published_rows": published.get("published_rows", 0),
+                }
+            except Exception as exc:  # noqa: BLE001
+                result[spec.api_name] = {
+                    "collect": {"status": "failed"},
+                    "publish": {"status": "blocked"},
+                    "error": type(exc).__name__,
+                    "message": self._safe_error(exc),
+                }
+                phase.setdefault("items", {})[spec.api_name] = {
+                    "status": "failed",
+                    "error": type(exc).__name__,
+                    "message": self._safe_error(exc),
+                }
+            phase["status"] = (
+                "incomplete"
+                if any(item.get("status") in {"failed", "blocked"} for item in phase["items"].values())
+                else "completed"
+            )
+            self._save(dataset_ingestion=result)
+        if self.config.publish:
+            try:
+                derived = self._rebuild_after_formal_publish(specs, result)
+                phase = self._phase("derived")
+                phase["status"] = "completed"
+                phase.pop("error", None)
+                phase.pop("message", None)
+                self._save(derived_rebuild=derived)
+            except Exception as exc:  # noqa: BLE001
+                phase = self._phase("derived")
+                failure = {
+                    "status": "failed",
+                    "error": type(exc).__name__,
+                    "message": self._safe_error(exc),
+                }
+                phase.update(failure)
+                self._save(derived_rebuild=failure)
+        engine.write_capability_matrix(specs)
+        return result, engine
+
+    def _rebuild_after_formal_publish(
+        self,
+        specs: tuple[TushareDatasetSpec, ...],
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        changed = {
+            spec.api_name: spec
+            for spec in specs
+            if result.get(spec.api_name, {}).get("publish", {}).get("status") == "published"
+            and int(result.get(spec.api_name, {}).get("publish", {}).get("published_rows") or 0) > 0
+        }
+        report: dict[str, Any] = {"datasets": sorted(changed)}
+        daily_paths = sorted(
+            (self.config.data_dir / "kline_daily").glob("date=*/part.parquet")
+        )
+        enriched_paths = sorted(
+            (self.config.data_dir / "kline_daily_enriched").glob("date=*/part.parquet")
+        )
+        shares_path = self.config.data_dir / "financials" / "shares" / "part.parquet"
+        stale_share_schema = bool(
+            daily_paths
+            and shares_path.exists()
+            and (
+                not enriched_paths
+                or any(
+                    not {"total_shares", "float_shares"}
+                    <= set(pl.read_parquet_schema(path))
+                    for path in enriched_paths
+                )
+            )
+        )
+        if stale_share_schema:
+            report["recovery_dependencies"] = ["historical_share_columns"]
+        if not changed and not stale_share_schema:
+            report["status"] = "not_needed"
+            return report
+
+        if "daily" in changed or stale_share_schema:
+            from app.indicators.pipeline import run_pipeline
+
+            report["kline_daily_enriched_rows"] = run_pipeline(
+                self.config.data_dir,
+                new_dates_only=self.config.incremental and not stale_share_schema,
+                keep_backup=stale_share_schema or not self.config.incremental,
+            )
+
+        from app.indicators.pipeline import ENRICHED_STORAGE_COLS, compute_enriched
+
+        for api_name, raw_table, enriched_table, factor_table in (
+            ("index_daily", "kline_index_daily", "kline_index_enriched", None),
+            ("fund_daily", "kline_etf_daily", "kline_etf_enriched", "adj_factor_etf"),
+        ):
+            if api_name not in changed:
+                continue
+            paths = sorted((self.config.data_dir / raw_table).glob("date=*/part.parquet"))
+            if not paths:
+                continue
+            raw = pl.concat([pl.read_parquet(path) for path in paths], how="diagonal_relaxed")
+            factors = pl.DataFrame()
+            if factor_table:
+                factor_path = self.config.data_dir / factor_table / "all.parquet"
+                if factor_path.exists():
+                    factors = pl.read_parquet(factor_path)
+            enriched = compute_enriched(
+                raw.sort(["symbol", "date"]),
+                factors=factors if not factors.is_empty() else None,
+                instruments=None,
+            )
+            storage_columns = [column for column in ENRICHED_STORAGE_COLS if column in enriched.columns]
+            written = 0
+            for day_frame in enriched.select(storage_columns).partition_by("date"):
+                day = day_frame["date"][0]
+                _atomic_parquet(
+                    day_frame.sort("symbol"),
+                    self.config.data_dir / enriched_table / f"date={day.isoformat()}" / "part.parquet",
+                )
+                written += day_frame.height
+            report[f"{enriched_table}_rows"] = written
+
+        if stale_share_schema or changed.keys() & {
+            "daily", "daily_basic", "income", "balancesheet", "cashflow", "fina_indicator"
+        }:
+            from app.services.daily_valuation import build_daily_valuation
+
+            report["valuation_daily"] = build_daily_valuation(
+                self.config.data_dir,
+                keep_backup=not self.config.incremental,
+            )
+        report["status"] = "completed"
+        return report
+
     def _write_rows(self, phase: str, key: str, frame: pl.DataFrame) -> Path:
         path = self.run_root / "batches" / _safe_part(phase) / f"{_safe_part(key)}.parquet"
         _atomic_parquet(frame, path)
@@ -683,10 +952,10 @@ class TushareHistoryBackfill:
 
     def _universe(self) -> tuple[list[str], list[str], list[str]]:
         state = self._phase("universe")
-        if self.config.symbols:
-            stocks = list(self.config.symbols)
-            etfs: list[str] = []
-            indexes: list[str] = []
+        if self._requested_symbols():
+            stocks = list(self.config.symbols or ())
+            etfs = list(self.config.etfs or ())
+            indexes = list(self.config.indexes or ())
         else:
             stocks, etfs, indexes = [], [], []
             for list_status in ("L", "D", "P"):
@@ -758,7 +1027,13 @@ class TushareHistoryBackfill:
             if state.get("status") == "completed" and path.exists():
                 return
             try:
-                response = self.client.request(api_name, {"ts_code": symbol})
+                params: dict[str, Any] = {"ts_code": symbol}
+                if self.config.incremental:
+                    params.update({
+                        "start_date": self.config.start.strftime("%Y%m%d"),
+                        "end_date": (self.config.end or date.today()).strftime("%Y%m%d"),
+                    })
+                response = self.client.request(api_name, params)
                 self._archive(api_name, symbol, response)
                 frame = pl.DataFrame(response.rows) if response.rows else pl.DataFrame()
                 if not frame.is_empty():
@@ -790,6 +1065,73 @@ class TushareHistoryBackfill:
             state = self._item_state(phase_name, symbol, {"status": "pending", "pages": 0})
             if state.get("status") == "completed" and raw_path.exists():
                 self._clear_minute_pages(page_root)
+                return
+            if self.config.incremental:
+                try:
+                    existing = (
+                        pl.read_parquet(raw_path)
+                        if raw_path.exists()
+                        else normalize_rows([], asset_type=kind)
+                    )
+                    start_at = (
+                        existing["datetime"].max() + timedelta(minutes=1)
+                        if existing.height
+                        else datetime.combine(self.config.start, datetime.min.time())
+                    )
+                    end_at = datetime.combine(
+                        self.config.end or today,
+                        datetime.max.time().replace(microsecond=0),
+                    )
+                    response = self.client.request(
+                        api_name,
+                        {
+                            "ts_code": symbol,
+                            "freq": "1min",
+                            "start_date": start_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "end_date": end_at.strftime("%Y-%m-%d %H:%M:%S"),
+                            "limit": MAX_MINUTE_ROWS,
+                        },
+                    )
+                    self._archive(api_name, f"{symbol}-incremental", response)
+                    if len(response.items) >= MAX_MINUTE_ROWS:
+                        raise BackfillBlocked(
+                            f"incremental minute window reached {MAX_MINUTE_ROWS} rows for {symbol}"
+                        )
+                    incoming, audit = validate_minute_frame(
+                        normalize_rows(response.rows, asset_type=kind)
+                    )
+                    if audit:
+                        raise BackfillBlocked(
+                            f"incremental minute quality rejected rows for {symbol}: {audit[:3]}"
+                        )
+                    merged, overlap = overlap_merge(existing, incoming)
+                    _atomic_parquet(merged, raw_path)
+                    self._record(
+                        phase_name,
+                        symbol,
+                        status="completed",
+                        rows=merged.height,
+                        added_rows=overlap.get("added_rows", 0),
+                        min_datetime=str(merged["datetime"].min()) if merged.height else None,
+                        max_datetime=str(merged["datetime"].max()) if merged.height else None,
+                        content_hash=stable_content_hash(merged.to_dicts()),
+                    )
+                except TusharePermissionError as exc:
+                    self._record(
+                        phase_name,
+                        symbol,
+                        status="blocked",
+                        reason="permission_or_auth",
+                        error=type(exc).__name__,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._record(
+                        phase_name,
+                        symbol,
+                        status="failed",
+                        error=type(exc).__name__,
+                        message=self._safe_error(exc),
+                    )
                 return
             page_paths = sorted(page_root.glob("page-*.parquet"))
             raw_pages = [pl.read_parquet(path) for path in page_paths]
@@ -938,12 +1280,43 @@ class TushareHistoryBackfill:
             phase["status"] = "blocked"
             self._save(publish={"status": "blocked", "conflicts": report["conflicts"]})
             raise BackfillBlocked("minute publication blocked by overlap conflicts")
-        # Every partition is checked before the first target is replaced.  A
-        # process interruption can still leave an earlier file published, but
-        # a later conflict can no longer silently produce a mixed-quality run.
-        for out, coverage_path, merged, coverage, overlap_report in pending:
-            _atomic_parquet(merged, out)
-            _atomic_json(coverage_path, coverage)
+        staged_root = self.run_root / "publish_staging" / "minute"
+        backup_root = self.run_root / "backups" / "minute"
+        prepared: list[tuple[Path, Path, Path | None]] = []
+        for out, coverage_path, merged, coverage, _overlap_report in pending:
+            for target, writer in (
+                (out, lambda path, value=merged: _atomic_parquet(value, path)),
+                (coverage_path, lambda path, value=coverage: _atomic_json(path, value)),
+            ):
+                try:
+                    relative = target.relative_to(self.config.data_dir)
+                except ValueError as exc:
+                    raise BackfillBlocked("minute publish target escaped data directory") from exc
+                staged = staged_root / relative
+                writer(staged)
+                backup = backup_root / relative if target.exists() else None
+                prepared.append((target, staged, backup))
+
+        published: list[tuple[Path, Path | None]] = []
+        try:
+            for target, staged, backup in prepared:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if backup is not None:
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    if backup.exists():
+                        backup.unlink()
+                    os.replace(target, backup)
+                published.append((target, backup))
+                os.replace(staged, target)
+        except Exception:
+            for target, backup in reversed(published):
+                if target.exists():
+                    target.unlink()
+                if backup is not None and backup.exists():
+                    os.replace(backup, target)
+            raise
+
+        for out, _coverage_path, merged, _coverage, overlap_report in pending:
             key = f"{out.parent.parent.name}/{out.parent.name.removeprefix('date=').removesuffix('.parquet')}"
             self._record("publish_minute", key, status="published", rows=merged.height, overlap=overlap_report)
         phase["status"] = "published"
@@ -982,7 +1355,11 @@ class TushareHistoryBackfill:
 
     def run(self) -> dict[str, Any]:
         assert_disk_reserve(self.config.data_dir)
-        stocks, etfs, indexes = self._universe() if "universe" in self.config.phases or not self.manifest.get("symbols") else (self._symbols("stocks"), self._symbols("etfs"), self._symbols("indexes"))
+        if set(self.config.phases) == {"audit"}:
+            stocks, etfs, indexes = [], [], []
+        else:
+            stocks, etfs, indexes = self._universe() if "universe" in self.config.phases or not self.manifest.get("symbols") else (self._symbols("stocks"), self._symbols("etfs"), self._symbols("indexes"))
+        formal_result, formal_engine = self._run_formal_datasets(stocks, etfs, indexes)
         if "adjustment" in self.config.phases:
             self._fetch_adjustment("stock", "adj_factor", stocks)
             self._fetch_adjustment("etf", "fund_adj", etfs)
@@ -998,6 +1375,8 @@ class TushareHistoryBackfill:
             self.research(stocks, apis=("daily", "daily_basic", "income", "balancesheet", "cashflow", "fina_indicator", "forecast", "express", "index_daily"))
         if "research" in self.config.phases:
             self.research([*stocks, *indexes, *etfs])
+        if "audit" in self.config.phases and formal_engine is not None:
+            self._save(dataset_audit=formal_engine.audit(self._formal_specs()))
         policy = tushare_history_policy()
         coverage = {
             "schema_version": 1,
@@ -1008,28 +1387,35 @@ class TushareHistoryBackfill:
             "symbols": self.manifest.get("symbols", {}),
         }
         _atomic_json(self.run_root / "coverage_catalog.json", coverage)
-        _atomic_json(
-            self.run_root / "capability_matrix.json",
-            {
+        matrix_path = self.run_root / "capability_matrix.json"
+        try:
+            matrix = json.loads(matrix_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            matrix = {
                 "schema_version": 1,
                 "run_id": self.run_id,
-                "local_runtime": "parquet",
-                "temporary_source": "tushare_proxy",
-                "datasets": {
-                    "stock_minute_raw": self.manifest.get("phases_state", {}).get("stock_minute", {}).get("status"),
-                    "etf_minute_raw": self.manifest.get("phases_state", {}).get("etf_minute", {}).get("status"),
-                    "stock_minute_canonical": self.manifest.get("publish", {}).get("status"),
-                    "etf_minute_canonical": self.manifest.get("publish", {}).get("status"),
-                    "research_extensions": self.manifest.get("phases_state", {}).get("research", {}).get("status"),
-                },
-            },
-        )
+                "source": "tushare_proxy",
+                "runtime_source": "local_parquet_only",
+                "datasets": {},
+            }
+        matrix["legacy_phases"] = {
+            "stock_minute_raw": self.manifest.get("phases_state", {}).get("stock_minute", {}).get("status"),
+            "etf_minute_raw": self.manifest.get("phases_state", {}).get("etf_minute", {}).get("status"),
+            "minute_canonical": self.manifest.get("publish", {}).get("status"),
+            "research_extensions": self.manifest.get("phases_state", {}).get("research", {}).get("status"),
+        }
+        matrix["formal_publish"] = {
+            name: value.get("publish", {}).get("status")
+            for name, value in formal_result.items()
+        }
+        _atomic_json(matrix_path, matrix)
         phase_values = self.manifest.get("phases_state", {}).values()
         failed = any(
             value.get("status") in {"blocked", "failed", "retry"}
             or any(item.get("status") in {"blocked", "failed", "retry"} for item in (value.get("items") or {}).values())
             for value in phase_values
         )
+        failed = failed or self.manifest.get("dataset_audit", {}).get("status") == "unhealthy"
         self._save(
             coverage={"catalog": str(self.run_root / "coverage_catalog.json"), "capability_matrix": str(self.run_root / "capability_matrix.json"), "policy": policy},
             status="incomplete" if failed else "completed",

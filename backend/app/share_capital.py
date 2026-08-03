@@ -14,7 +14,10 @@ def load_share_history(data_dir: Path) -> pl.DataFrame:
         return pl.DataFrame()
     try:
         shares = pl.read_parquet(path)
-        if not {"symbol", "period_end", "float_shares"} <= set(shares.columns):
+        columns = set(shares.columns)
+        if not {"symbol", "period_end"} <= columns or not (
+            {"total_shares", "float_shares"} & columns
+        ):
             return pl.DataFrame()
         return shares
     except Exception:
@@ -33,12 +36,20 @@ def apply_point_in_time_shares(
     及以后；没有 ``as_of`` 时仅允许用于今天。更早日期找不到历史记录时返回
     null，禁止回退当前股本造成未来数据污染。
     """
+    available_columns = set(rows.columns)
+    if shares is not None:
+        available_columns.update(shares.columns)
     share_columns = [
         column for column in ("total_shares", "float_shares")
-        if column in rows.columns
+        if column in available_columns
     ]
     if rows.is_empty() or not {"symbol", "date"} <= set(rows.columns) or not share_columns:
         return rows
+    missing_columns = [column for column in share_columns if column not in rows.columns]
+    if missing_columns:
+        rows = rows.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(column) for column in missing_columns]
+        )
 
     def as_date_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
         dtype = frame.schema[column]

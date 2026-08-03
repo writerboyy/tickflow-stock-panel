@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 
 from app.services import tushare_history as th
+from app.services.tushare_datasets import DATASET_SPECS
 
 
 class _Response:
@@ -256,6 +257,190 @@ def test_manifest_updates_are_thread_safe(tmp_path):
     assert items["symbol-39"]["rows"] == 39
 
 
+def test_v1_manifest_resumes_without_discarding_completed_state(tmp_path):
+    run_root = tmp_path / "backfill_state/tushare_proxy/v1-run"
+    run_root.mkdir(parents=True)
+    manifest = {
+        "schema_version": 1,
+        "kind": "tushare_proxy_history_backfill",
+        "run_id": "v1-run",
+        "data_dir": str(tmp_path.resolve()),
+        "phases": ["adjustment"],
+        "requested_symbols_hash": th._symbol_hash(["000001.SZ"]),
+        "phases_state": {"adjustment": {"status": "completed", "items": {}}},
+    }
+    (run_root / "manifest.json").write_text(json.dumps(manifest))
+
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="v1-run",
+            phases=("adjustment",),
+            symbols=("000001.SZ",),
+        ),
+        _FakeClient(),
+    )
+
+    assert run.manifest["schema_version"] == 1
+    assert run.manifest["phases_state"]["adjustment"]["status"] == "completed"
+    assert run.manifest["history_start"] == "2010-01-01"
+
+
+def test_v2_manifest_rejects_changed_history_or_dataset_scope(tmp_path):
+    th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="strict-resume",
+            phases=("universe",),
+            symbols=("000001.SZ",),
+            datasets=("income",),
+            start=date(2025, 1, 1),
+            end=date(2025, 12, 31),
+        ),
+        _FakeClient(),
+    )
+
+    with pytest.raises(th.BackfillBlocked, match="history_start"):
+        th.TushareHistoryBackfill(
+            th.BackfillConfig(
+                tmp_path,
+                run_id="strict-resume",
+                phases=("universe",),
+                symbols=("000001.SZ",),
+                datasets=("income",),
+                start=date(2024, 1, 1),
+                end=date(2025, 12, 31),
+            ),
+            _FakeClient(),
+        )
+
+    with pytest.raises(th.BackfillBlocked, match="datasets"):
+        th.TushareHistoryBackfill(
+            th.BackfillConfig(
+                tmp_path,
+                run_id="strict-resume",
+                phases=("universe",),
+                symbols=("000001.SZ",),
+                datasets=("cashflow",),
+                start=date(2025, 1, 1),
+                end=date(2025, 12, 31),
+            ),
+            _FakeClient(),
+        )
+
+
+def test_formal_run_can_select_one_dataset_and_preserves_rich_matrix(tmp_path, monkeypatch):
+    monkeypatch.setattr(th, "assert_disk_reserve", lambda *_args, **_kwargs: None)
+
+    class FormalClient:
+        _token = "not-secret"
+
+        def request(self, api_name, params):
+            assert api_name == "moneyflow"
+            fields = ("ts_code", "trade_date", "net_mf_vol", "net_mf_amount")
+            items = (("000001.SZ", "20250102", 1, 2),)
+            raw = {"code": 0, "data": {"fields": list(fields), "items": [list(items[0])]}}
+            return th.TushareResponse(api_name, 0, "", fields, items, raw)
+
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="formal-one",
+            phases=("universe",),
+            symbols=("000001.SZ",),
+            datasets=("moneyflow",),
+            start=date(2025, 1, 1),
+            end=date(2025, 12, 31),
+        ),
+        FormalClient(),
+    )
+
+    result = run.run()
+
+    assert result["status"] == "completed"
+    matrix = json.loads((run.run_root / "capability_matrix.json").read_text())
+    assert matrix["datasets"]["moneyflow"]["symbols"] == 1
+    assert matrix["datasets"]["moneyflow"]["field_non_null_rate"]["net_mf_amount"] == 1.0
+    assert matrix["legacy_phases"]["stock_minute_raw"] is None
+
+
+def test_derived_retry_rebuilds_stale_enriched_share_schema(tmp_path):
+    daily = tmp_path / "kline_daily/date=2025-01-02/part.parquet"
+    daily.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [date(2025, 1, 2)],
+        "open": [10.0],
+        "high": [10.0],
+        "low": [10.0],
+        "close": [10.0],
+        "volume": [100.0],
+        "amount": [1_000.0],
+    }).write_parquet(daily)
+    instruments = tmp_path / "instruments/instruments.parquet"
+    instruments.parent.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["000001.SZ"]}).write_parquet(instruments)
+    shares = tmp_path / "financials/shares/part.parquet"
+    shares.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "period_end": ["2025-01-02"],
+        "announce_date": ["2025-01-02"],
+        "total_shares": [1_000_000.0],
+        "float_shares": [800_000.0],
+    }).write_parquet(shares)
+    stale = tmp_path / "kline_daily_enriched/date=2025-01-02/part.parquet"
+    stale.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "date": [date(2025, 1, 2)],
+        "raw_close": [10.0],
+    }).write_parquet(stale)
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="derived-retry", phases=("universe",)),
+        _FakeClient(),
+    )
+
+    report = run._rebuild_after_formal_publish(
+        (DATASET_SPECS["income"],),
+        {"income": {"publish": {"status": "published", "published_rows": 1}}},
+    )
+
+    rebuilt = pl.read_parquet(stale)
+    assert report["status"] == "completed"
+    assert report["recovery_dependencies"] == ["historical_share_columns"]
+    assert rebuilt.select("total_shares", "float_shares").row(0) == (
+        1_000_000.0,
+        800_000.0,
+    )
+    assert report["valuation_daily"]["rows"] == 1
+
+
+def test_audit_only_does_not_query_network(tmp_path, monkeypatch):
+    monkeypatch.setattr(th, "assert_disk_reserve", lambda *_args, **_kwargs: None)
+
+    class NoNetworkClient:
+        _token = "not-secret"
+
+        def request(self, *_args, **_kwargs):
+            raise AssertionError("audit-only mode must not query the provider")
+
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="audit-only",
+            phases=("audit",),
+            datasets=("moneyflow",),
+        ),
+        NoNetworkClient(),
+    )
+
+    result = run.run()
+
+    assert result["dataset_audit"]["status"] == "unhealthy"
+    assert result["status"] == "incomplete"
+
+
 def test_universe_fetches_stock_statuses_separately(tmp_path):
     class UniverseClient:
         def __init__(self):
@@ -300,3 +485,48 @@ def test_publish_checks_all_partitions_before_replacing_any(tmp_path):
         run.publish_minutes(("stock",))
     assert pl.read_parquet(first_target)["close"].to_list() == [10.0]
     assert pl.read_parquet(second_target)["close"].to_list() == [19.0]
+
+
+def test_minute_publish_rolls_back_all_partitions_on_replace_failure(tmp_path, monkeypatch):
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="minute-rollback",
+            phases=("publish_minute",),
+            symbols=("000001.SZ",),
+        ),
+        _FakeClient(),
+    )
+    raw_root = tmp_path / "tushare_archive/minute_stock_raw/symbol=000001.SZ"
+    raw_root.mkdir(parents=True)
+    raw = th.normalize_rows([
+        {"ts_code": "000001.SZ", "trade_time": "2025-01-02 09:31:00", "open": 10, "high": 10, "low": 10, "close": 10, "vol": 1, "amount": 10},
+        {"ts_code": "000001.SZ", "trade_time": "2025-01-02 09:32:00", "open": 10, "high": 10, "low": 10, "close": 10, "vol": 1, "amount": 10},
+        {"ts_code": "000001.SZ", "trade_time": "2025-01-03 09:31:00", "open": 20, "high": 20, "low": 20, "close": 20, "vol": 1, "amount": 20},
+        {"ts_code": "000001.SZ", "trade_time": "2025-01-03 09:32:00", "open": 20, "high": 20, "low": 20, "close": 20, "vol": 1, "amount": 20},
+    ])
+    raw.write_parquet(raw_root / "part.parquet")
+    first_target = tmp_path / "kline_minute/date=2025-01-02/part.parquet"
+    second_target = tmp_path / "kline_minute/date=2025-01-03/part.parquet"
+    first_target.parent.mkdir(parents=True)
+    second_target.parent.mkdir(parents=True)
+    raw.filter(pl.col("datetime").dt.date() == date(2025, 1, 2)).head(1).select(
+        th._MINUTE_FIELDS
+    ).write_parquet(first_target)
+    raw.filter(pl.col("datetime").dt.date() == date(2025, 1, 3)).head(1).select(
+        th._MINUTE_FIELDS
+    ).write_parquet(second_target)
+    replace = th.os.replace
+
+    def fail_second_target(source, target):
+        if Path(target) == second_target and "publish_staging/minute" in str(source):
+            raise OSError("injected replace failure")
+        return replace(source, target)
+
+    monkeypatch.setattr(th.os, "replace", fail_second_target)
+
+    with pytest.raises(OSError, match="injected"):
+        run.publish_minutes(("stock",))
+
+    assert pl.read_parquet(first_target).height == 1
+    assert pl.read_parquet(second_target).height == 1

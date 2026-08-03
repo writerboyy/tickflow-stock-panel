@@ -119,6 +119,7 @@ class ExtConfig:
         "symbol_map", "code_map",
         "schema_version",
         "authority", "canonical_dataset", "overlap_policy", "allowed_usage",
+        "primary_key", "logical_date", "units",
         "created_at", "updated_at", "pull",
     )
 
@@ -136,6 +137,9 @@ class ExtConfig:
         canonical_dataset: str | None = None,
         overlap_policy: str | None = None,
         allowed_usage: list[str] | None = None,
+        primary_key: list[str] | None = None,
+        logical_date: str | None = None,
+        units: dict[str, str] | None = None,
         created_at: str | None = None,
         updated_at: str | None = None,
         pull: PullConfig | None = None,
@@ -168,6 +172,9 @@ class ExtConfig:
             if allowed_usage is not None
             else authority_defaults.get("allowed_usage", [])
         )
+        self.primary_key = list(primary_key or [])
+        self.logical_date = logical_date
+        self.units = dict(units or {})
         self.created_at = created_at or datetime.now().isoformat()
         self.updated_at = updated_at or datetime.now().isoformat()
         self.pull = pull
@@ -193,6 +200,12 @@ class ExtConfig:
             d["overlap_policy"] = self.overlap_policy
         if self.allowed_usage:
             d["allowed_usage"] = self.allowed_usage
+        if self.primary_key:
+            d["primary_key"] = self.primary_key
+        if self.logical_date:
+            d["logical_date"] = self.logical_date
+        if self.units:
+            d["units"] = self.units
         if self.pull:
             d["pull"] = self.pull.to_dict()
         return d
@@ -212,6 +225,9 @@ class ExtConfig:
             canonical_dataset=d.get("canonical_dataset"),
             overlap_policy=d.get("overlap_policy"),
             allowed_usage=d.get("allowed_usage"),
+            primary_key=d.get("primary_key"),
+            logical_date=d.get("logical_date"),
+            units=d.get("units"),
             created_at=d.get("created_at"),
             updated_at=d.get("updated_at"),
             pull=PullConfig.from_dict(d["pull"]) if d.get("pull") else None,
@@ -240,6 +256,9 @@ class ExtConfigStore:
             "canonical_dataset",
             "overlap_policy",
             "allowed_usage",
+            "primary_key",
+            "logical_date",
+            "units",
         )
         updates = {
             key: desired[key]

@@ -284,6 +284,24 @@ def test_share_capital_waits_for_both_announcement_and_effective_date():
     assert result["float_shares"].to_list() == [40.0, 40.0, 80.0]
 
 
+def test_share_capital_adds_columns_missing_from_instrument_snapshot():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2025, 1, 2)],
+    })
+    shares = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-01-02"],
+        "announce_date": ["2025-01-02"],
+        "total_shares": [200.0],
+        "float_shares": [100.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result.select("total_shares", "float_shares").row(0) == (200.0, 100.0)
+
+
 def test_instrument_snapshot_is_only_used_on_or_after_its_as_of_date():
     rows = pl.DataFrame({
         "symbol": ["600000.SH", "600000.SH"],

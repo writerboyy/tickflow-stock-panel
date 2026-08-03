@@ -131,6 +131,18 @@ async def lifespan(app: FastAPI):
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
 
+    # Tushare 仅作为本地 Parquet 缺口补齐源，复用主调度器；未配置
+    # 0600 secrets key 时不注册任何任务。
+    try:
+        from app.services.tushare_automation import TushareAutomation
+
+        tushare_automation = TushareAutomation(store.data_dir, repo=repo)
+        tushare_automation.start(app.state.scheduler)
+        app.state.tushare_automation = tushare_automation
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Tushare automation not started: %s", e)
+        app.state.tushare_automation = None
+
     # 开盘啦辅助扩展数据: 复用主调度器，插件失败不影响主行情与通用扩展数据。
     try:
         from app.plugins.kaipanla import KaipanlaCollector
