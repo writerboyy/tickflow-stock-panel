@@ -18,7 +18,7 @@ dependencies = [
     "duckdb>=1.0",
     "pyarrow>=16.0",
     "pandas>=2.2",                # 仅在 BacktestService 边界使用,见 §7.4 / ADR-19
-    "baostock==0.8.9",            # 指数异常后的只读备用核验源
+    "baostock==0.9.3",            # 指数异常后的只读备用核验源
     "psutil>=5.9",                # 独立回测 worker 的峰值 RSS 与退出后内存指标
     # llvmlite 不再提供 macOS Intel wheel；该平台使用 Matrix 纯 Python fallback。
     "numba>=0.65.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
