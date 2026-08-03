@@ -75,7 +75,11 @@ class BackfillConfig:
             raise ValueError("rpm must be positive")
         symbols = None
         if self.symbols is not None:
-            symbols = tuple(dict.fromkeys(str(item).strip().upper() for item in self.symbols if str(item).strip()))
+            symbols = tuple(
+                dict.fromkeys(
+                    str(item).strip().upper() for item in self.symbols if str(item).strip()
+                )
+            )
             if not symbols:
                 raise ValueError("symbols must not be empty")
         if self.max_symbols is not None and self.max_symbols <= 0:
@@ -127,7 +131,10 @@ def _hash_symbols(symbols: Iterable[str]) -> str:
 
 
 def _run_root(config: BackfillConfig) -> Path:
-    run_id = config.run_id or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+    run_id = (
+        config.run_id
+        or f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+    )
     return config.data_dir / "backfill_state" / "p0_history" / run_id
 
 
@@ -200,25 +207,52 @@ def _record_batch(
     path: Path | None = None,
     frame: pl.DataFrame | None = None,
     error: str | None = None,
+    requested_symbols: Iterable[str] | None = None,
 ) -> None:
     state = _batch_state(manifest, dataset, batch_id)
-    state.update({
-        "status": status,
-        "updated_at": _utc_now(),
-        "error": error,
-    })
+    state.update(
+        {
+            "status": status,
+            "updated_at": _utc_now(),
+            "error": error,
+        }
+    )
     if path is not None:
         state["path"] = str(path)
     if frame is not None:
-        state.update({
-            "rows": frame.height,
-            "symbols": frame["symbol"].n_unique() if "symbol" in frame.columns else 0,
-            "content_hash": stable_content_hash(frame.to_dicts()),
-        })
-        date_column = "date" if "date" in frame.columns else "trade_date" if "trade_date" in frame.columns else None
+        returned_symbols = (
+            sorted(set(str(item) for item in frame["symbol"].drop_nulls().to_list()))
+            if "symbol" in frame.columns
+            else []
+        )
+        state.update(
+            {
+                "rows": frame.height,
+                "symbols": len(returned_symbols),
+                "content_hash": stable_content_hash(frame.to_dicts()),
+            }
+        )
+        date_column = (
+            "date"
+            if "date" in frame.columns
+            else "trade_date"
+            if "trade_date" in frame.columns
+            else None
+        )
         if date_column and frame.height:
             state["min_date"] = str(frame[date_column].min())
             state["max_date"] = str(frame[date_column].max())
+        if requested_symbols is not None:
+            requested = sorted(set(str(item) for item in requested_symbols))
+            valid_empty = sorted(set(requested) - set(returned_symbols))
+            state.update(
+                {
+                    "requested_symbol_count": len(requested),
+                    "returned_symbol_count": len(returned_symbols),
+                    "valid_empty_symbol_count": len(valid_empty),
+                    "valid_empty_symbol_sample": valid_empty[:20],
+                }
+            )
     _save_manifest(manifest_path, manifest)
 
 
@@ -262,7 +296,9 @@ def _prepare_shadow(config: BackfillConfig, run_root: Path) -> Path:
         "valuation_daily",
     ):
         _copy_tree(config.data_dir / directory, shadow / directory)
-    _copy_file(config.data_dir / "adj_factor" / "all.parquet", shadow / "adj_factor" / "all.parquet")
+    _copy_file(
+        config.data_dir / "adj_factor" / "all.parquet", shadow / "adj_factor" / "all.parquet"
+    )
     for table in FINANCIAL_TABLES:
         _copy_file(
             config.data_dir / "financials" / table / "part.parquet",
@@ -271,14 +307,32 @@ def _prepare_shadow(config: BackfillConfig, run_root: Path) -> Path:
     return shadow
 
 
-def _symbols_from_data(data_dir: Path, explicit: tuple[str, ...] | None, max_symbols: int | None) -> list[str]:
+def _symbols_from_data(
+    data_dir: Path,
+    explicit: tuple[str, ...] | None,
+    max_symbols: int | None,
+    *,
+    start: date,
+    end: date,
+) -> list[str]:
     if explicit is not None:
         symbols = list(explicit)
     else:
         path = data_dir / "instruments" / "instruments.parquet"
         if not path.exists():
             raise BackfillBlocked(f"missing instruments table: {path}")
-        frame = pl.read_parquet(path, columns=["symbol"])
+        frame = pl.read_parquet(path)
+        if "asset_type" in frame.columns:
+            frame = frame.filter(pl.col("asset_type").is_null() | (pl.col("asset_type") == "stock"))
+        listing_column = "list_date" if "list_date" in frame.columns else "listing_date"
+        if listing_column in frame.columns:
+            frame = frame.filter(
+                pl.col(listing_column).is_null() | (pl.col(listing_column) <= pl.lit(end))
+            )
+        if "delist_date" in frame.columns:
+            frame = frame.filter(
+                pl.col("delist_date").is_null() | (pl.col("delist_date") >= pl.lit(start))
+            )
         symbols = sorted(set(str(item) for item in frame["symbol"].drop_nulls().to_list()))
     if max_symbols is not None:
         symbols = symbols[:max_symbols]
@@ -356,6 +410,12 @@ def _normalize_adj_result(raw: Any) -> pl.DataFrame:
     return kline_sync._normalize_adj_factor(raw)
 
 
+def _empty_adj_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={"symbol": pl.String, "trade_date": pl.Date, "ex_factor": pl.Float64}
+    )
+
+
 def _normalize_financial_result(raw: Any) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     if isinstance(raw, dict):
@@ -405,7 +465,9 @@ def _dedupe_or_raise(frame: pl.DataFrame, key: tuple[str, ...], label: str) -> p
     return frame.unique(subset=list(key), keep="last", maintain_order=False)
 
 
-def _load_batch_frames(run_root: Path, dataset: str, table: str | None = None) -> list[pl.DataFrame]:
+def _load_batch_frames(
+    run_root: Path, dataset: str, table: str | None = None
+) -> list[pl.DataFrame]:
     paths = sorted((_batch_path(run_root, dataset, "", table).parent).glob("batch-*.parquet"))
     return [pl.read_parquet(path) for path in paths]
 
@@ -435,8 +497,18 @@ def _fetch_daily(
                 chunk,
                 period="1d",
                 adjust="none",
-                start_time=int(datetime.combine(config.start, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000),
-                end_time=int(datetime.combine(config.end, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000),
+                start_time=int(
+                    datetime.combine(
+                        config.start, datetime.min.time(), tzinfo=timezone.utc
+                    ).timestamp()
+                    * 1000
+                ),
+                end_time=int(
+                    datetime.combine(
+                        config.end, datetime.min.time(), tzinfo=timezone.utc
+                    ).timestamp()
+                    * 1000
+                ),
                 count=10000,
                 as_dataframe=True,
                 show_progress=False,
@@ -449,11 +521,32 @@ def _fetch_daily(
             if missing:
                 raise BackfillBlocked(f"daily batch missing symbols: {missing[:8]}")
             _write_batch(path, frame.sort(["symbol", "date"]))
-            _record_batch(manifest_path, manifest, "daily", batch_id, status="completed", path=path, frame=frame)
+            _record_batch(
+                manifest_path,
+                manifest,
+                "daily",
+                batch_id,
+                status="completed",
+                path=path,
+                frame=frame,
+                requested_symbols=chunk,
+            )
         except Exception as exc:  # noqa: BLE001
-            _record_batch(manifest_path, manifest, "daily", batch_id, status="source_error", path=path, error=f"{type(exc).__name__}: {exc}")
+            _record_batch(
+                manifest_path,
+                manifest,
+                "daily",
+                batch_id,
+                status="source_error",
+                path=path,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
-    failed = [key for key, state in (manifest.get("batches", {}).get("daily", {}) or {}).items() if state.get("status") != "completed"]
+    failed = [
+        key
+        for key, state in (manifest.get("batches", {}).get("daily", {}) or {}).items()
+        if state.get("status") != "completed"
+    ]
     if failed:
         raise BackfillBlocked(f"daily batches failed: {failed[:8]}")
     _save_manifest(manifest_path, manifest, daily_batches=total)
@@ -481,37 +574,60 @@ def _fetch_adj_factor(
             sleep_between_batches(index, rpm)
             raw = client.klines.ex_factors(
                 chunk,
-                start_time=int(datetime.combine(config.start, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000),
-                end_time=int(datetime.combine(config.end, datetime.min.time(), tzinfo=timezone.utc).timestamp() * 1000),
+                start_time=int(
+                    datetime.combine(
+                        config.start, datetime.min.time(), tzinfo=timezone.utc
+                    ).timestamp()
+                    * 1000
+                ),
+                end_time=int(
+                    datetime.combine(
+                        config.end, datetime.min.time(), tzinfo=timezone.utc
+                    ).timestamp()
+                    * 1000
+                ),
                 as_dataframe=True,
                 batch_size=batch_size,
                 show_progress=False,
             )
+            if raw is None:
+                raise BackfillBlocked("adj_factor batch returned no response")
             frame = _date_filter(_normalize_adj_result(raw), "trade_date", config.start, config.end)
             frame = _dedupe_or_raise(frame, _ADJ_KEY, "adj_factor")
             if frame.is_empty():
-                # No corporate action is a valid result only when every symbol was
-                # answered. The SDK's dict response lets us distinguish that case;
-                # an empty response for a whole batch is treated as a source error.
-                if isinstance(raw, dict) and set(str(key).upper() for key in raw) >= set(chunk):
-                    frame = pl.DataFrame({"symbol": [], "trade_date": [], "ex_factor": []})
-                else:
-                    raise BackfillBlocked("adj_factor batch returned no rows without per-symbol acknowledgement")
-            if isinstance(raw, dict):
-                answered = {str(key).upper() for key in raw}
-                missing = sorted(set(chunk) - answered)
-            elif not frame.is_empty():
-                missing = sorted(set(chunk) - set(frame["symbol"].unique().to_list()))
-            else:
-                missing = list(chunk)
-            if missing:
-                raise BackfillBlocked(f"adj_factor batch missing symbols: {missing[:8]}")
+                frame = _empty_adj_frame()
+            unexpected = sorted(set(frame["symbol"].to_list()) - set(chunk))
+            if unexpected:
+                raise BackfillBlocked(
+                    f"adj_factor batch returned unexpected symbols: {unexpected[:8]}"
+                )
             _write_batch(path, frame)
-            _record_batch(manifest_path, manifest, "adj_factor", batch_id, status="completed", path=path, frame=frame)
+            _record_batch(
+                manifest_path,
+                manifest,
+                "adj_factor",
+                batch_id,
+                status="completed",
+                path=path,
+                frame=frame,
+                requested_symbols=chunk,
+            )
         except Exception as exc:  # noqa: BLE001
-            _record_batch(manifest_path, manifest, "adj_factor", batch_id, status="source_error", path=path, error=f"{type(exc).__name__}: {exc}")
+            _record_batch(
+                manifest_path,
+                manifest,
+                "adj_factor",
+                batch_id,
+                status="source_error",
+                path=path,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
-    failed = [key for key, state in (manifest.get("batches", {}).get("adj_factor", {}) or {}).items() if state.get("status") != "completed"]
+    failed = [
+        key
+        for key, state in (manifest.get("batches", {}).get("adj_factor", {}) or {}).items()
+        if state.get("status") != "completed"
+    ]
     if failed:
         raise BackfillBlocked(f"adj_factor batches failed: {failed[:8]}")
 
@@ -557,10 +673,32 @@ def _fetch_financials(
                 if missing:
                     raise BackfillBlocked(f"financial {table} batch missing symbols: {missing[:8]}")
                 _write_batch(path, frame)
-                _record_batch(manifest_path, manifest, f"financials/{table}", batch_id, status="completed", path=path, frame=frame)
+                _record_batch(
+                    manifest_path,
+                    manifest,
+                    f"financials/{table}",
+                    batch_id,
+                    status="completed",
+                    path=path,
+                    frame=frame,
+                )
             except Exception as exc:  # noqa: BLE001
-                _record_batch(manifest_path, manifest, f"financials/{table}", batch_id, status="source_error", path=path, error=f"{type(exc).__name__}: {exc}")
-        failed = [key for key, state in (manifest.get("batches", {}).get(f"financials/{table}", {}) or {}).items() if state.get("status") != "completed"]
+                _record_batch(
+                    manifest_path,
+                    manifest,
+                    f"financials/{table}",
+                    batch_id,
+                    status="source_error",
+                    path=path,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        failed = [
+            key
+            for key, state in (
+                manifest.get("batches", {}).get(f"financials/{table}", {}) or {}
+            ).items()
+            if state.get("status") != "completed"
+        ]
         if failed:
             raise BackfillBlocked(f"financial {table} batches failed: {failed[:8]}")
 
@@ -588,7 +726,10 @@ def _merge_daily(shadow: Path, run_root: Path) -> list[Path]:
     for day in sorted(affected):
         path = target / f"date={day.isoformat()}" / "part.parquet"
         existing = pl.read_parquet(path) if path.exists() else pl.DataFrame()
-        incoming = pl.concat([frame.filter(pl.col("date") == pl.lit(day)) for frame in batch_frames], how="diagonal_relaxed")
+        incoming = pl.concat(
+            [frame.filter(pl.col("date") == pl.lit(day)) for frame in batch_frames],
+            how="diagonal_relaxed",
+        )
         merged = _merge_existing_and_batches(existing, [incoming], _DAILY_KEY, "kline_daily")
         _write_batch(path, merged)
     return [target / f"date={day.isoformat()}" / "part.parquet" for day in sorted(affected)]
@@ -611,7 +752,9 @@ def _merge_financials(shadow: Path, run_root: Path) -> list[Path]:
         batches = _load_batch_frames(run_root, "financials", table)
         target = shadow / "financials" / table / "part.parquet"
         existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
-        merged = _merge_existing_and_batches(existing, batches, _FINANCIAL_KEY, f"financials/{table}")
+        merged = _merge_existing_and_batches(
+            existing, batches, _FINANCIAL_KEY, f"financials/{table}"
+        )
         if merged.is_empty():
             raise BackfillBlocked(f"no staged financial rows: {table}")
         _write_batch(target, merged)
@@ -624,7 +767,11 @@ def _coverage(shadow: Path, symbols: list[str], config: BackfillConfig) -> dict[
     if not any(shadow.joinpath("kline_daily").rglob("*.parquet")):
         return {"rows": 0, "symbols": 0, "missing_symbols": symbols}
     frame = (
-        pl.scan_parquet(str(daily_glob))
+        pl.scan_parquet(
+            str(daily_glob),
+            extra_columns="ignore",
+            missing_columns="insert",
+        )
         .filter(pl.col("date").is_between(pl.lit(config.start), pl.lit(config.end), closed="both"))
         .select(
             pl.len().alias("rows"),
@@ -635,11 +782,16 @@ def _coverage(shadow: Path, symbols: list[str], config: BackfillConfig) -> dict[
         .collect()
     )
     observed = (
-        pl.scan_parquet(str(daily_glob))
+        pl.scan_parquet(
+            str(daily_glob),
+            extra_columns="ignore",
+            missing_columns="insert",
+        )
         .filter(pl.col("date").is_between(pl.lit(config.start), pl.lit(config.end), closed="both"))
         .select("symbol")
         .unique()
-        .collect()["symbol"].to_list()
+        .collect()["symbol"]
+        .to_list()
     )
     missing = sorted(set(symbols) - set(observed))
     if frame.is_empty():
@@ -692,7 +844,13 @@ def run_p0_backfill(
 ) -> dict[str, Any]:
     """Run a P0 backfill in a shadow directory and optionally publish it."""
     config = config.normalized()
-    symbols = _symbols_from_data(config.data_dir, config.symbols, config.max_symbols)
+    symbols = _symbols_from_data(
+        config.data_dir,
+        config.symbols,
+        config.max_symbols,
+        start=config.start,
+        end=config.end,
+    )
     run_root, manifest = _get_manifest(config, symbols)
     manifest_path = _manifest_path(run_root)
     shadow = _prepare_shadow(config, run_root)
@@ -730,15 +888,25 @@ def run_p0_backfill(
 
         coverage = _coverage(shadow, symbols, config)
         if "daily" in config.datasets and coverage.get("missing_symbols"):
-            raise BackfillBlocked(f"daily coverage missing symbols: {coverage['missing_symbols'][:8]}")
+            raise BackfillBlocked(
+                f"daily coverage missing symbols: {coverage['missing_symbols'][:8]}"
+            )
         manifest["coverage"] = coverage
         manifest["publish_targets"] = sorted(set(publish_targets))
         _save_manifest(manifest_path, manifest, status="staged")
 
         published: list[str] = []
         if config.publish:
-            published = _publish_targets(run_root, shadow, config.data_dir, manifest["publish_targets"])
-            _save_manifest(manifest_path, manifest, status="published", published=published, published_at=_utc_now())
+            published = _publish_targets(
+                run_root, shadow, config.data_dir, manifest["publish_targets"]
+            )
+            _save_manifest(
+                manifest_path,
+                manifest,
+                status="published",
+                published=published,
+                published_at=_utc_now(),
+            )
         return {
             "status": "published" if config.publish else "staged",
             "run_id": run_root.name,
@@ -748,5 +916,7 @@ def run_p0_backfill(
             "published": published,
         }
     except Exception as exc:  # noqa: BLE001
-        _save_manifest(manifest_path, manifest, status="blocked", error=f"{type(exc).__name__}: {exc}")
+        _save_manifest(
+            manifest_path, manifest, status="blocked", error=f"{type(exc).__name__}: {exc}"
+        )
         raise
