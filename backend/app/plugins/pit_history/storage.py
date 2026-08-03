@@ -39,6 +39,18 @@ STRICT_INDEX_EXPECTATIONS: dict[str, dict[str, Any]] = {
         "expected_min_members": DEFAULT_STRICT_INDEX_MIN_MEMBERS,
         "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
     },
+    "000905.SH": {
+        "expected_min_members": 450,
+        "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
+    },
+    "000906.SH": {
+        "expected_min_members": 750,
+        "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
+    },
+    "000852.SH": {
+        "expected_min_members": 950,
+        "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
+    },
 }
 COMPLETE_LIFECYCLE_EVENT_TYPES = (
     "listed",
@@ -258,6 +270,139 @@ def summarize_industry_standards(frame: pl.DataFrame) -> dict[str, Any]:
             for row in standards
         ],
         "message": "filter exactly one industry_standard before joining a PIT industry panel",
+    }
+
+
+def validate_industry_history_coverage(
+    frame: pl.DataFrame,
+    *,
+    industry_standard: str,
+    sample_dates: Iterable[date] = (),
+    daily_frame: pl.DataFrame | None = None,
+    min_coverage: float = 0.95,
+) -> dict[str, Any]:
+    """Validate one industry's PIT intervals against an observed daily universe.
+
+    A current industry snapshot is not sufficient evidence for this check.  When
+    ``daily_frame`` is supplied, each sample date is compared with the symbols
+    that actually had a canonical daily bar on that date.  The function reports
+    missing coverage and interval defects without filling them implicitly.
+    """
+    if not 0 < min_coverage <= 1:
+        raise ValueError("min_coverage must be in (0, 1]")
+    required = {
+        "member_symbol",
+        "industry_standard",
+        "effective_from",
+        "effective_to",
+    }
+    missing_columns = sorted(required - set(frame.columns))
+    if missing_columns:
+        return {
+            "industry_standard": industry_standard,
+            "status": "invalid",
+            "usable": False,
+            "missing_columns": missing_columns,
+            "message": "industry history is missing required interval columns",
+        }
+
+    selected = frame.filter(pl.col("industry_standard") == industry_standard)
+    if selected.is_empty():
+        return {
+            "industry_standard": industry_standard,
+            "status": "incomplete",
+            "usable": False,
+            "rows": 0,
+            "symbols_covered": 0,
+            "sample_checks": [],
+            "message": "no rows for the requested industry standard",
+        }
+
+    invalid_intervals = selected.filter(
+        pl.col("effective_to").is_not_null()
+        & (pl.col("effective_to") <= pl.col("effective_from"))
+    ).height
+    duplicate_keys = (
+        selected.group_by(["member_symbol", "industry_standard", "effective_from"])
+        .len()
+        .filter(pl.col("len") > 1)
+        .height
+    )
+    ordered = selected.sort(["member_symbol", "effective_from"])
+    overlap_count = (
+        ordered
+        .with_columns(
+            pl.col("effective_to").shift(1).over("member_symbol").alias("_previous_to"),
+        )
+        .filter(
+            pl.col("_previous_to").is_not_null()
+            & (pl.col("effective_from") < pl.col("_previous_to"))
+        )
+        .height
+    )
+
+    sample_checks: list[dict[str, Any]] = []
+    expected_frame = daily_frame
+    if expected_frame is not None and not expected_frame.is_empty():
+        expected_frame = expected_frame.select("symbol", "date").unique()
+    for sample_date in sample_dates:
+        active = selected.filter(
+            (pl.col("effective_from") <= pl.lit(sample_date))
+            & (
+                pl.col("effective_to").is_null()
+                | (pl.col("effective_to") > pl.lit(sample_date))
+            )
+        )
+        active_symbols = set(active["member_symbol"].to_list())
+        expected_members: int | None = None
+        covered_members: int | None = None
+        coverage: float | None = None
+        if expected_frame is not None:
+            expected = expected_frame.filter(pl.col("date") == pl.lit(sample_date))
+            expected_symbols = set(expected["symbol"].to_list())
+            expected_members = len(expected_symbols)
+            covered_members = len(expected_symbols & active_symbols)
+            coverage = covered_members / expected_members if expected_members else 0.0
+        sample_checks.append({
+            "date": sample_date.isoformat(),
+            "active_members": len(active_symbols),
+            "expected_members": expected_members,
+            "covered_members": covered_members,
+            "coverage": coverage,
+            "ok": (
+                coverage is not None
+                and expected_members is not None
+                and expected_members > 0
+                and coverage >= min_coverage
+            ) if expected_frame is not None else None,
+        })
+
+    sample_failures = [item for item in sample_checks if item["ok"] is False]
+    usable = bool(
+        sample_checks
+        and not sample_failures
+        and invalid_intervals == 0
+        and duplicate_keys == 0
+        and overlap_count == 0
+    )
+    return {
+        "industry_standard": industry_standard,
+        "status": "usable" if usable else "incomplete",
+        "usable": usable,
+        "rows": selected.height,
+        "symbols_covered": selected["member_symbol"].n_unique(),
+        "earliest_date": str(selected["effective_from"].min()),
+        "latest_date": str(selected["effective_from"].max()),
+        "invalid_intervals": invalid_intervals,
+        "duplicate_keys": duplicate_keys,
+        "overlap_intervals": overlap_count,
+        "min_coverage": min_coverage,
+        "sample_checks": sample_checks,
+        "message": (
+            "industry PIT intervals cover the observed daily universe"
+            if usable
+            else "industry history is incomplete or has invalid/overlapping intervals"
+        ),
     }
 
 

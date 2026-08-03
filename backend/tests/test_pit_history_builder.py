@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import polars as pl
 import pytest
 
 from app.plugins.pit_history.storage import (
@@ -12,6 +13,7 @@ from app.plugins.pit_history.storage import (
     publish_history_table,
     read_history_table,
     summarize_industry_standards,
+    validate_industry_history_coverage,
     summarize_lifecycle_completeness,
     validate_index_membership_coverage,
 )
@@ -216,6 +218,105 @@ def test_industry_history_accepts_public_raw_columns():
             "effective_from": date(2001, 8, 27),
         }
     ]
+
+
+def test_industry_history_coverage_fails_closed_on_observed_daily_gap():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "600519",
+                "分类标准": "申万行业",
+                "行业编码": "801120",
+                "行业名称": "食品饮料",
+                "变更日期": "2020-01-01",
+            }
+        ],
+        source="fixture",
+    )
+    daily = pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "date": [date(2021, 8, 2), date(2021, 8, 2)],
+        }
+    )
+
+    coverage = validate_industry_history_coverage(
+        frame,
+        industry_standard="申万行业",
+        sample_dates=[date(2021, 8, 2)],
+        daily_frame=daily,
+    )
+
+    assert coverage["usable"] is False
+    assert coverage["status"] == "incomplete"
+    assert coverage["sample_checks"] == [
+        {
+            "date": "2021-08-02",
+            "active_members": 1,
+            "expected_members": 2,
+            "covered_members": 1,
+            "coverage": 0.5,
+            "ok": False,
+        }
+    ]
+
+
+def test_industry_history_coverage_passes_single_standard_without_overlap():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "600519",
+                "分类标准": "申万行业",
+                "行业编码": "801120",
+                "行业名称": "食品饮料",
+                "变更日期": "2020-01-01",
+            },
+            {
+                "证券代码": "000001",
+                "分类标准": "申万行业",
+                "行业编码": "801120",
+                "行业名称": "食品饮料",
+                "变更日期": "2020-01-01",
+            },
+        ],
+        source="fixture",
+    )
+    daily = pl.DataFrame(
+        {
+            "symbol": ["600519.SH", "000001.SZ"],
+            "date": [date(2021, 8, 2), date(2021, 8, 2)],
+        }
+    )
+
+    coverage = validate_industry_history_coverage(
+        frame,
+        industry_standard="申万行业",
+        sample_dates=[date(2021, 8, 2)],
+        daily_frame=daily,
+    )
+
+    assert coverage["usable"] is True
+    assert coverage["invalid_intervals"] == 0
+    assert coverage["duplicate_keys"] == 0
+    assert coverage["overlap_intervals"] == 0
+    assert coverage["sample_checks"][0]["coverage"] == 1.0
+
+
+def test_strict_index_thresholds_are_specific_to_index_family():
+    frame = normalize_index_membership_events(
+        [
+            {"品种代码": f"600{index:03d}", "纳入日期": "2020-01-01"}
+            for index in range(300)
+        ],
+        index_symbol="000905.SH",
+        source="fixture",
+    )
+
+    coverage = validate_index_membership_coverage(frame, index_symbol="000905.SH")
+
+    assert coverage["usable"] is False
+    assert coverage["coverage_checks"][0]["expected_min_members"] == 450
+    assert coverage["coverage_checks"][0]["members"] == 300
 
 
 def test_lifecycle_summary_marks_partial_without_decision_period():
