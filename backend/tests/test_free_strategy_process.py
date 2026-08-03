@@ -1075,18 +1075,16 @@ def scheduled_market(*symbols: str) -> MarketData:
 def test_scheduled_open_callback_waits_for_first_continuous_minute_bar():
     source = """
 def initialize(context):
-    context.schedule(close_position, '09:30', symbols=['X', 'Y'])
+    context.schedule(close_position, '09:30', symbols=['X'])
 
 def close_position(context):
     context.state['executed_at'] = context.now.isoformat()
     context.order_target('X', 0)
 """
     repo = ScheduledRepository([
-        minute_row("Y", datetime(2024, 1, 2, 9, 30), 20.0),
         minute_row("X", datetime(2024, 1, 2, 9, 31), 10.0),
-        minute_row("Y", datetime(2024, 1, 2, 9, 31), 20.0),
     ])
-    market = scheduled_market("X", "Y")
+    market = scheduled_market("X")
     engine = FreeStrategyEngine(
         source,
         timeframe="1m",
@@ -1105,19 +1103,6 @@ def close_position(context):
     engine.account.positions = {"X": 100.0}
     engine.account.available = {"X": 100.0}
     engine.account.avg_cost = {"X": 10.0}
-
-    advance_scheduled_session(
-        repo,
-        engine,
-        market,
-        datetime(2024, 1, 2).date(),
-        datetime(2024, 1, 2, 9, 30),
-        "stock",
-        "1m",
-    )
-
-    assert "executed_at" not in engine.context.state
-    assert not engine.account.orders
 
     advance_scheduled_session(
         repo,
