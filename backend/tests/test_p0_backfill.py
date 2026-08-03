@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date
 import json
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +61,23 @@ class _FakeKlines:
         if self.fail_after is not None and self.calls > self.fail_after:
             raise RuntimeError("synthetic source outage")
         return {symbol: self.by_symbol.get(symbol, pl.DataFrame()) for symbol in symbols}
+
+    def get(self, symbol: str, **_kwargs):
+        return self.by_symbol.get(symbol, pl.DataFrame())
+
+
+class _SparseDailyKlines:
+    def __init__(
+        self, batch_frame: pl.DataFrame, single_by_symbol: dict[str, pl.DataFrame]
+    ) -> None:
+        self.batch_frame = batch_frame
+        self.single_by_symbol = single_by_symbol
+
+    def batch(self, _symbols: list[str], **_kwargs):
+        return self.batch_frame
+
+    def get(self, symbol: str, **_kwargs):
+        return self.single_by_symbol.get(symbol, pl.DataFrame())
 
 
 class _FakeAdjKlines:
@@ -203,6 +221,60 @@ def test_default_universe_only_includes_stock_lifecycles_overlapping_window(
     )
 
     assert symbols == ["000001.SZ"]
+
+
+def test_daily_batch_confirms_missing_symbols_with_single_symbol_requests(
+    tmp_path: Path,
+) -> None:
+    _write_universe(tmp_path, ["600000.SH", "000001.SZ"])
+    config = replace(_config(tmp_path), batch_size=2)
+    client = _FakeClient(
+        _SparseDailyKlines(
+            _daily("600000.SH", 10.0),
+            {"000001.SZ": pl.DataFrame()},
+        )
+    )
+
+    result = run_p0_backfill(
+        config,
+        client=client,
+        capset=_capabilities(Cap.KLINE_DAILY_BATCH, Cap.KLINE_DAILY_BY_SYMBOL),
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    state = manifest["batches"]["daily"]["00000"]
+    assert result["coverage"]["missing_symbols"] == []
+    assert state["returned_symbol_count"] == 1
+    assert state["valid_empty_symbol_count"] == 1
+    assert state["valid_empty_symbols"] == ["000001.SZ"]
+    assert manifest["daily_valid_empty_symbols"] == ["000001.SZ"]
+
+
+def test_daily_all_empty_batch_is_staged_after_single_symbol_confirmation(
+    tmp_path: Path,
+) -> None:
+    _write_universe(tmp_path, ["600000.SH", "000001.SZ"])
+    config = replace(_config(tmp_path), batch_size=2)
+    client = _FakeClient(
+        _SparseDailyKlines(
+            pl.DataFrame(),
+            {"600000.SH": pl.DataFrame(), "000001.SZ": pl.DataFrame()},
+        )
+    )
+
+    result = run_p0_backfill(
+        config,
+        client=client,
+        capset=_capabilities(Cap.KLINE_DAILY_BATCH, Cap.KLINE_DAILY_BY_SYMBOL),
+    )
+
+    manifest = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    state = manifest["batches"]["daily"]["00000"]
+    assert result["status"] == "staged"
+    assert result["coverage"]["missing_symbols"] == []
+    assert state["rows"] == 0
+    assert state["valid_empty_symbols"] == ["000001.SZ", "600000.SH"]
+    assert manifest["daily_valid_empty_symbols"] == ["000001.SZ", "600000.SH"]
 
 
 def test_adj_factor_sparse_batch_records_valid_empty_symbols(tmp_path: Path) -> None:

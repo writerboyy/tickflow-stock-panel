@@ -9,15 +9,15 @@ after all source batches, key checks, and derived-table checks pass.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import shutil
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -157,6 +157,7 @@ def _new_manifest(config: BackfillConfig, symbols: list[str]) -> dict[str, Any]:
         "created_at": _utc_now(),
         "updated_at": _utc_now(),
         "batches": {},
+        "daily_valid_empty_symbols": [],
         "coverage": {},
         "publish_targets": [],
     }
@@ -250,6 +251,7 @@ def _record_batch(
                     "requested_symbol_count": len(requested),
                     "returned_symbol_count": len(returned_symbols),
                     "valid_empty_symbol_count": len(valid_empty),
+                    "valid_empty_symbols": valid_empty,
                     "valid_empty_symbol_sample": valid_empty[:20],
                 }
             )
@@ -416,6 +418,21 @@ def _empty_adj_frame() -> pl.DataFrame:
     )
 
 
+def _empty_daily_frame() -> pl.DataFrame:
+    return pl.DataFrame(
+        schema={
+            "symbol": pl.String,
+            "date": pl.Date,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Float64,
+            "amount": pl.Float64,
+        }
+    )
+
+
 def _normalize_financial_result(raw: Any) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     if isinstance(raw, dict):
@@ -490,7 +507,28 @@ def _fetch_daily(
         state = _batch_state(manifest, "daily", batch_id)
         path = _batch_path(run_root, "daily", batch_id)
         if state.get("status") == "completed" and path.exists():
-            continue
+            # Older checkpoints only stored a sample. Re-read the staged batch
+            # once so resumed runs can account for every confirmed empty symbol.
+            if "valid_empty_symbols" not in state:
+                try:
+                    _record_batch(
+                        manifest_path,
+                        manifest,
+                        "daily",
+                        batch_id,
+                        status="completed",
+                        path=path,
+                        frame=pl.read_parquet(path),
+                        requested_symbols=chunk,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    state["status"] = "source_error"
+                    state["error"] = f"checkpoint read failed: {type(exc).__name__}: {exc}"
+                    _save_manifest(manifest_path, manifest)
+                else:
+                    continue
+            else:
+                continue
         try:
             sleep_between_batches(index, rpm)
             raw = client.klines.batch(
@@ -515,11 +553,73 @@ def _fetch_daily(
             )
             frame = _date_filter(_normalize_daily_result(raw), "date", config.start, config.end)
             frame = _dedupe_or_raise(frame, _DAILY_KEY, "daily")
-            if frame.is_empty():
+            returned = set(frame["symbol"].unique().to_list()) if not frame.is_empty() else set()
+            missing = sorted(set(chunk) - returned)
+            confirmed_empty: set[str] = set()
+            if missing:
+                by_symbol_limit = resolve_limit(
+                    capset,
+                    Cap.KLINE_DAILY_BY_SYMBOL,
+                    default_batch=1,
+                    default_rpm=60,
+                )
+                fallback_frames: list[pl.DataFrame] = []
+                unresolved: list[str] = []
+                for single_index, symbol in enumerate(missing):
+                    try:
+                        sleep_between_batches(single_index, by_symbol_limit.rpm)
+                        single_raw = client.klines.get(
+                            symbol,
+                            period="1d",
+                            adjust="none",
+                            start_time=int(
+                                datetime.combine(
+                                    config.start,
+                                    datetime.min.time(),
+                                    tzinfo=timezone.utc,
+                                ).timestamp()
+                                * 1000
+                            ),
+                            end_time=int(
+                                datetime.combine(
+                                    config.end,
+                                    datetime.min.time(),
+                                    tzinfo=timezone.utc,
+                                ).timestamp()
+                                * 1000
+                            ),
+                            count=10000,
+                            as_dataframe=True,
+                        )
+                        single = _date_filter(
+                            kline_sync._normalize_daily(single_raw, default_symbol=symbol),
+                            "date",
+                            config.start,
+                            config.end,
+                        )
+                        single = _dedupe_or_raise(single, _DAILY_KEY, "daily")
+                        if not single.is_empty():
+                            fallback_frames.append(single)
+                        else:
+                            confirmed_empty.add(symbol)
+                    except Exception:  # noqa: BLE001
+                        unresolved.append(symbol)
+                if fallback_frames:
+                    frame = _dedupe_or_raise(
+                        pl.concat([frame, *fallback_frames], how="diagonal_relaxed"),
+                        _DAILY_KEY,
+                        "daily",
+                    )
+                returned = (
+                    set(frame["symbol"].unique().to_list()) if not frame.is_empty() else set()
+                )
+                missing = sorted(set(unresolved))
+            if frame.is_empty() and not missing and not confirmed_empty:
                 raise BackfillBlocked("daily batch returned no rows")
-            missing = sorted(set(chunk) - set(frame["symbol"].unique().to_list()))
             if missing:
                 raise BackfillBlocked(f"daily batch missing symbols: {missing[:8]}")
+            if frame.is_empty():
+                frame = _empty_daily_frame()
             _write_batch(path, frame.sort(["symbol", "date"]))
             _record_batch(
                 manifest_path,
@@ -549,7 +649,19 @@ def _fetch_daily(
     ]
     if failed:
         raise BackfillBlocked(f"daily batches failed: {failed[:8]}")
-    _save_manifest(manifest_path, manifest, daily_batches=total)
+    valid_empty_symbols = sorted(
+        {
+            symbol
+            for state in (manifest.get("batches", {}).get("daily", {}) or {}).values()
+            for symbol in state.get("valid_empty_symbols", [])
+        }
+    )
+    _save_manifest(
+        manifest_path,
+        manifest,
+        daily_batches=total,
+        daily_valid_empty_symbols=valid_empty_symbols,
+    )
 
 
 def _fetch_adj_factor(
@@ -762,10 +874,21 @@ def _merge_financials(shadow: Path, run_root: Path) -> list[Path]:
     return targets
 
 
-def _coverage(shadow: Path, symbols: list[str], config: BackfillConfig) -> dict[str, Any]:
+def _coverage(
+    shadow: Path,
+    symbols: list[str],
+    config: BackfillConfig,
+    valid_empty_symbols: Iterable[str] = (),
+) -> dict[str, Any]:
+    valid_empty = sorted(set(str(symbol) for symbol in valid_empty_symbols) & set(symbols))
     daily_glob = shadow / "kline_daily" / "**" / "*.parquet"
     if not any(shadow.joinpath("kline_daily").rglob("*.parquet")):
-        return {"rows": 0, "symbols": 0, "missing_symbols": symbols}
+        return {
+            "rows": 0,
+            "symbols": 0,
+            "missing_symbols": sorted(set(symbols) - set(valid_empty)),
+            "valid_empty_symbols": valid_empty,
+        }
     frame = (
         pl.scan_parquet(
             str(daily_glob),
@@ -795,13 +918,19 @@ def _coverage(shadow: Path, symbols: list[str], config: BackfillConfig) -> dict[
     )
     missing = sorted(set(symbols) - set(observed))
     if frame.is_empty():
-        return {"rows": 0, "symbols": 0, "missing_symbols": symbols}
+        return {
+            "rows": 0,
+            "symbols": 0,
+            "missing_symbols": sorted(set(symbols) - set(valid_empty)),
+            "valid_empty_symbols": valid_empty,
+        }
     return {
         "rows": int(frame["rows"][0]),
         "symbols": int(frame["symbols"][0]),
         "min_date": str(frame["min_date"][0]) if frame["min_date"][0] is not None else None,
         "max_date": str(frame["max_date"][0]) if frame["max_date"][0] is not None else None,
-        "missing_symbols": missing,
+        "missing_symbols": sorted(set(missing) - set(valid_empty)),
+        "valid_empty_symbols": valid_empty,
     }
 
 
@@ -886,7 +1015,12 @@ def run_p0_backfill(
                 raise BackfillBlocked("valuation rebuild produced no rows")
             publish_targets.extend(["kline_daily_enriched", "valuation_daily"])
 
-        coverage = _coverage(shadow, symbols, config)
+        coverage = _coverage(
+            shadow,
+            symbols,
+            config,
+            manifest.get("daily_valid_empty_symbols", []),
+        )
         if "daily" in config.datasets and coverage.get("missing_symbols"):
             raise BackfillBlocked(
                 f"daily coverage missing symbols: {coverage['missing_symbols'][:8]}"
