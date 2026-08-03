@@ -674,8 +674,24 @@ class TushareHistoryBackfill:
             indexes: list[str] = []
         else:
             stocks, etfs, indexes = [], [], []
+            for list_status in ("L", "D", "P"):
+                key = f"stock_basic_{list_status}"
+                try:
+                    response = self.client.request(
+                        "stock_basic",
+                        {"exchange": "", "list_status": list_status, "fields": "ts_code,name,list_date,delist_date"},
+                    )
+                    self._archive("stock_basic", key, response)
+                    stocks.extend(str(row.get("ts_code")) for row in response.rows if row.get("ts_code"))
+                    frame = pl.DataFrame(response.rows) if response.rows else pl.DataFrame()
+                    if not frame.is_empty():
+                        self._write_rows("universe", key, frame)
+                    state["items"][key] = {"status": "completed", "rows": len(response.items)}
+                except Exception as exc:  # noqa: BLE001
+                    state["items"][key] = {"status": "blocked", "error": type(exc).__name__}
+                    if list_status == "L":
+                        raise BackfillBlocked("active stock_basic is required to build the universe") from exc
             for api, params, target in (
-                ("stock_basic", {"exchange": "", "list_status": "L,D,P", "fields": "ts_code,name,list_date,delist_date"}, stocks),
                 ("etf_basic", {"exchange": "", "fields": "ts_code,name,list_date,delist_date"}, etfs),
                 ("index_basic", {"market": "SSE,SZSE", "fields": "ts_code,name,list_date"}, indexes),
             ):
@@ -689,8 +705,6 @@ class TushareHistoryBackfill:
                     state["items"][api] = {"status": "completed", "rows": len(response.items)}
                 except Exception as exc:  # noqa: BLE001
                     state["items"][api] = {"status": "blocked", "error": type(exc).__name__}
-                    if api == "stock_basic":
-                        raise BackfillBlocked("stock_basic is required to build the universe") from exc
             try:
                 calendar = self.client.request(
                     "trade_cal",
@@ -752,10 +766,11 @@ class TushareHistoryBackfill:
         for symbol in symbols:
             assert_disk_reserve(self.config.data_dir)
             state = phase["items"].setdefault(symbol, {"status": "pending", "pages": 0})
+            page_root = self.run_root / "batches" / phase_name / _safe_part(symbol)
             if state.get("status") == "completed":
+                self._clear_minute_pages(page_root)
                 continue
             cursor = str(state.get("cursor") or f"{today.isoformat()} 23:59:59")
-            page_root = self.run_root / "batches" / phase_name / _safe_part(symbol)
             raw_pages = [pl.read_parquet(path) for path in sorted(page_root.glob("page-*.parquet"))]
             state["pages"] = max(int(state.get("pages", 0)), len(raw_pages))
             try:
@@ -790,12 +805,22 @@ class TushareHistoryBackfill:
                 raw_root = self.config.data_dir / "tushare_archive" / ("minute_stock_raw" if kind == "stock" else "minute_etf_raw") / f"symbol={_safe_part(symbol)}"
                 _atomic_parquet(frame, raw_root / "part.parquet")
                 self._record(phase_name, symbol, status="completed", rows=frame.height, min_datetime=str(frame["datetime"].min()) if frame.height else None, max_datetime=str(frame["datetime"].max()) if frame.height else None, content_hash=stable_content_hash(frame.to_dicts()))
+                self._clear_minute_pages(page_root)
             except TusharePermissionError as exc:
                 self._record(phase_name, symbol, status="blocked", reason="permission_or_auth", error=type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 self._record(phase_name, symbol, status="failed", error=type(exc).__name__, message=str(exc)[:240])
         phase["status"] = "completed"
         self._save()
+
+    @staticmethod
+    def _clear_minute_pages(page_root: Path) -> None:
+        for path in page_root.glob("page-*.parquet"):
+            path.unlink()
+        try:
+            page_root.rmdir()
+        except OSError:
+            pass
 
     def _adjustment_frame(self, kind: str, symbol: str) -> pl.DataFrame:
         path = self.run_root / "batches" / "adjustment" / kind / f"{_safe_part(symbol)}.parquet"
