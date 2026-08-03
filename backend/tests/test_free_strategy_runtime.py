@@ -708,6 +708,153 @@ def test_performance_small_cap_uses_one_fixed_target_value_for_each_new_position
     assert submitted == [(symbol, 100_000 / 3) for symbol in symbols]
 
 
+def test_performance_small_cap_monthly_buy_budget_includes_expected_net_exit_proceeds(
+    monkeypatch,
+):
+    now = datetime(2025, 8, 1, 9, 30)
+    exit_symbol = "000001.SZ"
+    new_symbol = "000002.SZ"
+    submitted = []
+    bars = {
+        exit_symbol: Bar(
+            exit_symbol, now, 10, 10, 10, 10,
+            raw_close=10, limit_up=11, limit_down=9,
+        ),
+        new_symbol: Bar(
+            new_symbol, now, 10, 10, 10, 10,
+            raw_close=10, limit_up=11, limit_down=9,
+        ),
+    }
+    context = SimpleNamespace(
+        now=now,
+        portfolio=SimpleNamespace(
+            positions={exit_symbol: 100},
+            available_positions={exit_symbol: 100},
+            cash=50,
+        ),
+        state={"performance_small_cap": {
+            "first_rebalance_done": False,
+            "today_trade_allowed": True,
+            "sorted_stocks": [],
+            "just_sold": [],
+        }},
+        instruments=lambda _asset="stock": [],
+        current_bars=lambda: bars,
+        order_target=lambda symbol, quantity: submitted.append(
+            ("quantity", symbol, quantity)
+        ),
+        order_target_value=lambda symbol, value: submitted.append(
+            ("value", symbol, value)
+        ),
+        emit_signal=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_previous_trading_date",
+        lambda *_args: datetime(2025, 7, 31).date(),
+    )
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_select_stocks",
+        lambda *_args, **_kwargs: [new_symbol],
+    )
+
+    performance_small_cap._monthly_adjustment(context)
+
+    assert submitted == [
+        ("quantity", exit_symbol, 0),
+        ("value", new_symbol, 1_044),
+    ]
+
+
+def test_performance_small_cap_rebalance_fills_buy_after_same_callback_exit(monkeypatch):
+    now = datetime(2025, 8, 1, 9, 30)
+    exit_symbol = "000001.SZ"
+    new_symbol = "000002.SZ"
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_previous_trading_date",
+        lambda *_args: datetime(2025, 7, 31).date(),
+    )
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_select_stocks",
+        lambda *_args, **_kwargs: [new_symbol],
+    )
+    source = """
+from app.free_strategy import performance_small_cap
+
+def initialize(context):
+    context.state["performance_small_cap"] = {
+        "first_rebalance_done": False,
+        "today_trade_allowed": True,
+        "sorted_stocks": [],
+        "just_sold": [],
+    }
+    context.schedule(performance_small_cap._monthly_adjustment, "09:30")
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=50,
+            commission_pct=0.0001,
+            min_commission=5,
+            reserve_buy_fees=False,
+            stamp_tax_pct=0.001,
+            slippage_bps=0,
+            price_tick=0.01,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    )
+    engine.account.positions = {exit_symbol: 100}
+    engine.account.available = {exit_symbol: 100}
+    engine.account.avg_cost = {exit_symbol: 10}
+
+    engine.run_scheduled_event(now, [
+        Bar(
+            exit_symbol, now, 10, 10, 10, 10,
+            raw_close=10, limit_up=11, limit_down=9,
+        ),
+        Bar(
+            new_symbol, now, 10, 10, 10, 10,
+            raw_close=10, limit_up=11, limit_down=9,
+        ),
+    ])
+
+    assert [(fill.symbol, fill.side, fill.quantity) for fill in engine.account.fills] == [
+        (exit_symbol, "sell", 100),
+        (new_symbol, "buy", 100),
+    ]
+    assert engine.account.positions[exit_symbol] == 0
+    assert engine.account.positions[new_symbol] == 100
+
+
+def test_performance_small_cap_does_not_budget_untradable_exit_proceeds():
+    now = datetime(2025, 8, 1, 9, 30)
+    exit_symbol = "000001.SZ"
+    context = SimpleNamespace(
+        portfolio=SimpleNamespace(
+            positions={exit_symbol: 100},
+            available_positions={exit_symbol: 100},
+            cash=50,
+        ),
+    )
+    bars = {
+        exit_symbol: Bar(
+            exit_symbol, now, 9, 9, 9, 9,
+            raw_close=9, limit_up=11, limit_down=9,
+        ),
+    }
+
+    assert performance_small_cap._estimated_cash_after_sells(
+        context,
+        [exit_symbol],
+        bars,
+    ) == 50
+
+
 def test_performance_small_cap_candidate_sort_uses_persisted_market_cap():
     previous_day = datetime(2025, 7, 23)
     symbols = ["000001.SZ", "000002.SZ"]
