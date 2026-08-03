@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, Suspense } from 'react'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
@@ -50,6 +50,8 @@ import {
   WifiOff,
   WalletCards,
   Zap,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -90,6 +92,17 @@ const nav = [
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
+
+const CUSTOM_NAV_PARENT_ID = '__custom__'
+const CUSTOM_NAV_IDS = new Set(['/free-strategy', '/market-heat', '/large-orders'])
+
+type NavItem = {
+  to: string
+  label: string
+  icon: typeof Gauge
+  badge?: string
+  children?: NavItem[]
+}
 
 /** 亮/暗主题切换 — 状态存 localStorage, 生效见 lib/theme.ts */
 function ThemeToggle() {
@@ -135,6 +148,47 @@ function MonitorBadge({ active }: { active: boolean }) {
     <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[9px] font-bold text-white animate-pulse">
       {unread > 99 ? '99+' : unread}
     </span>
+  )
+}
+
+function SidebarNavLink({ item, nested, isDataSyncing, dataSyncJustDone }: {
+  item: NavItem
+  nested?: boolean
+  isDataSyncing: boolean
+  dataSyncJustDone: boolean
+}) {
+  return (
+    <NavLink
+      to={item.to}
+      className={({ isActive }) =>
+        cn(
+          'flex items-center gap-3 rounded-btn px-3 py-2 text-sm transition-colors duration-150 ease-smooth',
+          nested && 'ml-5 border-l border-border/70 pl-4',
+          isActive
+            ? 'bg-elevated text-foreground font-medium'
+            : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <item.icon className="h-4 w-4 shrink-0" />
+          <span className="flex-1">{item.label}</span>
+          {item.badge && (
+            <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+              {item.badge}
+            </span>
+          )}
+          {item.to === '/data' && isDataSyncing && (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+          )}
+          {item.to === '/data' && !isDataSyncing && dataSyncJustDone && (
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+          )}
+          {item.to === '/monitor' && <MonitorBadge active={isActive} />}
+        </>
+      )}
+    </NavLink>
   )
 }
 
@@ -326,6 +380,7 @@ export function Layout() {
   }, [isDataSyncing])
 
   const qc = useQueryClient()
+  const location = useLocation()
   const navigate = useNavigate()
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
@@ -388,7 +443,6 @@ export function Layout() {
   }, [alertsTotal])
 
   // 合并内置页面 + 可见的扩展分析菜单
-  type NavItem = { to: string; label: string; icon: typeof Gauge; badge?: string }
   const analysisNav: NavItem[] = (analysisMenus?.items ?? [])
     .filter(m => m.visible)
     .map(m => ({ to: `/analysis/${m.id}`, label: m.label, icon: m.icon === 'tags' ? Tags : BarChart3 }))
@@ -408,7 +462,30 @@ export function Layout() {
     : allNav
 
   const hiddenIds = new Set(prefs?.nav_hidden ?? [])
-  const visibleNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
+  const visibleFlatNavItems = navItems.filter(n => !hiddenIds.has(n.to) && !hiddenIds.has(n.to.replace(/^\/analysis\//, '')))
+  const customChildren = visibleFlatNavItems.filter(item => CUSTOM_NAV_IDS.has(item.to))
+  const visibleNavItems: NavItem[] = []
+  let customInserted = false
+  for (const item of visibleFlatNavItems) {
+    if (CUSTOM_NAV_IDS.has(item.to)) {
+      if (!customInserted && customChildren.length > 0) {
+        visibleNavItems.push({
+          to: CUSTOM_NAV_PARENT_ID,
+          label: '自定义',
+          icon: Layers3,
+          children: customChildren,
+        })
+        customInserted = true
+      }
+      continue
+    }
+    visibleNavItems.push(item)
+  }
+  const customActive = customChildren.some(item => item.to === location.pathname)
+  const [customExpanded, setCustomExpanded] = useState(true)
+  useEffect(() => {
+    if (customActive) setCustomExpanded(true)
+  }, [customActive])
 
   const handleToggle = async (enabled: boolean) => {
     // 开启时重新校验档位
@@ -473,40 +550,43 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon, badge }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                  isActive
+          {visibleNavItems.map(item => item.children ? (
+            <div key={item.to}>
+              <button
+                type="button"
+                aria-expanded={customExpanded}
+                onClick={() => setCustomExpanded(expanded => !expanded)}
+                className={cn(
+                  'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-left text-sm transition-colors duration-150 ease-smooth',
+                  customActive
                     ? 'bg-elevated text-foreground font-medium'
                     : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {badge && (
-                    <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
-                      {badge}
-                    </span>
-                  )}
-                  {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                  {to === '/data' && isDataSyncing && (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                  )}
-                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
-                  )}
-                  {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                  {to === '/monitor' && <MonitorBadge active={isActive} />}
-                </>
-              )}
-            </NavLink>
+                )}
+                title={customExpanded ? '收起自定义菜单' : '展开自定义菜单'}
+              >
+                <item.icon className="h-4 w-4 shrink-0" />
+                <span className="flex-1">{item.label}</span>
+                {customExpanded
+                  ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
+                  : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" />}
+              </button>
+              {customExpanded && item.children.map(child => (
+                <SidebarNavLink
+                  key={child.to}
+                  item={child}
+                  nested
+                  isDataSyncing={isDataSyncing}
+                  dataSyncJustDone={dataSyncJustDone}
+                />
+              ))}
+            </div>
+          ) : (
+            <SidebarNavLink
+              key={item.to}
+              item={item}
+              isDataSyncing={isDataSyncing}
+              dataSyncJustDone={dataSyncJustDone}
+            />
           ))}
         </nav>
 
