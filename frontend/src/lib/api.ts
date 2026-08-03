@@ -2254,6 +2254,8 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  tushareCapabilityMatrix: () =>
+    request<TushareCapabilityMatrix>('/api/data/tushare-capability-matrix'),
   pitReferenceStatus: () => request<PitReferenceStatus>('/api/pit-reference/status'),
   syncPitReferenceSnapshots: () =>
     request<PitReferenceSyncResult>('/api/pit-reference/sync-snapshots', { method: 'POST' }),
@@ -3022,6 +3024,38 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface TushareCapabilityDataset {
+  status: string
+  staged_rows?: number
+  published_rows?: number
+  batches?: number
+  failed_batches?: string[]
+  empty_unconfirmed_batches?: string[]
+  logical_date?: string | null
+  primary_key?: string[]
+  symbols?: number
+  min_date?: string | null
+  max_date?: string | null
+  field_non_null_rate?: Record<string, number>
+  factor_input?: boolean
+}
+
+export interface TushareCapabilityMatrix {
+  available: boolean
+  generated_at: string | null
+  schema_version: number
+  run_id: string | null
+  run_ids: string[]
+  run_count: number
+  source: string
+  runtime_source: string
+  history_start: string | null
+  history_end: string | null
+  datasets: Record<string, TushareCapabilityDataset>
+  formal_publish: Record<string, string | null>
+  legacy_phases: Record<string, string | null>
 }
 
 export interface PitReferenceTableStatus {

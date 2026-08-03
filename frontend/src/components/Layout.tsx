@@ -50,6 +50,7 @@ import {
   WifiOff,
   WalletCards,
   Zap,
+  Menu,
   ChevronDown,
   ChevronRight,
 } from 'lucide-react'
@@ -382,6 +383,7 @@ export function Layout() {
   const qc = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -479,6 +481,10 @@ export function Layout() {
     if (customActive) setCustomExpanded(true)
   }, [customActive])
 
+  useEffect(() => {
+    setMobileNavOpen(false)
+  }, [location.pathname])
+
   const handleToggle = async (enabled: boolean) => {
     // 开启时重新校验档位
     if (enabled) {
@@ -503,8 +509,8 @@ export function Layout() {
   }
 
   return (
-    <div className="h-screen grid grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
-      <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
+    <div className="h-screen grid grid-cols-1 md:grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
+      <aside className={`fixed inset-y-0 left-0 z-40 w-56 border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden transition-transform duration-200 ease-smooth md:static md:z-auto md:w-auto md:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="px-5 py-5 border-b border-border shrink-0">
           {/* Brand block — 原创 logo + 等宽 wordmark */}
           <div className="flex items-center gap-2.5">
@@ -746,12 +752,33 @@ export function Layout() {
         </div>
       </aside>
 
+      {mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="关闭导航"
+          onClick={() => setMobileNavOpen(false)}
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+        />
+      )}
+
       <motion.main
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="h-full overflow-auto scrollbar-gutter-stable"
+        className="h-full min-w-0 overflow-auto scrollbar-gutter-stable"
       >
+        <div className="sticky top-0 z-20 flex h-11 items-center gap-2 border-b border-border bg-base/95 px-3 backdrop-blur md:hidden">
+          <button
+            type="button"
+            aria-label="打开导航"
+            onClick={() => setMobileNavOpen(true)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-btn text-secondary transition-colors hover:bg-elevated hover:text-foreground"
+            title="打开导航"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+          <span className="font-mono text-xs font-semibold tracking-wide text-foreground">TickFlow</span>
+        </div>
         {streamStatus === 'reconnecting' && (
           <div
             role="status"

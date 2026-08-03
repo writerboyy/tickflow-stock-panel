@@ -52,6 +52,7 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
+import { TushareCapabilityMatrixPanel } from '@/components/data/TushareCapabilityMatrix'
 
 type ExtPlatform = 'easytdx' | 'kaipanla' | 'other'
 
@@ -79,6 +80,12 @@ export function Data() {
       if (activeJobId || data?.indicators_ready === false) return 2_000
       return 30_000
     },
+  })
+
+  const tushareMatrix = useQuery({
+    queryKey: QK.tushareCapabilityMatrix,
+    queryFn: api.tushareCapabilityMatrix,
+    refetchInterval: 60_000,
   })
 
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
@@ -795,7 +802,7 @@ export function Data() {
         title="数据"
         subtitle="本地数据画像 · 同步状态 · 历史记录"
         right={
-          <div className="flex items-center gap-3">
+          <div className="flex min-w-max items-center gap-3 whitespace-nowrap">
             {!hasData && !isLoading && (
               <span className="text-xs text-accent animate-pulse">首次使用请点击右侧按钮同步数据</span>
             )}
@@ -871,7 +878,7 @@ export function Data() {
         }
       />
 
-      <div className="px-8 py-6 space-y-6 max-w-6xl">
+      <div className="max-w-6xl space-y-6 px-4 py-5 sm:px-8 sm:py-6">
         {/* None 档提示 —— 非阻断: 无需 Key 也可获取历史日K, 仅实时行情等扩展能力受限 */}
         {isNoKey && (
           <div className="flex items-center gap-2 rounded-card border border-border bg-elevated/40 px-3 py-2 text-xs">
@@ -1134,6 +1141,18 @@ export function Data() {
               otherExt.length,
               otherExt.map(renderExtCard),
             )}
+          </div>
+        </div>
+
+        <div>
+          <SectionTitle icon={Database}>Tushare 缺口补齐</SectionTitle>
+          <div className="mt-3">
+            <TushareCapabilityMatrixPanel
+              matrix={tushareMatrix.data}
+              isLoading={tushareMatrix.isLoading}
+              isError={tushareMatrix.isError}
+              onRetry={() => { void tushareMatrix.refetch() }}
+            />
           </div>
         </div>
 
