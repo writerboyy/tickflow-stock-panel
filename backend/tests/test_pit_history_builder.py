@@ -35,7 +35,7 @@ def test_index_history_rows_become_pit_intervals():
             },
         ],
         index_symbol="000300.SH",
-        source="sina",
+        source="fixture",
     )
 
     rows = frame.select([
@@ -135,7 +135,7 @@ def test_industry_history_derives_effective_to_from_next_change():
                 "变更日期": "2021-06-30",
             },
         ],
-        source="cninfo",
+        source="fixture",
     )
 
     rows = frame.select([
@@ -187,7 +187,7 @@ def test_industry_summary_requires_one_standard_before_joining():
     assert [item["industry_standard"] for item in summary["standards"]] == ["申万行业", "证监会行业"]
 
 
-def test_industry_history_accepts_cninfo_akshare_columns():
+def test_industry_history_accepts_public_raw_columns():
     frame = normalize_industry_membership_history(
         [
             {
@@ -200,7 +200,7 @@ def test_industry_history_accepts_cninfo_akshare_columns():
                 "变更日期": "2001-08-27",
             }
         ],
-        source="cninfo",
+        source="fixture",
     )
 
     assert frame.select([
@@ -316,7 +316,7 @@ def test_publish_history_table_round_trips(tmp_path):
     frame = normalize_index_membership_events(
         [{"品种代码": "600519", "纳入日期": "2005-04-08"}],
         index_symbol="000300.SH",
-        source="sina",
+        source="fixture",
     )
 
     count = publish_history_table(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE, frame)
@@ -330,7 +330,7 @@ def test_build_index_history_records_manifest_and_published_table(tmp_path):
         data_dir=tmp_path,
         raw_rows=[{"品种代码": "600519", "纳入日期": "2005-04-08"}],
         index_symbol="000300.SH",
-        source="sina",
+        source="fixture",
         logical_snapshot="2026-08-02",
         raw_label="sample",
     )
@@ -380,7 +380,7 @@ def test_read_raw_rows_supports_html_history_table(tmp_path):
 
 
 def test_read_raw_rows_supports_html_history_table_with_title_row(tmp_path):
-    path = tmp_path / "sina.html"
+    path = tmp_path / "history.html"
     path.write_text(
         """
         <table>

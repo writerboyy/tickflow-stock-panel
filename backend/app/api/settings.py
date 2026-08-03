@@ -28,6 +28,9 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # 默认端点 —— endpoints.json 列表第一项,UI"当前使用"始终对齐此项。
 # 注意:Free 模式 SDK 实际走 free-api(免费数据通道),但 UI 显示统一用默认节点。
 DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
+CUSTOM_DATA_SOURCE_DISABLED_DETAIL = (
+    "用户自定义 HTTP 数据源已禁用；请使用 TickFlow、BaoStock 或内置插件"
+)
 
 
 def _sync_financial_scheduler_caps(app_state, capset) -> None:
@@ -459,7 +462,7 @@ def get_preferences() -> dict:
 
 @router.get("/data-sources")
 def list_data_sources() -> dict:
-    """列出已加载的数据源 (内置 / 插件 / 用户自定义)。"""
+    """列出已加载的数据源 (内置 / 插件)。"""
     from app.data_providers import custom as custom_sources
     return {
         "builtin": [
@@ -484,7 +487,7 @@ def list_data_sources() -> dict:
 
 @router.post("/data-sources/reload")
 def reload_data_sources() -> dict:
-    """重新加载 data_sources/*.yaml。"""
+    """重新加载内置数据源插件。"""
     from app.data_providers import custom as custom_sources
     custom_sources.load_all()
     return list_data_sources()
@@ -538,80 +541,26 @@ def uninstall_plugin(name: str) -> dict:
 
 @router.get("/data-sources/{name}")
 def get_data_source(name: str) -> dict:
-    """读取一个自定义数据源的完整配置(用于前端编辑回填)。"""
-    from app.data_providers import custom as custom_sources
-    cfg = custom_sources.get_config_dict(name)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail=f"数据源 '{name}' 不存在")
-    return cfg
+    """用户自定义 HTTP 数据源配置入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.post("/data-sources")
 def save_data_source(req: CustomSourceIn) -> dict:
-    """创建或更新一个自定义数据源 yaml, 保存后自动 reload。"""
-    from app.data_providers import custom as custom_sources
-    config = req.model_dump()
-    config["name"] = (config.get("name") or "").lower()
-    try:
-        custom_sources.save_config(config["name"], config)
-        custom_sources.load_all()
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return list_data_sources()
+    """用户自定义 HTTP 数据源创建入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.delete("/data-sources/{name}")
 def delete_data_source(name: str) -> dict:
-    """删除一个自定义数据源 yaml, 保存后自动 reload。
-
-    若当前总开关选中的就是被删的源, 回退到 tickflow。
-    """
-    from app.data_providers import custom as custom_sources
-    from app.services import preferences
-    try:
-        custom_sources.delete_config(name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    custom_sources.load_all()
-    # 回退被删源的偏好
-    updates: dict = {}
-    if preferences.get_daily_data_provider() == name:
-        updates["daily_data_provider"] = "tickflow"
-    if preferences.get_realtime_data_provider() == name:
-        updates["realtime_data_provider"] = "tickflow"
-    if preferences.get_financial_provider() == name:
-        updates["financial_data_provider"] = "tickflow"
-    adj = preferences.get_adj_factor_provider()
-    if adj == name:
-        updates["adj_factor_provider"] = "same_as_daily"
-    if updates:
-        preferences.save(updates)
-    return list_data_sources()
+    """用户自定义 HTTP 数据源删除入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.post("/data-sources/test")
 def test_data_source(req: CustomSourceTestIn) -> dict:
-    """试拉自定义数据源，不写盘。"""
-    from app.data_providers import custom as custom_sources
-
-    temporary = req.config is not None
-    provider = None
-    try:
-        if req.config:
-            config = req.config.model_dump()
-            dataset_config = config["datasets"].get(req.dataset)
-            if dataset_config is None:
-                raise ValueError(f"dataset '{req.dataset}' is not configured")
-            config["datasets"] = {req.dataset: dataset_config}
-            provider = custom_sources.create_provider(config)
-        else:
-            provider = custom_sources.get_provider(req.provider)
-        return provider.test_dataset(req.dataset, req.symbols)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
-    finally:
-        if temporary and provider is not None:
-            provider.close()
+    """用户自定义 HTTP 数据源试拉入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.put("/preferences/data-providers")

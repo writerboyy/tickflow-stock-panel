@@ -94,9 +94,8 @@ def _write_consensus_evidence(tmp_path, row: dict):
         "schema_version": 2,
         "sources": {
             "easy_tdx": {"status": "available"},
-            "astock_data_eastmoney": {"status": "available"},
+            "baostock": {"status": "available"},
         },
-        "astock_data": {"recipe_revision": "test"},
         "rows": [{
             "symbol": row["symbol"],
             "date": row["date"].isoformat(),
@@ -107,11 +106,11 @@ def _write_consensus_evidence(tmp_path, row: dict):
             "replacement": {"volume": 20.0, "amount": 2000.0},
             "references": {
                 "easy_tdx": {**source, "volume": 20.0, "amount": 2000.0},
-                "astock_data_eastmoney": {**source, "volume": 20.0, "amount": 2000.0},
+                "baostock": {**source, "volume": 20.0, "amount": 2000.0},
             },
             "field_consensus": {
-                "volume": {"value": 20.0, "sources": ["easy_tdx", "astock_data_eastmoney"]},
-                "amount": {"value": 2000.0, "sources": ["easy_tdx", "astock_data_eastmoney"]},
+                "volume": {"value": 20.0, "sources": ["easy_tdx", "baostock"]},
+                "amount": {"value": 2000.0, "sources": ["easy_tdx", "baostock"]},
             },
         }],
     }

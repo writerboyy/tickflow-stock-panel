@@ -55,7 +55,7 @@ def test_pit_reference_status_summarizes_history_and_snapshots(monkeypatch, tmp_
                 "member_symbol": ["600519.SH"],
                 "member_code": ["600519"],
                 "member_name": ["贵州茅台"],
-                "industry_standard": ["cninfo"],
+                "industry_standard": ["证监会行业"],
                 "industry_code": ["C15"],
                 "industry_name": ["白酒"],
                 "effective_from": [date(2001, 8, 27)],

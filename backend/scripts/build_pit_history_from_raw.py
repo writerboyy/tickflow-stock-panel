@@ -13,7 +13,6 @@ from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
-from urllib.request import urlopen
 
 import pandas as pd
 import polars as pl
@@ -38,16 +37,7 @@ from app.services.ingestion_manifest import (
 )
 
 
-SINA_HISTORY_URL = (
-    "https://vip.stock.finance.sina.com.cn/corp/go.php/"
-    "vII_HistoryComponent/indexid/{indexid}.phtml"
-)
-SINA_HISTORY_PAGE_URL = (
-    "https://vip.stock.finance.sina.com.cn/corp/view/"
-    "vII_HistoryComponent.php?indexid={indexid}&page={page}"
-)
 _LEADING_HEADER_INDEX = re.compile(r"^\d+\.\s*")
-_SINA_TOTAL_PAGES = re.compile(r"共\s*(\d+)\s*页")
 _HISTORY_HEADERS = {
     "品种代码",
     "证券代码",
@@ -183,37 +173,6 @@ def read_raw_rows(path: Path, *, encoding: str = "utf-8") -> list[dict]:
     raise ValueError(f"unsupported raw file type: {path}")
 
 
-def _fetch_sina_history_page(indexid: str, page: int, *, encoding: str = "gb2312") -> tuple[list[dict], int | None]:
-    url = SINA_HISTORY_URL.format(indexid=indexid) if page == 1 else SINA_HISTORY_PAGE_URL.format(
-        indexid=indexid,
-        page=page,
-    )
-    with urlopen(url, timeout=30) as response:  # noqa: S310
-        html = response.read().decode(encoding, errors="ignore")
-    match = _SINA_TOTAL_PAGES.search(html)
-    total_pages = int(match.group(1)) if match else None
-    return _rows_from_html(html), total_pages
-
-
-def fetch_sina_index_history(
-    indexid: str,
-    *,
-    encoding: str = "gb2312",
-    max_pages: int = 20,
-) -> list[dict]:
-    rows, total_pages = _fetch_sina_history_page(indexid, 1, encoding=encoding)
-    pages = min(total_pages or 1, max_pages)
-    seen = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows}
-    for page in range(2, pages + 1):
-        page_rows, _ = _fetch_sina_history_page(indexid, page, encoding=encoding)
-        for row in page_rows:
-            key = json.dumps(row, ensure_ascii=False, sort_keys=True)
-            if key not in seen:
-                seen.add(key)
-                rows.append(row)
-    return rows
-
-
 def _publish(
     *,
     data_dir: Path,
@@ -341,16 +300,14 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument("--encoding", default="utf-8")
     parser.add_argument("--index-history-file", type=Path)
     parser.add_argument("--index-symbol", default="000300.SH")
-    parser.add_argument("--index-source", default="sina")
-    parser.add_argument("--fetch-sina-index", help="Fetch one Sina history component page, e.g. 399300")
-    parser.add_argument("--sina-max-pages", type=int, default=20)
+    parser.add_argument("--index-source", default="raw")
     parser.add_argument(
         "--allow-incomplete-index",
         action="store_true",
         help="Archive/publish incomplete index history instead of failing strict PIT coverage checks",
     )
     parser.add_argument("--industry-history-file", type=Path)
-    parser.add_argument("--industry-source", default="cninfo")
+    parser.add_argument("--industry-source", default="raw")
     parser.add_argument("--lifecycle-file", type=Path)
     parser.add_argument("--lifecycle-source", default="exchange")
     parser.add_argument(
@@ -360,22 +317,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    if args.fetch_sina_index and args.index_history_file:
-        raise ValueError("--fetch-sina-index and --index-history-file are mutually exclusive")
-
     published: dict[str, int] = {}
-    if args.fetch_sina_index:
-        rows = fetch_sina_index_history(args.fetch_sina_index, max_pages=args.sina_max_pages)
-        published[INDEX_MEMBERSHIP_EVENTS_TABLE] = build_index_history(
-            data_dir=args.data_dir,
-            raw_rows=rows,
-            index_symbol=args.index_symbol,
-            source=args.index_source,
-            logical_snapshot=args.logical_snapshot,
-            raw_label=f"sina-{args.fetch_sina_index}-pages-{args.sina_max_pages}",
-            validate_strict=not args.allow_incomplete_index,
-        )
-    elif args.index_history_file:
+    if args.index_history_file:
         rows = read_raw_rows(args.index_history_file, encoding=args.encoding)
         published[INDEX_MEMBERSHIP_EVENTS_TABLE] = build_index_history(
             data_dir=args.data_dir,

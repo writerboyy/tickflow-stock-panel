@@ -228,7 +228,6 @@ def _load_consensus_replacements(
     return replacements, {
         "consensus_evidence_hash": _file_hash(evidence_path),
         "reference_sources": evidence.get("sources") or {},
-        "astock_data": evidence.get("astock_data") or {},
         "derived_evidence": evidence.get("derived_evidence") or {},
     }
 

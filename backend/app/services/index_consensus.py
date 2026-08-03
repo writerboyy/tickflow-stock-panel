@@ -10,13 +10,7 @@ from typing import Any
 
 import polars as pl
 
-from app.services.backup_data_sources import (
-    astock_data_source_metadata,
-    fetch_astock_data_baidu_index_daily,
-    fetch_astock_data_eastmoney_index_daily,
-    fetch_astock_data_tencent_index_daily,
-    fetch_baostock_index_daily,
-)
+from app.services.backup_data_sources import fetch_baostock_index_daily
 from app.services.index_crosscheck import (
     _FIELDS,
     _PRICE_FIELDS,
@@ -45,27 +39,6 @@ def default_index_reference_sources() -> tuple[IndexReferenceSource, ...]:
         IndexReferenceSource("easy_tdx", _FIELDS, fetch_easy_tdx_index_daily, "EasyTDX", "tdx"),
         IndexReferenceSource(
             "baostock", _FIELDS, fetch_baostock_index_daily, "BaoStock", "baostock"
-        ),
-        IndexReferenceSource(
-            "astock_data_baidu",
-            _FIELDS,
-            fetch_astock_data_baidu_index_daily,
-            "A-Stock-Data",
-            "baidu",
-        ),
-        IndexReferenceSource(
-            "astock_data_eastmoney",
-            _FIELDS,
-            fetch_astock_data_eastmoney_index_daily,
-            "A-Stock-Data",
-            "eastmoney",
-        ),
-        IndexReferenceSource(
-            "astock_data_tencent",
-            ("open", "high", "low", "close", "volume"),
-            fetch_astock_data_tencent_index_daily,
-            "A-Stock-Data",
-            "tencent",
         ),
     )
 
@@ -147,7 +120,6 @@ def crosscheck_index_daily_consensus(
             "status_counts": {},
             "sources": {},
             "rows": [],
-            "astock_data": astock_data_source_metadata(),
         }
     required = {"symbol", "date", *_FIELDS}
     missing = sorted(required - set(tickflow_rows.columns))
@@ -309,7 +281,6 @@ def crosscheck_index_daily_consensus(
         "derived_evidence": {
             "tickflow_uint32_recovery": "negative_volume_plus_2^32_exact_match"
         },
-        "astock_data": astock_data_source_metadata(),
         "rows": results,
     }
 
