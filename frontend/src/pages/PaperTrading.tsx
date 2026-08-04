@@ -205,26 +205,30 @@ function cumulativeBenchmarkReturn(rows: EquityPoint[], benchmarkRows: KlineRow[
 function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoint[]; benchmarkRows: KlineRow[]; benchmarkLabel: string }) {
   const theme = useChartTheme()
   const containerRef = useRef<HTMLDivElement>(null)
+  const [zoomRange, setZoomRange] = useState({ start: 0, end: 100 })
+  const dailyRows = useMemo(() => {
+    const lastRowByDate = new Map<string, EquityPoint>()
+    rows.forEach(row => lastRowByDate.set(row.timestamp.slice(0, 10), row))
+    return [...lastRowByDate.values()]
+  }, [rows])
+  const zoomed = zoomRange.start > 0.01 || zoomRange.end < 99.99
   const option = useMemo<EChartsOption | null>(() => {
-    if (!rows.length) return null
-    const previous = containerRef.current ? echarts.getInstanceByDom(containerRef.current) : null
-    const previousZoom = (previous?.getOption() as any)?.dataZoom?.[0]
-    const zoomStart = typeof previousZoom?.start === 'number' ? previousZoom.start : undefined
-    const zoomEnd = typeof previousZoom?.end === 'number' ? previousZoom.end : undefined
-    const zoomRange = {
-      ...(zoomStart !== undefined ? { start: zoomStart } : {}),
-      ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
-    }
-    const returns = rows.map(row => (Number(row.nav) - 1) * 100)
+    if (!dailyRows.length) return null
+    const zoomStart = Math.max(0, Math.min(100, zoomRange.start))
+    const zoomEnd = Math.max(zoomStart, Math.min(100, zoomRange.end))
+    const startIndex = Math.round((dailyRows.length - 1) * zoomStart / 100)
+    const endIndex = Math.round((dailyRows.length - 1) * zoomEnd / 100)
+    const returnBase = Number(dailyRows[startIndex]?.nav)
+    const returns = dailyRows.map(row => Number.isFinite(returnBase) && returnBase > 0 ? (Number(row.nav) / returnBase - 1) * 100 : null)
     const benchmarkByDate = new Map<string, number>()
     benchmarkRows.forEach(row => {
       const close = Number(row.close)
       if (Number.isFinite(close) && close > 0) benchmarkByDate.set(String(row.date).slice(0, 10), close)
     })
-    const benchmarkBase = rows
+    const benchmarkBase = dailyRows.slice(startIndex, endIndex + 1)
       .map(row => benchmarkByDate.get(row.timestamp.slice(0, 10)))
       .find(value => value != null)
-    const benchmarkReturns = rows.map(row => {
+    const benchmarkReturns = dailyRows.map(row => {
       const close = benchmarkByDate.get(row.timestamp.slice(0, 10))
       return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
     })
@@ -232,8 +236,8 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
       grid: { left: 62, right: 52, top: 24, bottom: 58 },
-      dataZoom: rows.length > 1 ? [
-        { type: 'inside', filterMode: 'filter', ...zoomRange },
+      dataZoom: dailyRows.length > 1 ? [
+        { type: 'inside', filterMode: 'filter', start: zoomStart, end: zoomEnd },
         {
           type: 'slider',
           height: 14,
@@ -241,7 +245,8 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
           borderColor: theme.border,
           fillerColor: theme.zoomFill,
           textStyle: { color: theme.text },
-          ...zoomRange,
+          start: zoomStart,
+          end: zoomEnd,
         },
       ] : undefined,
       tooltip: {
@@ -251,36 +256,58 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
         textStyle: { color: theme.tooltipText, fontSize: 11 },
         formatter: (params: any) => {
           const items = (Array.isArray(params) ? params : [params]).filter(item => item?.value != null && Number.isFinite(Number(item.value)))
-          const axisValue = String(items[0]?.axisValue ?? '')
+          const axisValue = formatTime(String(items[0]?.axisValue ?? ''))
           const lines = items.map(item => {
             const value = Number(item.value)
             return `<div>${String(item.seriesName ?? '')} ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
           }).join('')
-          return `<div>${axisValue}</div>${lines}`
+          return `<div>${axisValue}${zoomed ? ' · 区间收益' : ''}</div>${lines}`
         },
       },
       xAxis: {
         type: 'category',
-        data: rows.map(row => formatTime(row.timestamp)),
+        data: dailyRows.map(row => row.timestamp),
         boundaryGap: false,
-        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true, showMinLabel: true, showMaxLabel: true, formatter: (value: string) => value.split(' ')[0] },
+        axisLabel: {
+          color: theme.text,
+          fontSize: 10,
+          hideOverlap: true,
+          showMinLabel: true,
+          showMaxLabel: true,
+          formatter: (value: string) => value.slice(0, 10),
+        },
         axisLine: { lineStyle: { color: theme.border } },
       },
       yAxis: {
-        type: 'value', scale: true,
-        min: (range: { min: number }) => Math.min(0, range.min),
+        type: 'value', scale: true, min: 'dataMin',
         axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
         splitLine: { lineStyle: { color: theme.grid } },
       },
       series: [
-        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
-        { type: 'line', name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, connectNulls: false, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
+        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
+        { type: 'line', name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
       ],
     }
-  }, [benchmarkLabel, benchmarkRows, rows, theme])
+  }, [benchmarkLabel, benchmarkRows, dailyRows, theme, zoomRange, zoomed])
   const ref = useECharts(option, [option], containerRef)
+  useEffect(() => {
+    const chart = containerRef.current ? echarts.getInstanceByDom(containerRef.current) : null
+    if (!chart) return
+    const handleZoom = () => {
+      const zoom = (chart.getOption() as any)?.dataZoom?.[0]
+      if (typeof zoom?.start !== 'number' || typeof zoom?.end !== 'number') return
+      setZoomRange(previous => Math.abs(previous.start - zoom.start) < 0.01 && Math.abs(previous.end - zoom.end) < 0.01
+        ? previous
+        : { start: zoom.start, end: zoom.end })
+    }
+    chart.on('dataZoom', handleZoom)
+    return () => {
+      if (!chart.isDisposed()) chart.off('dataZoom', handleZoom)
+    }
+  }, [dailyRows.length])
   return <div className="relative h-56 w-full">
     <div ref={ref} className="h-full w-full" />
+    {zoomed ? <span className="pointer-events-none absolute left-2 top-1 text-[10px] text-muted">区间收益</span> : null}
     {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
   </div>
 }
