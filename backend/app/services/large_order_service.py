@@ -325,6 +325,7 @@ class LargeOrderService:
                 "max_order_amount": round(metrics["max_order"], 2),
                 "cancel_rate": self._cancel_rate_locked(state),
                 "change_pct": round(change_pct, 6),
+                "last_seen_ts": round(float(latest["ts"]), 3) if latest.get("ts") is not None else None,
                 "freshness_ms": max(0, int((now_ts - float(latest.get("ts") or now_ts)) * 1000)),
                 "large_threshold": round(metrics["threshold"], 2),
                 "zscore": round(metrics["zscore"], 3),

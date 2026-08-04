@@ -35,6 +35,7 @@ def test_snapshot_delta_ignores_amount_reset_and_builds_proxy_candidate():
     assert ranking["count"] == 1
     assert ranking["rows"][0]["source"] == "tick_proxy"
     assert ranking["rows"][0]["confidence"] == "medium"
+    assert ranking["rows"][0]["last_seen_ts"] is not None
     service._process_snapshot([{"symbol": "000001.SZ", "name": "平安银行", "last_price": 10, "amount": 100, "volume": 1}])
     assert service.ranking(60)["count"] == 0
     assert quote.events >= 2

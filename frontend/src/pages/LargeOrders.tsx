@@ -34,6 +34,17 @@ function freshness(value: number | null | undefined) {
   return `${Math.round(n / 1000)} 秒前`
 }
 
+function clockTime(value: number | null | undefined) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '--'
+  return new Date(n * 1000).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+}
+
 function confidenceMeta(value: string) {
   if (value === 'high') return { label: '高置信度', cls: 'text-bull bg-bull/10 border-bull/25' }
   if (value === 'medium') return { label: '中置信度', cls: 'text-warning bg-warning/10 border-warning/25' }
@@ -198,9 +209,9 @@ export function LargeOrders() {
                 <EmptyState icon={BarChart3} title="暂无大单候选" hint="等待实时行情增量，或检查实时行情与开盘啦授权状态。" />
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[980px] text-left text-xs">
+                  <table className="w-full min-w-[1040px] text-left text-xs">
                     <thead className="border-b border-border bg-surface text-muted">
-                      <tr>{['标的', '评分', '置信度', '主动买额', '主动卖额', '净买额', '买入占比', '最大单笔', '撤单率', '涨跌幅', '新鲜度'].map(title => <th key={title} className="whitespace-nowrap px-3 py-2.5 font-medium">{title}</th>)}</tr>
+                      <tr>{['标的', '时间', '评分', '置信度', '主动买额', '主动卖额', '净买额', '买入占比', '最大单笔', '撤单率', '涨跌幅', '新鲜度'].map(title => <th key={title} className="whitespace-nowrap px-3 py-2.5 font-medium">{title}</th>)}</tr>
                     </thead>
                     <tbody>
                       {rows.map(row => {
@@ -214,6 +225,7 @@ export function LargeOrders() {
                                 <div className="mt-0.5 font-mono text-[11px] text-muted">{row.symbol}</div>
                               </button>
                             </td>
+                            <td className="whitespace-nowrap px-3 py-3 font-mono text-muted">{clockTime(row.last_seen_ts)}</td>
                             <td className="px-3 py-3"><Score value={row.score} /></td>
                             <td className="px-3 py-3"><span className={cn('whitespace-nowrap rounded border px-1.5 py-0.5 text-[11px]', meta.cls)}>{meta.label}</span></td>
                             <td className="px-3 py-3 font-mono text-bull">{money(row.active_buy_amount)}</td>

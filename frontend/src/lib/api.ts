@@ -317,6 +317,7 @@ export interface LargeOrderRow {
   max_order_amount: number
   cancel_rate: number
   change_pct: number
+  last_seen_ts: number | null
   freshness_ms: number
   large_threshold: number
   zscore: number
