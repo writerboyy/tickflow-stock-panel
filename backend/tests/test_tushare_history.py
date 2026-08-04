@@ -197,6 +197,110 @@ def test_adjustment_and_minute_phases_are_resumable(tmp_path):
     assert item["last_page_hash"]
 
 
+def test_adjustment_resume_skips_a_completed_empty_response(tmp_path):
+    class EmptyAdjustmentClient:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, api_name, params):
+            self.calls += 1
+            fields = ("ts_code", "trade_date", "adj_factor")
+            raw = {"code": 0, "data": {"fields": list(fields), "items": []}}
+            return th.TushareResponse(api_name, 0, "", fields, (), raw)
+
+    client = EmptyAdjustmentClient()
+    config = th.BackfillConfig(
+        tmp_path,
+        run_id="empty-adjustment",
+        phases=("adjustment",),
+        symbols=("000001.SZ",),
+    )
+
+    first = th.TushareHistoryBackfill(config, client).run()
+    second = th.TushareHistoryBackfill(config, client).run()
+
+    assert first["status"] == "completed"
+    assert second["status"] == "completed"
+    assert client.calls == 1
+    item = second["phases_state"]["adjustment"]["items"]["000001.SZ"]
+    assert item["status"] == "completed"
+    assert item["empty"] is True
+
+
+def test_minute_pagination_uses_the_next_cursor_for_each_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(th, "MAX_MINUTE_ROWS", 2)
+
+    class CursorClient:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, api_name, params):
+            self.calls.append((api_name, dict(params)))
+            fields = ("ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount")
+            if len(self.calls) == 1:
+                items = (
+                    ("000001.SZ", "2025-01-02 09:32:00", 10, 10, 10, 10, 1, 10),
+                    ("000001.SZ", "2025-01-02 09:33:00", 10, 10, 10, 10, 1, 10),
+                )
+            else:
+                items = (("000001.SZ", "2025-01-02 09:31:00", 10, 10, 10, 10, 1, 10),)
+            raw = {"code": 0, "data": {"fields": list(fields), "items": [list(item) for item in items]}}
+            return th.TushareResponse(api_name, 0, "", fields, items, raw)
+
+    client = CursorClient()
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="cursor-advance", phases=("stock_minute",), symbols=("000001.SZ",)),
+        client,
+    )
+
+    result = run.run()
+
+    assert result["status"] == "completed"
+    assert [call[1]["end_date"] for call in client.calls] == [
+        f"{date.today().isoformat()} 23:59:59",
+        "2025-01-02 09:31:00",
+    ]
+
+
+def test_minute_pagination_rejects_a_page_that_ignores_the_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(th, "MAX_MINUTE_ROWS", 2)
+
+    class RepeatingPageClient:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, api_name, params):
+            self.calls.append((api_name, dict(params)))
+            fields = ("ts_code", "trade_time", "open", "high", "low", "close", "vol", "amount")
+            if len(self.calls) == 1:
+                items = (
+                    ("000001.SZ", "2025-01-02 09:32:00", 10, 10, 10, 10, 1, 10),
+                    ("000001.SZ", "2025-01-02 09:33:00", 10, 10, 10, 10, 1, 10),
+                )
+            else:
+                items = (
+                    ("000001.SZ", "2025-01-02 09:30:00", 10, 10, 10, 10, 1, 10),
+                    ("000001.SZ", "2025-01-02 09:32:00", 10, 10, 10, 10, 1, 10),
+                )
+            raw = {"code": 0, "data": {"fields": list(fields), "items": [list(item) for item in items]}}
+            return th.TushareResponse(api_name, 0, "", fields, items, raw)
+
+    client = RepeatingPageClient()
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="repeated-page", phases=("stock_minute",), symbols=("000001.SZ",)),
+        client,
+    )
+
+    result = run.run()
+
+    assert result["status"] == "incomplete"
+    assert len(client.calls) == 2
+    item = result["phases_state"]["stock_minute"]["items"]["000001.SZ"]
+    assert item["status"] == "failed"
+    assert item["error"] == "BackfillBlocked"
+    assert "after requested cursor" in item["message"]
+
+
 def test_adjustment_and_minute_phases_use_four_workers(tmp_path):
     symbols = tuple(f"00000{index}.SZ" for index in range(1, 5))
 

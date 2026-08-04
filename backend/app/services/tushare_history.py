@@ -1024,7 +1024,7 @@ class TushareHistoryBackfill:
             assert_disk_reserve(self.config.data_dir)
             state = self._item_state("adjustment", symbol)
             path = self.run_root / "batches" / "adjustment" / kind / f"{_safe_part(symbol)}.parquet"
-            if state.get("status") == "completed" and path.exists():
+            if state.get("status") == "completed" and (path.exists() or state.get("empty") is True):
                 return
             try:
                 params: dict[str, Any] = {"ts_code": symbol}
@@ -1157,9 +1157,15 @@ class TushareHistoryBackfill:
                     valid, audit = validate_minute_frame(frame)
                     timestamps = [item for item in valid["datetime"].to_list()] if not valid.is_empty() else []
                     oldest = min(timestamps) if timestamps else None
+                    newest = max(timestamps) if timestamps else None
                     previous = datetime.fromisoformat(cursor)
                     if oldest is None or oldest > previous:
                         raise BackfillBlocked(f"minute cursor did not strictly decrease for {symbol}")
+                    if newest is None or newest > previous:
+                        raise BackfillBlocked(f"minute provider returned rows after requested cursor for {symbol}")
+                    page_hash = stable_content_hash(response.raw)
+                    if page_hash == state.get("last_page_hash"):
+                        raise BackfillBlocked(f"minute provider repeated the previous page for {symbol}")
                     next_cursor = oldest - timedelta(minutes=1)
                     if next_cursor >= previous:
                         raise BackfillBlocked(f"minute cursor did not strictly decrease for {symbol}")
@@ -1170,9 +1176,10 @@ class TushareHistoryBackfill:
                             "pages": page_number + 1,
                             "cursor": next_cursor.strftime("%Y-%m-%d %H:%M:%S"),
                             "rows": int(state.get("rows", 0)) + valid.height,
-                            "last_page_hash": stable_content_hash(response.raw),
+                            "last_page_hash": page_hash,
                         }
                     )
+                    cursor = state["cursor"]
                     self._record(
                         phase_name,
                         symbol,
