@@ -23,7 +23,8 @@ import {
 } from 'lucide-react'
 import * as echarts from 'echarts'
 import type { EChartsOption } from 'echarts'
-import { api, type CreatePaperAccount, type PaperAccount, type PaperEvent, type PaperFill, type PaperMarketMode, type PaperOrder } from '@/lib/api'
+import { api, type CreatePaperAccount, type KlineRow, type PaperAccount, type PaperEvent, type PaperFill, type PaperMarketMode, type PaperOrder } from '@/lib/api'
+import { QK } from '@/lib/queryKeys'
 import { DatePicker } from '@/components/DatePicker'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
@@ -36,6 +37,7 @@ import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const PAPER_BENCHMARK_SYMBOL = '000300.SH'
 
 const MODE_LABEL: Record<string, string> = {
   bar_1m: '1分钟K线',
@@ -187,7 +189,7 @@ function orderStatusClass(status: string) {
   return 'text-muted'
 }
 
-function ReturnChart({ rows }: { rows: EquityPoint[] }) {
+function ReturnChart({ rows, benchmarkRows }: { rows: EquityPoint[]; benchmarkRows: KlineRow[] }) {
   const theme = useChartTheme()
   const containerRef = useRef<HTMLDivElement>(null)
   const option = useMemo<EChartsOption | null>(() => {
@@ -197,21 +199,31 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
     const zoomStart = typeof previousZoom?.start === 'number' ? previousZoom.start : undefined
     const zoomEnd = typeof previousZoom?.end === 'number' ? previousZoom.end : undefined
     const returns = rows.map(row => (Number(row.nav) - 1) * 100)
+    const benchmarkByDate = new Map<string, number>()
+    benchmarkRows.forEach(row => {
+      const close = Number(row.close)
+      if (Number.isFinite(close) && close > 0) benchmarkByDate.set(String(row.date).slice(0, 10), close)
+    })
+    const benchmarkBase = rows
+      .map(row => benchmarkByDate.get(row.timestamp.slice(0, 10)))
+      .find(value => value != null)
+    const benchmarkReturns = rows.map(row => {
+      const close = benchmarkByDate.get(row.timestamp.slice(0, 10))
+      return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
+    })
     return {
       animation: false,
-      grid: { left: 62, right: 18, top: 20, bottom: 34 },
+      legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
+      grid: { left: 62, right: 18, top: 24, bottom: 34 },
       dataZoom: rows.length > 1 ? [
         { type: 'inside', filterMode: 'filter' },
         {
           type: 'slider',
-          height: 14,
-          bottom: 4,
+          height: 16,
+          bottom: 8,
           borderColor: theme.border,
-          backgroundColor: theme.zoomFill,
-          fillerColor: 'rgba(59,130,246,0.18)',
-          handleStyle: { color: theme.text, borderColor: '#94a3b8' },
-          textStyle: { color: theme.text, fontSize: 10 },
-          brushSelect: false,
+          fillerColor: theme.zoomFill,
+          textStyle: { color: theme.text },
           ...(zoomStart !== undefined ? { start: zoomStart } : {}),
           ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
         },
@@ -222,9 +234,13 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
         borderColor: theme.tooltipBorder,
         textStyle: { color: theme.tooltipText, fontSize: 11 },
         formatter: (params: any) => {
-          const item = Array.isArray(params) ? params[0] : params
-          const value = Number(item?.value ?? 0)
-          return `<div>${String(item?.axisValue ?? '')}</div><div>累计收益 ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
+          const items = (Array.isArray(params) ? params : [params]).filter(item => item?.value != null && Number.isFinite(Number(item.value)))
+          const axisValue = String(items[0]?.axisValue ?? '')
+          const lines = items.map(item => {
+            const value = Number(item.value)
+            return `<div>${String(item.seriesName ?? '')} ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
+          }).join('')
+          return `<div>${axisValue}</div>${lines}`
         },
       },
       xAxis: {
@@ -240,9 +256,12 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
         axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
         splitLine: { lineStyle: { color: theme.grid } },
       },
-      series: [{ type: 'line', name: '累计收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } }],
+      series: [
+        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
+        { type: 'line', name: '沪深300', data: benchmarkReturns, showSymbol: false, connectNulls: false, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
+      ],
     }
-  }, [rows, theme])
+  }, [benchmarkRows, rows, theme])
   const ref = useECharts(option, [option], containerRef)
   return <div className="relative h-52 w-full">
     <div ref={ref} className="h-full w-full" />
@@ -499,6 +518,15 @@ export function PaperTrading() {
 
   const accountState = account?.account
   const equityRows = accountState?.equity_curve ?? []
+  const benchmarkStart = equityRows[0]?.timestamp.slice(0, 10) ?? ''
+  const benchmarkEnd = equityRows.at(-1)?.timestamp.slice(0, 10) ?? ''
+  const benchmarkQuery = useQuery({
+    queryKey: QK.indexDaily(PAPER_BENCHMARK_SYMBOL, benchmarkStart, benchmarkEnd),
+    queryFn: () => api.indexDaily(PAPER_BENCHMARK_SYMBOL, 120, { start: benchmarkStart, end: benchmarkEnd }),
+    enabled: Boolean(benchmarkStart && benchmarkEnd),
+    staleTime: 300_000,
+  })
+  const benchmarkRows = benchmarkQuery.data?.rows ?? []
   const decisionEvents = signalsQuery.data?.signals ?? []
   const allFills = accountState?.fills ?? []
   const allOrders = accountState?.orders ?? []
@@ -619,7 +647,7 @@ export function PaperTrading() {
         </section>
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
-          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="text-[11px] font-medium">收益曲线</div><ReturnChart rows={visibleEquityRows} /></div>
+          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex items-center justify-between gap-2 text-[11px] font-medium"><span>收益曲线</span>{benchmarkQuery.isError ? <span className="text-[10px] font-normal text-danger">沪深300暂不可用</span> : null}</div><ReturnChart rows={visibleEquityRows} benchmarkRows={benchmarkRows} /></div>
           <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} actualHoldingSymbols={positions.map(([symbol]) => symbol)} /></div>
         </section>
 
