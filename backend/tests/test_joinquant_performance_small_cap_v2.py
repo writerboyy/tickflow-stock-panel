@@ -38,3 +38,20 @@ def test_joinquant_strategy_keeps_v2_core_parameters_in_source():
     assert "回退微盘指数风控" not in source
     assert 'fields=["money"]' in source
     assert 'fields=["amount"]' not in source
+
+
+def test_joinquant_strategy_uses_numpy_compatible_quantile_without_numpy_quantile():
+    source = STRATEGY_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(STRATEGY_PATH))
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_linear_quantile"
+    )
+    namespace = {"pd": __import__("pandas")}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(STRATEGY_PATH), "exec"), namespace)
+
+    quantile = namespace["_linear_quantile"]
+    assert quantile([1, 2, 3, 4], 0.25) == 1.75
+    assert quantile([1, 2, 3, 4], 0.97) == 3.91
+    assert "np.quantile" not in source

@@ -515,14 +515,29 @@ def load_style_liquidity_thresholds(context):
     values = pd.to_numeric(history["cap_ratio"], errors="coerce").dropna()
     if values.empty:
         raise ValueError("大小盘成交占比择时无法计算历史分位")
-    entry = float(np.quantile(values.to_numpy(), g.style_entry_quantile))
-    recovery = float(np.quantile(values.to_numpy(), g.style_recovery_quantile))
+    entry = _linear_quantile(values.tolist(), g.style_entry_quantile)
+    recovery = _linear_quantile(values.tolist(), g.style_recovery_quantile)
     return {
         "entry_threshold": entry,
         "recovery_threshold": recovery,
         "history_start": str(history_start),
         "history_end": str(history_end),
     }
+
+
+def _linear_quantile(values, quantile):
+    """Calculate NumPy's default linear quantile without JoinQuant NumPy APIs."""
+    numbers = sorted(float(value) for value in values if pd.notna(value))
+    if not numbers:
+        raise ValueError("大小盘成交占比择时无法计算历史分位")
+    q = float(quantile)
+    if q < 0.0 or q > 1.0:
+        raise ValueError("大小盘成交占比分位必须在 [0, 1] 范围内")
+    position = (len(numbers) - 1) * q
+    lower = int(position)
+    upper = min(lower + 1, len(numbers) - 1)
+    weight = position - lower
+    return numbers[lower] + (numbers[upper] - numbers[lower]) * weight
 
 
 def strategy_start_date(context):
