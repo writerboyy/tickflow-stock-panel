@@ -36,6 +36,11 @@ PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES = (
     "metrics",
     "balance_sheet",
 )
+SCHEDULED_OPENING_RETRY_MINUTES = 5
+
+
+class ScheduledOpeningDataPending(RuntimeError):
+    """实时纸盘的开盘分钟 K 尚未落库，等待下一次行情时钟重试。"""
 
 
 @dataclass
@@ -1548,6 +1553,7 @@ def advance_scheduled_session(
     timeframe: str,
     *,
     finalize: bool = False,
+    allow_opening_data_retry: bool = False,
 ) -> None:
     engine.begin_session(day)
     due_times = sorted({
@@ -1586,6 +1592,13 @@ def advance_scheduled_session(
                     event_timestamp = first_continuous_minute
                     snapshot = opening_snapshot
             if event_timestamp == timestamp:
+                if (
+                    allow_opening_data_retry
+                    and cutoff < timestamp + timedelta(minutes=SCHEDULED_OPENING_RETRY_MINUTES)
+                ):
+                    raise ScheduledOpeningDataPending(
+                        f"{day.isoformat()} 09:30 定时任务等待可交易分钟K，下一次行情同步将重试"
+                    )
                 raise ValueError(
                     f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
                 )

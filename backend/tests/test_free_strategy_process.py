@@ -24,6 +24,7 @@ from app.free_strategy.process import (
     _set_daily_row,
     advance_scheduled_session,
     execute_backtest,
+    ScheduledOpeningDataPending,
 )
 from app.services.stock_dividends import (
     import_xdxr_cash_dividends,
@@ -1143,6 +1144,80 @@ def run(context):
             datetime(2024, 1, 2, 9, 31),
             "stock",
             "1m",
+        )
+
+    assert "executed" not in engine.context.state
+
+
+def test_realtime_scheduled_open_retries_until_first_minute_bar_arrives():
+    source = """
+def initialize(context):
+    context.schedule(run, '09:30', symbols=['X'])
+
+def run(context):
+    context.state['executed_at'] = context.now.isoformat()
+"""
+    repo = ScheduledRepository([])
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    market = scheduled_market("X")
+
+    with pytest.raises(ScheduledOpeningDataPending):
+        advance_scheduled_session(
+            repo,
+            engine,
+            market,
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 2, 9, 31),
+            "stock",
+            "1m",
+            allow_opening_data_retry=True,
+        )
+    assert "executed_at" not in engine.context.state
+
+    repo.rows.append(minute_row("X", datetime(2024, 1, 2, 9, 31), 10.0))
+    advance_scheduled_session(
+        repo,
+        engine,
+        market,
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 9, 31),
+        "stock",
+        "1m",
+        allow_opening_data_retry=True,
+    )
+
+    assert engine.context.state["executed_at"] == "2024-01-02T09:31:00"
+    assert engine.callbacks_executed == 1
+
+
+def test_realtime_scheduled_open_still_fails_closed_after_retry_window():
+    source = """
+def initialize(context):
+    context.schedule(run, '09:30', symbols=['X'])
+
+def run(context):
+    context.state['executed'] = True
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    with pytest.raises(ValueError, match="09:30 定时任务缺少可交易分钟K"):
+        advance_scheduled_session(
+            ScheduledRepository([]),
+            engine,
+            scheduled_market("X"),
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 2, 9, 35),
+            "stock",
+            "1m",
+            allow_opening_data_retry=True,
         )
 
     assert "executed" not in engine.context.state

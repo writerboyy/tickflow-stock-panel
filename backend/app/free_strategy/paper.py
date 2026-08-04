@@ -1068,6 +1068,7 @@ def _process_scheduled_day(
     timeframe: str,
     *,
     finalize: bool,
+    allow_opening_data_retry: bool = False,
     notify: Any = None,
 ) -> dict[str, Any]:
     from app.free_strategy.process import advance_scheduled_session
@@ -1085,6 +1086,7 @@ def _process_scheduled_day(
         asset_type,
         timeframe,
         finalize=finalize,
+        allow_opening_data_retry=allow_opening_data_retry,
     )
     timestamp = engine._last_timestamp  # noqa: SLF001
     if timestamp is None:
@@ -1122,6 +1124,8 @@ def _catch_up_scheduled(
     asset_type: str,
     timeframe: str,
 ) -> dict[str, Any]:
+    from app.free_strategy.process import ScheduledOpeningDataPending
+
     last_value = (
         current.get("last_bar")
         or current.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
@@ -1176,19 +1180,28 @@ def _catch_up_scheduled(
             datetime.combine(trading_day, clock_time(15, 0))
             if trading_day < cutoff.date() else cutoff
         )
-        current = _process_scheduled_day(
-            store,
-            account_id,
-            current,
-            engine,
-            repo,
-            market,
-            trading_day,
-            day_cutoff,
-            asset_type,
-            timeframe,
-            finalize=day_cutoff.time() >= clock_time(15, 0),
-        )
+        try:
+            current = _process_scheduled_day(
+                store,
+                account_id,
+                current,
+                engine,
+                repo,
+                market,
+                trading_day,
+                day_cutoff,
+                asset_type,
+                timeframe,
+                finalize=day_cutoff.time() >= clock_time(15, 0),
+                allow_opening_data_retry=trading_day == cutoff.date(),
+            )
+        except ScheduledOpeningDataPending:
+            sync.update({"phase": "live", "updated_at": now_iso()})
+            current["sync"] = dict(sync)
+            return store.update_fields(account_id, {
+                "last_error": None,
+                "sync": dict(sync),
+            })
         sync.update({
             "through": current.get("last_bar"),
             "processed_days": index,
@@ -1356,7 +1369,7 @@ def _catch_up_bars(
 
 
 def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadline: Any = None) -> None:
-    from app.free_strategy.process import MarketData
+    from app.free_strategy.process import MarketData, ScheduledOpeningDataPending
     from app.tickflow.repository import DataStore, KlineRepository
 
     account_root = Path(root) / account_id
@@ -1507,6 +1520,7 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                         "bar_30m": "30m",
                     }.get(state_market_mode(current), "1d"),
                     finalize=cutoff.time() >= clock_time(15, 0),
+                    allow_opening_data_retry=True,
                     notify=notify,
                 )
                 sync = dict(current.get("sync", {}))
@@ -1565,6 +1579,16 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                 current = store.update_fields(account_id, {"sync": sync})
             else:
                 continue
+        except ScheduledOpeningDataPending:
+            # The first opening minute can arrive after the clock boundary. Keep the
+            # account subscribed and let the next closed-minute clock retry it.
+            sync = dict(current.get("sync", {}))
+            sync.update({"phase": "live", "updated_at": now_iso()})
+            current = store.update_fields(account_id, {
+                "last_error": None,
+                "sync": sync,
+            })
+            continue
         except Exception as exc:  # noqa: BLE001
             sync = dict(current.get("sync", {}))
             sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
