@@ -579,8 +579,9 @@ def _get_stock_list(context) -> list[str]:
         raise ValueError(INDUSTRY_DATA_ERROR)
     previous_date = _previous_trading_date(context, records)
     cache_date = previous_date.isoformat()
-    if state.get("stock_list_cache_date") == cache_date:
-        return list(state.get("stock_list_cache", []))
+    cached = state.get("stock_list_cache", [])
+    if state.get("stock_list_cache_date") == cache_date and cached:
+        return list(cached)
     initial, bars = _eligible_market_records(context)
     symbols = [str(item["symbol"]) for item in initial]
     history = context.history_batch(symbols, count=HISTORY_DAYS, timeframe="1d")
@@ -591,8 +592,12 @@ def _get_stock_list(context) -> list[str]:
     }
     ranked = _rank_history_candidates(history, bars, reliable_limit_symbols)
     final = _select_industries(ranked, initial)
-    state["stock_list_cache_date"] = cache_date
-    state["stock_list_cache"] = list(final)
+    if final:
+        state["stock_list_cache_date"] = cache_date
+        state["stock_list_cache"] = list(final)
+    else:
+        state["stock_list_cache_date"] = None
+        state["stock_list_cache"] = []
     context.log(f"小市值候选：{final}")
     return final
 

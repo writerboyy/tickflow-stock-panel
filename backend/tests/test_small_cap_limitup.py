@@ -529,3 +529,67 @@ def test_stock_selection_is_not_computable_without_industry_snapshot():
 
     with pytest.raises(ValueError, match="EasyTDX 申万行业快照"):
         _get_stock_list(context)
+
+
+def test_empty_stock_list_cache_is_recomputed_for_same_trading_date(monkeypatch):
+    context = SimpleNamespace(
+        now=datetime(2026, 8, 4, 10, 30),
+        state={"small_cap_limitup": {
+            "stock_list_cache_date": "2026-08-03",
+            "stock_list_cache": [],
+        }},
+        instruments=lambda _asset: [{"symbol": "A", "industry_sw": "I"}],
+        history_batch=lambda *_args, **_kwargs: {"A": [SimpleNamespace()]},
+        log=lambda _message: None,
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._previous_trading_date",
+        lambda _context, _records: date(2026, 8, 3),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._eligible_market_records",
+        lambda _context: ([{"symbol": "A", "industry_sw": "I"}], {"A": object()}),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._rank_history_candidates",
+        lambda _history, _bars, _reliable: ["A"],
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._select_industries",
+        lambda _ranked, _records: ["A"],
+    )
+
+    assert _get_stock_list(context) == ["A"]
+    assert context.state["small_cap_limitup"]["stock_list_cache"] == ["A"]
+
+
+def test_empty_selection_is_not_cached(monkeypatch):
+    context = SimpleNamespace(
+        now=datetime(2026, 8, 4, 10, 30),
+        state={"small_cap_limitup": {
+            "stock_list_cache_date": None,
+            "stock_list_cache": [],
+        }},
+        instruments=lambda _asset: [{"symbol": "A", "industry_sw": "I"}],
+        history_batch=lambda *_args, **_kwargs: {"A": [SimpleNamespace()]},
+        log=lambda _message: None,
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._previous_trading_date",
+        lambda _context, _records: date(2026, 8, 3),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._eligible_market_records",
+        lambda _context: ([{"symbol": "A", "industry_sw": "I"}], {"A": object()}),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._rank_history_candidates",
+        lambda _history, _bars, _reliable: [],
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.small_cap_limitup._select_industries",
+        lambda _ranked, _records: [],
+    )
+
+    assert _get_stock_list(context) == []
+    assert context.state["small_cap_limitup"]["stock_list_cache_date"] is None
