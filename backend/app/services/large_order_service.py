@@ -24,6 +24,11 @@ from app.services.ingestion_manifest import stable_content_hash
 
 logger = logging.getLogger(__name__)
 
+_LARGE_ORDER_WEBHOOK_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="large-order-webhook",
+)
+
 WINDOWS = (15, 60, 300)
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
@@ -557,6 +562,7 @@ class LargeOrderService:
             if alerts:
                 self._quote_service.push_alerts(alerts)
                 self._persist_alerts(alerts)
+                self._dispatch_alert_notifications(alerts)
 
     def _build_alerts_locked(self, symbol: str) -> list[dict]:
         if self._quote_service is not None:
@@ -600,6 +606,38 @@ class LargeOrderService:
                 alert_store.append_many(self._app_state.repo.store.data_dir, alerts)
         except Exception:  # noqa: BLE001
             logger.debug("大单告警归档失败", exc_info=True)
+
+    @staticmethod
+    def _dispatch_alert_notifications(alerts: list[dict]) -> None:
+        """按全局消息渠道异步投递大单告警，不阻塞行情或深挖线程。"""
+        from app.services import preferences, webhook_adapter
+
+        channels = set(preferences.get_webhook_default_channels())
+        if not channels:
+            return
+        feishu_url = preferences.get_feishu_webhook_url()
+        feishu_secret = preferences.get_feishu_webhook_secret()
+        wecom_url = preferences.get_wecom_webhook_url()
+        for alert in alerts:
+            title = str(alert.get("rule_name") or "实时大单")
+            body = str(alert.get("message") or "").strip()
+            if not body:
+                continue
+            if "feishu" in channels and feishu_url:
+                _LARGE_ORDER_WEBHOOK_EXECUTOR.submit(
+                    webhook_adapter.send_feishu,
+                    feishu_url,
+                    title,
+                    body,
+                    feishu_secret,
+                )
+            if "wecom" in channels and wecom_url:
+                _LARGE_ORDER_WEBHOOK_EXECUTOR.submit(
+                    webhook_adapter.send_wecom,
+                    wecom_url,
+                    title,
+                    body,
+                )
 
     def status(self) -> dict:
         quote_status = self._quote_service.status() if self._quote_service is not None else {}

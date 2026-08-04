@@ -4,6 +4,7 @@ from datetime import date
 import asyncio
 
 from app.services.large_order_service import LargeOrderService
+from app.services import large_order_service, webhook_adapter
 from app.services.large_order_store import LargeOrderStore
 
 
@@ -26,6 +27,46 @@ class FakeQuoteService:
 
     def status(self):
         return {"quote_age_ms": 100, "interval_s": 6, "symbol_count": 1, "market_phase": "continuous", "is_trading_hours": True}
+
+
+class InlineExecutor:
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, function, *args):
+        self.calls.append((function, args))
+        return function(*args)
+
+
+def test_large_order_alert_uses_selected_wecom_channel(monkeypatch):
+    executor = InlineExecutor()
+    deliveries = []
+    monkeypatch.setattr(large_order_service, "_LARGE_ORDER_WEBHOOK_EXECUTOR", executor)
+    monkeypatch.setattr("app.services.preferences.get_webhook_default_channels", lambda: ["wecom"])
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "feishu-url")
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_secret", lambda: "secret")
+    monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "wecom-url")
+    monkeypatch.setattr(
+        webhook_adapter,
+        "send_wecom",
+        lambda *args: deliveries.append(args) or True,
+    )
+
+    LargeOrderService()._dispatch_alert_notifications([
+        {
+            "rule_name": "实时大单",
+            "message": "平安银行 主力买入候选：60秒主动净买额 2,000,000 元，评分 88",
+        },
+    ])
+
+    assert deliveries == [
+        (
+            "wecom-url",
+            "实时大单",
+            "平安银行 主力买入候选：60秒主动净买额 2,000,000 元，评分 88",
+        ),
+    ]
+    assert len(executor.calls) == 1
 
 
 def test_snapshot_delta_ignores_amount_reset_and_builds_proxy_candidate():
