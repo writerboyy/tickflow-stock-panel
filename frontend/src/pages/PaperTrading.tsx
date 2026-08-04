@@ -21,6 +21,7 @@ import {
   WalletCards,
   Wifi,
 } from 'lucide-react'
+import * as echarts from 'echarts'
 import type { EChartsOption } from 'echarts'
 import { api, type CreatePaperAccount, type PaperAccount, type PaperEvent, type PaperFill, type PaperMarketMode, type PaperOrder } from '@/lib/api'
 import { DatePicker } from '@/components/DatePicker'
@@ -188,12 +189,33 @@ function orderStatusClass(status: string) {
 
 function ReturnChart({ rows }: { rows: EquityPoint[] }) {
   const theme = useChartTheme()
+  const containerRef = useRef<HTMLDivElement>(null)
   const option = useMemo<EChartsOption | null>(() => {
     if (!rows.length) return null
+    const previous = containerRef.current ? echarts.getInstanceByDom(containerRef.current) : null
+    const previousZoom = (previous?.getOption() as any)?.dataZoom?.[0]
+    const zoomStart = typeof previousZoom?.start === 'number' ? previousZoom.start : undefined
+    const zoomEnd = typeof previousZoom?.end === 'number' ? previousZoom.end : undefined
     const returns = rows.map(row => (Number(row.nav) - 1) * 100)
     return {
       animation: false,
       grid: { left: 62, right: 18, top: 20, bottom: 34 },
+      dataZoom: rows.length > 1 ? [
+        { type: 'inside', filterMode: 'filter' },
+        {
+          type: 'slider',
+          height: 14,
+          bottom: 4,
+          borderColor: theme.border,
+          backgroundColor: theme.zoomFill,
+          fillerColor: 'rgba(59,130,246,0.18)',
+          handleStyle: { color: theme.text, borderColor: '#94a3b8' },
+          textStyle: { color: theme.text, fontSize: 10 },
+          brushSelect: false,
+          ...(zoomStart !== undefined ? { start: zoomStart } : {}),
+          ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
+        },
+      ] : undefined,
       tooltip: {
         trigger: 'axis',
         backgroundColor: theme.tooltipBg,
@@ -221,7 +243,7 @@ function ReturnChart({ rows }: { rows: EquityPoint[] }) {
       series: [{ type: 'line', name: '累计收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } }],
     }
   }, [rows, theme])
-  const ref = useECharts(option, [option])
+  const ref = useECharts(option, [option], containerRef)
   return <div className="relative h-52 w-full">
     <div ref={ref} className="h-full w-full" />
     {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
