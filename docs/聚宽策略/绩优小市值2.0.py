@@ -510,15 +510,15 @@ def calculate_style_liquidity_ratio(previous_date):
         end_date=previous_date,
         frequency="daily",
         count=5,
-        fields=["amount"],
+        fields=["money"],
         panel=False,
         fill_paused=False,
     )
     if caps is None or caps.empty or amounts is None or amounts.empty:
         return None
     caps = caps.dropna(subset=["code", "market_cap"])
-    amounts = amounts.dropna(subset=["code", "amount"])
-    amount_map = amounts.groupby("code")["amount"].sum()
+    amounts = amounts.dropna(subset=["code", "money"])
+    amount_map = amounts.groupby("code")["money"].sum()
     rows = [
         (row.code, float(row.market_cap), float(amount_map.get(row.code, 0)))
         for row in caps.itertuples()

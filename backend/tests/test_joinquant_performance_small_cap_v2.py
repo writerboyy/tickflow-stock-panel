@@ -32,3 +32,5 @@ def test_joinquant_strategy_keeps_v2_core_parameters_in_source():
     assert "g.smallcap_index_threshold = 18.72" in source
     assert "g.style_entry_quantile = 0.97" in source
     assert "g.style_recovery_quantile = 0.70" in source
+    assert 'fields=["money"]' in source
+    assert 'fields=["amount"]' not in source
