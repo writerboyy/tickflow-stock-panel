@@ -208,6 +208,10 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
     const previousZoom = (previous?.getOption() as any)?.dataZoom?.[0]
     const zoomStart = typeof previousZoom?.start === 'number' ? previousZoom.start : undefined
     const zoomEnd = typeof previousZoom?.end === 'number' ? previousZoom.end : undefined
+    const zoomRange = {
+      ...(zoomStart !== undefined ? { start: zoomStart } : {}),
+      ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
+    }
     const returns = rows.map(row => (Number(row.nav) - 1) * 100)
     const benchmarkByDate = new Map<string, number>()
     benchmarkRows.forEach(row => {
@@ -226,7 +230,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
       grid: { left: 62, right: 52, top: 24, bottom: 58 },
       dataZoom: rows.length > 1 ? [
-        { type: 'inside', filterMode: 'filter' },
+        { type: 'inside', filterMode: 'filter', ...zoomRange },
         {
           type: 'slider',
           height: 14,
@@ -234,8 +238,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
           borderColor: theme.border,
           fillerColor: theme.zoomFill,
           textStyle: { color: theme.text },
-          ...(zoomStart !== undefined ? { start: zoomStart } : {}),
-          ...(zoomEnd !== undefined ? { end: zoomEnd } : {}),
+          ...zoomRange,
         },
       ] : undefined,
       tooltip: {
