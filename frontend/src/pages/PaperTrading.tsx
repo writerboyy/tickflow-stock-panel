@@ -37,7 +37,6 @@ import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const PAPER_BENCHMARK_SYMBOL = '000300.SH'
 
 const MODE_LABEL: Record<string, string> = {
   bar_1m: '1分钟K线',
@@ -189,7 +188,18 @@ function orderStatusClass(status: string) {
   return 'text-muted'
 }
 
-function ReturnChart({ rows, benchmarkRows }: { rows: EquityPoint[]; benchmarkRows: KlineRow[] }) {
+function cumulativeBenchmarkReturn(rows: EquityPoint[], benchmarkRows: KlineRow[]) {
+  if (!rows.length || !benchmarkRows.length) return null
+  const dates = new Set(rows.map(row => row.timestamp.slice(0, 10)))
+  const closes = benchmarkRows
+    .filter(row => dates.has(String(row.date).slice(0, 10)))
+    .map(row => Number(row.close))
+    .filter(value => Number.isFinite(value) && value > 0)
+  if (!closes.length) return null
+  return (closes.at(-1)! / closes[0] - 1) * 100
+}
+
+function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoint[]; benchmarkRows: KlineRow[]; benchmarkLabel: string }) {
   const theme = useChartTheme()
   const containerRef = useRef<HTMLDivElement>(null)
   const option = useMemo<EChartsOption | null>(() => {
@@ -214,13 +224,13 @@ function ReturnChart({ rows, benchmarkRows }: { rows: EquityPoint[]; benchmarkRo
     return {
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
-      grid: { left: 62, right: 18, top: 24, bottom: 34 },
+      grid: { left: 62, right: 18, top: 24, bottom: 58 },
       dataZoom: rows.length > 1 ? [
         { type: 'inside', filterMode: 'filter' },
         {
           type: 'slider',
-          height: 16,
-          bottom: 8,
+          height: 14,
+          bottom: 4,
           borderColor: theme.border,
           fillerColor: theme.zoomFill,
           textStyle: { color: theme.text },
@@ -258,12 +268,12 @@ function ReturnChart({ rows, benchmarkRows }: { rows: EquityPoint[]; benchmarkRo
       },
       series: [
         { type: 'line', name: '模拟收益', data: returns, showSymbol: false, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
-        { type: 'line', name: '沪深300', data: benchmarkReturns, showSymbol: false, connectNulls: false, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
+        { type: 'line', name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, connectNulls: false, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
       ],
     }
-  }, [benchmarkRows, rows, theme])
+  }, [benchmarkLabel, benchmarkRows, rows, theme])
   const ref = useECharts(option, [option], containerRef)
-  return <div className="relative h-52 w-full">
+  return <div className="relative h-56 w-full">
     <div ref={ref} className="h-full w-full" />
     {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
   </div>
@@ -518,15 +528,17 @@ export function PaperTrading() {
 
   const accountState = account?.account
   const equityRows = accountState?.equity_curve ?? []
+  const benchmarkSymbol = account?.config?.benchmark_symbol?.trim() ?? ''
   const benchmarkStart = equityRows[0]?.timestamp.slice(0, 10) ?? ''
   const benchmarkEnd = equityRows.at(-1)?.timestamp.slice(0, 10) ?? ''
   const benchmarkQuery = useQuery({
-    queryKey: QK.indexDaily(PAPER_BENCHMARK_SYMBOL, benchmarkStart, benchmarkEnd),
-    queryFn: () => api.indexDaily(PAPER_BENCHMARK_SYMBOL, 120, { start: benchmarkStart, end: benchmarkEnd }),
-    enabled: Boolean(benchmarkStart && benchmarkEnd),
+    queryKey: QK.kline(benchmarkSymbol, benchmarkStart, benchmarkEnd),
+    queryFn: () => api.klineDaily(benchmarkSymbol, 120, { start: benchmarkStart, end: benchmarkEnd }),
+    enabled: Boolean(benchmarkSymbol && benchmarkStart && benchmarkEnd),
     staleTime: 300_000,
   })
   const benchmarkRows = benchmarkQuery.data?.rows ?? []
+  const benchmarkLabel = formatInstrumentLabel(benchmarkSymbol, benchmarkQuery.data?.name)
   const decisionEvents = signalsQuery.data?.signals ?? []
   const allFills = accountState?.fills ?? []
   const allOrders = accountState?.orders ?? []
@@ -556,6 +568,10 @@ export function PaperTrading() {
   const selectedReturn = useCurrentState
     ? Number(account?.return_pct ?? 0)
     : selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : null
+  const selectedBenchmarkReturn = cumulativeBenchmarkReturn(visibleEquityRows, benchmarkRows)
+  const selectedExcessReturn = selectedReturn != null && selectedBenchmarkReturn != null
+    ? selectedReturn - selectedBenchmarkReturn
+    : null
   const drawdownValues = visibleEquityRows
     .map(row => Number(row.drawdown_pct))
     .filter(Number.isFinite)
@@ -647,7 +663,7 @@ export function PaperTrading() {
         </section>
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
-          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex items-center justify-between gap-2 text-[11px] font-medium"><span>收益曲线</span>{benchmarkQuery.isError ? <span className="text-[10px] font-normal text-danger">沪深300暂不可用</span> : null}</div><ReturnChart rows={visibleEquityRows} benchmarkRows={benchmarkRows} /></div>
+          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex min-h-5 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] font-medium"><span>收益曲线</span><div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] font-normal text-muted">{benchmarkQuery.isError ? <span className="text-danger">{benchmarkLabel || '基准'}暂不可用</span> : <><span>基准 <span className={`font-mono ${returnClass(selectedBenchmarkReturn ?? undefined)}`}>{selectedBenchmarkReturn == null ? '—' : signedPercent(selectedBenchmarkReturn)}</span></span><span>超额 <span className={`font-mono ${returnClass(selectedExcessReturn ?? undefined)}`}>{selectedExcessReturn == null ? '—' : signedPercent(selectedExcessReturn)}</span></span></>}</div></div><ReturnChart rows={visibleEquityRows} benchmarkRows={benchmarkRows} benchmarkLabel={benchmarkLabel || benchmarkSymbol || '基准'} /></div>
           <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} actualHoldingSymbols={positions.map(([symbol]) => symbol)} /></div>
         </section>
 

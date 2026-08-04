@@ -1329,7 +1329,7 @@ export interface PaperAccount {
     max_drawdown_pct?: number
   }
   positions?: Record<string, number>
-  config?: { initial_capital?: number }
+  config?: { initial_capital?: number; benchmark_symbol?: string }
   account?: {
     cash: number
     positions: Record<string, number>

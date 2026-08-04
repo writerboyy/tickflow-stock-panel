@@ -805,6 +805,129 @@ def test_backtest_reads_universe_from_strategy_source(monkeypatch, tmp_path):
     assert event["result"]["metadata"]["symbols"] == ["510300.SH"]
 
 
+def test_daily_backtest_replays_configured_benchmark(monkeypatch, tmp_path):
+    requests = []
+
+    class FakeRepository:
+        def __init__(self, _store):
+            pass
+
+        @staticmethod
+        def resolve_asset_type(symbol):
+            return "index" if symbol == "BENCHMARK" else "etf"
+
+        def get_daily_asset(self, asset_type, symbol, start, end, _columns):
+            requests.append((asset_type, symbol))
+            prices = {
+                "STRATEGY": [10.0, 10.0],
+                "BENCHMARK": [100.0, 110.0],
+            }[symbol]
+            days = [date(2024, 1, 2), date(2024, 1, 3)]
+            return pl.DataFrame([
+                daily_row(day, price)
+                for day, price in zip(days, prices)
+                if start <= day <= end
+            ])
+
+    monkeypatch.setattr("app.tickflow.repository.DataStore", lambda path: path)
+    monkeypatch.setattr("app.tickflow.repository.KlineRepository", FakeRepository)
+    output: queue.SimpleQueue = queue.SimpleQueue()
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "source": (
+            "def initialize(context):\n"
+            "    context.set_universe(['STRATEGY'])\n"
+            "def on_bar(context, bars):\n"
+            "    pass\n"
+        ),
+        "strategy_id": "benchmark-test",
+        "strategy_name": "基准测试",
+        "source_revision": 1,
+        "symbols": [],
+        "timeframe": "1d",
+        "asset_type": "etf",
+        "start": "2024-01-02",
+        "end": "2024-01-03",
+        "config": {"asset_type": "etf", "benchmark_symbol": "BENCHMARK"},
+    }, output)
+
+    event = output.get()
+    while event["type"] == "progress":
+        event = output.get()
+
+    assert event["type"] == "result"
+    assert event["result"]["performance"]["benchmark_return_pct"] == pytest.approx(10.0)
+    assert [row["benchmark_nav"] for row in event["result"]["daily_equity_curve"]] == [1.0, 1.1]
+    assert event["result"]["metadata"]["symbols"] == ["STRATEGY"]
+    assert ("etf", "STRATEGY") in requests
+    assert ("index", "BENCHMARK") in requests
+
+
+def test_minute_backtest_uses_daily_index_benchmark(monkeypatch, tmp_path):
+    class FakeRepository:
+        def __init__(self, _store):
+            pass
+
+        @staticmethod
+        def resolve_asset_type(symbol):
+            return "index" if symbol == "BENCHMARK" else "stock"
+
+        @staticmethod
+        def get_daily_asset(_asset_type, symbol, start, end, _columns):
+            prices = {
+                "STRATEGY": [10.0, 10.0],
+                "BENCHMARK": [100.0, 110.0],
+            }[symbol]
+            days = [date(2024, 1, 2), date(2024, 1, 3)]
+            return pl.DataFrame([
+                daily_row(day, price)
+                for day, price in zip(days, prices)
+                if start <= day <= end
+            ])
+
+        @staticmethod
+        def get_minute_range(symbols, start, end, _asset_type, **_window):
+            return pl.DataFrame([
+                minute_row("STRATEGY", datetime.combine(day, time(15, 0)), 10.0)
+                for day in (date(2024, 1, 2), date(2024, 1, 3))
+                if "STRATEGY" in symbols and start <= day <= end
+            ])
+
+        @staticmethod
+        def get_minute_symbols(_asset_type, _start, _end):
+            return {"STRATEGY"}
+
+    monkeypatch.setattr("app.tickflow.repository.DataStore", lambda path: path)
+    monkeypatch.setattr("app.tickflow.repository.KlineRepository", FakeRepository)
+    output: queue.SimpleQueue = queue.SimpleQueue()
+    execute_backtest({
+        "data_dir": str(tmp_path),
+        "source": (
+            "def initialize(context):\n"
+            "    context.set_universe(['STRATEGY'])\n"
+            "def on_bar(context, bars):\n"
+            "    pass\n"
+        ),
+        "strategy_id": "minute-benchmark-test",
+        "strategy_name": "分钟基准测试",
+        "source_revision": 1,
+        "symbols": [],
+        "timeframe": "1m",
+        "asset_type": "stock",
+        "start": "2024-01-02",
+        "end": "2024-01-03",
+        "config": {"asset_type": "stock", "benchmark_symbol": "BENCHMARK"},
+    }, output)
+
+    event = output.get()
+    while event["type"] == "progress":
+        event = output.get()
+
+    assert event["type"] == "result"
+    assert event["result"]["performance"]["benchmark_return_pct"] == pytest.approx(10.0)
+    assert event["result"]["metadata"]["symbols"] == ["STRATEGY"]
+
+
 def test_backtest_requires_universe_in_source_or_legacy_config(tmp_path):
     output: queue.SimpleQueue = queue.SimpleQueue()
     execute_backtest({
@@ -1373,6 +1496,54 @@ def run(context):
     }
     assert {bar.symbol for bar in morning} == {"X"}
     assert {bar.symbol for bar in closing} == {"X"}
+
+
+def test_scheduled_close_loads_index_benchmark_from_its_daily_asset():
+    requested_daily = []
+
+    class MixedAssetRepository:
+        @staticmethod
+        def resolve_asset_type(symbol):
+            return "index" if symbol == "BENCHMARK" else "stock"
+
+        def get_daily_asset(self, asset_type, symbol, start, end, _columns):
+            requested_daily.append((asset_type, symbol))
+            price = 110.0 if symbol == "BENCHMARK" else 10.0
+            return pl.DataFrame([
+                daily_row(date(2024, 1, 2), price)
+                for _ in [None]
+                if start <= date(2024, 1, 2) <= end
+            ])
+
+        @staticmethod
+        def get_minute_snapshot(symbols, at, asset_type):
+            assert asset_type == "stock"
+            return pl.DataFrame([
+                minute_row("STRATEGY", at, 10.0)
+                for _ in [None]
+                if "STRATEGY" in symbols
+            ])
+
+    engine = FreeStrategyEngine(
+        (
+            "def initialize(context):\n    context.set_universe(['STRATEGY'])\n"
+            "def on_bar(context, bars):\n    pass\n"
+        ),
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="BENCHMARK"),
+    )
+
+    snapshot = _scheduled_snapshot(
+        MixedAssetRepository(),
+        engine,
+        MarketData(),
+        datetime(2024, 1, 2, 15, 0),
+        "stock",
+        "1m",
+    )
+
+    assert {bar.symbol: bar.close for bar in snapshot} == {"BENCHMARK": 110.0}
+    assert ("index", "BENCHMARK") in requested_daily
 
 
 def test_scheduled_next_open_preserves_t1_settlement():

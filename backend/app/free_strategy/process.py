@@ -1107,6 +1107,23 @@ def _resolve_symbols(engine: FreeStrategyEngine, payload: dict[str, Any]) -> tup
     raise ValueError("策略源码未定义股票池，请在 initialize(context) 中调用 context.set_universe([...])")
 
 
+def _market_asset_type(repo: Any, symbol: str, default: str) -> str:
+    resolver = getattr(repo, "resolve_asset_type", None)
+    if callable(resolver):
+        try:
+            resolved = str(resolver(symbol) or default).lower()
+        except Exception:  # noqa: BLE001
+            return default
+        if resolved in {"stock", "etf", "index"}:
+            return resolved
+    return default
+
+
+def _market_symbols(engine: FreeStrategyEngine, symbols: list[str]) -> list[str]:
+    benchmark = str(engine.config.benchmark_symbol or "").strip()
+    return list(dict.fromkeys([*symbols, benchmark] if benchmark else symbols))
+
+
 def _read_rows(
     repo: Any,
     symbols: list[str],
@@ -1216,6 +1233,8 @@ def _prepare_market_data(
     end: date,
     asset_type: str,
     timeframe: str,
+    *,
+    include_benchmark: bool = False,
 ) -> tuple[MarketData, dict[str, Any]]:
     requested_bars = engine.history_requirements.get("1d", 0)
     lookback_days = max(
@@ -1223,7 +1242,16 @@ def _prepare_market_data(
         requested_bars * 2 + 14 if requested_bars else 0,
     )
     load_start = start - timedelta(days=lookback_days)
-    market_data = _load_market_data(repo, symbols, load_start, end, asset_type)
+    market_symbols = _market_symbols(engine, symbols) if include_benchmark else symbols
+    market_data = MarketData()
+    symbols_by_asset: dict[str, list[str]] = {}
+    for symbol in market_symbols:
+        symbols_by_asset.setdefault(_market_asset_type(repo, symbol, asset_type), []).append(symbol)
+    for requested_asset, requested_symbols in symbols_by_asset.items():
+        _merge_market_data(
+            market_data,
+            _load_market_data(repo, requested_symbols, load_start, end, requested_asset),
+        )
     _preload_tradable_dates(engine, market_data)
     references = {
         requested_asset: _prepare_market_reference(
@@ -1241,17 +1269,20 @@ def _prepare_market_data(
         if len(references) > 1 else primary_reference
     )
     if not any(start <= day <= end for _, day in market_data.daily):
-        formal_market_data = _load_market_data(repo, symbols, start, end, asset_type)
-        _merge_market_data(market_data, formal_market_data)
+        for requested_asset, requested_symbols in symbols_by_asset.items():
+            _merge_market_data(
+                market_data,
+                _load_market_data(repo, requested_symbols, start, end, requested_asset),
+            )
 
     warmup_end = start - timedelta(days=1)
     if timeframe == "1d":
-        prior_bars = _daily_bars(symbols, load_start, warmup_end, asset_type, market_data)
+        prior_bars = _daily_bars(market_symbols, load_start, warmup_end, asset_type, market_data)
     else:
         if engine.execution_mode == "full_bar":
-            _prime_minute_market_data(repo, symbols, start, asset_type, market_data)
+            _prime_minute_market_data(repo, market_symbols, start, asset_type, market_data)
         prior_bars = (
-            _aligned_warmup_bars(symbols, load_start, warmup_end, market_data)
+            _aligned_warmup_bars(market_symbols, load_start, warmup_end, market_data)
             if requested_bars else []
         )
 
@@ -1482,7 +1513,7 @@ def _ensure_scheduled_market_data(
     end: date,
     asset_type: str,
 ) -> None:
-    requests: dict[tuple[date, date], list[str]] = {}
+    requests: dict[tuple[str, date, date], list[str]] = {}
     for symbol in symbols:
         if (
             symbol not in market.loaded_daily_ranges
@@ -1490,14 +1521,15 @@ def _ensure_scheduled_market_data(
         ):
             continue
         for missing_range in _missing_daily_ranges(market, symbol, start, end):
-            requests.setdefault(missing_range, []).append(symbol)
-    for (range_start, range_end), missing_symbols in sorted(requests.items()):
+            requested_asset = _market_asset_type(repo, symbol, asset_type)
+            requests.setdefault((requested_asset, *missing_range), []).append(symbol)
+    for (requested_asset, range_start, range_end), missing_symbols in sorted(requests.items()):
         loaded = _load_market_data(
             repo,
             missing_symbols,
             range_start,
             range_end,
-            asset_type,
+            requested_asset,
         )
         _merge_market_data(market, loaded)
 
@@ -1532,7 +1564,14 @@ def _scheduled_snapshot(
     if timeframe == "1d" and timestamp.time() >= time(15, 0):
         return [
             bar for symbol in symbols
-            if (bar := _scheduled_daily_bar(market, symbol, timestamp.date(), asset_type)) is not None
+            if (
+                bar := _scheduled_daily_bar(
+                    market,
+                    symbol,
+                    timestamp.date(),
+                    _market_asset_type(repo, symbol, asset_type),
+                )
+            ) is not None
         ]
 
     get_range = getattr(repo, "get_minute_range", None)
@@ -1564,11 +1603,27 @@ def _scheduled_snapshot(
     for symbol in symbols:
         if symbol in found:
             continue
+        symbol_asset_type = _market_asset_type(repo, symbol, asset_type)
+        if timestamp.time() >= time(15, 0):
+            closing = _scheduled_daily_bar(
+                market,
+                symbol,
+                timestamp.date(),
+                symbol_asset_type,
+            )
+            if closing is not None:
+                bars.append(closing)
+                continue
         dates = market.daily_dates.get(symbol, [])
         previous_index = bisect_left(dates, timestamp.date()) - 1
         if previous_index < 0:
             continue
-        previous = _scheduled_daily_bar(market, symbol, dates[previous_index], asset_type)
+        previous = _scheduled_daily_bar(
+            market,
+            symbol,
+            dates[previous_index],
+            symbol_asset_type,
+        )
         if previous is not None:
             bars.append(replace(
                 previous,
@@ -1886,10 +1941,12 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             "execution_mode": engine.execution_mode,
         })
         symbols, universe_source = _resolve_symbols(engine, payload)
+        market_symbols = _market_symbols(engine, symbols)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
         market_data, warmup_metadata = _prepare_market_data(
             repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
+            include_benchmark=True,
         )
         replayed_rows = 0
         first_bar: datetime | None = None
@@ -1920,7 +1977,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             )
             trading_dates = sorted({
                 day for symbol, day in market_data.daily
-                if symbol in symbols and start <= day <= end
+                if symbol in market_symbols and start <= day <= end
             })
             if not trading_dates:
                 raise ValueError("回测区间没有可用的交易日行情")
@@ -1958,7 +2015,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             engine.state = engine.context.state.copy()
             result = engine.result()
         elif payload["timeframe"] == "1d":
-            bars = _read_rows(repo, symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
+            bars = _read_rows(repo, market_symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
             output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
             replayed_rows = len(bars)
             symbols_seen.update(bar.symbol for bar in bars)
@@ -1973,16 +2030,16 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             days_with_bars = 0
             while cursor <= end:
                 if cursor.weekday() < 5:
-                    session_symbols = symbols
+                    session_symbols = market_symbols
                     if engine.market_history_requirements:
                         if not engine.has_market_date(cursor):
                             cursor += timedelta(days=1)
                             days_seen += 1
                             continue
                         engine.begin_session(cursor)
-                        session_symbols = engine.universe
+                        session_symbols = _market_symbols(engine, engine.universe)
                         for symbol in session_symbols:
-                            if symbol not in requested_symbols:
+                            if symbol != engine.config.benchmark_symbol and symbol not in requested_symbols:
                                 requested_symbols.append(symbol)
                     bars = _read_rows(
                         repo, session_symbols, cursor, cursor,
@@ -1990,6 +2047,17 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                         market_data=market_data,
                     )
                     rows = list(bars)
+                    benchmark_symbol = engine.config.benchmark_symbol
+                    if benchmark_symbol and not any(bar.symbol == benchmark_symbol for bar in rows):
+                        benchmark_bar = _scheduled_daily_bar(
+                            market_data,
+                            benchmark_symbol,
+                            cursor,
+                            _market_asset_type(repo, benchmark_symbol, payload["asset_type"]),
+                        )
+                        if benchmark_bar is not None:
+                            rows.append(benchmark_bar)
+                            rows.sort(key=lambda bar: (bar.timestamp, bar.symbol))
                     if rows:
                         replayed_rows += len(rows)
                         for bar in rows:

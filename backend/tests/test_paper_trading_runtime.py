@@ -18,6 +18,7 @@ from app.free_strategy.paper import (
     _Subscription,
     _append_engine_events,
     _catch_up_bars,
+    _compatible_checkpoint,
     _engine_from_state,
     _equity_snapshot,
     _process_bar_rows,
@@ -118,6 +119,70 @@ def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp
         "09:05", "10:00", "10:15", "10:30", "14:20", "14:50", "14:55",
     ]
     assert requested_timeframes == ["1d"]
+
+
+def test_legacy_five_fortunes_v2_checkpoint_uses_current_state_key():
+    checkpoint = {
+        "state": {
+            "five_fortunes": {
+                "version": "2.0",
+                "target": ["510300.SH"],
+            },
+        },
+    }
+
+    migrated = _compatible_checkpoint(
+        'def _state(context):\n    return context.state["five_fortunes_v2"]\n',
+        checkpoint,
+    )
+
+    assert "five_fortunes" not in migrated["state"]
+    assert migrated["state"]["five_fortunes_v2"]["target"] == ["510300.SH"]
+    assert checkpoint["state"]["five_fortunes"]["version"] == "2.0"
+
+
+def test_paper_engine_preloads_history_for_the_whole_universe(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "app.free_strategy.process._instrument_records",
+        lambda _repo, _asset_type, _timeframe: [
+            {"symbol": "X", "asset_type": "etf"},
+            {"symbol": "Y", "asset_type": "etf"},
+        ],
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process._load_market_data",
+        lambda _repo, symbols, start, end, asset_type: (
+            calls.append((symbols, start, end, asset_type)) or MarketData()
+        ),
+    )
+    account_root = tmp_path / "paper_accounts" / "paper"
+    account_root.mkdir(parents=True)
+    (account_root / "strategy.py").write_text(
+        "def initialize(context):\n"
+        "    context.set_universe(['X', 'Y'])\n"
+        "    context.require_history('1d', bars=45)\n"
+        "def on_bar(context, bars):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    _engine_from_state(
+        {
+            "config": {
+                "market_mode": "bar_1m",
+                "asset_type": "etf",
+                "benchmark_symbol": "X",
+            },
+            "last_bar": "2026-08-03T15:00:00",
+        },
+        account_root,
+        tmp_path,
+    )
+
+    assert calls == [
+        (["X", "Y"], datetime(2026, 8, 3).date() - timedelta(days=104), cn_now().date(), "etf"),
+    ]
 
 
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):

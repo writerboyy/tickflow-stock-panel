@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, fields
@@ -40,6 +41,24 @@ def state_market_mode(state: dict[str, Any]) -> str:
         return str(explicit)
     timeframe = str(state.get("config", {}).get("timeframe", "1d"))
     return {"1m": "bar_1m", "5m": "bar_5m", "30m": "bar_30m"}.get(timeframe, "bar_1d")
+
+
+def _compatible_checkpoint(source: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Migrate checkpoint state keys that changed with a strategy template revision."""
+    migrated = deepcopy(checkpoint)
+    state = migrated.get("state")
+    if not isinstance(state, dict):
+        return migrated
+    legacy = state.get("five_fortunes")
+    if (
+        "five_fortunes_v2" in source
+        and isinstance(legacy, dict)
+        and legacy.get("version") == "2.0"
+        and "five_fortunes_v2" not in state
+    ):
+        state["five_fortunes_v2"] = legacy
+        state.pop("five_fortunes", None)
+    return migrated
 
 
 @dataclass
@@ -559,11 +578,20 @@ def _engine_from_state(
     risk = RiskConfig(**state.get("risk_config", {}))
     repo = KlineRepository(DataStore(data_dir))
     source = (account_root / "strategy.py").read_text(encoding="utf-8")
+    checkpoint = state.get("checkpoint")
+    compatible_checkpoint = (
+        _compatible_checkpoint(source, checkpoint)
+        if isinstance(checkpoint, dict) else None
+    )
+    initial_state = (
+        compatible_checkpoint.get("state", state.get("state", {}))
+        if compatible_checkpoint is not None else state.get("state", {})
+    )
     engine = FreeStrategyEngine(
         source,
         timeframe=timeframe,
         config=config,
-        state=state.get("state", {}),
+        state=initial_state,
         instrument_loader=lambda execution_mode: _instrument_records(
             repo,
             asset_type,
@@ -624,6 +652,17 @@ def _engine_from_state(
     market_loaded_through: date | None = None
     scheduled_history_market = MarketData()
 
+    requested_history_bars = engine.history_requirements.get("1d", 0)
+    if requested_history_bars and engine.universe:
+        history_start = run_start - timedelta(days=requested_history_bars * 2 + 14)
+        scheduled_history_market = _load_market_data(
+            repo,
+            list(engine.universe),
+            history_start,
+            cn_today(),
+            asset_type,
+        )
+
     def load_market_history(cutoff: datetime) -> None:
         nonlocal market_loaded_through
         target = cutoff.date()
@@ -676,8 +715,8 @@ def _engine_from_state(
     engine.set_market_history_loader(load_market_history)
     if preload_market_history and engine.market_history_requirements:
         load_market_history(cn_naive_now())
-    if state.get("checkpoint"):
-        engine.restore_checkpoint(state["checkpoint"])
+    if compatible_checkpoint is not None:
+        engine.restore_checkpoint(compatible_checkpoint)
     else:
         engine.account.restore(state.get("account", {}))
         engine.restore_runtime(state.get("runtime"))
