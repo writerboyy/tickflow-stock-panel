@@ -8,9 +8,9 @@
 4. 400 只最小市值股票均价高于 18.72 时清仓，连续 5 个交易日后恢复。
 5. 399303 指数出现 MACD 顶背离时清仓。
 
-聚宽没有 TickFlow 的大小盘成交占比缓存，因此这里使用回测中已经走过的
-5 日成交额滚动序列计算 97%/70% 分位阈值；该扩展信号可通过
-g.enable_style_liquidity_timing 关闭，不影响主策略回测。
+聚宽没有 TickFlow 的本地 Parquet 缓存，因此这里用聚宽历史接口重建同一
+大小盘成交占比信号：阈值只使用回测开始日前的 10 年历史，当前日使用完整
+5 日成交额窗口；历史或当日数据不可用时按 TickFlow 的 fail-closed 规则空仓。
 """
 
 import datetime
@@ -43,12 +43,13 @@ def initialize(context):
     g.index_symbol = "399303.XSHE"
     g.index_history_bars = (12 + 26 + 9) * 5
 
-    # 2.0 的扩展择时。聚宽全市场成交额扫描较重，必要时可改为 False。
+    # 与 TickFlow 的 StyleLiquiditySignalCache 保持同一状态机。
     g.enable_style_liquidity_timing = True
     g.style_entry_quantile = 0.97
     g.style_recovery_quantile = 0.70
-    g.style_min_history_days = 250
-    g.style_ratio_history = []
+    g.style_lookback_years = 10
+    g.style_thresholds = None
+    g.style_threshold_error = None
     g.style_signal_cache = {}
     g.style_liquidity_active = False
     g.style_liquidity_signal = None
@@ -167,9 +168,6 @@ def candidate_symbols(context):
     ]
     if stocks.empty:
         return []
-    cutoff = previous_date - datetime.timedelta(days=240)
-    stocks = stocks[stocks["start_date"].map(lambda day: _listed_by(day, cutoff))]
-    stocks = stocks[stocks["display_name"].map(_valid_name)]
     universe = list(stocks.index)
 
     # 先做分红率前 25% 筛选，再做绩优财务筛选，与 2.0 原策略顺序一致。
@@ -450,33 +448,49 @@ def calculate_style_liquidity_signal(context):
     if cache_key in g.style_signal_cache:
         return g.style_signal_cache[cache_key]
 
-    try:
-        ratio = calculate_style_liquidity_ratio(previous_date)
-    except Exception as exc:
-        log.warn("大小盘成交占比计算失败，回退微盘指数风控: %s" % exc)
-        g.style_signal_cache[cache_key] = None
-        return None
-    if ratio is None:
-        g.style_signal_cache[cache_key] = None
-        return None
+    if g.style_threshold_error is not None:
+        signal = {
+            "available": False,
+            "date": cache_key,
+            "risk_off": True,
+            "reason": g.style_threshold_error,
+            "entry_quantile": g.style_entry_quantile,
+            "recovery_quantile": g.style_recovery_quantile,
+        }
+        g.style_signal_cache[cache_key] = signal
+        return signal
 
-    history = list(g.style_ratio_history)
+    try:
+        if g.style_thresholds is None:
+            g.style_thresholds = load_style_liquidity_thresholds(context)
+        ratio = calculate_style_liquidity_ratio(previous_date)
+        if ratio is None:
+            raise ValueError("大小盘成交占比缺少当日完整 5 日数据")
+    except Exception as exc:
+        if g.style_thresholds is None:
+            g.style_threshold_error = str(exc)
+        log.warn("大小盘成交占比计算失败，按 TickFlow fail-closed 空仓: %s" % exc)
+        signal = {
+            "available": False,
+            "date": cache_key,
+            "risk_off": True,
+            "reason": str(exc),
+            "entry_quantile": g.style_entry_quantile,
+            "recovery_quantile": g.style_recovery_quantile,
+        }
+        g.style_signal_cache[cache_key] = signal
+        return signal
+
+    entry_threshold = float(g.style_thresholds["entry_threshold"])
+    recovery_threshold = float(g.style_thresholds["recovery_threshold"])
     risk_off = g.style_liquidity_active
-    entry_threshold = None
-    recovery_threshold = None
-    if len(history) >= g.style_min_history_days:
-        entry_threshold = float(np.quantile(history, g.style_entry_quantile))
-        recovery_threshold = float(np.quantile(history, g.style_recovery_quantile))
-        if not risk_off and ratio >= entry_threshold:
-            risk_off = True
-        elif risk_off and ratio <= recovery_threshold:
-            risk_off = False
-    g.style_ratio_history.append(float(ratio))
-    # 保留最近 10 年交易日，避免长回测状态无限增长。
-    if len(g.style_ratio_history) > 2500:
-        del g.style_ratio_history[:-2500]
+    if not risk_off and ratio >= entry_threshold:
+        risk_off = True
+    elif risk_off and ratio <= recovery_threshold:
+        risk_off = False
 
     signal = {
+        "available": True,
         "date": cache_key,
         "risk_off": risk_off,
         "cap_ratio": float(ratio),
@@ -487,17 +501,174 @@ def calculate_style_liquidity_signal(context):
     return signal
 
 
-def calculate_style_liquidity_ratio(previous_date):
-    stocks = get_all_securities("stock", date=previous_date)
+def load_style_liquidity_thresholds(context):
+    """Calculate fixed pre-start quantiles, matching TickFlow's cache."""
+    start_date = strategy_start_date(context)
+    trade_days = get_trade_days(end_date=start_date, count=2)
+    if len(trade_days) < 2:
+        raise ValueError("无法取得回测开始日前交易日")
+    history_end = trade_days[-2]
+    history_start = years_before(start_date, g.style_lookback_years)
+    history = collect_style_liquidity_history(history_start, history_end)
+    if history is None or history.empty:
+        raise ValueError("大小盘成交占比择时缺少回测开始日前历史数据")
+    values = pd.to_numeric(history["cap_ratio"], errors="coerce").dropna()
+    if values.empty:
+        raise ValueError("大小盘成交占比择时无法计算历史分位")
+    entry = float(np.quantile(values.to_numpy(), g.style_entry_quantile))
+    recovery = float(np.quantile(values.to_numpy(), g.style_recovery_quantile))
+    return {
+        "entry_threshold": entry,
+        "recovery_threshold": recovery,
+        "history_start": str(history_start),
+        "history_end": str(history_end),
+    }
+
+
+def strategy_start_date(context):
+    run_params = getattr(context, "run_params", None)
+    value = None
+    if isinstance(run_params, dict):
+        value = run_params.get("start_date")
+    elif run_params is not None:
+        value = getattr(run_params, "start_date", None)
+    if value is None:
+        raise ValueError("聚宽运行参数缺少 start_date，无法建立 TickFlow 历史阈值")
+    try:
+        return pd.Timestamp(value).date()
+    except (TypeError, ValueError):
+        raise ValueError("聚宽运行参数 start_date 无法解析")
+
+
+def years_before(day, years):
+    try:
+        return day.replace(year=day.year - years)
+    except ValueError:
+        return day.replace(year=day.year - years, day=28)
+
+
+def style_symbols(day):
+    stocks = get_all_securities("stock", date=day)
     if stocks is None or stocks.empty:
-        return None
-    stocks = stocks[
+        raise ValueError("大小盘成交占比择时缺少股票标的目录")
+    valid = stocks[
         ~stocks.index.to_series().map(_is_kcbj)
         & stocks["display_name"].map(_valid_name)
     ]
-    symbols = list(stocks.index)
+    symbols = list(valid.index)
     if not symbols:
+        raise ValueError("大小盘成交占比择时没有有效股票标的")
+    return symbols
+
+
+def collect_style_liquidity_history(history_start, history_end):
+    """Load historical ratios in yearly chunks to bound each JoinQuant query."""
+    symbols = style_symbols(history_end)
+    chunks = []
+    cursor = history_start
+    while cursor <= history_end:
+        chunk_end = min(cursor + datetime.timedelta(days=364), history_end)
+        prices = get_price(
+            symbols,
+            start_date=cursor - datetime.timedelta(days=14),
+            end_date=chunk_end,
+            frequency="daily",
+            fields=["money"],
+            panel=False,
+            fill_paused=False,
+        )
+        valuations = get_valuation(
+            symbols,
+            start_date=cursor,
+            end_date=chunk_end,
+            fields=["market_cap"],
+        )
+        summary = style_ratio_frame(prices, valuations)
+        if summary is not None and not summary.empty:
+            summary = summary[
+                (summary["_date"] >= cursor) & (summary["_date"] <= chunk_end)
+            ]
+            if not summary.empty:
+                chunks.append(summary)
+        cursor = chunk_end + datetime.timedelta(days=1)
+    if not chunks:
         return None
+    return pd.concat(chunks, ignore_index=True).drop_duplicates("_date").sort_values("_date")
+
+
+def _with_style_date(frame):
+    if frame is None or frame.empty:
+        return None
+    frame = frame.copy()
+    date_field = next(
+        (field for field in ("date", "day", "time") if field in frame.columns),
+        None,
+    )
+    if date_field is None:
+        raise ValueError("大小盘成交占比数据缺少日期字段")
+    frame["_date"] = pd.to_datetime(frame[date_field], errors="coerce").dt.date
+    return frame.dropna(subset=["_date"])
+
+
+def style_ratio_frame(price_data, valuation_data):
+    price_data = _with_style_date(price_data)
+    valuation_data = _with_style_date(valuation_data)
+    if price_data is None or valuation_data is None:
+        return None
+    required_price = {"code", "money", "_date"}
+    required_valuation = {"code", "market_cap", "_date"}
+    if not required_price.issubset(price_data.columns):
+        raise ValueError("聚宽成交额数据缺少 code/money/date")
+    if not required_valuation.issubset(valuation_data.columns):
+        raise ValueError("聚宽估值数据缺少 code/market_cap/date")
+
+    prices = price_data[list(required_price)].copy()
+    prices["money"] = pd.to_numeric(prices["money"], errors="coerce")
+    prices = prices.dropna(subset=["money"])
+    prices = prices.sort_values(["code", "_date"])
+    prices["money_5d"] = prices.groupby("code")["money"].transform(
+        lambda values: values.rolling(5, min_periods=5).sum()
+    )
+    prices = prices[prices["money_5d"] > 0]
+
+    valuations = valuation_data[list(required_valuation)].copy()
+    valuations["market_cap"] = pd.to_numeric(
+        valuations["market_cap"], errors="coerce"
+    )
+    valuations = valuations.dropna(subset=["market_cap"])
+    rows = prices.merge(valuations, on=["code", "_date"], how="inner")
+    rows = rows[rows["market_cap"] > 0]
+    if rows.empty:
+        return None
+
+    rows = rows.sort_values(["_date", "market_cap", "code"], ascending=[True, False, True])
+    rows["cap_rank"] = rows.groupby("_date").cumcount() + 1
+    rows["symbol_count"] = rows.groupby("_date")["code"].transform("size")
+    rows["group_size"] = np.floor(rows["symbol_count"] * 0.1).astype(int)
+    rows = rows[rows["group_size"] > 0]
+    if rows.empty:
+        return None
+
+    large = rows[rows["cap_rank"] <= rows["group_size"]].groupby("_date")["money_5d"].sum()
+    small = rows[rows["cap_rank"] > rows["symbol_count"] - rows["group_size"]].groupby("_date")["money_5d"].sum()
+    summary = pd.concat(
+        [large.rename("large_amount_5d"), small.rename("small_amount_5d")],
+        axis=1,
+    ).dropna()
+    summary = summary[summary["small_amount_5d"] > 0]
+    if summary.empty:
+        return None
+    summary["cap_ratio"] = (
+        summary["large_amount_5d"] / summary["small_amount_5d"]
+    )
+    summary["large_ratio"] = 100 * summary["large_amount_5d"] / rows.groupby("_date")["money_5d"].sum()
+    summary["small_ratio"] = 100 * summary["small_amount_5d"] / rows.groupby("_date")["money_5d"].sum()
+    summary = summary.reset_index()
+    return summary.replace([np.inf, -np.inf], np.nan).dropna(subset=["cap_ratio"])
+
+
+def calculate_style_liquidity_ratio(previous_date):
+    symbols = style_symbols(previous_date)
 
     caps = get_valuation(
         symbols,
@@ -514,32 +685,21 @@ def calculate_style_liquidity_ratio(previous_date):
         panel=False,
         fill_paused=False,
     )
-    if caps is None or caps.empty or amounts is None or amounts.empty:
+    summary = style_ratio_frame(amounts, caps)
+    if summary is None or summary.empty:
         return None
-    caps = caps.dropna(subset=["code", "market_cap"])
-    amounts = amounts.dropna(subset=["code", "money"])
-    amount_map = amounts.groupby("code")["money"].sum()
-    rows = [
-        (row.code, float(row.market_cap), float(amount_map.get(row.code, 0)))
-        for row in caps.itertuples()
-        if float(row.market_cap) > 0 and float(amount_map.get(row.code, 0)) > 0
-    ]
-    if len(rows) < 20:
+    current = summary[summary["_date"] == previous_date]
+    if current.empty:
         return None
-    rows.sort(key=lambda item: (item[1], item[0]))
-    group_size = max(1, int(len(rows) * 0.1))
-    large_amount = sum(item[2] for item in rows[-group_size:])
-    small_amount = sum(item[2] for item in rows[:group_size])
-    if small_amount <= 0:
-        return None
-    return large_amount / small_amount
+    return float(current.iloc[-1]["cap_ratio"])
 
 
 def apply_style_liquidity_timing(context, signal):
     was_active = g.style_liquidity_active
-    risk_off = bool(signal.get("risk_off", False))
+    risk_off = bool(signal.get("risk_off", True))
     g.style_liquidity_active = risk_off
     g.style_liquidity_signal = signal
+    g.ban_trade_start_date = None
     if risk_off:
         if not was_active:
             for security in list(context.portfolio.positions.keys()):

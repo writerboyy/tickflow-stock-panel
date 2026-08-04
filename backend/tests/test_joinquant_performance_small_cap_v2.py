@@ -32,5 +32,9 @@ def test_joinquant_strategy_keeps_v2_core_parameters_in_source():
     assert "g.smallcap_index_threshold = 18.72" in source
     assert "g.style_entry_quantile = 0.97" in source
     assert "g.style_recovery_quantile = 0.70" in source
+    assert "g.style_lookback_years = 10" in source
+    assert "g.style_min_history_days" not in source
+    assert "按 TickFlow fail-closed 空仓" in source
+    assert "回退微盘指数风控" not in source
     assert 'fields=["money"]' in source
     assert 'fields=["amount"]' not in source
