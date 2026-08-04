@@ -44,6 +44,9 @@ MAX_MINUTE_ROWS = 8_000
 MIN_FREE_BYTES = 50 * 1024**3
 DEFAULT_RATE_INTERVAL = 0.2
 MAX_WORKERS = 4
+MAX_CONFIGURED_WORKERS = 64
+TEAJOIN_MAX_REQUESTS_PER_MINUTE = 450
+TEAJOIN_MIN_RATE_INTERVAL = 60.0 / TEAJOIN_MAX_REQUESTS_PER_MINUTE
 
 PHASES = (
     "universe",
@@ -193,6 +196,7 @@ class GlobalRateLimiter:
     def __init__(self, interval: float = DEFAULT_RATE_INTERVAL) -> None:
         if interval < 0:
             raise ValueError("rate interval must be non-negative")
+        self.minimum_interval = float(interval)
         self.interval = float(interval)
         self._lock = threading.Lock()
         self._next_at = 0.0
@@ -211,6 +215,13 @@ class GlobalRateLimiter:
             raise ValueError("rate limiter slowdown parameters are invalid")
         with self._lock:
             self.interval = min(maximum, max(self.interval, self.interval * factor))
+
+    def recover(self, factor: float = 0.8) -> None:
+        """Gradually restore the configured rate after successful requests."""
+        if not 0 < factor < 1:
+            raise ValueError("rate limiter recovery factor must be between zero and one")
+        with self._lock:
+            self.interval = max(self.minimum_interval, self.interval * factor)
 
 
 @dataclass(frozen=True)
@@ -279,7 +290,9 @@ class TushareProxyClient:
                     decoded = json.loads(raw_body.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise TushareProtocolError("response is not JSON") from exc
-                return self._parse_response(api_name, decoded)
+                parsed = self._parse_response(api_name, decoded)
+                self.limiter.recover()
+                return parsed
             except HTTPError as exc:
                 last_error = exc
                 if exc.code not in {429, 500, 502, 503, 504}:
@@ -570,6 +583,7 @@ class BackfillConfig:
     max_symbols: int | None = None
     rate_interval: float = DEFAULT_RATE_INTERVAL
     attempts: int = 4
+    workers: int = MAX_WORKERS
     publish: bool = False
     start: date = DEFAULT_HISTORY_START
     end: date | None = None
@@ -587,6 +601,13 @@ class BackfillConfig:
         indexes = tuple(dict.fromkeys(str(item).strip().upper() for item in self.indexes or () if str(item).strip())) or None
         if self.max_symbols is not None and self.max_symbols <= 0:
             raise ValueError("max_symbols must be positive")
+        if self.rate_interval < TEAJOIN_MIN_RATE_INTERVAL:
+            raise ValueError(
+                f"rate interval must be at least {TEAJOIN_MIN_RATE_INTERVAL:.6f} seconds "
+                f"({TEAJOIN_MAX_REQUESTS_PER_MINUTE} requests/minute)"
+            )
+        if not 1 <= self.workers <= MAX_CONFIGURED_WORKERS:
+            raise ValueError(f"workers must be between 1 and {MAX_CONFIGURED_WORKERS}")
         end = self.end or date.today()
         if self.start > end:
             raise ValueError("start must not be after end")
@@ -603,6 +624,7 @@ class BackfillConfig:
             max_symbols=self.max_symbols,
             rate_interval=self.rate_interval,
             attempts=self.attempts,
+            workers=self.workers,
             publish=self.publish,
             start=self.start,
             end=end,
@@ -1046,7 +1068,7 @@ class TushareHistoryBackfill:
                 self._record("adjustment", symbol, status="blocked", api=api_name, reason="permission_or_auth", error=type(exc).__name__)
             except Exception as exc:  # noqa: BLE001
                 self._record("adjustment", symbol, status="retry", api=api_name, error=type(exc).__name__)
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="tushare-adjustment") as executor:
+        with ThreadPoolExecutor(max_workers=self.config.workers, thread_name_prefix="tushare-adjustment") as executor:
             list(executor.map(fetch_one, symbols))
         phase["status"] = "completed"
         self._save()
@@ -1204,7 +1226,7 @@ class TushareHistoryBackfill:
             except Exception as exc:  # noqa: BLE001
                 self._record(phase_name, symbol, status="failed", error=type(exc).__name__, message=str(exc)[:240])
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix=f"tushare-{phase_name}") as executor:
+        with ThreadPoolExecutor(max_workers=self.config.workers, thread_name_prefix=f"tushare-{phase_name}") as executor:
             list(executor.map(fetch_one, symbols))
         phase["status"] = "completed"
         self._save()

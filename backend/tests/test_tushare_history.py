@@ -109,6 +109,26 @@ def test_global_rate_limiter_is_shared_across_worker_threads(monkeypatch):
     assert sleeps == pytest.approx([0.2, 0.2, 0.2])
 
 
+def test_backfill_rate_limit_enforces_provider_ceiling_and_recovers_after_backoff(tmp_path):
+    with pytest.raises(ValueError, match="450 requests/minute"):
+        th.BackfillConfig(tmp_path, rate_interval=(60 / 450) - 0.001).normalized()
+
+    limiter = th.GlobalRateLimiter(0.2)
+    limiter.slow_down(factor=2)
+    assert limiter.interval == pytest.approx(0.4)
+    limiter.recover()
+    assert limiter.interval == pytest.approx(0.32)
+    for _ in range(10):
+        limiter.recover()
+    assert limiter.interval == pytest.approx(0.2)
+
+
+def test_backfill_worker_count_is_configurable_and_bounded(tmp_path):
+    assert th.BackfillConfig(tmp_path, workers=32).normalized().workers == 32
+    with pytest.raises(ValueError, match="workers must be between"):
+        th.BackfillConfig(tmp_path, workers=65).normalized()
+
+
 def test_normalize_and_forward_adjustment_preserve_volume_and_amount():
     raw = th.normalize_rows([
         {"ts_code": "000001.SZ", "trade_time": "2025-01-02 09:31:00", "open": 10, "high": 11, "low": 9, "close": 10, "vol": 100, "amount": 1000},

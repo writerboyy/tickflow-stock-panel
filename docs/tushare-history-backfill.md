@@ -110,6 +110,13 @@ uv run python scripts/backfill_tushare_history.py --data-dir /path/to/data \
 只请求和保存 1 分钟数据；5/15/30/60 分钟由本地读取层聚合。股票与 ETF 分别发布
 到 `kline_minute` 和 `kline_etf_minute`，价格按复权因子处理，成交量和成交额不复权。
 
+`teajoin.com` 文档声明绝对上限为每分钟 450 次请求，批量任务建议至少间隔 0.2 秒。
+`--rate-interval` 是所有 worker 共享的全局请求启动间隔，程序拒绝低于
+`60 / 450` 秒的配置；`--workers` 控制同时等待响应的标的数，范围为 1-64。高延迟
+分钟回填可使用 `--workers 28 --rate-interval 0.134`，理论上限约 447 次/分钟；遇到
+429、5xx 或网络错误时会全局退避，成功响应后再逐步恢复，避免一次错误让整次 run
+永久停留在慢速状态。
+
 ## 4. 恢复与现有 run
 
 读取状态不访问网络：

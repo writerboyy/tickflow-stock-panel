@@ -79,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-symbols", type=int)
     parser.add_argument("--rate-interval", type=float, default=0.2)
     parser.add_argument("--attempts", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=4, help="并发标的数，范围 1-64；请求频率仍受全局限流器控制")
     args = parser.parse_args(argv)
     data_dir = Path(args.data_dir).expanduser().resolve()
     phases = args.phases or (("universe",) if args.datasets else PHASES)
@@ -151,6 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         max_symbols=args.max_symbols,
         rate_interval=args.rate_interval,
         attempts=args.attempts,
+        workers=args.workers,
         publish=args.publish,
         start=start,
         end=args.end,
