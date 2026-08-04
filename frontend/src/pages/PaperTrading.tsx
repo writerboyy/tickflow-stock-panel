@@ -224,7 +224,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
     return {
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
-      grid: { left: 62, right: 18, top: 24, bottom: 58 },
+      grid: { left: 62, right: 52, top: 24, bottom: 58 },
       dataZoom: rows.length > 1 ? [
         { type: 'inside', filterMode: 'filter' },
         {
@@ -257,7 +257,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
         type: 'category',
         data: rows.map(row => formatTime(row.timestamp)),
         boundaryGap: false,
-        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true, formatter: (value: string) => value.split(' ')[0] },
+        axisLabel: { color: theme.text, fontSize: 10, hideOverlap: true, showMinLabel: true, showMaxLabel: true, formatter: (value: string) => value.split(' ')[0] },
         axisLine: { lineStyle: { color: theme.border } },
       },
       yAxis: {
