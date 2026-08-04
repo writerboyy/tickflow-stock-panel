@@ -19,6 +19,8 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
 from app.plugins.kaipanla.credentials import load_credentials
 from app.plugins.kaipanla.parsers import ResponseShapeError, parse_large_order_intents, parse_large_order_trades
+from app.services.large_order_store import LargeOrderStore, SCHEMA_VERSION
+from app.services.ingestion_manifest import stable_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ class LargeOrderService:
         self._deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="large-orders-kaipanla")
         self._states: dict[str, dict[str, Any]] = {}
         self._ranking: list[dict] = []
-        self._raw_archive: deque[dict] = deque(maxlen=500)
+        self._storage: LargeOrderStore | None = None
         self._deep_pending: set[str] = set()
         self._last_deep_at: dict[str, float] = {}
         self._deep_calls_date = cn_today()
@@ -103,6 +105,10 @@ class LargeOrderService:
 
     def set_app_state(self, app_state) -> None:
         self._app_state = app_state
+        repo = getattr(app_state, "repo", None)
+        data_dir = getattr(getattr(repo, "store", None), "data_dir", None)
+        if data_dir is not None and self._storage is None:
+            self._storage = LargeOrderStore(data_dir)
 
     def start(self) -> None:
         if self._running:
@@ -110,6 +116,13 @@ class LargeOrderService:
         from app.services import preferences
 
         self._config.update(preferences.get_large_orders_preferences())
+        if self._storage is not None:
+            try:
+                self._storage.start()
+                self._storage.compact_unsealed_days(today=self._trade_date)
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = f"大单存储启动失败: {exc}"
+                logger.exception("实时大单存储启动失败")
         self._running = True
         if self._quote_service is not None:
             self._quote_service.add_fetch_listener(self._on_quote_fetch)
@@ -125,8 +138,10 @@ class LargeOrderService:
         with self._lock:
             self._pending_snapshot = None
             self._deep_pending.clear()
-        self._snapshot_executor.shutdown(wait=False, cancel_futures=True)
-        self._deep_executor.shutdown(wait=False, cancel_futures=True)
+        self._snapshot_executor.shutdown(wait=True, cancel_futures=False)
+        self._deep_executor.shutdown(wait=True, cancel_futures=False)
+        if self._storage is not None:
+            self._storage.stop(compact_date=self._trade_date)
 
     def update_preferences(self, updates: dict[str, Any]) -> dict:
         from app.services import preferences
@@ -166,7 +181,6 @@ class LargeOrderService:
         with self._lock:
             self._states.clear()
             self._ranking = []
-            self._raw_archive.clear()
             self._last_deep_at.clear()
             self._cooldown_until.clear()
             self._deep_calls_date = self._trade_date
@@ -175,7 +189,14 @@ class LargeOrderService:
     def _process_snapshot(self, records: list[dict]) -> None:
         today = cn_today()
         if today != self._trade_date:
+            previous_date = self._trade_date
             self._trade_date = today
+            if self._storage is not None:
+                try:
+                    self._storage.compact(previous_date)
+                    self._storage.cleanup_raw_archives(today=today)
+                except Exception:  # noqa: BLE001
+                    logger.exception("实时大单跨日存储处理失败: %s", previous_date)
             self._reset_for_new_day()
         if not records:
             return
@@ -188,6 +209,8 @@ class LargeOrderService:
             except Exception:  # noqa: BLE001
                 index_symbols = set()
 
+        flow_events: list[dict[str, Any]] = []
+        event_ts_ms = int(now.timestamp() * 1000)
         with self._lock:
             for raw in records:
                 symbol = str(raw.get("symbol") or "").strip().upper()
@@ -247,9 +270,30 @@ class LargeOrderService:
                     "price": price,
                 })
                 state["baseline"].append(delta_amount)
+                flow_events.append({
+                    "trade_date": today,
+                    "event_ts_ms": event_ts_ms,
+                    "symbol": symbol,
+                    "name": state["name"],
+                    "price": price,
+                    "amount": delta_amount,
+                    "volume": delta_volume,
+                    "delta_amount": delta_amount,
+                    "delta_volume": delta_volume,
+                    "buy_amount": delta_amount if side > 0 else 0.0,
+                    "sell_amount": delta_amount if side < 0 else 0.0,
+                    "side": side,
+                    "source": "tickflow_proxy",
+                    "event_id": f"proxy:{symbol}:{event_ts_ms}:{delta_amount}:{delta_volume}:{price}",
+                    "received_at_ms": event_ts_ms,
+                    "schema_version": SCHEMA_VERSION,
+                    "parser_version": "large_orders_proxy_v1",
+                })
 
             self._ranking = self._build_ranking_locked(now.timestamp())
             self._last_update_ms = int(time.time() * 1000)
+        if self._storage is not None and flow_events:
+            self._storage.submit("proxy_flow", flow_events)
         self._schedule_deep_dive()
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()
@@ -396,13 +440,13 @@ class LargeOrderService:
         credentials = load_credentials()
         if credentials is None:
             return
+        trade_payload: dict[str, Any] | None = None
+        intent_payload: dict[str, Any] | None = None
         try:
             async with KaipanlaClient(credentials=credentials, attempts=1) as client:
                 trade_payload = await client.request(13, {"StockID": symbol})
                 intent_payload = await client.request(14, {"StockID": symbol})
-            trades = parse_large_order_trades(trade_payload, symbol)
-            intents = parse_large_order_intents(intent_payload, symbol)
-        except (KaipanlaRequestError, ResponseShapeError, ValueError) as exc:
+        except (KaipanlaRequestError, ValueError) as exc:
             with self._lock:
                 state = self._states.get(symbol)
                 if state:
@@ -410,7 +454,39 @@ class LargeOrderService:
                     state["deep_source"] = "proxy_only"
             self._last_error = "开盘啦深挖暂不可用"
             return
+        if self._storage is not None:
+            raw_batch = int(time.time() * 1000)
+            for kind, payload, endpoint in (
+                ("kaipanla_trade", trade_payload, 13),
+                ("kaipanla_intent", intent_payload, 14),
+            ):
+                if payload is None:
+                    continue
+                try:
+                    content_hash = stable_content_hash(payload)
+                    self._storage.archive_payload(
+                        kind,
+                        self._trade_date,
+                        f"{symbol}-{endpoint}-{raw_batch}-{content_hash[:16]}",
+                        payload,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._last_error = f"开盘啦原始响应归档失败: {exc}"
+                    logger.exception("开盘啦原始响应归档失败 symbol=%s endpoint=%s", symbol, endpoint)
+        try:
+            trades = parse_large_order_trades(trade_payload or {}, symbol)
+            intents = parse_large_order_intents(intent_payload or {}, symbol)
+        except (ResponseShapeError, ValueError) as exc:
+            with self._lock:
+                state = self._states.get(symbol)
+                if state:
+                    state["deep_error"] = str(exc)
+                    state["deep_source"] = "proxy_only"
+            self._last_error = "开盘啦深挖响应解析失败"
+            return
         now_ms = int(time.time() * 1000)
+        trade_rows: list[dict[str, Any]] = []
+        intent_rows: list[dict[str, Any]] = []
         with self._lock:
             state = self._states.setdefault(symbol, {
                 "symbol": symbol, "name": symbol, "snapshots": deque(maxlen=360), "flows": deque(maxlen=720),
@@ -422,20 +498,60 @@ class LargeOrderService:
                 if event["event_id"] not in state["trade_ids"]:
                     state["trade_ids"].add(event["event_id"])
                     state["trade_events"].append({**event, "event_time": event.get("time")})
+                    trade_ts = _as_datetime(event.get("timestamp") or event.get("time"))
+                    trade_rows.append({
+                        "trade_date": self._trade_date,
+                        "event_ts_ms": int(trade_ts.timestamp() * 1000) if trade_ts else now_ms,
+                        "symbol": symbol,
+                        "name": state["name"],
+                        "price": event.get("price"),
+                        "amount": event.get("amount"),
+                        "volume": event.get("volume"),
+                        "source": "kaipanla_13",
+                        "event_id": event["event_id"],
+                        "received_at_ms": now_ms,
+                        "schema_version": SCHEMA_VERSION,
+                        "parser_version": "kaipanla_v1",
+                        "direction": event.get("direction"),
+                        "direction_code": event.get("direction_code"),
+                        "event_time": event.get("time"),
+                    })
             for event in intents:
                 if event["event_id"] not in state["intent_ids"]:
                     state["intent_ids"].add(event["event_id"])
                     state["intent_events"].append(event)
+                    intent_ts = _as_datetime(event.get("timestamp") or event.get("time"))
+                    intent_rows.append({
+                        "trade_date": self._trade_date,
+                        "event_ts_ms": int(intent_ts.timestamp() * 1000) if intent_ts else now_ms,
+                        "symbol": symbol,
+                        "name": state["name"],
+                        "price": event.get("price"),
+                        "amount": event.get("amount"),
+                        "volume": event.get("volume"),
+                        "source": "kaipanla_14",
+                        "event_id": event["event_id"],
+                        "received_at_ms": now_ms,
+                        "schema_version": SCHEMA_VERSION,
+                        "parser_version": "kaipanla_v1",
+                        "order_id": event.get("order_id"),
+                        "side": event.get("side"),
+                        "side_code": event.get("side_code"),
+                        "limit_flag": event.get("limit_flag"),
+                        "cancel_flag": event.get("cancel_flag"),
+                        "event_time": event.get("time"),
+                    })
             state["trade_ids"] = {item["event_id"] for item in state["trade_events"]}
             state["intent_ids"] = {item["event_id"] for item in state["intent_events"]}
             state["deep_source"] = "kaipanla"
             state["deep_error"] = None
             state["last_deep_ms"] = now_ms
-            self._raw_archive.append({"symbol": symbol, "endpoint": 13, "received_at": now_ms, "payload": trade_payload})
-            self._raw_archive.append({"symbol": symbol, "endpoint": 14, "received_at": now_ms, "payload": intent_payload})
             self._ranking = self._build_ranking_locked(time.time())
             alerts = self._build_alerts_locked(symbol)
             self._last_update_ms = now_ms
+        if self._storage is not None:
+            self._storage.submit("kaipanla_trade", trade_rows)
+            self._storage.submit("kaipanla_intent", intent_rows)
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()
             if alerts:
@@ -509,6 +625,16 @@ class LargeOrderService:
                 "deep_dive_budget": int(self._config.get("max_deep_dive_symbols", 3)),
                 "deep_dive_calls_used": self._deep_calls_used,
                 "deep_dive_calls_remaining": max(0, int(self._config.get("daily_call_budget", 60)) - self._deep_calls_used),
+                "storage": self._storage.status() if self._storage is not None else {
+                    "enabled": False,
+                    "queued_rows": 0,
+                    "written_rows": 0,
+                    "dropped_rows": 0,
+                    "invalid_rows": 0,
+                    "last_flush_ms": None,
+                    "last_error": None,
+                    "storage_root": None,
+                },
             }
 
     def ranking(self, window: int = 60, scope: str = "all") -> dict:
@@ -534,6 +660,30 @@ class LargeOrderService:
                 })
             rows.sort(key=lambda item: (item["score"], item["net_buy_amount"]), reverse=True)
         return {"rows": rows, "count": len(rows), "window": window, "scope": scope, "stale": self.status()["stale"]}
+
+    def history(
+        self,
+        trade_date,
+        *,
+        kind: str = "proxy_flow",
+        symbol: str | None = None,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int = 1000,
+        order: str = "asc",
+    ) -> dict:
+        if self._storage is None:
+            return {"rows": [], "count": 0, "truncated": False, "kind": kind, "date": trade_date.isoformat()}
+        result = self._storage.query(
+            kind,
+            trade_date,
+            symbol=symbol,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            limit=limit,
+            order=order,
+        )
+        return {**result, "kind": kind, "date": trade_date.isoformat()}
 
     def tape(self, symbol: str) -> dict:
         normalized = str(symbol).strip().upper()

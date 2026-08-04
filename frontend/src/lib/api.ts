@@ -301,6 +301,16 @@ export interface LargeOrderStatus {
   is_trading_hours?: boolean
   config_version?: string
   deep_dive_budget?: number
+  storage?: {
+    enabled: boolean
+    queued_rows: number
+    written_rows: number
+    dropped_rows: number
+    invalid_rows: number
+    last_flush_ms: number | null
+    last_error: string | null
+    storage_root: string | null
+  }
 }
 
 export interface LargeOrderRow {
@@ -345,6 +355,16 @@ export interface LargeOrderTape {
   trades: Array<Record<string, any>>
   intents: Array<Record<string, any>>
   timeline: Array<{ ts: number; amount: number; buy: number; sell: number; price: number }>
+}
+
+export type LargeOrderHistoryKind = 'proxy_flow' | 'kaipanla_trade' | 'kaipanla_intent'
+
+export interface LargeOrderHistoryResponse {
+  rows: Array<Record<string, unknown>>
+  count: number
+  truncated: boolean
+  kind: LargeOrderHistoryKind
+  date: string
 }
 
 // ===== Screener =====
@@ -1760,6 +1780,24 @@ export const api = {
     request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; stale: boolean }>(
       `/api/large-orders/ranking?window=${window}&scope=${scope}`,
     ),
+  largeOrdersHistory: (params: {
+    date: string
+    kind?: LargeOrderHistoryKind
+    symbol?: string
+    from_ms?: number
+    to_ms?: number
+    limit?: number
+    order?: 'asc' | 'desc'
+  }) => {
+    const query = new URLSearchParams({ date: params.date })
+    if (params.kind) query.set('kind', params.kind)
+    if (params.symbol) query.set('symbol', params.symbol)
+    if (params.from_ms != null) query.set('from_ms', String(params.from_ms))
+    if (params.to_ms != null) query.set('to_ms', String(params.to_ms))
+    if (params.limit != null) query.set('limit', String(params.limit))
+    if (params.order) query.set('order', params.order)
+    return request<LargeOrderHistoryResponse>(`/api/large-orders/history?${query.toString()}`)
+  },
   largeOrdersTape: (symbol: string) =>
     request<LargeOrderTape>(`/api/large-orders/${encodeURIComponent(symbol)}/tape`),
   updateLargeOrdersPreferences: (payload: {
