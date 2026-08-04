@@ -344,6 +344,21 @@ class Context:
         ))
         return self._engine._smallcap_index_loader(normalized, previous_date)
 
+    def style_liquidity_signal(
+        self,
+        previous_date: date | datetime | str,
+    ) -> dict[str, Any] | None:
+        if self._engine._style_liquidity_loader is None or self.now is None:
+            return None
+        if isinstance(previous_date, datetime):
+            requested_date = previous_date.date()
+        elif isinstance(previous_date, date):
+            requested_date = previous_date
+        else:
+            requested_date = date.fromisoformat(str(previous_date)[:10])
+        cutoff = min(requested_date, self.now.date() - timedelta(days=1))
+        return self._engine._style_liquidity_loader(cutoff)
+
     def market_history_bars(
         self,
         symbol: str,
@@ -632,6 +647,7 @@ class FreeStrategyEngine:
         self._dividend_ratio_loader: Callable[[list[str], date], list[str]] | None = None
         self._valuation_market_cap_loader: Callable[[list[str], date], dict[str, float]] | None = None
         self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
+        self._style_liquidity_loader: Callable[[date], dict[str, Any] | None] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
         # Trusted local execution is intentional for this feature: user scripts may import
@@ -773,6 +789,12 @@ class FreeStrategyEngine:
         loader: Callable[[list[str], date], float | None] | None,
     ) -> None:
         self._smallcap_index_loader = loader
+
+    def set_style_liquidity_loader(
+        self,
+        loader: Callable[[date], dict[str, Any] | None] | None,
+    ) -> None:
+        self._style_liquidity_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""

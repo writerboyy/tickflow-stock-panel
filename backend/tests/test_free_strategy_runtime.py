@@ -164,6 +164,20 @@ def on_bar(context, bars):
     assert engine.context.state == {"visible": [1], "name": "测试ETF"}
 
 
+def test_style_liquidity_loader_cannot_see_current_trading_day():
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+    requested = []
+    engine.set_style_liquidity_loader(
+        lambda cutoff: requested.append(cutoff) or {"date": cutoff.isoformat()}
+    )
+    engine.context.now = datetime(2025, 7, 24, 9, 30)
+
+    signal = engine.context.style_liquidity_signal("2025-07-24")
+
+    assert requested == [datetime(2025, 7, 23).date()]
+    assert signal == {"date": "2025-07-23"}
+
+
 def test_reference_asset_helper_declares_etf_daily_and_minute_handles():
     source = """
 def initialize(context):
@@ -567,7 +581,7 @@ def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selectio
     )
 
     scope = performance_small_cap._held_and_selection_symbols(context, context.now)
-    first, eleventh = scope[0], scope[10]
+    first = scope[0]
     current = {
         symbol: Bar(
             symbol,
@@ -588,7 +602,7 @@ def test_performance_small_cap_reuses_daily_candidate_pool_for_snapshot_selectio
     selected = performance_small_cap._select_stocks(context, require_snapshot=True)
 
     assert len(scope) == 12
-    assert eleventh in selected
+    assert selected == scope[1:6]
     assert first not in selected
     assert [count for _symbols, count in history_calls] == [260, 1]
 
@@ -672,7 +686,7 @@ def test_performance_small_cap_applies_name_filter_at_current_snapshot():
     selected = performance_small_cap._select_stocks(context, require_snapshot=True)
 
     assert blocked not in selected
-    assert symbols[10] in selected
+    assert selected == symbols[1:6]
 
 
 def test_performance_small_cap_close_position_submits_to_match_order_target_semantics():
@@ -765,6 +779,64 @@ def test_performance_small_cap_monthly_rebalance_submits_cash_weight_after_exit(
         ("quantity", exit_symbol, 0),
         ("weight", new_symbol, 1.0),
     ]
+
+
+def test_performance_small_cap_selected_parameters_are_active():
+    assert performance_small_cap.STOCK_COUNT == 5
+    assert performance_small_cap.MAX_STOCK_PRICE == 6.0
+    assert performance_small_cap.STYLE_LIQUIDITY_ENTRY_QUANTILE == 0.97
+    assert performance_small_cap.STYLE_LIQUIDITY_RECOVERY_QUANTILE == 0.70
+
+
+def test_performance_small_cap_style_liquidity_risk_exits_and_recovers(monkeypatch):
+    submitted = []
+    signals = []
+    recovered = []
+    state = {
+        "just_sold": [],
+        "style_liquidity_active": False,
+        "style_liquidity_signal": None,
+        "today_trade_allowed": True,
+        "risk_control_executed": False,
+        "ban_trade_start_date": "2025-07-01",
+        "decision": {},
+    }
+    context = SimpleNamespace(
+        now=datetime(2025, 7, 24, 9, 30),
+        portfolio=SimpleNamespace(positions={"000001.SZ": 100}),
+        state={"performance_small_cap": state},
+        order_target=lambda symbol, quantity: submitted.append((symbol, quantity)),
+        emit_signal=lambda *args, **kwargs: signals.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        performance_small_cap,
+        "_execute_recovery_buying",
+        lambda _context: recovered.append(True),
+    )
+
+    performance_small_cap._apply_style_liquidity_timing(context, {
+        "available": True,
+        "risk_off": True,
+        "cap_ratio": 53.0,
+    })
+
+    assert submitted == [("000001.SZ", 0)]
+    assert state["today_trade_allowed"] is False
+    assert state["risk_control_executed"] is True
+    assert state["ban_trade_start_date"] is None
+    assert state["decision"]["reason"] == "style_liquidity_risk"
+    assert len(signals) == 1
+
+    state["risk_control_executed"] = False
+    performance_small_cap._apply_style_liquidity_timing(context, {
+        "available": True,
+        "risk_off": False,
+        "cap_ratio": 25.0,
+    })
+
+    assert state["today_trade_allowed"] is True
+    assert state["style_liquidity_active"] is False
+    assert recovered == [True]
 
 
 def test_performance_small_cap_rebalance_fills_buy_after_same_callback_exit(monkeypatch):

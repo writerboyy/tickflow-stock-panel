@@ -17,6 +17,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
+import duckdb
 import polars as pl
 
 from app.services.security_dimensions import (
@@ -36,6 +37,184 @@ PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES = (
     "metrics",
     "balance_sheet",
 )
+STYLE_LIQUIDITY_ENTRY_QUANTILE = 0.97
+STYLE_LIQUIDITY_RECOVERY_QUANTILE = 0.70
+
+
+class StyleLiquiditySignalCache:
+    def __init__(
+        self,
+        repo: Any,
+        start: date,
+        end: date,
+        *,
+        entry_quantile: float = STYLE_LIQUIDITY_ENTRY_QUANTILE,
+        recovery_quantile: float = STYLE_LIQUIDITY_RECOVERY_QUANTILE,
+    ) -> None:
+        self._repo = repo
+        self._data_dir = Path(repo.store.data_dir)
+        self._start = start
+        self._end = end
+        self._entry_quantile = entry_quantile
+        self._recovery_quantile = recovery_quantile
+        self._lock = threading.RLock()
+        self._loaded = False
+        self._error: str | None = None
+        self._signals: dict[date, dict[str, Any]] = {}
+
+    @staticmethod
+    def _years_before(day: date, years: int) -> date:
+        try:
+            return day.replace(year=day.year - years)
+        except ValueError:
+            return day.replace(year=day.year - years, day=28)
+
+    def _load(self) -> None:
+        instruments = self._repo.get_instruments_asset("stock")
+        required = {"symbol", "name"}
+        if instruments.is_empty() or not required.issubset(instruments.columns):
+            raise ValueError("大小盘成交占比择时缺少股票标的目录")
+        symbol = pl.col("symbol")
+        valid = (
+            instruments
+            .filter(~(
+                symbol.str.starts_with("4")
+                | symbol.str.starts_with("8")
+                | symbol.str.starts_with("68")
+            ))
+            .filter(~pl.col("name").fill_null("").str.to_uppercase().str.contains("ST"))
+            .filter(~pl.col("name").fill_null("").str.contains(r"\*|退"))
+            .select("symbol")
+            .unique()
+        )
+        if valid.is_empty():
+            raise ValueError("大小盘成交占比择时没有有效股票标的")
+
+        history_start = self._years_before(self._start, 10)
+        load_start = history_start - timedelta(days=14)
+        daily_glob = str(
+            self._data_dir / "kline_daily" / "**" / "*.parquet"
+        ).replace("'", "''")
+        valuation_glob = str(
+            self._data_dir / "valuation_daily" / "**" / "*.parquet"
+        ).replace("'", "''")
+        connection = duckdb.connect()
+        connection.register("valid_symbols", valid.to_arrow())
+        query = f"""
+            WITH bars AS (
+                SELECT
+                    k.symbol,
+                    k.date,
+                    sum(k.amount) OVER (
+                        PARTITION BY k.symbol ORDER BY k.date
+                        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                    ) AS amount_5d,
+                    count(*) OVER (
+                        PARTITION BY k.symbol ORDER BY k.date
+                        ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                    ) AS bars_5d
+                FROM read_parquet('{daily_glob}', hive_partitioning=false) AS k
+                INNER JOIN valid_symbols AS s USING (symbol)
+                WHERE k.date BETWEEN DATE '{load_start.isoformat()}'
+                    AND DATE '{self._end.isoformat()}'
+            ), ranked AS (
+                SELECT
+                    b.symbol,
+                    b.date,
+                    b.amount_5d,
+                    row_number() OVER (
+                        PARTITION BY b.date ORDER BY v.market_cap DESC, b.symbol
+                    ) AS cap_rank,
+                    count(*) OVER (PARTITION BY b.date) AS symbol_count
+                FROM bars AS b
+                INNER JOIN read_parquet(
+                    '{valuation_glob}', hive_partitioning=false
+                ) AS v USING (symbol, date)
+                WHERE b.bars_5d = 5 AND b.amount_5d > 0 AND v.market_cap > 0
+            ), daily AS (
+                SELECT
+                    date,
+                    symbol_count,
+                    sum(amount_5d) AS total_amount_5d,
+                    sum(CASE
+                        WHEN cap_rank <= floor(symbol_count * 0.1) THEN amount_5d
+                        ELSE 0
+                    END) AS large_amount_5d,
+                    sum(CASE
+                        WHEN cap_rank > symbol_count - floor(symbol_count * 0.1)
+                            THEN amount_5d
+                        ELSE 0
+                    END) AS small_amount_5d
+                FROM ranked
+                GROUP BY date, symbol_count
+            )
+            SELECT
+                date,
+                100 * large_amount_5d / total_amount_5d AS large_ratio,
+                100 * small_amount_5d / total_amount_5d AS small_ratio,
+                large_amount_5d / small_amount_5d AS cap_ratio
+            FROM daily
+            WHERE date >= DATE '{history_start.isoformat()}'
+            ORDER BY date
+        """
+        try:
+            metrics = connection.sql(query).pl()
+        finally:
+            connection.close()
+        history = metrics.filter(pl.col("date") < self._start)
+        period = metrics.filter(pl.col("date").is_between(self._start, self._end))
+        if history.is_empty() or period.is_empty():
+            raise ValueError("大小盘成交占比择时缺少十年历史或回测期数据")
+        entry = history.select(
+            pl.col("cap_ratio").quantile(self._entry_quantile)
+        ).item()
+        recovery = history.select(
+            pl.col("cap_ratio").quantile(self._recovery_quantile)
+        ).item()
+        if entry is None or recovery is None:
+            raise ValueError("大小盘成交占比择时无法计算历史分位")
+
+        risk_off = False
+        for row in period.iter_rows(named=True):
+            ratio = float(row["cap_ratio"])
+            if not risk_off and ratio >= float(entry):
+                risk_off = True
+            elif risk_off and ratio <= float(recovery):
+                risk_off = False
+            self._signals[row["date"]] = {
+                "available": True,
+                "date": row["date"].isoformat(),
+                "risk_off": risk_off,
+                "large_ratio": float(row["large_ratio"]),
+                "small_ratio": float(row["small_ratio"]),
+                "cap_ratio": ratio,
+                "entry_quantile": self._entry_quantile,
+                "recovery_quantile": self._recovery_quantile,
+                "entry_threshold": float(entry),
+                "recovery_threshold": float(recovery),
+            }
+
+    def signal(self, cutoff: date) -> dict[str, Any] | None:
+        if cutoff < self._start:
+            return None
+        with self._lock:
+            if not self._loaded:
+                try:
+                    self._load()
+                except Exception as exc:
+                    self._error = str(exc)
+                self._loaded = True
+            signal = self._signals.get(cutoff)
+            if signal is not None:
+                return dict(signal)
+            return {
+                "available": False,
+                "date": cutoff.isoformat(),
+                "risk_off": True,
+                "reason": self._error or "大小盘成交占比择时缺少当日数据",
+                "entry_quantile": self._entry_quantile,
+                "recovery_quantile": self._recovery_quantile,
+            }
 SCHEDULED_OPENING_RETRY_MINUTES = 5
 
 
@@ -1691,6 +1870,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 cutoff,
             )
         )
+        if _is_performance_small_cap_source(source):
+            style_liquidity = StyleLiquiditySignalCache(repo, start, end)
+            engine.set_style_liquidity_loader(style_liquidity.signal)
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data

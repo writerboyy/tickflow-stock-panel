@@ -7,8 +7,10 @@ from typing import Any
 
 
 STRATEGY_KIND = "performance_small_cap"
-STOCK_COUNT = 10
-MAX_STOCK_PRICE = 9.0
+STOCK_COUNT = 5
+MAX_STOCK_PRICE = 6.0
+STYLE_LIQUIDITY_ENTRY_QUANTILE = 0.97
+STYLE_LIQUIDITY_RECOVERY_QUANTILE = 0.70
 SMALLCAP_INDEX_SIZE = 400
 SMALLCAP_INDEX_THRESHOLD = 18.72
 BAN_TRADE_DAYS = 5
@@ -80,6 +82,17 @@ def _held_symbols(context) -> list[str]:
 
 def _held_scope(context, _timestamp: datetime) -> list[str]:
     return _held_symbols(context)
+
+
+def _timing_scope(context, _timestamp: datetime) -> list[str]:
+    held = _held_symbols(context)
+    if held:
+        return held
+    return [
+        str(item["symbol"])
+        for item in _instrument_records(context)
+        if item.get("symbol") and bool(item.get("has_minute", True))
+    ][:1]
 
 
 def _current_bars(context) -> dict[str, Any]:
@@ -334,6 +347,8 @@ def initialize(context) -> None:
         "risk_control_executed": False,
         "today_trade_allowed": True,
         "smallcap_index_value": None,
+        "style_liquidity_active": False,
+        "style_liquidity_signal": None,
         "ban_trade_start_date": None,
         "first_rebalance_done": False,
         "candidate_cache_key": None,
@@ -345,7 +360,7 @@ def initialize(context) -> None:
     })
     context.schedule(_prepare_stock_list, "09:00", symbols=_held_scope)
     context.schedule(_analyze_smallcap_index, "09:30", symbols=[])
-    context.schedule(_check_smallcap_timing, "09:30", symbols=_held_scope)
+    context.schedule(_check_smallcap_timing, "09:30", symbols=_timing_scope)
     context.schedule(_dapan, "09:30", symbols=_held_scope)
     context.schedule(_monthly_adjustment, "09:30", symbols=_held_and_selection_symbols)
     context.schedule(_check_limit_up_and_buy, "14:00", symbols=_held_and_selection_symbols)
@@ -361,6 +376,7 @@ def after_trading_end(context) -> None:
         "equity": float(context.portfolio.total_value),
         "cash": float(context.portfolio.cash),
         "smallcap_index_value": state.get("smallcap_index_value"),
+        "style_liquidity_signal": state.get("style_liquidity_signal"),
         "today_trade_allowed": bool(state.get("today_trade_allowed", True)),
         "decision": dict(state.get("decision", {})),
     }
@@ -464,6 +480,13 @@ def _check_smallcap_timing(context) -> None:
     state = _state(context)
     if state.get("risk_control_executed"):
         return
+    records = _instrument_records(context)
+    previous_date = _previous_trading_date(context, records)
+    loader = getattr(context, "style_liquidity_signal", None)
+    style_signal = loader(previous_date) if callable(loader) else None
+    if style_signal is not None:
+        _apply_style_liquidity_timing(context, style_signal)
+        return
     ban_ended = _ban_period_ended(context)
     value = state.get("smallcap_index_value")
     if value is None:
@@ -479,6 +502,26 @@ def _check_smallcap_timing(context) -> None:
         state["today_trade_allowed"] = True
         if ban_ended:
             _execute_recovery_buying(context)
+
+
+def _apply_style_liquidity_timing(context, signal: dict[str, Any]) -> None:
+    state = _state(context)
+    risk_off = bool(signal.get("risk_off", True))
+    was_active = bool(state.get("style_liquidity_active", False))
+    state["style_liquidity_active"] = risk_off
+    state["style_liquidity_signal"] = dict(signal)
+    state["ban_trade_start_date"] = None
+    if risk_off:
+        if not was_active:
+            for symbol in list(_held_symbols(context)):
+                _close_position(context, symbol)
+            _emit_decision(context, [], "style_liquidity_risk")
+        state["today_trade_allowed"] = False
+        state["risk_control_executed"] = True
+        return
+    state["today_trade_allowed"] = True
+    if was_active:
+        _execute_recovery_buying(context)
 
 
 def _ema(values: list[float | None], span: int) -> list[float | None]:
