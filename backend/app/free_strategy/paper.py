@@ -184,6 +184,50 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
     return quotes
 
 
+def _dispatch_paper_notification(state: dict[str, Any], event: dict[str, Any]) -> None:
+    """Send one paper-account event to the channels enabled for that account."""
+    from app.services import notify_adapter, preferences, webhook_adapter
+
+    enabled = state.get("system_notify_enabled")
+    if enabled is False:
+        return
+
+    symbol = str(event.get("symbol") or "")
+    detail = str(event.get("reason") or event.get("message") or event.get("status") or "")
+    body = f"{state.get('name', state.get('id', '模拟策略'))} {symbol} {detail}".strip()
+
+    # Accounts using the bell follow the channels currently configured in Settings.
+    # Legacy accounts without the field retain their persisted channel selection.
+    if enabled is True:
+        notify_adapter.notify("TickFlow · 模拟策略", body)
+        channels = {
+            channel
+            for channel, configured in (
+                ("feishu", preferences.get_feishu_webhook_url()),
+                ("wecom", preferences.get_wecom_webhook_url()),
+            )
+            if configured
+        }
+    else:
+        channels = set(state.get("notification_channels", []))
+
+    if "feishu" in channels and preferences.get_feishu_webhook_url():
+        _PAPER_WEBHOOK_EXECUTOR.submit(
+            webhook_adapter.send_feishu,
+            preferences.get_feishu_webhook_url(),
+            "模拟",
+            body,
+            preferences.get_feishu_webhook_secret(),
+        )
+    if "wecom" in channels and preferences.get_wecom_webhook_url():
+        _PAPER_WEBHOOK_EXECUTOR.submit(
+            webhook_adapter.send_wecom,
+            preferences.get_wecom_webhook_url(),
+            "模拟",
+            body,
+        )
+
+
 class MarketDataHub:
     """跨账户共享行情轮询、闭合 K 线时钟和 WebSocket 连接。"""
 
@@ -1603,33 +1647,7 @@ def _paper_worker(
             return
         notified.add(key)
         notification_times.append(now)
-        latest_state = store.get(account_id)
-        channels = set(latest_state.get("notification_channels", []))
-        from app.services import preferences, webhook_adapter
-
-        symbol = str(event.get("symbol") or "")
-        detail = str(event.get("reason") or event.get("message") or event.get("status") or "")
-        body = f"{latest_state.get('name', account_id)} {symbol} {detail}".strip()
-        if latest_state.get("system_notify_enabled", False):
-            from app.services import notify_adapter
-            notify_adapter.notify("TickFlow · 模拟策略", body)
-        if not channels:
-            return
-        if "feishu" in channels and preferences.get_feishu_webhook_url():
-            _PAPER_WEBHOOK_EXECUTOR.submit(
-                webhook_adapter.send_feishu,
-                preferences.get_feishu_webhook_url(),
-                "模拟",
-                body,
-                preferences.get_feishu_webhook_secret(),
-            )
-        if "wecom" in channels and preferences.get_wecom_webhook_url():
-            _PAPER_WEBHOOK_EXECUTOR.submit(
-                webhook_adapter.send_wecom,
-                preferences.get_wecom_webhook_url(),
-                "模拟",
-                body,
-            )
+        _dispatch_paper_notification(store.get(account_id), event)
     while True:
         try:
             message = input_queue.get(timeout=2)

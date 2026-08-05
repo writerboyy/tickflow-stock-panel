@@ -20,6 +20,7 @@ from app.free_strategy.paper import (
     _append_strategy_logs,
     _catch_up_bars,
     _compatible_checkpoint,
+    _dispatch_paper_notification,
     _engine_from_state,
     _equity_snapshot,
     _queue_delay_seconds,
@@ -35,6 +36,46 @@ from app.services.quote_service import QuoteService
 
 def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
+
+
+def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):
+    submitted = []
+
+    class ImmediateExecutor:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+            return fn(*args)
+
+    sent = []
+    monkeypatch.setattr("app.free_strategy.paper._PAPER_WEBHOOK_EXECUTOR", ImmediateExecutor())
+    monkeypatch.setattr("app.services.notify_adapter.notify", lambda *_args: True)
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test")
+    monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: sent.append(args) or True)
+
+    _dispatch_paper_notification(
+        {"id": "paper", "name": "报价策略", "system_notify_enabled": True, "notification_channels": []},
+        {"type": "fill", "symbol": "510300.SH", "status": "filled"},
+    )
+
+    assert len(submitted) == 1
+    assert sent == [("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test", "模拟", "报价策略 510300.SH filled")]
+
+
+def test_disabled_paper_notification_sends_nothing(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.notify_adapter.notify",
+        lambda *_args: pytest.fail("disabled account must not send a system notification"),
+    )
+    monkeypatch.setattr(
+        "app.services.preferences.get_wecom_webhook_url",
+        lambda: pytest.fail("disabled account must not resolve webhook channels"),
+    )
+
+    _dispatch_paper_notification(
+        {"id": "paper", "system_notify_enabled": False, "notification_channels": ["wecom"]},
+        {"type": "fill", "symbol": "510300.SH"},
+    )
 
 
 class FakePaperProcess:
@@ -460,6 +501,63 @@ def on_quote(context, quotes):
     assert following.account.fills == []
     following.process_quotes([quote(3, 11)])
     assert following.account.fills[0].price == 11
+
+
+def test_quote_driven_fill_dispatches_current_wecom_hook(monkeypatch, tmp_path):
+    source = """
+def on_quote(context, quotes):
+    if not context.state.get('ordered'):
+        context.state['ordered'] = True
+        context.buy('X', quantity=10)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            lot_size=1,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+        ),
+    )
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "name": "报价策略",
+        "status": "running",
+        "system_notify_enabled": True,
+        "notification_channels": [],
+    })
+    sent = []
+
+    class ImmediateExecutor:
+        def submit(self, fn, *args):
+            return fn(*args)
+
+    monkeypatch.setattr("app.free_strategy.paper._PAPER_WEBHOOK_EXECUTOR", ImmediateExecutor())
+    monkeypatch.setattr("app.services.notify_adapter.notify", lambda *_args: True)
+    monkeypatch.setattr("app.services.preferences.get_feishu_webhook_url", lambda: "")
+    monkeypatch.setattr("app.services.preferences.get_wecom_webhook_url", lambda: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test")
+    monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: sent.append(args) or True)
+
+    before_risk = dict(engine.risk_status)
+    engine.process_quotes([quote(0, 10)])
+    _append_engine_events(
+        store,
+        "paper",
+        engine,
+        before_orders=0,
+        before_fills=0,
+        before_logs=0,
+        before_risk=before_risk,
+        notify=lambda event: _dispatch_paper_notification(store.get("paper"), event),
+    )
+
+    assert [event["type"] for event in store.events("paper")] == ["order", "fill"]
+    assert len(sent) == 2
+    assert all(call[0].endswith("key=test") and call[1] == "模拟" for call in sent)
 
 
 def test_quote_mapping_and_quote_values_are_read_only():
