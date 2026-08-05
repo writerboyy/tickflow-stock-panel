@@ -279,22 +279,26 @@ def initialize(context) -> None:
 
 
 def _history_rows(context, symbol: str, count: int) -> list[dict[str, Any]]:
-    market_history = getattr(context, "market_history_bars", None)
-    bars = market_history(symbol, count=count, timeframe="1d") if callable(market_history) else []
+    bars = context.market_history_bars(symbol, count=count, timeframe="1d")
     if not bars:
         bars = context.history_bars(symbol, count=count, timeframe="1d")
     return _bars_to_history_rows(bars)
 
 
 def _history_rows_batch(context, symbols: list[str], count: int) -> dict[str, list[dict[str, Any]]]:
-    loader = getattr(context, "market_history_batch", None)
-    if not callable(loader):
-        return {symbol: _history_rows(context, symbol, count) for symbol in symbols}
-    history = loader(symbols, count=count, timeframe="1d")
+    history = context.market_history_batch(symbols, count=count, timeframe="1d")
+    market_history_enabled = bool(context.market_history_metadata.get("enabled"))
+    missing = (
+        [symbol for symbol in symbols if symbol not in history]
+        if market_history_enabled else list(symbols)
+    )
+    fallback = (
+        context.history_batch(missing, count=count, timeframe="1d")
+        if missing else {}
+    )
     return {
         symbol: _bars_to_history_rows(
-            history.get(symbol)
-            or context.history_bars(symbol, count=count, timeframe="1d")
+            history.get(symbol) or fallback.get(symbol) or []
         )
         for symbol in symbols
     }

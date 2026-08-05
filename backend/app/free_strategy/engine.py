@@ -397,6 +397,10 @@ class Context:
             result[symbol] = list(visible[-count:])
         return result
 
+    @property
+    def market_history_metadata(self) -> dict[str, Any]:
+        return dict(self._engine.market_history_metadata)
+
     def current_bars(self) -> BarsView:
         return BarsView(self._engine._session_bars)
 
@@ -582,7 +586,8 @@ class FreeStrategyEngine:
                  instruments: Iterable[dict[str, Any]] | None = None,
                  instrument_loader: Callable[[str], Iterable[dict[str, Any]]] | None = None,
                  risk_config: RiskConfig | None = None,
-                 callback_deadline: Any = None) -> None:
+                 callback_deadline: Any = None,
+                 callback_label: Any = None) -> None:
         self.source = source
         self.timeframe = timeframe
         self.config = config or FreeStrategyConfig()
@@ -604,6 +609,7 @@ class FreeStrategyEngine:
         self._counter = 0
         self._callbacks: dict[str, Callable[..., Any]] = {}
         self._callback_deadline = callback_deadline
+        self._callback_label = callback_label
         self._history_loader: Callable[[str, int, str, datetime], list[Bar]] | None = None
         self._history_batch_loader: Callable[
             [list[str], int, str, datetime], dict[str, list[Bar]]
@@ -1311,6 +1317,9 @@ class FreeStrategyEngine:
     def _protected_call(self, label: str, callback: Callable[..., Any], *args: Any) -> Any:
         timeout = float(self.config.callback_timeout_seconds)
         started = time.monotonic()
+        if self._callback_label is not None:
+            with self._callback_label.get_lock():
+                self._callback_label.get_obj().value = label
         if self._callback_deadline is not None:
             with self._callback_deadline.get_lock():
                 self._callback_deadline.value = started + timeout
@@ -1321,8 +1330,11 @@ class FreeStrategyEngine:
             if self._callback_deadline is not None:
                 with self._callback_deadline.get_lock():
                     self._callback_deadline.value = 0.0
+            if self._callback_label is not None:
+                with self._callback_label.get_lock():
+                    self._callback_label.get_obj().value = ""
             if elapsed > timeout:
-                raise TimeoutError(f"{label}超过 {timeout:g} 秒")
+                raise TimeoutError(f"{label}超过 {timeout:g} 秒（实际 {elapsed:.1f} 秒）")
 
     def runtime_snapshot(self) -> dict[str, Any]:
         """保存模拟盘恢复所需的会话边界，避免盘后任务重复执行。"""

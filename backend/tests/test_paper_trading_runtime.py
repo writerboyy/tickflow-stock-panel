@@ -21,6 +21,8 @@ from app.free_strategy.paper import (
     _compatible_checkpoint,
     _engine_from_state,
     _equity_snapshot,
+    _queue_delay_seconds,
+    _queued_payload,
     _process_bar_rows,
 )
 from app.free_strategy.process import MarketData
@@ -58,6 +60,18 @@ class FakePaperProcess:
         self.terminated = True
 
 
+class FakeSharedValue:
+    def __init__(self, value):
+        self.value = value
+        self._lock = threading.RLock()
+
+    def get_lock(self):
+        return self._lock
+
+    def get_obj(self):
+        return self
+
+
 class FakePaperHub:
     def __init__(self):
         self.unregistered = []
@@ -76,10 +90,25 @@ class FakePaperContext:
 
     @staticmethod
     def Value(_typecode, value):
-        return SimpleNamespace(value=value)
+        return FakeSharedValue(value)
+
+    @staticmethod
+    def Array(_typecode, _size):
+        return FakeSharedValue("")
+
+    @staticmethod
+    def BoundedSemaphore(size):
+        return threading.BoundedSemaphore(size)
 
     def Process(self, *_args, **_kwargs):
         return self.replacement
+
+
+def initialize_supervisor_runtime(supervisor):
+    supervisor._deadlines = {}  # noqa: SLF001
+    supervisor._callback_labels = {}  # noqa: SLF001
+    supervisor._queue_delays = {}  # noqa: SLF001
+    supervisor._catch_up_slots = threading.BoundedSemaphore(2)  # noqa: SLF001
 
 
 def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp_path):
@@ -213,6 +242,127 @@ def test_paper_engine_preloads_history_for_the_whole_universe(monkeypatch, tmp_p
     assert calls == [
         (["X", "Y"], datetime(2026, 8, 3).date() - timedelta(days=104), cn_now().date(), "etf"),
     ]
+
+
+def test_paper_engine_short_circuits_missing_market_history_without_symbol_reads(monkeypatch, tmp_path):
+    reads = []
+    prepared = []
+
+    monkeypatch.setattr(
+        "app.free_strategy.process._instrument_records",
+        lambda _repo, _asset_type, _timeframe: [
+            {"symbol": "PRESENT", "asset_type": "etf"},
+            {"symbol": "MISSING", "asset_type": "etf"},
+        ],
+    )
+
+    def prepare(_repo, engine, _start, _end, _asset_type, _market):
+        prepared.append(True)
+        engine.preload_market_history([
+            Bar("PRESENT", datetime(2026, 8, 4, 15), 10, 10, 10, 10),
+        ])
+        return {"enabled": True, "asset_type": "etf", "timeframe": "1d", "requested_bars": 5,
+                "rows": 1, "symbols": 1, "start": "2026-08-04", "end": "2026-08-04"}
+
+    monkeypatch.setattr("app.free_strategy.process._prepare_market_reference", prepare)
+    monkeypatch.setattr(
+        "app.free_strategy.process._read_rows",
+        lambda *_args, **_kwargs: reads.append(True) or [],
+    )
+    account_root = tmp_path / "paper_accounts" / "paper"
+    account_root.mkdir(parents=True)
+    (account_root / "strategy.py").write_text(
+        "def initialize(context):\n"
+        "    context.set_universe(['PRESENT', 'MISSING'])\n"
+        "    context.require_market_history('etf', bars=5)\n"
+        "def on_bar(context, bars):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    engine = _engine_from_state(
+        {"config": {"market_mode": "bar_1m", "asset_type": "etf"}},
+        account_root,
+        tmp_path,
+    )
+    engine.context.now = datetime(2026, 8, 5, 10)
+
+    assert engine.context.history_bars("MISSING", count=5, timeframe="1d") == []
+    assert engine.context.history_bars("MISSING", count=5, timeframe="1d") == []
+    assert engine.context.history_bars("UNKNOWN", count=5, timeframe="1d") == []
+    assert len(prepared) == 1
+    assert reads == [True]
+
+
+def test_queued_payload_preserves_dict_shape_and_reports_wait():
+    payload = _queued_payload({"type": "bars"})
+    payload.enqueued_at = time.monotonic() - 0.5
+
+    assert payload == {"type": "bars"}
+    assert _queue_delay_seconds(payload) >= 0.49
+
+
+def test_supervisor_start_passes_shared_catch_up_slot(tmp_path):
+    class FakeContext:
+        def __init__(self):
+            self.slot = object()
+            self.args = None
+
+        def BoundedSemaphore(self, _size):
+            return self.slot
+
+        @staticmethod
+        def Queue(maxsize):
+            return queue.Queue(maxsize=maxsize)
+
+        @staticmethod
+        def Value(_typecode, value):
+            return FakeSharedValue(value)
+
+        @staticmethod
+        def Array(_typecode, _size):
+            return FakeSharedValue("")
+
+        def Process(self, *args, **kwargs):
+            self.args = kwargs.get("args", args)
+            return FakePaperProcess()
+
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "stopped", "config": {}})
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.data_dir = tmp_path
+    supervisor.store = store
+    supervisor.hub = SimpleNamespace(quote_service=SimpleNamespace(get_min_interval=lambda: 1))
+    supervisor._ctx = FakeContext()  # noqa: SLF001
+    supervisor._catch_up_slots = supervisor._ctx.slot  # noqa: SLF001
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {}  # noqa: SLF001
+    supervisor._queues = {}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
+
+    supervisor.start("paper")
+
+    assert supervisor._ctx.args[4] is supervisor._catch_up_slots  # noqa: SLF001
+
+
+def test_supervisor_timeout_reports_callback_and_queue_delay(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running", "config": {"callback_timeout_seconds": 1}})
+    process = FakePaperProcess(alive=True)
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.store = store
+    supervisor.hub = FakePaperHub()
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {"paper": process}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    supervisor._deadlines = {"paper": FakeSharedValue(time.monotonic() - 1)}  # noqa: SLF001
+    supervisor._callback_labels = {"paper": FakeSharedValue("定时回调 13:10")}  # noqa: SLF001
+    supervisor._queue_delays = {"paper": FakeSharedValue(2.5)}  # noqa: SLF001
+
+    supervisor._monitor_once()  # noqa: SLF001
+
+    message = store.get("paper")["last_error"]
+    assert "定时回调 13:10" in message
+    assert "队列等待 2.5 秒" in message
 
 
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):
@@ -518,6 +668,7 @@ def test_supervisor_detaches_runtime_after_worker_pauses(tmp_path):
     process = FakeProcess()
     supervisor._processes = {"paper": process}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
 
     supervisor._monitor_once()  # noqa: SLF001
 
@@ -538,6 +689,7 @@ def test_supervisor_does_not_detach_concurrently_restarted_worker(tmp_path):
     new_queue = queue.Queue(maxsize=2)
     supervisor._processes = {"paper": old_process}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
 
     def replace_runtime():
         supervisor._processes["paper"] = new_process  # noqa: SLF001
@@ -569,7 +721,7 @@ def test_supervisor_restarts_worker_after_unreported_exit(tmp_path):
     supervisor._lock = threading.RLock()  # noqa: SLF001
     supervisor._processes = {"paper": FakePaperProcess(exitcode=-15)}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
-    supervisor._deadlines = {}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
     supervisor._restart_attempts = {}  # noqa: SLF001
 
     supervisor._monitor_once()  # noqa: SLF001
@@ -592,7 +744,7 @@ def test_supervisor_pauses_after_repeated_unreported_exits(tmp_path):
     supervisor._lock = threading.RLock()  # noqa: SLF001
     supervisor._processes = {"paper": FakePaperProcess(exitcode=1)}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
-    supervisor._deadlines = {}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
     now = time.monotonic()
     supervisor._restart_attempts = {  # noqa: SLF001
         "paper": deque([now - 3, now - 2, now - 1]),
@@ -625,7 +777,11 @@ def test_supervisor_start_defers_strategy_initialization_to_worker(tmp_path):
 
         @staticmethod
         def Value(_typecode, value):
-            return SimpleNamespace(value=value)
+            return FakeSharedValue(value)
+
+        @staticmethod
+        def Array(_typecode, _size):
+            return FakeSharedValue("")
 
         @staticmethod
         def Process(*_args, **_kwargs):
@@ -657,6 +813,7 @@ def test_supervisor_start_defers_strategy_initialization_to_worker(tmp_path):
     supervisor._lock = threading.RLock()  # noqa: SLF001
     supervisor._processes = {}  # noqa: SLF001
     supervisor._queues = {}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
     result = supervisor.start("paper")
 
     assert result["sync"] == sync
@@ -1146,6 +1303,35 @@ def on_bar(context, bars):
         ("X", "buy", "2024-01-01T15:00:00"),
         ("X", "sell", "2024-01-02T09:45:00"),
     ]
+
+
+def test_paper_bar_rows_persist_in_timestamp_chunks(monkeypatch, tmp_path):
+    from app.free_strategy import paper as paper_module
+
+    engine = FreeStrategyEngine(
+        "def on_bar(context, bars):\n    pass\n",
+        timeframe="1m",
+        config=FreeStrategyConfig(settlement="t0", fees_pct=0, slippage_bps=0),
+    )
+    store = PaperAccountStore(tmp_path)
+    current = store.save({"id": "paper", "status": "running"})
+    persist_calls = []
+    original = paper_module._persist_engine_state
+
+    def persist(*args, **kwargs):
+        persist_calls.append(args[4])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(paper_module, "_persist_engine_state", persist)
+    bars = [
+        Bar("X", datetime(2024, 1, 2, 9, 30) + timedelta(minutes=index), 10, 10, 10, 10)
+        for index in range(61)
+    ]
+
+    result = _process_bar_rows(store, "paper", current, engine, bars)
+
+    assert len(persist_calls) == 3
+    assert result["last_bar"] == "2024-01-02T10:30:00"
 
 
 def test_paper_equity_curve_is_upserted_and_limited_to_recent_year(tmp_path):

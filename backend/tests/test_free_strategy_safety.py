@@ -224,13 +224,17 @@ def test_paper_supervisor_pauses_worker_when_strategy_deadline_expires(tmp_path)
     process = FakeProcess()
     supervisor._processes = {"paper": process}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue()}  # noqa: SLF001
+    ctx = mp.get_context("spawn")
     supervisor._deadlines = {  # noqa: SLF001
-        "paper": SimpleNamespace(value=time.monotonic() - 1),
+        "paper": ctx.Value("d", time.monotonic() - 1),
     }
+    supervisor._callback_labels = {"paper": ctx.Array("u", 128)}  # noqa: SLF001
+    supervisor._queue_delays = {"paper": ctx.Value("d", 0.0)}  # noqa: SLF001
 
     supervisor._monitor_once()  # noqa: SLF001
 
     saved = store.get("paper")
     assert process.terminated is True
     assert saved["status"] == "paused"
-    assert saved["last_error"] == "策略执行超过 120 秒，已终止子进程"
+    assert saved["last_error"].startswith("策略执行超过 120 秒，已耗时 ")
+    assert saved["last_error"].endswith(" 秒，已终止子进程")

@@ -27,6 +27,8 @@ class FakeContext:
         self.extra_history_requirements = set()
         self.extra_rows = {}
         self.market_rows = {}
+        self.history_rows = {}
+        self.market_history_metadata = {"enabled": False}
         self.signals = []
         self.market_batch_calls = 0
 
@@ -55,14 +57,17 @@ class FakeContext:
         self.market_batch_calls += 1
         return {symbol: list(self.market_rows.get(symbol, []))[-count:] for symbol in symbols}
 
+    def history_batch(self, symbols, count: int = 20, timeframe: str | None = None):
+        return {symbol: list(self.history_rows.get(symbol, []))[-count:] for symbol in symbols}
+
     def emit_signal(self, signal_type: str, payload: dict, *, event_id: str | None = None):
         self.signals.append({"id": event_id, "signal_type": signal_type, **payload})
 
     def log(self, message: str, level: str = "INFO") -> None:
         self.logs.append((level, message))
 
-    def history_bars(self, _symbol: str, count: int = 20, timeframe: str | None = None):
-        return []
+    def history_bars(self, symbol: str, count: int = 20, timeframe: str | None = None):
+        return list(self.history_rows.get(symbol, []))[-count:]
 
     def order_target_percent(self, symbol: str, percent: float) -> None:
         self.orders.append(("percent", symbol, percent))

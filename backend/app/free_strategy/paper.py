@@ -10,7 +10,6 @@ import time
 from collections import deque
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time as clock_time, timedelta
 from hashlib import sha256
@@ -32,6 +31,9 @@ LEGACY_MARKET_MODES = {"bar_5m", "bar_30m"}
 QUOTE_MODES = {"poll_3s", "websocket"}
 WS_SYMBOL_LIMIT = 100
 PAPER_DEFAULT_CALLBACK_TIMEOUT_SECONDS = 120.0
+PAPER_CATCH_UP_CONCURRENCY = 2
+PAPER_BAR_CHECKPOINT_GROUPS = 30
+PAPER_CALLBACK_LABEL_SIZE = 128
 _WORKER_RESTART_LIMIT = 3
 _WORKER_RESTART_WINDOW_SECONDS = 300.0
 
@@ -83,7 +85,20 @@ class _Subscription:
     last_dispatch_at: float = 0.0
 
 
+class _QueuedPayload(dict[str, Any]):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(payload)
+        self.enqueued_at = time.monotonic()
+
+
+def _queued_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload, _QueuedPayload):
+        return payload
+    return _QueuedPayload(payload)
+
+
 def _put_latest(target: Any, payload: dict[str, Any]) -> None:
+    payload = _queued_payload(payload)
     try:
         target.put_nowait(payload)
         return
@@ -100,11 +115,35 @@ def _put_latest(target: Any, payload: dict[str, Any]) -> None:
 
 
 def _put_bar_batch(target: Any, payload: dict[str, Any]) -> bool:
+    payload = _queued_payload(payload)
     try:
         target.put(payload, block=True, timeout=0.5)
         return True
     except queue.Full:
         return False
+
+
+def _shared_text(shared: Any) -> str:
+    with shared.get_lock():
+        return str(shared.get_obj().value or "")
+
+
+def _shared_number(shared: Any) -> float:
+    with shared.get_lock():
+        return float(shared.value or 0.0)
+
+
+def _set_shared_number(shared: Any, value: float) -> None:
+    with shared.get_lock():
+        shared.value = float(value)
+
+
+def _queue_delay_seconds(message: _QueuedPayload) -> float:
+    enqueued_at = message.enqueued_at
+    try:
+        return max(0.0, time.monotonic() - float(enqueued_at))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _quote_record(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -559,6 +598,7 @@ def _engine_from_state(
     *,
     preload_market_history: bool = False,
     callback_deadline: Any = None,
+    callback_label: Any = None,
 ) -> FreeStrategyEngine:
     from app.free_strategy.process import (
         MarketData,
@@ -607,6 +647,7 @@ def _engine_from_state(
         ),
         risk_config=risk,
         callback_deadline=callback_deadline,
+        callback_label=callback_label,
     )
     runtime_timestamp = (
         state.get("last_bar")
@@ -652,13 +693,20 @@ def _engine_from_state(
 
         prepare_fund_nav_data(repo, engine, run_start, cn_today())
 
-    history_asset_by_symbol = {
-        str(item["symbol"]): requested_asset
-        for requested_asset, _period in engine.market_history_requirements
-        for item in _instrument_records(repo, requested_asset, "1d")
-    }
+    history_asset_by_symbol: dict[str, str] = {}
+    market_history_symbols_by_asset: dict[str, set[str]] = {}
+    for requested_asset, _period in engine.market_history_requirements:
+        symbols = {
+            str(item["symbol"])
+            for item in _instrument_records(repo, requested_asset, "1d")
+            if item.get("symbol")
+        }
+        market_history_symbols_by_asset.setdefault(requested_asset, set()).update(symbols)
+        history_asset_by_symbol.update({symbol: requested_asset for symbol in symbols})
     market_loaded_through: date | None = None
     scheduled_history_market = MarketData()
+    history_cache: dict[tuple[str, int, str, str], list[Bar]] = {}
+    history_batch_cache: dict[tuple[tuple[str, ...], int, str, str], dict[str, list[Bar]]] = {}
 
     requested_history_bars = engine.history_requirements.get("1d", 0)
     if requested_history_bars and engine.universe:
@@ -694,6 +742,18 @@ def _engine_from_state(
     def load_history(symbol: str, count: int, period: str, cutoff: datetime) -> list[Bar]:
         if not symbol or count <= 0:
             return []
+        symbol = str(symbol).strip().upper()
+        cache_key = (symbol, int(count), str(period), cutoff.isoformat())
+        cached = history_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
+        requested_asset = history_asset_by_symbol.get(symbol, asset_type)
+        if period == "1d" and symbol in market_history_symbols_by_asset.get(requested_asset, set()):
+            load_market_history(cutoff)
+            history = engine._market_history_by_period.get(period, {}).get(symbol, [])  # noqa: SLF001
+            visible = list([bar for bar in history if bar.timestamp <= cutoff][-count:])
+            history_cache[cache_key] = visible
+            return list(visible)
         start = cutoff.date() - timedelta(days=max(30, count * 3))
         try:
             rows = _read_rows(
@@ -701,25 +761,44 @@ def _engine_from_state(
                 [symbol],
                 start,
                 cutoff.date(),
-                history_asset_by_symbol.get(symbol, asset_type),
+                requested_asset,
                 period,
             )
         except ValueError:
+            history_cache[cache_key] = []
             return []
-        return [bar for bar in rows if bar.timestamp <= cutoff][-count:]
+        visible = [bar for bar in rows if bar.timestamp <= cutoff][-count:]
+        history_cache[cache_key] = visible
+        return list(visible)
 
     engine.set_history_loader(load_history)
-    engine.set_history_batch_loader(
-        lambda symbols, count, period, cutoff: _load_scheduled_history_batch(
+    def load_history_batch(
+        symbols: list[str], count: int, period: str, cutoff: datetime,
+    ) -> dict[str, list[Bar]]:
+        normalized = tuple(dict.fromkeys(
+            str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
+        ))
+        cache_key = (normalized, int(count), str(period), cutoff.isoformat())
+        cached = history_batch_cache.get(cache_key)
+        if cached is not None:
+            return {symbol: list(values) for symbol, values in cached.items()}
+        result = _load_scheduled_history_batch(
             repo,
             scheduled_history_market,
             asset_type,
-            symbols,
+            list(normalized),
             count,
             period,
             cutoff,
         )
-    )
+        visible = {
+            symbol: list(values[-count:])
+            for symbol, values in result.items()
+        }
+        history_batch_cache[cache_key] = visible
+        return {symbol: list(values) for symbol, values in visible.items()}
+
+    engine.set_history_batch_loader(load_history_batch)
     engine.set_market_history_loader(load_market_history)
     if preload_market_history and engine.market_history_requirements:
         load_market_history(cn_naive_now())
@@ -850,6 +929,8 @@ def _persist_engine_state(
     for key in ("last_bar", "last_quote"):
         if key in current:
             runtime_fields[key] = current[key]
+    if "sync" in current:
+        runtime_fields["sync"] = current["sync"]
 
     def persist(latest: dict[str, Any]) -> dict[str, Any]:
         for key in ("account", "state", "runtime"):
@@ -1021,39 +1102,45 @@ def _process_bar_rows(
     *,
     notify: Any = None,
 ) -> dict[str, Any]:
-    bars = list(bars)
+    bars = sorted(list(bars), key=lambda bar: (bar.timestamp, bar.symbol))
     if engine.config.allow_stale_fills:
         engine.preload_tradable_dates(
             (bar.symbol, bar.timestamp.date())
             for bar in bars
             if bar.tradable and not bar.suspended and bar.open > 0 and bar.high > 0
         )
-    before_orders = len(engine.account.orders)
-    before_fills = len(engine.account.fills)
-    before_logs = len(engine.logs)
-    before_risk = engine.risk_status
-    snapshots: list[dict[str, Any]] = []
-    for timestamp, rows in groupby(bars, key=lambda bar: bar.timestamp):
-        engine.run(list(rows), finalize_session=False, return_result=False)
-        _append_five_fortunes_decisions(store, account_id, engine, timestamp)
-        snapshots.append(_equity_snapshot(engine, current, timestamp))
-    last_timestamp = max((bar.timestamp for bar in bars), default=None)
-    if last_timestamp is not None and last_timestamp.time() >= clock_time(15, 0):
-        engine.finish_session(persist_state=False)
-    _append_engine_events(
-        store,
-        account_id,
-        engine,
-        before_orders=before_orders,
-        before_fills=before_fills,
-        before_logs=before_logs,
-        before_risk=before_risk,
-        strategy_id=str(current.get("strategy_id") or ""),
-        notify=notify,
-    )
-    if last_timestamp is not None:
-        current["last_bar"] = last_timestamp.isoformat()
-    return _persist_engine_state(store, account_id, current, engine, snapshots)
+    timestamp_groups = [
+        (timestamp, list(rows))
+        for timestamp, rows in groupby(bars, key=lambda bar: bar.timestamp)
+    ]
+    for offset in range(0, len(timestamp_groups), PAPER_BAR_CHECKPOINT_GROUPS):
+        chunk = timestamp_groups[offset:offset + PAPER_BAR_CHECKPOINT_GROUPS]
+        before_orders = len(engine.account.orders)
+        before_fills = len(engine.account.fills)
+        before_logs = len(engine.logs)
+        before_risk = engine.risk_status
+        snapshots: list[dict[str, Any]] = []
+        for timestamp, rows in chunk:
+            engine.run(rows, finalize_session=False, return_result=False)
+            _append_five_fortunes_decisions(store, account_id, engine, timestamp)
+            snapshots.append(_equity_snapshot(engine, current, timestamp))
+        chunk_last_timestamp = chunk[-1][0]
+        if chunk_last_timestamp.time() >= clock_time(15, 0):
+            engine.finish_session(persist_state=False)
+        _append_engine_events(
+            store,
+            account_id,
+            engine,
+            before_orders=before_orders,
+            before_fills=before_fills,
+            before_logs=before_logs,
+            before_risk=before_risk,
+            strategy_id=str(current.get("strategy_id") or ""),
+            notify=notify,
+        )
+        current["last_bar"] = chunk_last_timestamp.isoformat()
+        current = _persist_engine_state(store, account_id, current, engine, snapshots)
+    return current
 
 
 def _scheduled_trading_dates(
@@ -1415,7 +1502,15 @@ def _catch_up_bars(
     return current
 
 
-def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadline: Any = None) -> None:
+def _paper_worker(
+    account_id: str,
+    root: str,
+    input_queue: Any,
+    callback_deadline: Any,
+    catch_up_slots: Any,
+    callback_label: Any,
+    queue_delay: Any,
+) -> None:
     from app.free_strategy.process import MarketData, ScheduledOpeningDataPending
     from app.tickflow.repository import DataStore, KlineRepository
 
@@ -1424,30 +1519,29 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
     state = store.get(account_id)
     repo = KlineRepository(DataStore(Path(root).parent))
     scheduled_market = MarketData()
+    engine: FreeStrategyEngine | None = None
+    slot_acquired = False
     try:
+        catch_up_slots.acquire()
+        slot_acquired = True
         engine = _engine_from_state(
             state,
             account_root,
             Path(root).parent,
             preload_market_history=True,
             callback_deadline=callback_deadline,
+            callback_label=callback_label,
         )
         mode = state_market_mode(state)
         if mode in QUOTE_MODES and engine.execution_mode == "full_bar":
             raise ValueError("3秒行情和 WebSocket 策略必须定义 on_quote(context, quotes) 或定时任务")
         if mode.startswith("bar_") and engine.execution_mode == "quote":
             raise ValueError("K线模式策略必须定义 on_bar(context, bars) 或定时任务")
-    except Exception as exc:  # noqa: BLE001
-        message = f"模拟账户初始化失败: {exc}"
-        store.update_fields(account_id, {"status": "paused", "last_error": message})
-        store.append_event(account_id, {"type": "error", "message": message})
-        return
-    state = store.update_fields(account_id, {
-        "execution_mode": engine.execution_mode,
-        "scheduled_times": engine.scheduled_times,
-        "universe": engine.universe,
-    })
-    try:
+        state = store.update_fields(account_id, {
+            "execution_mode": engine.execution_mode,
+            "scheduled_times": engine.scheduled_times,
+            "universe": engine.universe,
+        })
         state = _catch_up_bars(
             store,
             account_id,
@@ -1461,13 +1555,20 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
         latest = store.get(account_id)
         sync = dict(latest.get("sync", {}))
         sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
+        delay = _shared_number(queue_delay)
+        if delay > 0:
+            sync["queue_delay_seconds"] = round(delay, 3)
+        message = f"模拟账户初始化失败: {exc}" if engine is None else str(exc)
         store.update_fields(account_id, {
             "status": "paused",
-            "last_error": str(exc),
+            "last_error": message,
             "sync": sync,
         })
-        store.append_event(account_id, {"type": "error", "message": str(exc)})
+        store.append_event(account_id, {"type": "error", "message": message})
         return
+    finally:
+        if slot_acquired:
+            catch_up_slots.release()
     notified: set[str] = set()
     notification_times: deque[float] = deque()
 
@@ -1513,6 +1614,8 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
             message = input_queue.get(timeout=2)
         except queue.Empty:
             continue
+        queue_wait = _queue_delay_seconds(message)
+        _set_shared_number(queue_delay, queue_wait)
         if message.get("type") == "stop":
             return
         current = store.get(account_id)
@@ -1531,11 +1634,19 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                 "bars": len(bars),
                 "snapshot_quotes": len(quotes),
             })
+            sync = dict(current.get("sync", {}))
+            sync["queue_delay_seconds"] = round(queue_wait, 3)
+            store.update_fields(account_id, {"sync": sync})
             continue
         elif message.get("type") == "gap":
             store.append_event(account_id, {"type": "market_gap", "reason": message.get("reason")})
+            sync = dict(current.get("sync", {}))
+            sync["queue_delay_seconds"] = round(queue_wait, 3)
+            store.update_fields(account_id, {"sync": sync})
             continue
         try:
+            current["sync"] = dict(current.get("sync", {}))
+            current["sync"]["queue_delay_seconds"] = round(queue_wait, 3)
             if message.get("type") == "scheduled_clock":
                 if engine.execution_mode != "scheduled":
                     continue
@@ -1575,6 +1686,7 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                     "phase": "live",
                     "through": current.get("last_bar"),
                     "target": current.get("last_bar"),
+                    "queue_delay_seconds": round(queue_wait, 3),
                     "updated_at": now_iso(),
                 })
                 current = store.update_fields(account_id, {"sync": sync})
@@ -1621,6 +1733,7 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
                     "phase": "live",
                     "through": current.get("last_bar"),
                     "target": current.get("last_bar"),
+                    "queue_delay_seconds": round(queue_wait, 3),
                     "updated_at": now_iso(),
                 })
                 current = store.update_fields(account_id, {"sync": sync})
@@ -1638,7 +1751,12 @@ def _paper_worker(account_id: str, root: str, input_queue: Any, callback_deadlin
             continue
         except Exception as exc:  # noqa: BLE001
             sync = dict(current.get("sync", {}))
-            sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
+            sync.update({
+                "phase": "error",
+                "error": str(exc),
+                "queue_delay_seconds": round(queue_wait, 3),
+                "updated_at": now_iso(),
+            })
             store.update_fields(account_id, {
                 "status": "paused",
                 "last_error": str(exc),
@@ -1657,6 +1775,9 @@ class PaperTradingSupervisor:
         self._processes: dict[str, mp.Process] = {}
         self._queues: dict[str, Any] = {}
         self._deadlines: dict[str, Any] = {}
+        self._callback_labels: dict[str, Any] = {}
+        self._queue_delays: dict[str, Any] = {}
+        self._catch_up_slots = self._ctx.BoundedSemaphore(PAPER_CATCH_UP_CONCURRENCY)
         self._restart_attempts: dict[str, deque[float]] = {}
         self._lock = threading.RLock()
         self._monitor_stop = threading.Event()
@@ -1715,13 +1836,20 @@ class PaperTradingSupervisor:
                         f"策略子进程在 5 分钟内连续异常退出{detail}，已暂停",
                     )
                     continue
-                deadline = getattr(self, "_deadlines", {}).get(account_id)
+                deadline = self._deadlines.get(account_id)
                 if deadline is not None:
-                    with deadline.get_lock() if hasattr(deadline, "get_lock") else nullcontext():
+                    with deadline.get_lock():
                         deadline_value = float(deadline.value)
                     if deadline_value > 0 and time.monotonic() >= deadline_value:
                         timeout = _paper_callback_timeout(state)
-                        message = f"策略执行超过 {timeout:g} 秒，已终止子进程"
+                        callback_label = _shared_text(self._callback_labels[account_id])
+                        queue_wait = _shared_number(self._queue_delays[account_id])
+                        elapsed = max(0.0, time.monotonic() - (deadline_value - timeout))
+                        details = f"，回调 {callback_label}" if callback_label else ""
+                        if queue_wait > 0:
+                            details += f"，队列等待 {queue_wait:.1f} 秒"
+                        details += f"，已耗时 {elapsed:.1f} 秒"
+                        message = f"策略执行超过 {timeout:g} 秒{details}，已终止子进程"
                         if not self._detach_runtime(account_id, expected_process=process):
                             continue
                         self._pause_with_error(account_id, state, message)
@@ -1785,7 +1913,9 @@ class PaperTradingSupervisor:
             self.hub.unregister(account_id)
             process = self._processes.pop(account_id, None)
             input_queue = self._queues.pop(account_id, None)
-            getattr(self, "_deadlines", {}).pop(account_id, None)
+            self._deadlines.pop(account_id, None)
+            self._callback_labels.pop(account_id, None)
+            self._queue_delays.pop(account_id, None)
             if input_queue is not None:
                 _put_latest(input_queue, {"type": "stop", "account_id": account_id})
             if process and process.is_alive():
@@ -1844,9 +1974,19 @@ class PaperTradingSupervisor:
             if process is None or not process.is_alive():
                 input_queue = self._ctx.Queue(maxsize=2)
                 callback_deadline = self._ctx.Value("d", 0.0)
+                callback_label = self._ctx.Array("u", PAPER_CALLBACK_LABEL_SIZE)
+                queue_delay = self._ctx.Value("d", 0.0)
                 process = self._ctx.Process(
                     target=_paper_worker,
-                    args=(account_id, str(self.store.root), input_queue, callback_deadline),
+                    args=(
+                        account_id,
+                        str(self.store.root),
+                        input_queue,
+                        callback_deadline,
+                        self._catch_up_slots,
+                        callback_label,
+                        queue_delay,
+                    ),
                     daemon=True,
                 )
                 try:
@@ -1856,9 +1996,9 @@ class PaperTradingSupervisor:
                     raise
                 self._processes[account_id] = process
                 self._queues[account_id] = input_queue
-                if not hasattr(self, "_deadlines"):
-                    self._deadlines = {}
                 self._deadlines[account_id] = callback_deadline
+                self._callback_labels[account_id] = callback_label
+                self._queue_delays[account_id] = queue_delay
             self.store.append_event(account_id, {"type": "start"})
             return self.store.get(account_id)
 

@@ -1295,6 +1295,7 @@ export interface PaperSyncState {
   processed_days?: number
   total_days?: number
   missing_symbols?: string[]
+  queue_delay_seconds?: number
   error?: string | null
   updated_at?: string
 }
