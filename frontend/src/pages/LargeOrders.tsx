@@ -4,6 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertTriangle,
   BarChart3,
+  ChartCandlestick,
   CheckCircle2,
   Clock3,
   Database,
@@ -141,7 +142,7 @@ export function LargeOrders() {
   const [window, setWindow] = useState(60)
   const [mode, setMode] = useState<LargeOrderEvidenceMode>('combined')
   const [selected, setSelected] = useState<LargeOrderRow | null>(null)
-  const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
+  const [previewStock, setPreviewStock] = useState<{ symbol: string; name?: string } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [threshold, setThreshold] = useState(75)
   const [cooldown, setCooldown] = useState(120)
@@ -154,6 +155,9 @@ export function LargeOrders() {
   const historyRef = useRef<HTMLDivElement>(null)
   const wasNearTopRef = useRef(true)
   const newestEventIdRef = useRef<string | null>(null)
+  const openStockPreview = (symbol: string, name?: string | null) => {
+    setPreviewStock({ symbol, name: name || undefined })
+  }
 
   const preferences = useQuery({ queryKey: QK.preferences, queryFn: api.preferences })
   const status = useQuery({
@@ -497,14 +501,21 @@ export function LargeOrders() {
                             )}
                           >
                             <td className="px-3 py-3">
-                              <button
-                                type="button"
-                                className="min-w-[110px] text-left"
-                                onClick={() => setSelected(row)}
-                              >
-                                <div className="font-medium text-foreground">{row.name || '--'}</div>
-                                <div className="mt-0.5 font-mono text-[11px] text-muted">{row.symbol}</div>
-                              </button>
+                              <div className="flex min-w-[138px] items-center gap-1">
+                                <button type="button" className="min-w-[104px] text-left" onClick={() => setSelected(row)}>
+                                  <div className="font-medium text-foreground">{row.name || '--'}</div>
+                                  <div className="mt-0.5 font-mono text-[11px] text-muted">{row.symbol}</div>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openStockPreview(row.symbol, row.name)}
+                                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-accent"
+                                  title="查看 K 线和分时"
+                                  aria-label={`查看 ${row.name || row.symbol} K 线和分时`}
+                                >
+                                  <ChartCandlestick className="h-4 w-4" />
+                                </button>
+                              </div>
                             </td>
                             <td className="whitespace-nowrap px-3 py-3 font-mono text-muted">
                               {clockTime(row.last_seen_ts)}
@@ -576,7 +587,7 @@ export function LargeOrders() {
                     </div>
                     <button
                       type="button"
-                      onClick={() => setPreviewSymbol(selectedRow.symbol)}
+                      onClick={() => openStockPreview(selectedRow.symbol, selectedRow.name)}
                       className="rounded-btn border border-border px-2.5 py-1.5 text-muted hover:bg-elevated hover:text-foreground"
                     >
                       打开个股
@@ -715,7 +726,14 @@ export function LargeOrders() {
                           <span className="w-16 shrink-0 font-mono text-muted">
                             {clockTime(event.event_ts_ms / 1000)}
                           </span>
-                          <span className="w-20 shrink-0 font-mono text-foreground">{event.symbol}</span>
+                          <button
+                            type="button"
+                            onClick={() => openStockPreview(event.symbol, event.name)}
+                            className="w-20 shrink-0 text-left font-mono text-foreground hover:text-accent"
+                            title="查看 K 线和分时"
+                          >
+                            {event.symbol}
+                          </button>
                           <span
                             className={cn(
                               'w-16 shrink-0 rounded border px-1.5 py-0.5 text-center text-[10px]',
@@ -862,8 +880,15 @@ export function LargeOrders() {
                                 {bucketTime(row.bucket_start_ms)}
                               </td>
                               <td className="px-3 py-2.5">
-                                <div className="font-medium text-foreground">{row.name || '--'}</div>
-                                <div className="font-mono text-[10px] text-muted">{row.symbol}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => openStockPreview(row.symbol, row.name)}
+                                  className="text-left hover:text-accent"
+                                  title="查看 K 线和分时"
+                                >
+                                  <div className="font-medium text-foreground">{row.name || '--'}</div>
+                                  <div className="font-mono text-[10px] text-muted">{row.symbol}</div>
+                                </button>
                               </td>
                               <td className="px-3 py-2.5 font-mono text-muted">{money(row.proxy_buy_amount)}</td>
                               <td className="px-3 py-2.5 font-mono text-bull">{money(row.precise_buy_amount)}</td>
@@ -923,7 +948,11 @@ export function LargeOrders() {
           </section>
         </div>
       </div>
-      <StockPreviewDialog symbol={previewSymbol} name={selectedRow?.name} onClose={() => setPreviewSymbol(null)} />
+      <StockPreviewDialog
+        symbol={previewStock?.symbol ?? null}
+        name={previewStock?.name}
+        onClose={() => setPreviewStock(null)}
+      />
     </div>
   )
 }
