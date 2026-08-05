@@ -37,7 +37,8 @@ import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const BENCHMARK_COLOR = '#94a3b8'
+const STRATEGY_COLOR = '#a855f7'
+const STRATEGY_FILL = 'rgba(168, 85, 247, 0.10)'
 
 const MODE_LABEL: Record<string, string> = {
   bar_1m: '1分钟K线',
@@ -253,17 +254,12 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
     return {
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
-      grid: benchmarkVisible
-        ? [
-            { left: 62, right: 24, top: 24, height: '46%' },
-            { left: 62, right: 24, top: '62%', bottom: 50 },
-          ]
-        : { left: 62, right: 24, top: 24, bottom: 58 },
+      grid: { left: 62, right: 24, top: 24, bottom: 58 },
       dataZoom: dailyRows.length > 1 ? [
-        { type: 'inside', xAxisIndex: benchmarkVisible ? [0, 1] : [0], filterMode: 'filter', start: zoomStart, end: zoomEnd },
+        { type: 'inside', xAxisIndex: [0], filterMode: 'filter', start: zoomStart, end: zoomEnd },
         {
           type: 'slider',
-          xAxisIndex: benchmarkVisible ? [0, 1] : [0],
+          xAxisIndex: [0],
           height: 14,
           bottom: 4,
           borderColor: theme.border,
@@ -294,28 +290,15 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
           return `<div>${formatTime(timestamp)}${zoomed ? ' · 区间收益' : ''}</div>${lines}`
         },
       },
-      axisPointer: benchmarkVisible ? { link: [{ xAxisIndex: [0, 1] }] } : undefined,
-      xAxis: benchmarkVisible
-        ? [
-            { ...xAxis, gridIndex: 0, axisLabel: { show: false }, axisTick: { show: false } },
-            { ...xAxis, gridIndex: 1 },
-          ]
-        : xAxis,
-      yAxis: [
-        {
-          type: 'value', scale: true, min: 'dataMin', gridIndex: 0,
-          axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
-          splitLine: { lineStyle: { color: theme.grid } },
-        },
-        ...(benchmarkVisible ? [{
-          type: 'value' as const, scale: true, min: 'dataMin' as const, gridIndex: 1,
-          axisLabel: { color: BENCHMARK_COLOR, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
-          splitLine: { lineStyle: { color: theme.grid } },
-        }] : []),
-      ],
+      xAxis,
+      yAxis: {
+        type: 'value', scale: true, min: 'dataMin',
+        axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
+        splitLine: { lineStyle: { color: theme.grid } },
+      },
       series: [
-        { type: 'line', name: '模拟收益', xAxisIndex: 0, yAxisIndex: 0, data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
-        ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, xAxisIndex: 1, yAxisIndex: 1, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.6, type: 'dashed' as const, color: BENCHMARK_COLOR }, itemStyle: { color: BENCHMARK_COLOR } }] : []),
+        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.6, color: STRATEGY_COLOR }, itemStyle: { color: STRATEGY_COLOR }, areaStyle: { color: STRATEGY_FILL } },
+        ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.8, color: theme.accent }, itemStyle: { color: theme.accent } }] : []),
       ],
     }
   }, [benchmarkLabel, benchmarkRows, dailyRows, theme, zoomRange, zoomed])
@@ -335,7 +318,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       if (!chart.isDisposed()) chart.off('dataZoom', handleZoom)
     }
   }, [dailyRows.length])
-  return <div className="relative h-64 w-full">
+  return <div className="relative h-56 w-full">
     <div ref={ref} className="h-full w-full" />
     {zoomed ? <span className="pointer-events-none absolute left-2 top-1 text-[10px] text-muted">区间收益</span> : null}
     {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
