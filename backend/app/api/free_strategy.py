@@ -433,11 +433,14 @@ class PaperWrite(BacktestWrite):
 
 
 class PaperRenameWrite(BaseModel):
-    name: str = Field(min_length=1, max_length=40)
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    system_notify_enabled: bool | None = None
 
     @field_validator("name", mode="before")
     @classmethod
     def normalize_name(cls, value: Any) -> str:
+        if value is None:
+            return None
         name = str(value).strip()
         if not name:
             raise ValueError("模拟名称不能为空")
@@ -1011,6 +1014,7 @@ def create_paper_account(req: PaperWrite, request: Request):
         "risk_config": risk_config,
         "risk_status": {"daily_loss_locked": False, "drawdown_locked": False, "reason": None},
         "notification_channels": preferences.get_webhook_default_channels(),
+        "system_notify_enabled": False,
         "status": "stopped",
         "sync": {
             "phase": "idle",
@@ -1095,14 +1099,17 @@ def rename_paper_account(account_id: str, req: PaperRenameWrite, request: Reques
     previous = str(state.get("name") or "")
 
     def rename(current: dict[str, Any]) -> dict[str, Any]:
-        current["name"] = req.name
-        config = dict(current.get("config", {}))
-        config["name"] = req.name
-        current["config"] = config
+        if req.name is not None:
+            current["name"] = req.name
+            config = dict(current.get("config", {}))
+            config["name"] = req.name
+            current["config"] = config
+        if req.system_notify_enabled is not None:
+            current["system_notify_enabled"] = req.system_notify_enabled
         return current
 
     saved = store.update(account_id, rename)
-    if previous != req.name:
+    if req.name is not None and previous != req.name:
         store.append_event(account_id, {
             "type": "renamed",
             "previous_name": previous,

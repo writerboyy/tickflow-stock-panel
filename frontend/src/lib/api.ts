@@ -1308,6 +1308,7 @@ export interface PaperAccount {
   source_hash: string
   market_mode: PaperMarketMode | 'bar_5m' | 'bar_30m'
   status: 'running' | 'paused' | 'stopped'
+  system_notify_enabled?: boolean
   sync?: PaperSyncState
   execution_mode?: 'full_bar' | 'scheduled' | 'quote'
   scheduled_times?: string[]
@@ -1574,6 +1575,8 @@ export const api = {
   paperAccount: (id: string) => request<PaperAccount & { events?: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}`),
   renamePaperAccount: (id: string, name: string) =>
     request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  updatePaperSystemNotify: (id: string, enabled: boolean) =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name: undefined, system_notify_enabled: enabled }) }),
   paperEvents: (id: string, cursor?: number, types?: string) => {
     const query = new URLSearchParams({ limit: '500' })
     if (cursor != null) query.set('cursor', String(cursor))

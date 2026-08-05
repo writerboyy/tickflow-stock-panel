@@ -1605,13 +1605,16 @@ def _paper_worker(
         notification_times.append(now)
         latest_state = store.get(account_id)
         channels = set(latest_state.get("notification_channels", []))
-        if not channels:
-            return
         from app.services import preferences, webhook_adapter
 
         symbol = str(event.get("symbol") or "")
         detail = str(event.get("reason") or event.get("message") or event.get("status") or "")
         body = f"{latest_state.get('name', account_id)} {symbol} {detail}".strip()
+        if latest_state.get("system_notify_enabled", False):
+            from app.services import notify_adapter
+            notify_adapter.notify("TickFlow · 模拟策略", body)
+        if not channels:
+            return
         if "feishu" in channels and preferences.get_feishu_webhook_url():
             _PAPER_WEBHOOK_EXECUTOR.submit(
                 webhook_adapter.send_feishu,

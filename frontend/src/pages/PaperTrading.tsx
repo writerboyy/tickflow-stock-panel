@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
+  Bell,
   ArrowDownRight,
   ArrowUpRight,
   CirclePause,
@@ -565,6 +566,17 @@ export function PaperTrading() {
     }
   }
 
+  const toggleSystemNotify = async () => {
+    if (!account) return
+    try {
+      await api.updatePaperSystemNotify(account.id, !account.system_notify_enabled)
+      await Promise.all([accountsQuery.refetch(), detailQuery.refetch()])
+      toast(account.system_notify_enabled ? '该模拟策略已关闭系统通知' : '该模拟策略已开启系统通知', 'success')
+    } catch (e) {
+      toast(`通知设置失败 · ${String((e as Error)?.message || e)}`, 'error')
+    }
+  }
+
   const remove = async () => {
     if (!deleteTarget) return
     setPendingAction('delete')
@@ -683,6 +695,7 @@ export function PaperTrading() {
           <div className="flex flex-wrap items-center justify-end gap-2">
             <DatePicker value={activeDate} onChange={selectTradingDate} min={availableDates[0]} max={latestDate} align="right" />
             <div className="flex items-center gap-1">
+              <button type="button" title={account.system_notify_enabled ? '关闭系统通知' : '开启系统通知'} onClick={() => void toggleSystemNotify()} className={`inline-flex h-8 w-8 items-center justify-center rounded border ${account.system_notify_enabled ? 'border-success/50 bg-success/10 text-success hover:border-success' : 'border-border text-muted hover:border-accent hover:text-accent'}`}><Bell className="h-4 w-4" /></button>
               <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-success/40 text-success hover:border-success hover:bg-success/10 disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
               <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-warning/40 text-warning hover:border-warning hover:bg-warning/10 disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
               <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-danger/40 text-danger hover:border-danger hover:bg-danger/10 disabled:opacity-35"><Square className="h-4 w-4" /></button>
