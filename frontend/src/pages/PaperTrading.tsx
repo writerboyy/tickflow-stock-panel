@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import {
@@ -193,47 +193,45 @@ function orderStatusClass(status: string) {
   return 'text-muted'
 }
 
-function cumulativeBenchmarkReturn(rows: EquityPoint[], benchmarkRows: KlineRow[]) {
-  if (!rows.length || !benchmarkRows.length) return null
-  const dates = new Set(rows.map(row => row.timestamp.slice(0, 10)))
-  const closes = benchmarkRows
-    .filter(row => dates.has(String(row.date).slice(0, 10)))
-    .map(row => Number(row.close))
-    .filter(value => Number.isFinite(value) && value > 0)
-  if (!closes.length) return null
-  return (closes.at(-1)! / closes[0] - 1) * 100
+type ReturnZoomRange = { start: number; end: number }
+
+function buildReturnChartData(rows: EquityPoint[], benchmarkRows: KlineRow[], zoomRange: ReturnZoomRange) {
+  const lastRowByDate = new Map<string, EquityPoint>()
+  rows.forEach(row => lastRowByDate.set(row.timestamp.slice(0, 10), row))
+  const dailyRows = [...lastRowByDate.values()]
+  if (!dailyRows.length) return { dailyRows, returns: [], benchmarkReturns: [], strategyReturn: null, benchmarkReturn: null }
+
+  const zoomStart = Math.max(0, Math.min(100, zoomRange.start))
+  const zoomEnd = Math.max(zoomStart, Math.min(100, zoomRange.end))
+  const startIndex = Math.round((dailyRows.length - 1) * zoomStart / 100)
+  const endIndex = Math.round((dailyRows.length - 1) * zoomEnd / 100)
+  const returnBase = Number(dailyRows[startIndex]?.nav)
+  const returns = dailyRows.map(row => Number.isFinite(returnBase) && returnBase > 0 ? (Number(row.nav) / returnBase - 1) * 100 : null)
+  const benchmarkByDate = new Map<string, number>()
+  benchmarkRows.forEach(row => {
+    const close = Number(row.close)
+    if (Number.isFinite(close) && close > 0) benchmarkByDate.set(String(row.date).slice(0, 10), close)
+  })
+  const benchmarkBase = dailyRows.slice(startIndex, endIndex + 1)
+    .map(row => benchmarkByDate.get(row.timestamp.slice(0, 10)))
+    .find(value => value != null)
+  const benchmarkReturns = dailyRows.map(row => {
+    const close = benchmarkByDate.get(row.timestamp.slice(0, 10))
+    return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
+  })
+  const benchmarkReturn = benchmarkReturns.slice(startIndex, endIndex + 1).findLast(value => value != null) ?? null
+  return { dailyRows, returns, benchmarkReturns, strategyReturn: returns[endIndex] ?? null, benchmarkReturn }
 }
 
-function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoint[]; benchmarkRows: KlineRow[]; benchmarkLabel: string }) {
+function ReturnChart({ data, benchmarkLabel, zoomRange, onZoomRangeChange }: { data: ReturnType<typeof buildReturnChartData>; benchmarkLabel: string; zoomRange: ReturnZoomRange; onZoomRangeChange: (range: ReturnZoomRange) => void }) {
   const theme = useChartTheme()
   const containerRef = useRef<HTMLDivElement>(null)
-  const [zoomRange, setZoomRange] = useState({ start: 0, end: 100 })
-  const dailyRows = useMemo(() => {
-    const lastRowByDate = new Map<string, EquityPoint>()
-    rows.forEach(row => lastRowByDate.set(row.timestamp.slice(0, 10), row))
-    return [...lastRowByDate.values()]
-  }, [rows])
+  const { dailyRows, returns, benchmarkReturns } = data
   const zoomed = zoomRange.start > 0.01 || zoomRange.end < 99.99
   const option = useMemo<EChartsOption | null>(() => {
     if (!dailyRows.length) return null
     const zoomStart = Math.max(0, Math.min(100, zoomRange.start))
     const zoomEnd = Math.max(zoomStart, Math.min(100, zoomRange.end))
-    const startIndex = Math.round((dailyRows.length - 1) * zoomStart / 100)
-    const endIndex = Math.round((dailyRows.length - 1) * zoomEnd / 100)
-    const returnBase = Number(dailyRows[startIndex]?.nav)
-    const returns = dailyRows.map(row => Number.isFinite(returnBase) && returnBase > 0 ? (Number(row.nav) / returnBase - 1) * 100 : null)
-    const benchmarkByDate = new Map<string, number>()
-    benchmarkRows.forEach(row => {
-      const close = Number(row.close)
-      if (Number.isFinite(close) && close > 0) benchmarkByDate.set(String(row.date).slice(0, 10), close)
-    })
-    const benchmarkBase = dailyRows.slice(startIndex, endIndex + 1)
-      .map(row => benchmarkByDate.get(row.timestamp.slice(0, 10)))
-      .find(value => value != null)
-    const benchmarkReturns = dailyRows.map(row => {
-      const close = benchmarkByDate.get(row.timestamp.slice(0, 10))
-      return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
-    })
     const benchmarkVisible = benchmarkReturns.some(value => value != null)
     const timestamps = dailyRows.map(row => row.timestamp)
     const indexByTimestamp = new Map(timestamps.map((timestamp, index) => [timestamp, index]))
@@ -301,7 +299,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
         ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.8, color: theme.accent }, itemStyle: { color: theme.accent } }] : []),
       ],
     }
-  }, [benchmarkLabel, benchmarkRows, dailyRows, theme, zoomRange, zoomed])
+  }, [benchmarkLabel, benchmarkReturns, dailyRows, returns, theme, zoomRange, zoomed])
   const ref = useECharts(option, [option], containerRef)
   useEffect(() => {
     const chart = containerRef.current ? echarts.getInstanceByDom(containerRef.current) : null
@@ -309,19 +307,17 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
     const handleZoom = () => {
       const zoom = (chart.getOption() as any)?.dataZoom?.[0]
       if (typeof zoom?.start !== 'number' || typeof zoom?.end !== 'number') return
-      setZoomRange(previous => Math.abs(previous.start - zoom.start) < 0.01 && Math.abs(previous.end - zoom.end) < 0.01
-        ? previous
-        : { start: zoom.start, end: zoom.end })
+      onZoomRangeChange({ start: zoom.start, end: zoom.end })
     }
     chart.on('dataZoom', handleZoom)
     return () => {
       if (!chart.isDisposed()) chart.off('dataZoom', handleZoom)
     }
-  }, [dailyRows.length])
+  }, [dailyRows.length, onZoomRangeChange])
   return <div className="relative h-56 w-full">
     <div ref={ref} className="h-full w-full" />
     {zoomed ? <span className="pointer-events-none absolute left-2 top-1 text-[10px] text-muted">区间收益</span> : null}
-    {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
+    {!dailyRows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
   </div>
 }
 
@@ -487,6 +483,10 @@ export function PaperTrading() {
   const [selectedId, setSelectedId] = useState('')
   const [tab, setTab] = useState<DetailTab>('positions')
   const [selectedDate, setSelectedDate] = useState('')
+  const [returnZoomRange, setReturnZoomRange] = useState<ReturnZoomRange>({ start: 0, end: 100 })
+  const updateReturnZoomRange = useCallback((range: ReturnZoomRange) => {
+    setReturnZoomRange(previous => Math.abs(previous.start - range.start) < 0.01 && Math.abs(previous.end - range.end) < 0.01 ? previous : range)
+  }, [])
   const [showCreate, setShowCreate] = useState(searchParams.get('create') === '1')
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
@@ -623,9 +623,15 @@ export function PaperTrading() {
   const selectedReturn = useCurrentState
     ? Number(account?.return_pct ?? 0)
     : selectedSnapshot ? (Number(selectedSnapshot.nav) - 1) * 100 : null
-  const selectedBenchmarkReturn = cumulativeBenchmarkReturn(visibleEquityRows, benchmarkRows)
-  const selectedExcessReturn = selectedReturn != null && selectedBenchmarkReturn != null
-    ? selectedReturn - selectedBenchmarkReturn
+  const returnChartData = useMemo(
+    () => buildReturnChartData(visibleEquityRows, benchmarkRows, returnZoomRange),
+    [benchmarkRows, returnZoomRange, visibleEquityRows],
+  )
+  const returnZoomed = returnZoomRange.start > 0.01 || returnZoomRange.end < 99.99
+  const comparisonReturn = returnZoomed ? returnChartData.strategyReturn : selectedReturn
+  const selectedBenchmarkReturn = returnChartData.benchmarkReturn
+  const selectedExcessReturn = comparisonReturn != null && selectedBenchmarkReturn != null
+    ? comparisonReturn - selectedBenchmarkReturn
     : null
   const drawdownValues = visibleEquityRows
     .map(row => Number(row.drawdown_pct))
@@ -718,7 +724,7 @@ export function PaperTrading() {
         </section>
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
-          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex min-h-5 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] font-medium"><span>收益曲线</span><div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] font-normal text-muted">{benchmarkQuery.isError ? <span className="text-danger">{benchmarkLabel || '基准'}暂不可用</span> : <><span>基准 <span className={`font-mono ${returnClass(selectedBenchmarkReturn ?? undefined)}`}>{selectedBenchmarkReturn == null ? '—' : signedPercent(selectedBenchmarkReturn)}</span></span><span>超额 <span className={`font-mono ${returnClass(selectedExcessReturn ?? undefined)}`}>{selectedExcessReturn == null ? '—' : signedPercent(selectedExcessReturn)}</span></span></>}</div></div><ReturnChart rows={visibleEquityRows} benchmarkRows={benchmarkRows} benchmarkLabel={benchmarkLabel || benchmarkSymbol || '基准'} /></div>
+          <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex min-h-5 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] font-medium"><span>收益曲线</span><div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] font-normal text-muted">{benchmarkQuery.isError ? <span className="text-danger">{benchmarkLabel || '基准'}暂不可用</span> : <><span>基准 <span className={`font-mono ${returnClass(selectedBenchmarkReturn ?? undefined)}`}>{selectedBenchmarkReturn == null ? '—' : signedPercent(selectedBenchmarkReturn)}</span></span><span>超额 <span className={`font-mono ${returnClass(selectedExcessReturn ?? undefined)}`}>{selectedExcessReturn == null ? '—' : signedPercent(selectedExcessReturn)}</span></span></>}</div></div><ReturnChart data={returnChartData} benchmarkLabel={benchmarkLabel || benchmarkSymbol || '基准'} zoomRange={returnZoomRange} onZoomRangeChange={updateReturnZoomRange} /></div>
           <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} actualHoldingSymbols={positions.map(([symbol]) => symbol)} orders={orders} fills={fills} /></div>
         </section>
 
