@@ -233,4 +233,4 @@ def test_paper_supervisor_pauses_worker_when_strategy_deadline_expires(tmp_path)
     saved = store.get("paper")
     assert process.terminated is True
     assert saved["status"] == "paused"
-    assert "超过" in saved["last_error"]
+    assert saved["last_error"] == "策略执行超过 120 秒，已终止子进程"

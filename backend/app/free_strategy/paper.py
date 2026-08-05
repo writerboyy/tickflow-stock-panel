@@ -31,6 +31,7 @@ MARKET_MODES = {"bar_1m", "bar_1d", "poll_3s", "websocket"}
 LEGACY_MARKET_MODES = {"bar_5m", "bar_30m"}
 QUOTE_MODES = {"poll_3s", "websocket"}
 WS_SYMBOL_LIMIT = 100
+PAPER_DEFAULT_CALLBACK_TIMEOUT_SECONDS = 120.0
 _WORKER_RESTART_LIMIT = 3
 _WORKER_RESTART_WINDOW_SECONDS = 300.0
 
@@ -41,6 +42,12 @@ def state_market_mode(state: dict[str, Any]) -> str:
         return str(explicit)
     timeframe = str(state.get("config", {}).get("timeframe", "1d"))
     return {"1m": "bar_1m", "5m": "bar_5m", "30m": "bar_30m"}.get(timeframe, "bar_1d")
+
+
+def _paper_callback_timeout(state: dict[str, Any]) -> float:
+    config = state.get("config") or {}
+    value = config.get("callback_timeout_seconds")
+    return PAPER_DEFAULT_CALLBACK_TIMEOUT_SECONDS if value is None else float(value)
 
 
 def _compatible_checkpoint(source: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +576,7 @@ def _engine_from_state(
     from app.tickflow.repository import DataStore, KlineRepository
 
     raw = dict(state.get("config", {}))
+    raw.setdefault("callback_timeout_seconds", _paper_callback_timeout(state))
     mode = state_market_mode(state)
     raw.pop("market_mode", None)
     timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1m" if mode in QUOTE_MODES else "1d")
@@ -1712,7 +1720,7 @@ class PaperTradingSupervisor:
                     with deadline.get_lock() if hasattr(deadline, "get_lock") else nullcontext():
                         deadline_value = float(deadline.value)
                     if deadline_value > 0 and time.monotonic() >= deadline_value:
-                        timeout = float(state.get("config", {}).get("callback_timeout_seconds", 30.0))
+                        timeout = _paper_callback_timeout(state)
                         message = f"策略执行超过 {timeout:g} 秒，已终止子进程"
                         if not self._detach_runtime(account_id, expected_process=process):
                             continue

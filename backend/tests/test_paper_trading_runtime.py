@@ -121,6 +121,36 @@ def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp
     assert requested_timeframes == ["1d"]
 
 
+def test_paper_engine_defaults_missing_callback_timeout_to_two_minutes(tmp_path):
+    account_root = tmp_path / "paper_accounts" / "paper"
+    account_root.mkdir(parents=True)
+    (account_root / "strategy.py").write_text(
+        "def on_bar(context, bars):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+
+    engine = _engine_from_state(
+        {"config": {"market_mode": "bar_1m", "asset_type": "etf"}},
+        account_root,
+        tmp_path,
+    )
+    custom = _engine_from_state(
+        {
+            "config": {
+                "market_mode": "bar_1m",
+                "asset_type": "etf",
+                "callback_timeout_seconds": 15,
+            },
+        },
+        account_root,
+        tmp_path,
+    )
+
+    assert engine.config.callback_timeout_seconds == 120
+    assert custom.config.callback_timeout_seconds == 15
+
+
 def test_legacy_five_fortunes_v2_checkpoint_uses_current_state_key():
     checkpoint = {
         "state": {

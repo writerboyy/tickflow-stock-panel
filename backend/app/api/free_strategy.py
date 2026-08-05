@@ -411,6 +411,7 @@ class PaperRiskWrite(BaseModel):
 
 
 class PaperWrite(BacktestWrite):
+    callback_timeout_seconds: float = Field(default=120, ge=0.1, le=120)
     name: str = Field(default="量化策略 · 模拟", min_length=1, max_length=40)
     market_mode: Literal["bar_1m", "bar_1d", "poll_3s", "websocket"] | None = None
     continuation_job_id: str | None = Field(default=None, min_length=1, max_length=64)

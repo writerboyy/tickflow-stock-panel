@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api import free_strategy
 from app.api.free_strategy import (
     BacktestWrite,
+    PaperWrite,
     _job_payload,
     cleanup_incomplete_backtests,
     migrate_legacy_five_fortunes_strategies,
@@ -40,6 +41,10 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
     assert payload["config"]["asset_type"] == "etf"
     assert payload["config"]["callback_timeout_seconds"] == 30
     assert payload["strategy_name"] == "五福"
+
+
+def test_paper_write_uses_longer_callback_timeout_than_backtests():
+    assert PaperWrite(strategy_id="paper").callback_timeout_seconds == 120
 
 
 def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_path):
