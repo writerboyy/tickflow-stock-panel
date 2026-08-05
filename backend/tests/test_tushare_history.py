@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from concurrent.futures import ThreadPoolExecutor
+from http.client import IncompleteRead
 import io
 import json
 import os
@@ -82,6 +83,31 @@ def test_http_client_retries_429_and_does_not_log_or_expose_key():
     assert calls == 3
 
 
+def test_http_client_retries_incomplete_response_reads():
+    calls = 0
+    delays = []
+
+    class InterruptedResponse(_Response):
+        def read(self):
+            raise IncompleteRead(b"partial", 100)
+
+    def opener(request, timeout):
+        nonlocal calls
+        calls += 1
+        return InterruptedResponse(_payload()) if calls < 3 else _Response(_payload())
+
+    client = th.TushareProxyClient(
+        "very-secret",
+        opener=opener,
+        attempts=3,
+        limiter=th.GlobalRateLimiter(0),
+        backoff=delays.append,
+    )
+    assert client.request("daily").code == 0
+    assert calls == 3
+    assert delays == [0.5, 1.0]
+
+
 def test_global_rate_limiter_is_shared_across_worker_threads(monkeypatch):
     now = 0.0
     sleeps = []
@@ -127,6 +153,19 @@ def test_backfill_worker_count_is_configurable_and_bounded(tmp_path):
     assert th.BackfillConfig(tmp_path, workers=32).normalized().workers == 32
     with pytest.raises(ValueError, match="workers must be between"):
         th.BackfillConfig(tmp_path, workers=65).normalized()
+
+
+def test_phase_resume_replaces_stale_running_status_with_pending(tmp_path):
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="resume-state", phases=("stock_minute",), symbols=("000001.SZ",)),
+        _FakeClient(),
+    )
+    run._record("stock_minute", "000001.SZ", status="running", pages=3)
+
+    phase = run._start_phase("stock_minute")
+
+    assert phase["status"] == "running"
+    assert phase["items"]["000001.SZ"]["status"] == "pending"
 
 
 def test_normalize_and_forward_adjustment_preserve_volume_and_amount():

@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+from http.client import IncompleteRead, RemoteDisconnected
 import json
 import logging
 import os
@@ -291,7 +292,9 @@ class TushareProxyClient:
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise TushareProtocolError("response is not JSON") from exc
                 parsed = self._parse_response(api_name, decoded)
-                self.limiter.recover()
+                # Do not return to the provider ceiling immediately after a
+                # transient failure in a long minute-history download.
+                self.limiter.recover(factor=0.95)
                 return parsed
             except HTTPError as exc:
                 last_error = exc
@@ -299,7 +302,14 @@ class TushareProxyClient:
                     if exc.code in {401, 403}:
                         raise TusharePermissionError(f"HTTP {exc.code}") from exc
                     raise TushareError(f"HTTP {exc.code}") from exc
-            except (URLError, TimeoutError, OSError, TushareRetryableError) as exc:
+            except (
+                IncompleteRead,
+                RemoteDisconnected,
+                URLError,
+                TimeoutError,
+                OSError,
+                TushareRetryableError,
+            ) as exc:
                 last_error = exc
             if attempt + 1 < self.attempts:
                 self.limiter.slow_down()
@@ -728,6 +738,17 @@ class TushareHistoryBackfill:
             item = state.setdefault("items", {}).setdefault(key, dict(default or {}))
             return dict(item)
 
+    def _start_phase(self, name: str) -> dict[str, Any]:
+        """Start a resumable phase without reporting crashed workers as active."""
+        with self._manifest_lock:
+            phase = self._phase(name)
+            for item in (phase.get("items") or {}).values():
+                if item.get("status") == "running":
+                    item["status"] = "pending"
+            phase["status"] = "running"
+            self._save()
+            return phase
+
     def _archive(self, api_name: str, key: str, response: TushareResponse) -> None:
         archive_source_payload(self.config.data_dir, "tushare_proxy", api_name, self.run_id, key, response.raw, parser_version="tushare_proxy_v1")
 
@@ -1039,8 +1060,7 @@ class TushareHistoryBackfill:
         return list(self.config.symbols or ()) if kind == "stocks" else []
 
     def _fetch_adjustment(self, kind: str, api_name: str, symbols: list[str]) -> None:
-        phase = self._phase("adjustment")
-        phase["status"] = "running"
+        phase = self._start_phase("adjustment")
 
         def fetch_one(symbol: str) -> None:
             assert_disk_reserve(self.config.data_dir)
@@ -1075,8 +1095,7 @@ class TushareHistoryBackfill:
 
     def _fetch_minutes(self, kind: str, api_name: str, symbols: list[str]) -> None:
         phase_name = f"{kind}_minute"
-        phase = self._phase(phase_name)
-        phase["status"] = "running"
+        phase = self._start_phase(phase_name)
         today = date.today()
 
         def fetch_one(symbol: str) -> None:
