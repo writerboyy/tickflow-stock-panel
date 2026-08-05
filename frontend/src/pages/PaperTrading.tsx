@@ -38,8 +38,7 @@ import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-const STRATEGY_COLOR = '#a855f7'
-const STRATEGY_FILL = 'rgba(168, 85, 247, 0.10)'
+const BENCHMARK_COLOR = '#64748b'
 
 const MODE_LABEL: Record<string, string> = {
   bar_1m: '1分钟K线',
@@ -296,8 +295,8 @@ function ReturnChart({ data, benchmarkLabel, zoomRange, onZoomRangeChange }: { d
         splitLine: { lineStyle: { color: theme.grid } },
       },
       series: [
-        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.6, color: STRATEGY_COLOR }, itemStyle: { color: STRATEGY_COLOR }, areaStyle: { color: STRATEGY_FILL } },
-        ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.8, color: theme.accent }, itemStyle: { color: theme.accent } }] : []),
+        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.6, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accent, opacity: 0.1 } },
+        ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.8, color: BENCHMARK_COLOR }, itemStyle: { color: BENCHMARK_COLOR } }] : []),
       ],
     }
   }, [benchmarkLabel, benchmarkReturns, dailyRows, returns, theme, zoomRange, zoomed])
