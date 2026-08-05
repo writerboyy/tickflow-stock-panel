@@ -456,6 +456,29 @@ def _partition_path(data_dir: Path, table_id: str, trade_date: date) -> Path:
     return data_dir / "ext_data" / table_id / "timeseries" / f"date={trade_date}" / "part.parquet"
 
 
+def read_funds_large_order_reference(
+    data_dir: Path,
+    trade_date: date,
+    *,
+    symbol: str | None = None,
+) -> pl.DataFrame:
+    """Read the documented daily 300k+ net amount as event context only."""
+    from app.services.data_authority import EVENT_USAGE, assert_extension_field_usage
+
+    field = "main_net_amount_over_300k"
+    assert_extension_field_usage(FUNDS_TABLE, field, EVENT_USAGE)
+    path = _partition_path(data_dir, FUNDS_TABLE, trade_date)
+    if not path.exists():
+        return pl.DataFrame(schema={"symbol": pl.String, field: pl.Float64})
+    frame = pl.read_parquet(path)
+    if "symbol" not in frame.columns or field not in frame.columns:
+        return pl.DataFrame(schema={"symbol": pl.String, field: pl.Float64})
+    frame = frame.select("symbol", field).unique(subset=["symbol"], keep="last")
+    if symbol:
+        frame = frame.filter(pl.col("symbol") == symbol.strip().upper())
+    return frame
+
+
 def _path_lock(path: Path) -> threading.Lock:
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(path, threading.Lock())

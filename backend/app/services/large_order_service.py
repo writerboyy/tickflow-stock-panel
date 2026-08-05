@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from typing import Any
 
+import polars as pl
+
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
@@ -481,6 +483,14 @@ class LargeOrderService:
         active_buy = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_buy")
         active_sell = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_sell")
         precise = active_buy + active_sell > 0
+        intents = []
+        for item in state["intent_events"]:
+            event_time = _as_datetime(
+                item.get("timestamp") or item.get("event_time") or item.get("time")
+            )
+            if event_time is not None and event_time.timestamp() >= cutoff:
+                intents.append(item)
+        cancel_count = sum(bool(item.get("cancel_flag")) for item in intents)
         buy, sell = (active_buy, active_sell) if precise else (proxy_buy, proxy_sell)
         amount = buy + sell
         baseline = [float(item) for item in tracker["history"] if _finite(item) is not None]
@@ -496,6 +506,9 @@ class LargeOrderService:
             "threshold": threshold,
             "max_order": max((float(item.get("amount") or 0) for item in trades), default=0.0),
             "precise": precise,
+            "intent_count": len(intents),
+            "cancel_count": cancel_count,
+            "cancel_rate": cancel_count / len(intents) if intents else 0.0,
         }
 
     def _build_rankings_locked(
@@ -568,7 +581,8 @@ class LargeOrderService:
                     "net_buy_amount": round(metrics["net"], 2),
                     "buy_ratio": round(metrics["buy_ratio"], 4),
                     "max_order_amount": round(metrics["max_order"], 2),
-                    "cancel_rate": self._cancel_rate_locked(state),
+                    "intent_count": metrics["intent_count"],
+                    "cancel_rate": round(metrics["cancel_rate"], 4),
                     "change_pct": round(change_pct, 6) if change_pct is not None else None,
                     "limit_up_price": round(float(state["limit_up_price"]), 2) if state.get("limit_up_price") is not None else None,
                     "limit_up_gap_pct": round(limit_gap, 6) if limit_gap is not None else None,
@@ -898,10 +912,19 @@ class LargeOrderService:
             },
         }
 
-    def ranking(self, window: int = 60, scope: str = "all") -> dict:
+    def ranking(
+        self,
+        window: int = 60,
+        scope: str = "all",
+        mode: str = "combined",
+    ) -> dict:
         if window not in WINDOWS:
             window = 60
         rows = [dict(row) for row in self._rankings.get(window, ())]
+        if mode == "execution":
+            rows = [row for row in rows if row.get("data_quality") == "precise"]
+        elif mode == "intent":
+            rows = [row for row in rows if int(row.get("intent_count") or 0) > 0]
         if scope == "watchlist":
             try:
                 from app.services import preferences
@@ -919,6 +942,7 @@ class LargeOrderService:
             "count": len(rows),
             "window": window,
             "scope": scope,
+            "mode": mode,
             "stale": stale,
             "last_updated_ms": self._last_update_ms,
         }
@@ -927,25 +951,252 @@ class LargeOrderService:
         self,
         trade_date,
         *,
-        kind: str = "proxy_flow",
+        kind: str | None = None,
+        mode: str = "combined",
+        symbol: str | None = None,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        cursor: str | None = None,
+        limit: int = 1000,
+        order: str = "asc",
+    ) -> dict:
+        kinds_by_mode = {
+            "combined": ("proxy_flow", "kaipanla_trade", "kaipanla_intent"),
+            "execution": ("proxy_flow", "kaipanla_trade"),
+            "intent": ("kaipanla_intent",),
+        }
+        kinds = (kind,) if kind else kinds_by_mode.get(mode, kinds_by_mode["combined"])
+        if self._storage is None:
+            return {
+                "rows": [],
+                "count": 0,
+                "has_more": False,
+                "truncated": False,
+                "next_cursor": None,
+                "kind": kind,
+                "kinds": list(kinds),
+                "mode": mode,
+                "date": trade_date.isoformat(),
+            }
+        result = self._storage.query_events(
+            trade_date,
+            kinds=kinds,
+            symbol=symbol,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            cursor=cursor,
+            limit=limit,
+            order=order,
+        )
+        return {
+            **result,
+            "kind": kind or (kinds[0] if len(kinds) == 1 else None),
+            "kinds": list(kinds),
+            "mode": mode,
+            "date": trade_date.isoformat(),
+        }
+
+    def available_history_dates(self, limit: int = 30) -> list[str]:
+        return self._storage.available_dates(limit=limit) if self._storage is not None else []
+
+    @staticmethod
+    def _aggregate_reconciliation_frame(
+        frame: pl.DataFrame,
+        *,
+        kind: str,
+    ) -> pl.DataFrame:
+        keys = ["symbol", "bucket_start_ms"]
+        if frame.is_empty():
+            return pl.DataFrame()
+        frame = frame.with_columns(
+            ((pl.col("event_ts_ms") // 60_000) * 60_000).alias("bucket_start_ms")
+        )
+        name = pl.col("name").drop_nulls().first().alias("name")
+        if kind == "proxy_flow":
+            return frame.group_by(keys).agg(
+                name,
+                pl.col("buy_amount").fill_null(0).sum().alias("proxy_buy_amount"),
+                pl.col("sell_amount").fill_null(0).sum().alias("proxy_sell_amount"),
+                pl.len().alias("proxy_event_count"),
+            )
+        if kind == "kaipanla_trade":
+            return frame.group_by(keys).agg(
+                name,
+                pl.when(pl.col("direction") == "active_buy")
+                .then(pl.col("amount").fill_null(0))
+                .otherwise(0)
+                .sum()
+                .alias("precise_buy_amount"),
+                pl.when(pl.col("direction") == "active_sell")
+                .then(pl.col("amount").fill_null(0))
+                .otherwise(0)
+                .sum()
+                .alias("precise_sell_amount"),
+                pl.len().alias("precise_event_count"),
+            )
+        return frame.group_by(keys).agg(
+            name,
+            pl.len().alias("intent_count"),
+            pl.col("cancel_flag").fill_null(False).cast(pl.Int64).sum().alias("cancel_count"),
+        )
+
+    def reconciliation(
+        self,
+        trade_date: date,
+        *,
         symbol: str | None = None,
         from_ms: int | None = None,
         to_ms: int | None = None,
         limit: int = 1000,
-        order: str = "asc",
+        order: str = "desc",
     ) -> dict:
         if self._storage is None:
-            return {"rows": [], "count": 0, "truncated": False, "kind": kind, "date": trade_date.isoformat()}
-        result = self._storage.query(
-            kind,
+            return {
+                "rows": [],
+                "count": 0,
+                "truncated": False,
+                "date": trade_date.isoformat(),
+                "summary": self._reconciliation_summary(pl.DataFrame(), None),
+            }
+        frames = []
+        for kind in ("proxy_flow", "kaipanla_trade", "kaipanla_intent"):
+            source = self._storage.read_day(
+                kind,
+                trade_date,
+                symbol=symbol,
+                from_ms=from_ms,
+                to_ms=to_ms,
+            )
+            aggregated = self._aggregate_reconciliation_frame(source, kind=kind)
+            if not aggregated.is_empty():
+                frames.append(aggregated)
+        merged = pl.DataFrame()
+        for frame in frames:
+            if merged.is_empty():
+                merged = frame
+                continue
+            merged = merged.join(
+                frame,
+                on=["symbol", "bucket_start_ms"],
+                how="full",
+                coalesce=True,
+                suffix="_incoming",
+            ).with_columns(
+                pl.coalesce("name", "name_incoming").alias("name")
+            ).drop("name_incoming")
+        data_dir = self._storage.data_dir
+        from app.plugins.kaipanla.storage import read_funds_large_order_reference
+
+        reference = read_funds_large_order_reference(
+            data_dir,
             trade_date,
             symbol=symbol,
-            from_ms=from_ms,
-            to_ms=to_ms,
-            limit=limit,
-            order=order,
         )
-        return {**result, "kind": kind, "date": trade_date.isoformat()}
+        reference_available = not reference.is_empty()
+        if not merged.is_empty():
+            numeric_defaults = {
+                "proxy_buy_amount": 0.0,
+                "proxy_sell_amount": 0.0,
+                "proxy_event_count": 0,
+                "precise_buy_amount": 0.0,
+                "precise_sell_amount": 0.0,
+                "precise_event_count": 0,
+                "intent_count": 0,
+                "cancel_count": 0,
+            }
+            merged = merged.with_columns(
+                [
+                    pl.col(column).fill_null(value).alias(column)
+                    if column in merged.columns
+                    else pl.lit(value).alias(column)
+                    for column, value in numeric_defaults.items()
+                ]
+            )
+            if reference_available:
+                merged = merged.join(reference, on="symbol", how="left")
+            else:
+                merged = merged.with_columns(
+                    pl.lit(None, dtype=pl.Float64).alias("main_net_amount_over_300k")
+                )
+            proxy_total = pl.col("proxy_buy_amount") + pl.col("proxy_sell_amount")
+            precise_total = pl.col("precise_buy_amount") + pl.col("precise_sell_amount")
+            merged = merged.with_columns(
+                (pl.col("proxy_buy_amount") - pl.col("proxy_sell_amount")).alias("proxy_net_amount"),
+                (pl.col("precise_buy_amount") - pl.col("precise_sell_amount")).alias("precise_net_amount"),
+                (pl.col("cancel_count") / pl.col("intent_count")).fill_nan(0).alias("cancel_rate"),
+                pl.when(proxy_total > 0)
+                .then((precise_total / proxy_total).clip(0, 1))
+                .otherwise(None)
+                .alias("precise_coverage"),
+            ).with_columns(
+                (pl.col("precise_net_amount") - pl.col("proxy_net_amount")).alias("net_difference"),
+                pl.when(
+                    (pl.col("proxy_event_count") > 0)
+                    & (pl.col("precise_event_count") > 0)
+                    & pl.col("main_net_amount_over_300k").is_null()
+                )
+                .then(pl.lit("reference_missing"))
+                .when((pl.col("proxy_event_count") > 0) & (pl.col("precise_event_count") > 0))
+                .then(pl.lit("matched"))
+                .when(pl.col("proxy_event_count") > 0)
+                .then(pl.lit("proxy_only"))
+                .when(pl.col("precise_event_count") > 0)
+                .then(pl.lit("precise_only"))
+                .otherwise(pl.lit("intent_only"))
+                .alias("status"),
+            )
+        summary = self._reconciliation_summary(merged, reference)
+        if merged.is_empty():
+            rows = []
+            truncated = False
+        else:
+            merged = merged.sort(
+                ["bucket_start_ms", "symbol"],
+                descending=[order == "desc", order == "desc"],
+            )
+            truncated = merged.height > limit
+            rows = merged.head(limit).to_dicts()
+        return {
+            "rows": rows,
+            "count": len(rows),
+            "truncated": truncated,
+            "date": trade_date.isoformat(),
+            "summary": summary,
+        }
+
+    @staticmethod
+    def _reconciliation_summary(
+        merged: pl.DataFrame,
+        reference: pl.DataFrame | None,
+    ) -> dict[str, Any]:
+        reference_values = []
+        if reference is not None and "main_net_amount_over_300k" in reference.columns:
+            reference_values = reference["main_net_amount_over_300k"].drop_nulls().to_list()
+        if merged.is_empty():
+            return {
+                "proxy_net_amount": 0.0,
+                "precise_net_amount": 0.0,
+                "net_difference": 0.0,
+                "matched_buckets": 0,
+                "precise_coverage": 0.0,
+                "daily_reference_net": sum(reference_values) if reference_values else None,
+                "reference_status": "available" if reference_values else "reference_missing",
+            }
+        proxy_net = float(merged["proxy_net_amount"].sum())
+        precise_net = float(merged["precise_net_amount"].sum())
+        proxy_buckets = int((merged["proxy_event_count"] > 0).sum())
+        matched = int(
+            ((merged["proxy_event_count"] > 0) & (merged["precise_event_count"] > 0)).sum()
+        )
+        return {
+            "proxy_net_amount": proxy_net,
+            "precise_net_amount": precise_net,
+            "net_difference": precise_net - proxy_net,
+            "matched_buckets": matched,
+            "precise_coverage": matched / proxy_buckets if proxy_buckets else 0.0,
+            "daily_reference_net": sum(reference_values) if reference_values else None,
+            "reference_status": "available" if reference_values else "reference_missing",
+        }
 
     def tape(self, symbol: str) -> dict:
         normalized = str(symbol).strip().upper()

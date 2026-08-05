@@ -331,6 +331,7 @@ export interface LargeOrderRow {
   buy_ratio: number
   max_order_amount: number
   cancel_rate: number
+  intent_count?: number
   change_pct: number | null
   limit_up_price: number | null
   limit_up_gap_pct: number | null
@@ -365,13 +366,86 @@ export interface LargeOrderTape {
 }
 
 export type LargeOrderHistoryKind = 'proxy_flow' | 'kaipanla_trade' | 'kaipanla_intent'
+export type LargeOrderEvidenceMode = 'combined' | 'execution' | 'intent'
+
+export interface LargeOrderHistoryEvent {
+  trade_date: string
+  event_ts_ms: number
+  symbol: string
+  name: string
+  price: number | null
+  amount: number | null
+  volume: number | null
+  source: string
+  event_id: string
+  received_at_ms: number | null
+  schema_version?: string
+  parser_version?: string
+  event_kind: LargeOrderHistoryKind
+  delta_amount?: number | null
+  delta_volume?: number | null
+  buy_amount?: number | null
+  sell_amount?: number | null
+  side?: number | string | null
+  direction?: string | null
+  direction_code?: number | null
+  event_time?: string | null
+  order_id?: string | null
+  limit_flag?: boolean | null
+  cancel_flag?: boolean | null
+}
 
 export interface LargeOrderHistoryResponse {
-  rows: Array<Record<string, unknown>>
+  rows: LargeOrderHistoryEvent[]
+  count: number
+  has_more: boolean
+  next_cursor: string | null
+  truncated: boolean
+  kind: LargeOrderHistoryKind | null
+  kinds: LargeOrderHistoryKind[]
+  mode: LargeOrderEvidenceMode
+  date: string
+}
+
+export type LargeOrderReconciliationStatus = 'matched' | 'proxy_only' | 'precise_only' | 'intent_only' | 'reference_missing'
+
+export interface LargeOrderReconciliationRow {
+  symbol: string
+  name: string
+  bucket_start_ms: number
+  proxy_buy_amount: number
+  proxy_sell_amount: number
+  proxy_net_amount: number
+  proxy_event_count: number
+  precise_buy_amount: number
+  precise_sell_amount: number
+  precise_net_amount: number
+  precise_event_count: number
+  intent_count: number
+  cancel_count: number
+  cancel_rate: number
+  precise_coverage: number | null
+  net_difference: number
+  main_net_amount_over_300k: number | null
+  status: LargeOrderReconciliationStatus
+}
+
+export interface LargeOrderReconciliationSummary {
+  proxy_net_amount: number
+  precise_net_amount: number
+  net_difference: number
+  matched_buckets: number
+  precise_coverage: number
+  daily_reference_net: number | null
+  reference_status: 'available' | 'reference_missing' | string
+}
+
+export interface LargeOrderReconciliationResponse {
+  rows: LargeOrderReconciliationRow[]
   count: number
   truncated: boolean
-  kind: LargeOrderHistoryKind
   date: string
+  summary: LargeOrderReconciliationSummary
 }
 
 // ===== Screener =====
@@ -1789,13 +1863,36 @@ export const api = {
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
-  largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all') =>
-    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; stale: boolean; last_updated_ms: number | null }>(
-      `/api/large-orders/ranking?window=${window}&scope=${scope}`,
+  largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all', mode: LargeOrderEvidenceMode = 'combined') =>
+    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; mode: LargeOrderEvidenceMode; stale: boolean; last_updated_ms: number | null }>(
+      `/api/large-orders/ranking?window=${window}&scope=${scope}&mode=${mode}`,
     ),
+  largeOrdersDates: (limit = 30) =>
+    request<{ dates: string[]; count: number }>(`/api/large-orders/dates?limit=${limit}`),
   largeOrdersHistory: (params: {
     date: string
     kind?: LargeOrderHistoryKind
+    mode?: LargeOrderEvidenceMode
+    symbol?: string
+    from_ms?: number
+    to_ms?: number
+    cursor?: string
+    limit?: number
+    order?: 'asc' | 'desc'
+  }) => {
+    const query = new URLSearchParams({ date: params.date })
+    if (params.kind) query.set('kind', params.kind)
+    if (params.mode) query.set('mode', params.mode)
+    if (params.symbol) query.set('symbol', params.symbol)
+    if (params.from_ms != null) query.set('from_ms', String(params.from_ms))
+    if (params.to_ms != null) query.set('to_ms', String(params.to_ms))
+    if (params.cursor) query.set('cursor', params.cursor)
+    if (params.limit != null) query.set('limit', String(params.limit))
+    if (params.order) query.set('order', params.order)
+    return request<LargeOrderHistoryResponse>(`/api/large-orders/history?${query.toString()}`)
+  },
+  largeOrdersReconciliation: (params: {
+    date: string
     symbol?: string
     from_ms?: number
     to_ms?: number
@@ -1803,13 +1900,12 @@ export const api = {
     order?: 'asc' | 'desc'
   }) => {
     const query = new URLSearchParams({ date: params.date })
-    if (params.kind) query.set('kind', params.kind)
     if (params.symbol) query.set('symbol', params.symbol)
     if (params.from_ms != null) query.set('from_ms', String(params.from_ms))
     if (params.to_ms != null) query.set('to_ms', String(params.to_ms))
     if (params.limit != null) query.set('limit', String(params.limit))
     if (params.order) query.set('order', params.order)
-    return request<LargeOrderHistoryResponse>(`/api/large-orders/history?${query.toString()}`)
+    return request<LargeOrderReconciliationResponse>(`/api/large-orders/reconciliation?${query.toString()}`)
   },
   largeOrdersTape: (symbol: string) =>
     request<LargeOrderTape>(`/api/large-orders/${encodeURIComponent(symbol)}/tape`),

@@ -7,6 +7,8 @@ or ranking hot path.
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import os
 import queue
@@ -295,19 +297,15 @@ class LargeOrderStore:
         if order not in {"asc", "desc"}:
             raise ValueError("order must be asc or desc")
         limit = max(1, min(int(limit), 10_000))
-        self.flush_now()
-        files = sorted((self.root / kind / f"date={trade_date.isoformat()}").glob("**/*.parquet"))
-        if not files:
+        frame = self.read_day(
+            kind,
+            trade_date,
+            symbol=symbol,
+            from_ms=from_ms,
+            to_ms=to_ms,
+        )
+        if frame.is_empty():
             return {"rows": [], "count": 0, "truncated": False}
-        frame = pl.read_parquet(files)
-        if "event_id" in frame.columns:
-            frame = frame.unique(subset=["event_id"], keep="last", maintain_order=True)
-        if symbol:
-            frame = frame.filter(pl.col("symbol") == symbol.strip().upper())
-        if from_ms is not None:
-            frame = frame.filter(pl.col("event_ts_ms") >= int(from_ms))
-        if to_ms is not None:
-            frame = frame.filter(pl.col("event_ts_ms") <= int(to_ms))
         frame = frame.sort("event_ts_ms", descending=order == "desc")
         truncated = frame.height > limit
         rows = frame.head(limit).to_dicts()
@@ -315,6 +313,170 @@ class LargeOrderStore:
             if isinstance(row.get("trade_date"), date):
                 row["trade_date"] = row["trade_date"].isoformat()
         return {"rows": rows, "count": len(rows), "truncated": truncated}
+
+    def read_day(
+        self,
+        kind: str,
+        trade_date: date,
+        *,
+        symbol: str | None = None,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+    ) -> pl.DataFrame:
+        """Read one normalized event dataset without imposing an API page limit."""
+        if kind not in EVENT_KINDS:
+            raise ValueError(f"unsupported large-order event kind: {kind}")
+        self.flush_now()
+        files = sorted((self.root / kind / f"date={trade_date.isoformat()}").glob("**/*.parquet"))
+        if not files:
+            return pl.DataFrame(schema=_KIND_SCHEMA[kind])
+        frames = []
+        schema = _KIND_SCHEMA[kind]
+        for file in files:
+            source = pl.read_parquet(file).with_row_index("_legacy_row")
+            fallback_id = pl.concat_str(
+                [
+                    pl.lit(f"legacy:{kind}:{file.relative_to(self.root)}:"),
+                    pl.col("_legacy_row").cast(pl.String),
+                ]
+            )
+            expressions = []
+            for column, dtype in schema.items():
+                if column == "event_id":
+                    value = (
+                        pl.col(column).cast(pl.String, strict=False)
+                        if column in source.columns
+                        else pl.lit(None, dtype=pl.String)
+                    )
+                    expressions.append(
+                        pl.when(value.is_not_null() & (value != ""))
+                        .then(value)
+                        .otherwise(fallback_id)
+                        .alias(column)
+                    )
+                elif column in source.columns:
+                    expressions.append(pl.col(column).cast(dtype, strict=False).alias(column))
+                else:
+                    expressions.append(pl.lit(None, dtype=dtype).alias(column))
+            frames.append(source.select(expressions))
+        frame = pl.concat(frames, how="vertical_relaxed")
+        frame = frame.unique(subset=["event_id"], keep="last", maintain_order=True)
+        if symbol:
+            frame = frame.filter(pl.col("symbol") == symbol.strip().upper())
+        if from_ms is not None:
+            frame = frame.filter(pl.col("event_ts_ms") >= int(from_ms))
+        if to_ms is not None:
+            frame = frame.filter(pl.col("event_ts_ms") <= int(to_ms))
+        return frame
+
+    @staticmethod
+    def _encode_cursor(row: dict[str, Any]) -> str:
+        payload = json.dumps(
+            [int(row["event_ts_ms"]), str(row["event_kind"]), str(row["event_id"])],
+            separators=(",", ":"),
+        ).encode()
+        return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+    @staticmethod
+    def _decode_cursor(cursor: str) -> tuple[int, str, str]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            value = json.loads(base64.urlsafe_b64decode(padded).decode())
+            if not isinstance(value, list) or len(value) != 3:
+                raise ValueError
+            return int(value[0]), str(value[1]), str(value[2])
+        except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError("invalid large-order history cursor") from exc
+
+    def query_events(
+        self,
+        trade_date: date,
+        *,
+        kinds: tuple[str, ...] = EVENT_KINDS,
+        symbol: str | None = None,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        cursor: str | None = None,
+        limit: int = 1000,
+        order: str = "desc",
+    ) -> dict[str, Any]:
+        if not kinds or any(kind not in EVENT_KINDS for kind in kinds):
+            raise ValueError("unsupported large-order event kind")
+        if order not in {"asc", "desc"}:
+            raise ValueError("order must be asc or desc")
+        limit = max(1, min(int(limit), 10_000))
+        cursor_value = self._decode_cursor(cursor) if cursor else None
+        frames = []
+        for kind in dict.fromkeys(kinds):
+            frame = self.read_day(
+                kind,
+                trade_date,
+                symbol=symbol,
+                from_ms=from_ms,
+                to_ms=to_ms,
+            )
+            if not frame.is_empty():
+                frames.append(frame.with_columns(pl.lit(kind).alias("event_kind")))
+        if not frames:
+            return {
+                "rows": [],
+                "count": 0,
+                "has_more": False,
+                "truncated": False,
+                "next_cursor": None,
+            }
+        frame = pl.concat(frames, how="diagonal_relaxed")
+        frame = frame.unique(
+            subset=["event_kind", "event_id"],
+            keep="last",
+            maintain_order=True,
+        )
+        if cursor_value:
+            cursor_ts, cursor_kind, cursor_id = cursor_value
+            timestamp = pl.col("event_ts_ms")
+            kind = pl.col("event_kind")
+            event_id = pl.col("event_id")
+            if order == "asc":
+                after_cursor = (timestamp > cursor_ts) | (
+                    (timestamp == cursor_ts)
+                    & ((kind > cursor_kind) | ((kind == cursor_kind) & (event_id > cursor_id)))
+                )
+            else:
+                after_cursor = (timestamp < cursor_ts) | (
+                    (timestamp == cursor_ts)
+                    & ((kind < cursor_kind) | ((kind == cursor_kind) & (event_id < cursor_id)))
+                )
+            frame = frame.filter(after_cursor)
+        descending = order == "desc"
+        frame = frame.sort(
+            ["event_ts_ms", "event_kind", "event_id"],
+            descending=[descending, descending, descending],
+        )
+        has_more = frame.height > limit
+        page = frame.head(limit)
+        rows = page.to_dicts()
+        for row in rows:
+            if isinstance(row.get("trade_date"), date):
+                row["trade_date"] = row["trade_date"].isoformat()
+        return {
+            "rows": rows,
+            "count": len(rows),
+            "has_more": has_more,
+            "truncated": has_more,
+            "next_cursor": self._encode_cursor(rows[-1]) if has_more and rows else None,
+        }
+
+    def available_dates(self, *, limit: int = 30) -> list[str]:
+        values: set[date] = set()
+        for kind in EVENT_KINDS:
+            for day_root in (self.root / kind).glob("date=*"):
+                try:
+                    value = date.fromisoformat(day_root.name.removeprefix("date="))
+                except ValueError:
+                    continue
+                if any(day_root.glob("**/*.parquet")):
+                    values.add(value)
+        return [value.isoformat() for value in sorted(values, reverse=True)[: max(1, limit)]]
 
     def compact(self, trade_date: date, kind: str | None = None) -> dict[str, int]:
         """Merge a day's immutable fragments and deduplicate by event_id."""

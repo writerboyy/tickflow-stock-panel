@@ -1,5 +1,6 @@
 from datetime import date, datetime
 
+import polars as pl
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -68,6 +69,14 @@ def test_large_order_history_validates_kind_and_limit(tmp_path):
         "/api/large-orders/history",
         params={"date": "2026-08-04", "limit": 10001},
     ).status_code == 422
+    assert client.get(
+        "/api/large-orders/history",
+        params={"date": "2026-08-04", "cursor": "not-a-cursor"},
+    ).status_code == 422
+    assert client.get(
+        "/api/large-orders/reconciliation",
+        params={"date": "2026-08-04", "from_ms": 2, "to_ms": 1},
+    ).status_code == 422
     storage.stop()
 
 
@@ -97,4 +106,179 @@ def test_status_and_ranking_expose_v2_published_snapshot_fields(tmp_path):
     assert ranking["rows"][0]["change_pct"] == 0.04
     assert ranking["rows"][0]["limit_up_price"] == 11.0
     assert ranking["rows"][0]["limit_up_gap_pct"] == 0.057692
+    storage.stop()
+
+
+def test_large_order_history_combines_execution_events_and_pages(tmp_path):
+    client, storage = _client(tmp_path)
+    day = date(2026, 8, 4)
+    timestamp = _ts(1)
+    storage.submit(
+        "proxy_flow",
+        [{
+            "trade_date": day,
+            "event_ts_ms": timestamp,
+            "symbol": "000001.SZ",
+            "event_id": "proxy-1",
+            "amount": 1000,
+        }],
+    )
+    storage.submit(
+        "kaipanla_trade",
+        [{
+            "trade_date": day,
+            "event_ts_ms": timestamp,
+            "symbol": "000001.SZ",
+            "event_id": "trade-1",
+            "amount": 900,
+            "direction": "active_buy",
+        }],
+    )
+
+    first = client.get(
+        "/api/large-orders/history",
+        params={"date": day.isoformat(), "mode": "execution", "limit": 1, "order": "desc"},
+    ).json()
+    second = client.get(
+        "/api/large-orders/history",
+        params={
+            "date": day.isoformat(),
+            "mode": "execution",
+            "limit": 1,
+            "order": "desc",
+            "cursor": first["next_cursor"],
+        },
+    ).json()
+
+    assert {first["rows"][0]["event_kind"], second["rows"][0]["event_kind"]} == {
+        "proxy_flow",
+        "kaipanla_trade",
+    }
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    storage.stop()
+
+
+def test_large_order_reconciliation_aggregates_minute_and_daily_reference(tmp_path):
+    client, storage = _client(tmp_path)
+    day = date(2026, 8, 4)
+    storage.submit(
+        "proxy_flow",
+        [
+            {
+                "trade_date": day,
+                "event_ts_ms": _ts(1),
+                "symbol": "000001.SZ",
+                "name": "代理名称",
+                "event_id": "proxy-buy",
+                "amount": 1_000,
+                "buy_amount": 1_000,
+                "sell_amount": 0,
+            },
+            {
+                "trade_date": day,
+                "event_ts_ms": _ts(2),
+                "symbol": "000001.SZ",
+                "event_id": "proxy-sell",
+                "amount": 200,
+                "buy_amount": 0,
+                "sell_amount": 200,
+            },
+        ],
+    )
+    storage.submit(
+        "kaipanla_trade",
+        [{
+            "trade_date": day,
+                "event_ts_ms": _ts(3),
+                "symbol": "000001.SZ",
+                "name": "精确名称",
+            "event_id": "trade-buy",
+            "amount": 700,
+            "direction": "active_buy",
+        }],
+    )
+    storage.submit(
+        "kaipanla_intent",
+        [
+            {
+                "trade_date": day,
+                "event_ts_ms": _ts(4),
+                "symbol": "000001.SZ",
+                "event_id": "intent-1",
+                "amount": 100,
+                "cancel_flag": True,
+            },
+            {
+                "trade_date": day,
+                "event_ts_ms": _ts(5),
+                "symbol": "000001.SZ",
+                "event_id": "intent-2",
+                "amount": 100,
+                "cancel_flag": False,
+            },
+        ],
+    )
+    reference = tmp_path / "ext_data" / "ext_kpl_funds" / "timeseries" / f"date={day}"
+    reference.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["000001.SZ"],
+        "main_net_amount_over_300k": [123_456.0],
+    }).write_parquet(reference / "part.parquet")
+
+    response = client.get(
+        "/api/large-orders/reconciliation",
+        params={"date": day.isoformat(), "symbol": "000001.SZ"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["rows"][0]["proxy_net_amount"] == 800
+    assert payload["rows"][0]["precise_net_amount"] == 700
+    assert payload["rows"][0]["net_difference"] == -100
+    assert payload["rows"][0]["cancel_rate"] == 0.5
+    assert payload["rows"][0]["status"] == "matched"
+    assert payload["summary"]["daily_reference_net"] == 123_456
+    storage.stop()
+
+
+def test_large_order_reconciliation_marks_intent_only_and_missing_reference(tmp_path):
+    client, storage = _client(tmp_path)
+    day = date(2026, 8, 4)
+    matched_ts = int(datetime(2026, 8, 4, 9, 31, 1).timestamp() * 1000)
+    intent_ts = int(datetime(2026, 8, 4, 9, 32, 1).timestamp() * 1000)
+    storage.submit("proxy_flow", [{
+        "trade_date": day,
+        "event_ts_ms": matched_ts,
+        "symbol": "000001.SZ",
+        "event_id": "proxy",
+        "buy_amount": 1_000,
+        "sell_amount": 0,
+    }])
+    storage.submit("kaipanla_trade", [{
+        "trade_date": day,
+        "event_ts_ms": matched_ts,
+        "symbol": "000001.SZ",
+        "event_id": "trade",
+        "amount": 900,
+        "direction": "active_buy",
+    }])
+    storage.submit("kaipanla_intent", [{
+        "trade_date": day,
+        "event_ts_ms": intent_ts,
+        "symbol": "000001.SZ",
+        "event_id": "intent",
+        "cancel_flag": True,
+    }])
+
+    payload = client.get(
+        "/api/large-orders/reconciliation",
+        params={"date": day.isoformat()},
+    ).json()
+
+    assert [row["status"] for row in payload["rows"]] == [
+        "intent_only",
+        "reference_missing",
+    ]
     storage.stop()

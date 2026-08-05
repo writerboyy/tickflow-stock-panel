@@ -432,3 +432,31 @@ def test_full_market_snapshot_and_cached_ranking_performance():
     assert processing_seconds < 2.0
     assert sorted(latencies)[18] < 0.5
     service.stop()
+
+
+def test_ranking_evidence_mode_filters_published_candidates():
+    service = LargeOrderService()
+    service._rankings[60] = (
+        {
+            "symbol": "000001.SZ",
+            "score": 88,
+            "net_buy_amount": 2_000_000,
+            "data_quality": "precise",
+            "intent_count": 0,
+        },
+        {
+            "symbol": "600000.SH",
+            "score": 70,
+            "net_buy_amount": 1_000_000,
+            "data_quality": "proxy_only",
+            "intent_count": 3,
+        },
+    )
+
+    assert service.ranking(60, mode="combined")["count"] == 2
+    assert [row["symbol"] for row in service.ranking(60, mode="execution")["rows"]] == [
+        "000001.SZ"
+    ]
+    assert [row["symbol"] for row in service.ranking(60, mode="intent")["rows"]] == [
+        "600000.SH"
+    ]
