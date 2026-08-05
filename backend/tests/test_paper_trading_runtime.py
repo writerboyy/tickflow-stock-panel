@@ -17,6 +17,7 @@ from app.free_strategy.paper import (
     PaperTradingSupervisor,
     _Subscription,
     _append_engine_events,
+    _append_strategy_logs,
     _catch_up_bars,
     _compatible_checkpoint,
     _engine_from_state,
@@ -299,6 +300,31 @@ def test_queued_payload_preserves_dict_shape_and_reports_wait():
 
     assert payload == {"type": "bars"}
     assert _queue_delay_seconds(payload) >= 0.49
+
+
+def test_paper_persists_only_strategy_owned_logs(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running"})
+
+    _append_strategy_logs(store, "paper", [
+        {
+            "timestamp": "2026-08-05T09:30:00",
+            "level": "INFO",
+            "message": "自由输出\n第二行",
+            "source": "strategy",
+        },
+        {
+            "timestamp": "2026-08-05T09:30:00",
+            "level": "INFO",
+            "message": "框架固定日志",
+            "source": "engine",
+        },
+    ])
+
+    events = store.events("paper")
+    assert len(events) == 1
+    assert events[0]["message"] == "自由输出\n第二行"
+    assert events[0]["source"] == "strategy"
 
 
 def test_supervisor_start_passes_shared_catch_up_slot(tmp_path):

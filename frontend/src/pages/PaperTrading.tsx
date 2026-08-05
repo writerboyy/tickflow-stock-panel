@@ -312,33 +312,13 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
   </div>
 }
 
-function LatestDecision({ event, instrumentLabel, actualHoldingSymbols, orders, fills }: { event?: PaperEvent; instrumentLabel: (symbol: unknown) => string; actualHoldingSymbols: string[]; orders: PaperOrder[]; fills: PaperFill[] }) {
-  if (!event) return <div className="grid min-h-52 place-items-center px-5 text-center text-xs text-muted">当日暂无策略决策</div>
-  const targets = event.target_symbols ?? []
-  const holdings = event.holding_symbols ?? []
-  const isCandidatePool = event.strategy === 'small_cap_limitup'
-  const clearing = !targets.length && holdings.length > 0
-  const actualHoldings = new Set(actualHoldingSymbols)
-  const remaining = clearing ? holdings.filter(symbol => actualHoldings.has(symbol)) : []
-  const clearingIncomplete = clearing && remaining.length > 0
-  const holdingsRemainCandidates = isCandidatePool && targets.length > 0 && actualHoldingSymbols.length > 0 && actualHoldingSymbols.every(symbol => targets.includes(symbol))
-  const unchangedCandidateHoldings = event.decision === 'rebalance' && holdingsRemainCandidates && orders.length === 0
-  const executionText = event.decision === 'rebalance' && !clearing
-    ? orders.length === 0
-      ? isCandidatePool && holdingsRemainCandidates ? '未产生委托，当前持仓仍在候选池内' : '未产生委托'
-      : fills.length === 0 ? `当日委托 ${orders.length} 笔，暂无成交` : `当日委托 ${orders.length} 笔，成交 ${fills.length} 笔`
-    : ''
-  const label = clearingIncomplete ? '清仓未完成' : unchangedCandidateHoldings ? '持仓未变' : decisionLabel(event)
-  const decisionTone = clearingIncomplete ? 'text-warning' : unchangedCandidateHoldings ? 'text-muted' : event.decision === 'rebalance' ? 'text-bull' : event.decision === 'empty' ? 'text-muted' : 'text-foreground'
-  return <div className="space-y-3 px-4 py-3 text-xs">
-    <div className="flex items-center justify-between gap-3"><span className={`font-semibold ${decisionTone}`}>{label}</span><span className="font-mono text-[10px] text-muted">{event.trading_date ?? formatTime(event.timestamp)}</span></div>
-    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-2">
-      <span className="text-muted">{isCandidatePool ? '候选池' : '目标标的'}</span><span className="break-words">{targets.length ? targets.map(instrumentLabel).join('、') : '空仓'}</span>
-      <span className="text-muted">{isCandidatePool ? '当前持仓' : '决策前持仓'}</span><span className="break-words">{holdings.length ? holdings.map(instrumentLabel).join('、') : '空仓'}</span>
-      {executionText ? <><span className="text-muted">执行结果</span><span className={orders.length === 0 ? 'text-muted' : fills.length === 0 ? 'text-warning' : 'text-success'}>{executionText}</span></> : null}
-      {clearing ? <><span className="text-muted">执行结果</span><span className={clearingIncomplete ? 'text-warning' : 'text-success'}>{clearingIncomplete ? `未完成，仍持有 ${remaining.length} 只` : '已完成'}</span></> : null}
-      <span className="text-muted">决策原因</span><span className="leading-5">{decisionReasonText(event)}</span>
-    </div>
+function StrategyOutput({ rows }: { rows: PaperEvent[] }) {
+  if (!rows.length) return <div className="grid h-56 place-items-center px-5 text-center text-xs text-muted">当日暂无策略输出</div>
+  return <div className="h-56 overflow-y-auto font-mono text-[11px]">
+    {rows.slice(0, 50).map(event => <div key={event.id} className="grid grid-cols-[118px_minmax(0,1fr)] gap-3 border-b border-border px-4 py-2.5 max-sm:grid-cols-1 max-sm:gap-1">
+      <span className="text-[10px] text-muted">{formatTime(event.timestamp)}</span>
+      <span className={`whitespace-pre-wrap break-words leading-5 ${event.level === 'ERROR' ? 'text-danger' : event.level === 'WARNING' ? 'text-warning' : ''}`}>{String(event.message ?? '')}</span>
+    </div>)}
   </div>
 }
 
@@ -584,7 +564,7 @@ export function PaperTrading() {
   const decisionEvents = signalsQuery.data?.signals ?? []
   const allFills = accountState?.fills ?? []
   const allOrders = accountState?.orders ?? []
-  const allLogEvents = events.filter(event => ['log', 'error', 'risk', 'market_gap', 'sync', 'renamed', 'start', 'pause', 'stop'].includes(event.type))
+  const allLogEvents = events.filter(event => event.type === 'log' && event.source === 'strategy')
   const availableDates = [...new Set([
     ...equityRows.map(row => row.timestamp.slice(0, 10)),
     account?.valuation?.date ?? '',
@@ -603,7 +583,6 @@ export function PaperTrading() {
   const fills = allFills.filter(fill => fill.timestamp.slice(0, 10) === activeDate)
   const orders = allOrders.filter(order => order.submitted_at.slice(0, 10) === activeDate)
   const visibleDecisionEvents = decisionEvents.filter(event => eventTradingDate(event) === activeDate)
-  const latestDecision = visibleDecisionEvents.find(event => event.signal_type === 'daily_decision')
   const logEvents = allLogEvents.filter(event => eventTradingDate(event) === activeDate)
   const selectedEquity = useCurrentState ? account?.equity : selectedSnapshot?.equity
   const selectedCash = useCurrentState ? account?.cash : selectedSnapshot?.cash
@@ -706,7 +685,7 @@ export function PaperTrading() {
 
         <section className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] border-b border-border max-lg:grid-cols-1">
           <div className="min-w-0 border-r border-border px-3 py-2 max-lg:border-b max-lg:border-r-0"><div className="flex min-h-5 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] font-medium"><span>收益曲线</span><div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] font-normal text-muted">{benchmarkQuery.isError ? <span className="text-danger">{benchmarkLabel || '基准'}暂不可用</span> : <><span>基准 <span className={`font-mono ${returnClass(selectedBenchmarkReturn ?? undefined)}`}>{selectedBenchmarkReturn == null ? '—' : signedPercent(selectedBenchmarkReturn)}</span></span><span>超额 <span className={`font-mono ${returnClass(selectedExcessReturn ?? undefined)}`}>{selectedExcessReturn == null ? '—' : signedPercent(selectedExcessReturn)}</span></span></>}</div></div><ReturnChart rows={visibleEquityRows} benchmarkRows={benchmarkRows} benchmarkLabel={benchmarkLabel || benchmarkSymbol || '基准'} /></div>
-          <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">最新决策</div><LatestDecision event={latestDecision} instrumentLabel={instrumentLabel} actualHoldingSymbols={positions.map(([symbol]) => symbol)} orders={orders} fills={fills} /></div>
+          <div className="min-w-0"><div className="border-b border-border px-4 py-2 text-[11px] font-medium">策略输出</div><StrategyOutput rows={logEvents} /></div>
         </section>
 
         {syncLabel(account) || account.market_mode === 'poll_3s' || account.market_mode === 'websocket' ? <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
@@ -764,5 +743,5 @@ function TradeTable({ orders, fills, instrumentLabel }: { orders: PaperOrder[]; 
 }
 
 function EventRows({ rows, symbolNames }: { rows: PaperEvent[]; symbolNames: Record<string, string> }) {
-  return <div className="space-y-1">{rows.map(event => <div key={event.id} className="grid grid-cols-[150px_180px_minmax(0,1fr)] gap-2 border-b border-border px-2 py-2 text-xs max-sm:grid-cols-[110px_minmax(0,1fr)]"><span className="text-[10px] text-muted">{formatTime(event.timestamp)}</span><span className="truncate font-mono text-[10px] text-muted max-sm:hidden" title={event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type}>{event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type}</span><span className={event.type === 'error' || event.type === 'risk' ? 'text-danger' : event.type === 'rejected' ? 'text-warning' : ''}>{eventText(event, symbolNames)}</span></div>)}</div>
+  return <div className="space-y-1">{rows.map(event => <div key={event.id} className="grid grid-cols-[150px_180px_minmax(0,1fr)] gap-2 border-b border-border px-2 py-2 text-xs max-sm:grid-cols-[110px_minmax(0,1fr)]"><span className="text-[10px] text-muted">{formatTime(event.timestamp)}</span><span className="truncate font-mono text-[10px] text-muted max-sm:hidden" title={event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type}>{event.symbol ? formatInstrumentLabel(event.symbol, symbolNames[event.symbol]) : event.type === 'log' ? event.level ?? 'INFO' : event.type}</span><span className={`whitespace-pre-wrap break-words ${event.type === 'error' || event.type === 'risk' || event.level === 'ERROR' ? 'text-danger' : event.type === 'rejected' || event.level === 'WARNING' ? 'text-warning' : ''}`}>{eventText(event, symbolNames)}</span></div>)}</div>
 }

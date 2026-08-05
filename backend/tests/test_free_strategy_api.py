@@ -47,6 +47,26 @@ def test_paper_write_uses_longer_callback_timeout_than_backtests():
     assert PaperWrite(strategy_id="paper").callback_timeout_seconds == 120
 
 
+def test_paper_logs_only_return_strategy_output(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running"})
+    store.append_event("paper", {
+        "type": "log", "message": "策略输出", "source": "strategy",
+    })
+    store.append_event("paper", {
+        "type": "log", "message": "框架日志", "source": "engine",
+    })
+    store.append_event("paper", {"type": "error", "message": "运行错误"})
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    response = TestClient(app).get("/api/free-strategies/paper/accounts/paper/logs")
+
+    assert response.status_code == 200
+    assert [item["message"] for item in response.json()["logs"]] == ["策略输出"]
+
+
 def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_path):
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
         datastore=SimpleNamespace(data_dir=tmp_path),

@@ -883,7 +883,10 @@ def _fill_event_id(fill: Any) -> str:
 
 
 def _log_event_id(item: dict[str, Any]) -> str:
-    raw = ":".join(str(item.get(key) or "") for key in ("timestamp", "level", "message"))
+    raw = ":".join(
+        str(item.get(key) or "")
+        for key in ("timestamp", "level", "source", "message")
+    )
     return f"log:{sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
@@ -972,8 +975,7 @@ def _append_engine_events(
         event = {"id": _fill_event_id(fill), "type": "fill", **asdict(fill)}
         if store.append_event_once(account_id, event) and notify is not None:
             notify(event)
-    for item in engine.logs[before_logs:]:
-        store.append_event_once(account_id, {"id": _log_event_id(item), "type": "log", **item})
+    _append_strategy_logs(store, account_id, engine.logs[before_logs:])
     for signal in engine.drain_signals():
         payload = dict(signal.pop("payload", {}))
         signal_id = str(signal.pop("id"))
@@ -993,6 +995,21 @@ def _append_engine_events(
         event = {"id": f"risk:{risk_id}", "type": "risk", **engine.risk_status}
         if store.append_event_once(account_id, event) and notify is not None:
             notify(event)
+
+
+def _append_strategy_logs(
+    store: PaperAccountStore,
+    account_id: str,
+    logs: list[dict[str, Any]],
+) -> None:
+    for item in logs:
+        if item.get("source") != "strategy":
+            continue
+        store.append_event_once(account_id, {
+            "id": _log_event_id(item),
+            "type": "log",
+            **item,
+        })
 
 
 def _append_five_fortunes_decision(
@@ -1542,6 +1559,7 @@ def _paper_worker(
             "scheduled_times": engine.scheduled_times,
             "universe": engine.universe,
         })
+        _append_strategy_logs(store, account_id, engine.logs)
         state = _catch_up_bars(
             store,
             account_id,

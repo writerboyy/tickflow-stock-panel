@@ -1401,6 +1401,7 @@ export interface PaperEvent {
   quantity?: number
   value?: number
   level?: string
+  source?: 'strategy' | 'engine'
   signal_type?: string
   strategy?: string
   trading_date?: string

@@ -1,7 +1,9 @@
 """自由策略脚本的可信执行核心与账户撮合。"""
 from __future__ import annotations
 
+import builtins
 import copy
+import io
 import logging
 import math
 import re
@@ -556,7 +558,13 @@ class Context:
         return symbol
 
     def log(self, message: str, level: str = "INFO") -> None:
-        self._engine.logs.append({"timestamp": self.now.isoformat() if self.now else "", "level": level, "message": str(message)})
+        timestamp = self.now or cn_naive_now()
+        self._engine.logs.append({
+            "timestamp": timestamp.isoformat(),
+            "level": str(level).upper(),
+            "message": str(message),
+            "source": "strategy",
+        })
 
     def emit_signal(
         self,
@@ -655,7 +663,10 @@ class FreeStrategyEngine:
         self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
         self._style_liquidity_loader: Callable[[date], dict[str, Any] | None] | None = None
         self.context = Context(self)
-        namespace: dict[str, Any] = {"__name__": "free_strategy_snapshot"}
+        namespace: dict[str, Any] = {
+            "__name__": "free_strategy_snapshot",
+            "print": self._strategy_print,
+        }
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
         self._protected_call(
@@ -679,6 +690,24 @@ class FreeStrategyEngine:
     @property
     def universe(self) -> list[str]:
         return self.context.universe
+
+    def _strategy_print(
+        self,
+        *values: Any,
+        sep: str | None = " ",
+        end: str | None = "\n",
+        file: Any = None,
+        flush: bool = False,
+    ) -> None:
+        if file is not None:
+            builtins.print(*values, sep=sep, end=end, file=file, flush=flush)
+            return
+        buffer = io.StringIO()
+        builtins.print(*values, sep=sep, end=end, file=buffer, flush=flush)
+        message = buffer.getvalue()
+        if message.endswith("\n"):
+            message = message[:-1]
+        self.context.log(message)
 
     @property
     def history_requirements(self) -> dict[str, int]:
@@ -1299,6 +1328,7 @@ class FreeStrategyEngine:
                     "timestamp": timestamp.isoformat(),
                     "level": "INFO",
                     "message": f"{symbol} 拆分/送转生效：持仓数量按 {ratio:g} 倍调整",
+                    "source": "engine",
                 })
 
     def _run_callback(self, name: str, bars: BarsView) -> None:

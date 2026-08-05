@@ -68,6 +68,36 @@ def on_bar(context, bars):
     assert result["orders"] == []
 
 
+def test_strategy_print_is_captured_as_freeform_strategy_output():
+    source = """
+print('source', 1, sep=' | ')
+
+def initialize(context):
+    print('first line\\nsecond line')
+    context.log('warning text', level='warning')
+
+def on_bar(context, bars):
+    print('bar', context.now.strftime('%H:%M'), end='')
+"""
+    engine = FreeStrategyEngine(source)
+
+    result = engine.run([
+        Bar("X", datetime(2026, 8, 5, 15), 10, 10, 10, 10),
+    ])
+
+    assert [item["message"] for item in result["logs"]] == [
+        "source | 1",
+        "first line\nsecond line",
+        "warning text",
+        "bar 15:00",
+    ]
+    assert [item["level"] for item in result["logs"]] == [
+        "INFO", "INFO", "WARNING", "INFO",
+    ]
+    assert {item["source"] for item in result["logs"]} == {"strategy"}
+    assert all(item["timestamp"] for item in result["logs"])
+
+
 def test_before_trading_start_uses_previous_close_for_portfolio_value():
     source = """
 def initialize(context):
