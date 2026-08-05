@@ -234,14 +234,36 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
     })
     const benchmarkVisible = benchmarkReturns.some(value => value != null)
+    const timestamps = dailyRows.map(row => row.timestamp)
+    const indexByTimestamp = new Map(timestamps.map((timestamp, index) => [timestamp, index]))
+    const xAxis = {
+      type: 'category' as const,
+      data: timestamps,
+      boundaryGap: false,
+      axisLabel: {
+        color: theme.text,
+        fontSize: 10,
+        hideOverlap: true,
+        showMinLabel: true,
+        showMaxLabel: true,
+        formatter: (value: string) => value.slice(0, 10),
+      },
+      axisLine: { lineStyle: { color: theme.border } },
+    }
     return {
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
-      grid: { left: 62, right: benchmarkVisible ? 62 : 24, top: 24, bottom: 58 },
+      grid: benchmarkVisible
+        ? [
+            { left: 62, right: 24, top: 24, height: '46%' },
+            { left: 62, right: 24, top: '62%', bottom: 50 },
+          ]
+        : { left: 62, right: 24, top: 24, bottom: 58 },
       dataZoom: dailyRows.length > 1 ? [
-        { type: 'inside', filterMode: 'filter', start: zoomStart, end: zoomEnd },
+        { type: 'inside', xAxisIndex: benchmarkVisible ? [0, 1] : [0], filterMode: 'filter', start: zoomStart, end: zoomEnd },
         {
           type: 'slider',
+          xAxisIndex: benchmarkVisible ? [0, 1] : [0],
           height: 14,
           bottom: 4,
           borderColor: theme.border,
@@ -258,45 +280,42 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
         textStyle: { color: theme.tooltipText, fontSize: 11 },
         formatter: (params: any) => {
           const items = (Array.isArray(params) ? params : [params]).filter(item => item?.value != null && Number.isFinite(Number(item.value)))
-          const axisValue = formatTime(String(items[0]?.axisValue ?? ''))
-          const lines = items.map(item => {
-            const value = Number(item.value)
-            return `<div>${String(item.seriesName ?? '')} ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
-          }).join('')
-          return `<div>${axisValue}${zoomed ? ' · 区间收益' : ''}</div>${lines}`
+          const timestamp = String(items[0]?.axisValue ?? '')
+          const index = indexByTimestamp.get(timestamp)
+          if (index == null) return ''
+          const lines = [
+            ['模拟收益', returns[index]],
+            ...(benchmarkVisible ? [[benchmarkLabel, benchmarkReturns[index]]] : []),
+          ].filter((item): item is [string, number] => item[1] != null && Number.isFinite(Number(item[1])))
+            .map(([name, rawValue]) => {
+              const value = Number(rawValue)
+              return `<div>${name} ${value >= 0 ? '+' : ''}${value.toFixed(2)}%</div>`
+            }).join('')
+          return `<div>${formatTime(timestamp)}${zoomed ? ' · 区间收益' : ''}</div>${lines}`
         },
       },
-      xAxis: {
-        type: 'category',
-        data: dailyRows.map(row => row.timestamp),
-        boundaryGap: false,
-        axisLabel: {
-          color: theme.text,
-          fontSize: 10,
-          hideOverlap: true,
-          showMinLabel: true,
-          showMaxLabel: true,
-          formatter: (value: string) => value.slice(0, 10),
-        },
-        axisLine: { lineStyle: { color: theme.border } },
-      },
+      axisPointer: benchmarkVisible ? { link: [{ xAxisIndex: [0, 1] }] } : undefined,
+      xAxis: benchmarkVisible
+        ? [
+            { ...xAxis, gridIndex: 0, axisLabel: { show: false }, axisTick: { show: false } },
+            { ...xAxis, gridIndex: 1 },
+          ]
+        : xAxis,
       yAxis: [
         {
-          type: 'value', scale: true, min: 'dataMin',
+          type: 'value', scale: true, min: 'dataMin', gridIndex: 0,
           axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
           splitLine: { lineStyle: { color: theme.grid } },
         },
-        {
-          type: 'value', scale: true, min: 'dataMin', position: 'right', show: benchmarkVisible,
+        ...(benchmarkVisible ? [{
+          type: 'value' as const, scale: true, min: 'dataMin' as const, gridIndex: 1,
           axisLabel: { color: BENCHMARK_COLOR, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
-          axisLine: { show: true, lineStyle: { color: BENCHMARK_COLOR } },
-          axisTick: { show: false },
-          splitLine: { show: false },
-        },
+          splitLine: { lineStyle: { color: theme.grid } },
+        }] : []),
       ],
       series: [
-        { type: 'line', name: '模拟收益', yAxisIndex: 0, data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
-        { type: 'line', name: benchmarkLabel, yAxisIndex: 1, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.6, type: 'dashed', color: BENCHMARK_COLOR }, itemStyle: { color: BENCHMARK_COLOR } },
+        { type: 'line', name: '模拟收益', xAxisIndex: 0, yAxisIndex: 0, data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
+        ...(benchmarkVisible ? [{ type: 'line' as const, name: benchmarkLabel, xAxisIndex: 1, yAxisIndex: 1, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.6, type: 'dashed' as const, color: BENCHMARK_COLOR }, itemStyle: { color: BENCHMARK_COLOR } }] : []),
       ],
     }
   }, [benchmarkLabel, benchmarkRows, dailyRows, theme, zoomRange, zoomed])
@@ -316,7 +335,7 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       if (!chart.isDisposed()) chart.off('dataZoom', handleZoom)
     }
   }, [dailyRows.length])
-  return <div className="relative h-56 w-full">
+  return <div className="relative h-64 w-full">
     <div ref={ref} className="h-full w-full" />
     {zoomed ? <span className="pointer-events-none absolute left-2 top-1 text-[10px] text-muted">区间收益</span> : null}
     {!rows.length ? <div className="absolute inset-0 grid place-items-center text-xs text-muted">等待首个收益采样</div> : null}
