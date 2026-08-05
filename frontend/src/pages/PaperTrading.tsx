@@ -37,6 +37,7 @@ import { formatInstrumentLabel } from '@/lib/format'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const BENCHMARK_COLOR = '#94a3b8'
 
 const MODE_LABEL: Record<string, string> = {
   bar_1m: '1分钟K线',
@@ -232,10 +233,11 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
       const close = benchmarkByDate.get(row.timestamp.slice(0, 10))
       return benchmarkBase != null && close != null ? (close / benchmarkBase - 1) * 100 : null
     })
+    const benchmarkVisible = benchmarkReturns.some(value => value != null)
     return {
       animation: false,
       legend: { top: 0, right: 18, itemWidth: 14, itemHeight: 2, textStyle: { color: theme.text, fontSize: 10 } },
-      grid: { left: 62, right: 52, top: 24, bottom: 58 },
+      grid: { left: 62, right: benchmarkVisible ? 62 : 24, top: 24, bottom: 58 },
       dataZoom: dailyRows.length > 1 ? [
         { type: 'inside', filterMode: 'filter', start: zoomStart, end: zoomEnd },
         {
@@ -278,14 +280,23 @@ function ReturnChart({ rows, benchmarkRows, benchmarkLabel }: { rows: EquityPoin
         },
         axisLine: { lineStyle: { color: theme.border } },
       },
-      yAxis: {
-        type: 'value', scale: true, min: 'dataMin',
-        axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
-        splitLine: { lineStyle: { color: theme.grid } },
-      },
+      yAxis: [
+        {
+          type: 'value', scale: true, min: 'dataMin',
+          axisLabel: { color: theme.text, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
+          splitLine: { lineStyle: { color: theme.grid } },
+        },
+        {
+          type: 'value', scale: true, min: 'dataMin', position: 'right', show: benchmarkVisible,
+          axisLabel: { color: BENCHMARK_COLOR, fontSize: 10, formatter: (value: number) => `${value.toFixed(1)}%` },
+          axisLine: { show: true, lineStyle: { color: BENCHMARK_COLOR } },
+          axisTick: { show: false },
+          splitLine: { show: false },
+        },
+      ],
       series: [
-        { type: 'line', name: '模拟收益', data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
-        { type: 'line', name: benchmarkLabel, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.2, type: 'dashed', color: '#64748b' }, itemStyle: { color: '#64748b' } },
+        { type: 'line', name: '模拟收益', yAxisIndex: 0, data: returns, showSymbol: false, smooth: 0.2, lineStyle: { width: 1.5, color: theme.accent }, itemStyle: { color: theme.accent }, areaStyle: { color: theme.accentFill } },
+        { type: 'line', name: benchmarkLabel, yAxisIndex: 1, data: benchmarkReturns, showSymbol: false, smooth: 0.25, connectNulls: true, lineStyle: { width: 1.6, type: 'dashed', color: BENCHMARK_COLOR }, itemStyle: { color: BENCHMARK_COLOR } },
       ],
     }
   }, [benchmarkLabel, benchmarkRows, dailyRows, theme, zoomRange, zoomed])
