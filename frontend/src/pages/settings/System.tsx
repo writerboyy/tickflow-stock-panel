@@ -11,6 +11,7 @@ import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { refreshAlertToastConfig } from '@/components/AlertToast'
+import { toast } from '@/components/Toast'
 import { SOUND_OPTIONS, previewSound } from '@/lib/notificationSound'
 import {
   listZhVoices, previewVoice, activateVoice, getCurrentVoiceURI,
@@ -23,6 +24,7 @@ export function SettingsSystemPanel() {
   const [saving, setSaving] = useState(false)
 
   const screenerAutoRun = prefs?.screener_auto_run ?? true
+  const systemNotifyEnabled = prefs?.system_notify_enabled ?? false
   const [clearing, setClearing] = useState(false)
   const [toastEnabled, setToastEnabled] = useState(() => {
     try { return localStorage.getItem('alert_toast_enabled') !== '0' } catch { return true }
@@ -133,6 +135,25 @@ export function SettingsSystemPanel() {
             localStorage.setItem('alert_toast_enabled', v ? '1' : '0')
             setToastEnabled(v)
             refreshAlertToastConfig()
+          }}
+        />
+
+        <ToggleRow
+          label="发送系统通知"
+          desc="收到监控告警时同时发送到操作系统通知中心"
+          checked={systemNotifyEnabled}
+          disabled={saving}
+          onChange={async (v) => {
+            setSaving(true)
+            try {
+              await api.updateSystemNotify(v)
+              qc.invalidateQueries({ queryKey: QK.preferences })
+              toast(v ? '系统通知已开启' : '系统通知已关闭', 'success')
+            } catch (e) {
+              toast(`系统通知设置失败 · ${String((e as Error)?.message || e)}`, 'error')
+            } finally {
+              setSaving(false)
+            }
           }}
         />
 
