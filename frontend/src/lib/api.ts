@@ -295,12 +295,17 @@ export interface LargeOrderStatus {
   coverage_count: number
   candidate_count: number
   precise_count: number
+  filtered_near_limit_count: number
+  unassessable_count: number
   last_updated_ms: number | null
+  last_calculation_ms?: number
   last_error?: string | null
   market_phase?: string | null
   is_trading_hours?: boolean
   config_version?: string
   deep_dive_budget?: number
+  deep_dive_calls_used?: number
+  deep_dive_calls_remaining?: number
   storage?: {
     enabled: boolean
     queued_rows: number
@@ -326,7 +331,9 @@ export interface LargeOrderRow {
   buy_ratio: number
   max_order_amount: number
   cancel_rate: number
-  change_pct: number
+  change_pct: number | null
+  limit_up_price: number | null
+  limit_up_gap_pct: number | null
   last_seen_ts: number | null
   freshness_ms: number
   large_threshold: number
@@ -1214,6 +1221,7 @@ export interface Preferences {
     deep_dive_interval_seconds: number
     max_deep_dive_symbols: number
     candidate_limit: number
+    min_limit_up_gap_pct: number
     version: string
   }
 }
@@ -1782,7 +1790,7 @@ export const api = {
     ),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
   largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all') =>
-    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; stale: boolean }>(
+    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; stale: boolean; last_updated_ms: number | null }>(
       `/api/large-orders/ranking?window=${window}&scope=${scope}`,
     ),
   largeOrdersHistory: (params: {
@@ -1812,6 +1820,7 @@ export const api = {
     deep_dive_interval_seconds?: number
     max_deep_dive_symbols?: number
     candidate_limit?: number
+    min_limit_up_gap_pct?: number
   }) => request<{ large_orders: NonNullable<Preferences['large_orders']> }>(
     '/api/settings/preferences/large-orders',
     { method: 'POST', body: JSON.stringify(payload) },

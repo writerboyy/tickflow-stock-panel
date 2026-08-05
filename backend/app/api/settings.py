@@ -474,6 +474,7 @@ class LargeOrderPreferencesIn(BaseModel):
     deep_dive_interval_seconds: int | None = Field(default=None, ge=15, le=600)
     max_deep_dive_symbols: int | None = Field(default=None, ge=0, le=10)
     candidate_limit: int | None = Field(default=None, ge=10, le=200)
+    min_limit_up_gap_pct: float | None = Field(default=None, ge=0.0, le=0.10)
 
 
 class DatasetFieldMapItem(BaseModel):

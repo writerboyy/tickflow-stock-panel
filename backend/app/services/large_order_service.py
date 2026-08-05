@@ -12,10 +12,11 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from app.market_time import CN_TZ, cn_now, cn_today
+from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
 from app.plugins.kaipanla.credentials import load_credentials
 from app.plugins.kaipanla.parsers import ResponseShapeError, parse_large_order_intents, parse_large_order_trades
@@ -30,6 +31,7 @@ _LARGE_ORDER_WEBHOOK_EXECUTOR = ThreadPoolExecutor(
 )
 
 WINDOWS = (15, 60, 300)
+BASELINE_BUCKETS = 120
 DEFAULTS: dict[str, Any] = {
     "enabled": True,
     "score_threshold": 75,
@@ -37,8 +39,9 @@ DEFAULTS: dict[str, Any] = {
     "deep_dive_interval_seconds": 60,
     "max_deep_dive_symbols": 3,
     "candidate_limit": 50,
+    "min_limit_up_gap_pct": 0.02,
     "daily_call_budget": 60,
-    "version": "large_orders_v1",
+    "version": "large_orders_v2",
 }
 
 
@@ -63,6 +66,14 @@ def _robust_z(value: float, values: list[float]) -> float:
     if scale <= 1e-9:
         return 0.0
     return (value - median) / scale
+
+
+def _large_threshold(values: list[float]) -> float:
+    if len(values) < 5:
+        return 1_000_000.0
+    median = _median(values)
+    mad = _median([abs(item - median) for item in values])
+    return max(1_000_000.0, median + 3.0 * 1.4826 * mad)
 
 
 def _as_datetime(value: object) -> datetime | None:
@@ -96,7 +107,7 @@ class LargeOrderService:
         self._snapshot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="large-orders")
         self._deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="large-orders-kaipanla")
         self._states: dict[str, dict[str, Any]] = {}
-        self._ranking: list[dict] = []
+        self._rankings: dict[int, tuple[dict[str, Any], ...]] = {window: () for window in WINDOWS}
         self._storage: LargeOrderStore | None = None
         self._deep_pending: set[str] = set()
         self._last_deep_at: dict[str, float] = {}
@@ -104,8 +115,13 @@ class LargeOrderService:
         self._deep_calls_used = 0
         self._cooldown_until: dict[str, float] = {}
         self._last_update_ms: int | None = None
+        self._last_calculation_ms = 0.0
         self._last_error: str | None = None
         self._trade_date = cn_today()
+        self._instrument_limits_date: date | None = None
+        self._instrument_limits: dict[str, dict[str, Any]] = {}
+        self._filtered_near_limit_count = 0
+        self._unassessable_count = 0
         self._config = dict(DEFAULTS)
 
     def set_app_state(self, app_state) -> None:
@@ -156,6 +172,149 @@ class LargeOrderService:
             self._config.update(current)
         return current
 
+    @staticmethod
+    def _new_window_tracker(now_ts: float, window: int) -> dict[str, Any]:
+        return {
+            "events": deque(),
+            "buy": 0.0,
+            "sell": 0.0,
+            "bucket_id": int(now_ts // window),
+            "bucket_amount": 0.0,
+            "history": deque(maxlen=BASELINE_BUCKETS),
+        }
+
+    def _new_state(self, symbol: str, name: object, now_ts: float) -> dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "name": name or symbol,
+            "snapshots": deque(maxlen=360),
+            "flows": deque(maxlen=720),
+            "windows": {
+                window: self._new_window_tracker(now_ts, window)
+                for window in WINDOWS
+            },
+            "trade_events": deque(maxlen=300),
+            "intent_events": deque(maxlen=300),
+            "trade_ids": set(),
+            "intent_ids": set(),
+            "last_side": 0,
+            "deep_source": "proxy_only",
+            "deep_error": None,
+            "last_deep_ms": None,
+            "change_pct": None,
+            "limit_up_price": None,
+            "limit_up_gap_pct": None,
+            "price_limit_assessable": False,
+            "no_price_limit": False,
+        }
+
+    @staticmethod
+    def _advance_window_tracker(tracker: dict[str, Any], now_ts: float, window: int) -> None:
+        bucket_id = int(now_ts // window)
+        current_id = int(tracker["bucket_id"])
+        if bucket_id > current_id:
+            history = tracker["history"]
+            history.append(float(tracker["bucket_amount"]))
+            skipped = min(bucket_id - current_id - 1, BASELINE_BUCKETS)
+            history.extend(0.0 for _ in range(skipped))
+            tracker["bucket_id"] = bucket_id
+            tracker["bucket_amount"] = 0.0
+
+        cutoff = now_ts - window
+        events = tracker["events"]
+        while events and events[0][0] < cutoff:
+            _ts, buy, sell = events.popleft()
+            tracker["buy"] -= buy
+            tracker["sell"] -= sell
+        if abs(tracker["buy"]) < 1e-6:
+            tracker["buy"] = 0.0
+        if abs(tracker["sell"]) < 1e-6:
+            tracker["sell"] = 0.0
+
+    def _append_proxy_flow(self, state: dict[str, Any], flow: dict[str, float]) -> None:
+        state["flows"].append(flow)
+        amount = float(flow["amount"])
+        for window, tracker in state["windows"].items():
+            self._advance_window_tracker(tracker, float(flow["ts"]), window)
+            buy = float(flow["buy"])
+            sell = float(flow["sell"])
+            tracker["events"].append((float(flow["ts"]), buy, sell))
+            tracker["buy"] += buy
+            tracker["sell"] += sell
+            tracker["bucket_amount"] += amount
+
+    def _reset_proxy_flows(self, state: dict[str, Any], now_ts: float) -> None:
+        state["flows"].clear()
+        state["windows"] = {
+            window: self._new_window_tracker(now_ts, window)
+            for window in WINDOWS
+        }
+
+    def _refresh_instrument_limits(self, trade_date: date) -> None:
+        if self._instrument_limits_date == trade_date:
+            return
+        limits: dict[str, dict[str, Any]] = {}
+        repo = getattr(self._app_state, "repo", None) if self._app_state else None
+        if repo is not None:
+            try:
+                instruments = repo.get_instruments()
+                wanted = [
+                    column
+                    for column in ("symbol", "as_of", "limit_up")
+                    if column in instruments.columns
+                ]
+                if "symbol" in wanted:
+                    for row in instruments.select(wanted).to_dicts():
+                        symbol = str(row.get("symbol") or "").strip().upper()
+                        if symbol:
+                            limits[symbol] = row
+            except Exception:  # noqa: BLE001
+                logger.debug("实时大单读取涨停价维表失败", exc_info=True)
+        self._instrument_limits = limits
+        self._instrument_limits_date = trade_date
+
+    def _update_price_context(
+        self,
+        state: dict[str, Any],
+        raw: dict[str, Any],
+        *,
+        symbol: str,
+        price: float,
+        trade_date: date,
+    ) -> None:
+        name = str(raw.get("name") or state["name"] or symbol)
+        prev_close = _finite(raw.get("prev_close"))
+        change_pct = _finite(raw.get("change_pct"))
+        if change_pct is None and prev_close is not None and prev_close > 0:
+            change_pct = price / prev_close - 1.0
+
+        limit_up_value: float | None = None
+        no_price_limit = False
+        instrument = self._instrument_limits.get(symbol)
+        if instrument and instrument.get("as_of") == trade_date:
+            authoritative = _finite(instrument.get("limit_up"))
+            if authoritative is not None and authoritative >= 10_000:
+                no_price_limit = True
+            elif authoritative is not None and authoritative > 0:
+                limit_up_value = authoritative
+        if limit_up_value is None and not no_price_limit and prev_close is not None and prev_close > 0:
+            limit_pct = price_limit_pct(
+                symbol,
+                trade_date,
+                is_risk_warning=is_risk_warning_name(name),
+            )
+            limit_up_value = limit_price(prev_close, limit_pct, up=True)
+
+        state["change_pct"] = change_pct
+        state["limit_up_price"] = limit_up_value
+        state["limit_up_gap_pct"] = (
+            limit_up_value / price - 1.0
+            if limit_up_value is not None and price > 0
+            else None
+        )
+        state["price_limit_assessable"] = no_price_limit or limit_up_value is not None
+        state["no_price_limit"] = no_price_limit
+
     def _on_quote_fetch(self) -> None:
         """行情线程只复制缓存并投递最新任务，不执行开盘啦请求。"""
         if not self._running or not self._config.get("enabled", True) or self._quote_service is None:
@@ -173,10 +332,9 @@ class LargeOrderService:
             with self._lock:
                 snapshot = self._pending_snapshot
                 self._pending_snapshot = None
-            if snapshot is None:
-                with self._lock:
+                if snapshot is None:
                     self._snapshot_running = False
-                return
+                    return
             try:
                 self._process_snapshot(snapshot)
             except Exception:  # noqa: BLE001
@@ -185,11 +343,15 @@ class LargeOrderService:
     def _reset_for_new_day(self) -> None:
         with self._lock:
             self._states.clear()
-            self._ranking = []
+            self._rankings = {window: () for window in WINDOWS}
             self._last_deep_at.clear()
             self._cooldown_until.clear()
             self._deep_calls_date = self._trade_date
             self._deep_calls_used = 0
+            self._instrument_limits_date = None
+            self._instrument_limits = {}
+            self._filtered_near_limit_count = 0
+            self._unassessable_count = 0
 
     def _process_snapshot(self, records: list[dict]) -> None:
         today = cn_today()
@@ -206,6 +368,9 @@ class LargeOrderService:
         if not records:
             return
         now = cn_now()
+        now_ts = now.timestamp()
+        calculation_started = time.perf_counter()
+        self._refresh_instrument_limits(today)
         index_symbols: set[str] = set()
         repo = getattr(self._app_state, "repo", None) if self._app_state else None
         if repo is not None:
@@ -226,35 +391,27 @@ class LargeOrderService:
                 volume = _finite(raw.get("volume"))
                 if price is None or amount is None or volume is None or amount < 0 or volume < 0:
                     continue
-                state = self._states.setdefault(
-                    symbol,
-                    {
-                        "symbol": symbol,
-                        "name": raw.get("name") or symbol,
-                        "snapshots": deque(maxlen=360),
-                        "flows": deque(maxlen=720),
-                        "baseline": deque(maxlen=120),
-                        "trade_events": deque(maxlen=300),
-                        "intent_events": deque(maxlen=300),
-                        "trade_ids": set(),
-                        "intent_ids": set(),
-                        "last_side": 0,
-                        "deep_source": "proxy_only",
-                        "deep_error": None,
-                        "last_deep_ms": None,
-                    },
-                )
+                state = self._states.get(symbol)
+                if state is None:
+                    state = self._new_state(symbol, raw.get("name"), now_ts)
+                    self._states[symbol] = state
                 state["name"] = raw.get("name") or state["name"]
                 previous = state["snapshots"][-1] if state["snapshots"] else None
-                state["snapshots"].append({"ts": now.timestamp(), "price": price, "amount": amount, "volume": volume})
+                state["snapshots"].append({"ts": now_ts, "price": price, "amount": amount, "volume": volume})
+                self._update_price_context(
+                    state,
+                    raw,
+                    symbol=symbol,
+                    price=price,
+                    trade_date=today,
+                )
                 if previous is None:
                     continue
                 delta_amount = amount - previous["amount"]
                 delta_volume = volume - previous["volume"]
                 if delta_amount < 0 or delta_volume < 0:
                     # 交易日切换/上游重置，绝不能把重置量当作资金脉冲。
-                    state["flows"].clear()
-                    state["baseline"].clear()
+                    self._reset_proxy_flows(state, now_ts)
                     continue
                 if delta_amount <= 0 and delta_volume <= 0:
                     continue
@@ -266,15 +423,15 @@ class LargeOrderService:
                 else:
                     side = state["last_side"] or 1
                 state["last_side"] = side
-                state["flows"].append({
-                    "ts": now.timestamp(),
+                flow = {
+                    "ts": now_ts,
                     "amount": delta_amount,
                     "volume": delta_volume,
                     "buy": delta_amount if side > 0 else 0.0,
                     "sell": delta_amount if side < 0 else 0.0,
                     "price": price,
-                })
-                state["baseline"].append(delta_amount)
+                }
+                self._append_proxy_flow(state, flow)
                 flow_events.append({
                     "trade_date": today,
                     "event_ts_ms": event_ts_ms,
@@ -295,29 +452,40 @@ class LargeOrderService:
                     "parser_version": "large_orders_proxy_v1",
                 })
 
-            self._ranking = self._build_ranking_locked(now.timestamp())
+            rankings, filtered_near_limit, unassessable = self._build_rankings_locked(now_ts)
+            self._rankings = rankings
+            self._filtered_near_limit_count = filtered_near_limit
+            self._unassessable_count = unassessable
             self._last_update_ms = int(time.time() * 1000)
+            self._last_calculation_ms = (time.perf_counter() - calculation_started) * 1000
         if self._storage is not None and flow_events:
             self._storage.submit("proxy_flow", flow_events)
         self._schedule_deep_dive()
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()
 
-    def _window_metrics_locked(self, state: dict[str, Any], window: int) -> dict[str, float]:
-        cutoff = time.time() - window
-        flows = [item for item in state["flows"] if item["ts"] >= cutoff]
-        buy = sum(item["buy"] for item in flows)
-        sell = sum(item["sell"] for item in flows)
-        amount = buy + sell
-        deep_cutoff = time.time() - window
-        trades = [item for item in state["trade_events"] if (_as_datetime(item.get("event_time")) or cn_now()).timestamp() >= deep_cutoff]
+    def _window_metrics_locked(self, state: dict[str, Any], window: int, now_ts: float) -> dict[str, Any]:
+        tracker = state["windows"][window]
+        self._advance_window_tracker(tracker, now_ts, window)
+        proxy_buy = max(0.0, float(tracker["buy"]))
+        proxy_sell = max(0.0, float(tracker["sell"]))
+        proxy_amount = proxy_buy + proxy_sell
+        cutoff = now_ts - window
+        trades = []
+        for item in state["trade_events"]:
+            event_time = _as_datetime(
+                item.get("timestamp") or item.get("event_time") or item.get("time")
+            )
+            if event_time is not None and event_time.timestamp() >= cutoff:
+                trades.append(item)
         active_buy = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_buy")
         active_sell = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_sell")
-        if active_buy + active_sell > 0:
-            buy, sell = active_buy, active_sell
-        baseline = [float(item) for item in state["baseline"] if _finite(item) is not None]
-        threshold = max(1_000_000.0, 3.0 * _median([abs(item - _median(baseline)) for item in baseline]))
-        zscore = _robust_z(amount, baseline)
+        precise = active_buy + active_sell > 0
+        buy, sell = (active_buy, active_sell) if precise else (proxy_buy, proxy_sell)
+        amount = buy + sell
+        baseline = [float(item) for item in tracker["history"] if _finite(item) is not None]
+        threshold = _large_threshold(baseline)
+        zscore = _robust_z(proxy_amount, baseline)
         return {
             "amount": amount,
             "buy": buy,
@@ -327,10 +495,14 @@ class LargeOrderService:
             "zscore": zscore,
             "threshold": threshold,
             "max_order": max((float(item.get("amount") or 0) for item in trades), default=0.0),
+            "precise": precise,
         }
 
-    def _build_ranking_locked(self, now_ts: float) -> list[dict]:
-        rows: list[dict] = []
+    def _build_rankings_locked(
+        self,
+        now_ts: float,
+    ) -> tuple[dict[int, tuple[dict[str, Any], ...]], int, int]:
+        rows_by_window: dict[int, list[dict[str, Any]]] = {window: [] for window in WINDOWS}
         depth_metrics: dict[str, dict[str, float]] = {}
         depth_service = getattr(self._app_state, "depth_service", None) if self._app_state else None
         if depth_service is not None:
@@ -338,53 +510,83 @@ class LargeOrderService:
                 depth_metrics = depth_service.get_cached_metrics(set(self._states))
             except Exception:  # noqa: BLE001
                 depth_metrics = {}
+        filtered_near_limit = 0
+        unassessable = 0
+        min_gap = float(self._config.get("min_limit_up_gap_pct", 0.02))
         for symbol, state in self._states.items():
-            metrics = self._window_metrics_locked(state, 60)
-            latest = state["snapshots"][-1] if state["snapshots"] else {}
-            if metrics["amount"] <= 0 and not state["trade_events"]:
+            metrics_by_window = {
+                window: self._window_metrics_locked(state, window, now_ts)
+                for window in WINDOWS
+            }
+            if not any(metrics["amount"] > 0 for metrics in metrics_by_window.values()):
                 continue
-            first = state["snapshots"][0] if state["snapshots"] else latest
-            price = float(latest.get("price") or 0)
-            prev_price = float(first.get("price") or price)
-            change_pct = (price / prev_price - 1.0) if prev_price else 0.0
-            price_confirmed = change_pct > 0 or metrics["buy_ratio"] >= 0.65
+            if not state.get("price_limit_assessable"):
+                unassessable += 1
+                continue
+            limit_gap = _finite(state.get("limit_up_gap_pct"))
+            if limit_gap is not None and limit_gap <= min_gap + 1e-9:
+                filtered_near_limit += 1
+                continue
+            latest = state["snapshots"][-1] if state["snapshots"] else {}
+            change_pct = _finite(state.get("change_pct"))
             book = depth_metrics.get(symbol, {})
             imbalance = float(book.get("book_imbalance") or 0)
-            score = (
-                min(1.0, max(0.0, metrics["net"] / max(metrics["threshold"] * 3.0, 1.0))) * 35.0
-                + min(1.0, max(0.0, metrics["zscore"] / 5.0)) * 25.0
-                + min(1.0, max(0.0, (metrics["buy_ratio"] - 0.5) / 0.3)) * 15.0
-                + (15.0 if price_confirmed else 0.0)
-                + min(1.0, max(0.0, imbalance)) * 10.0
-            )
-            deep = bool(state["trade_events"])
-            confidence = "high" if deep and score >= 75 and metrics["buy_ratio"] >= 0.65 else "medium" if metrics["amount"] else "low"
-            source = "kaipanla" if deep else "tick_proxy"
-            rows.append({
-                "symbol": symbol,
-                "name": state["name"],
-                "score": round(min(100.0, score), 2),
-                "confidence": confidence,
-                "source": source,
-                "data_quality": "precise" if deep else "proxy_only",
-                "active_buy_amount": round(metrics["buy"], 2),
-                "active_sell_amount": round(metrics["sell"], 2),
-                "net_buy_amount": round(metrics["net"], 2),
-                "buy_ratio": round(metrics["buy_ratio"], 4),
-                "max_order_amount": round(metrics["max_order"], 2),
-                "cancel_rate": self._cancel_rate_locked(state),
-                "change_pct": round(change_pct, 6),
-                "last_seen_ts": round(float(latest["ts"]), 3) if latest.get("ts") is not None else None,
-                "freshness_ms": max(0, int((now_ts - float(latest.get("ts") or now_ts)) * 1000)),
-                "large_threshold": round(metrics["threshold"], 2),
-                "zscore": round(metrics["zscore"], 3),
-                "ofi": round(float(book.get("ofi") or 0), 2),
-                "book_imbalance": round(imbalance, 4),
-                "windows": {str(window): self._window_metrics_locked(state, window) for window in WINDOWS},
-                "explanation": self._explanation(metrics, deep, price_confirmed),
-            })
-        rows.sort(key=lambda row: (row["score"], row["net_buy_amount"]), reverse=True)
-        return rows[: int(self._config.get("candidate_limit", 50))]
+            serialized_windows = {
+                str(window): {
+                    key: value
+                    for key, value in metrics.items()
+                    if key != "precise"
+                }
+                for window, metrics in metrics_by_window.items()
+            }
+            for window, metrics in metrics_by_window.items():
+                if metrics["amount"] <= 0:
+                    continue
+                price_confirmed = (change_pct is not None and change_pct > 0) or metrics["buy_ratio"] >= 0.65
+                score = (
+                    min(1.0, max(0.0, metrics["net"] / max(metrics["threshold"] * 3.0, 1.0))) * 35.0
+                    + min(1.0, max(0.0, metrics["zscore"] / 5.0)) * 25.0
+                    + min(1.0, max(0.0, (metrics["buy_ratio"] - 0.5) / 0.3)) * 15.0
+                    + (15.0 if price_confirmed else 0.0)
+                    + min(1.0, max(0.0, imbalance)) * 10.0
+                )
+                deep = bool(metrics["precise"])
+                confidence = (
+                    "high"
+                    if deep and score >= 75 and metrics["buy_ratio"] >= 0.65
+                    else "medium"
+                )
+                rows_by_window[window].append({
+                    "symbol": symbol,
+                    "name": state["name"],
+                    "score": round(min(100.0, score), 2),
+                    "confidence": confidence,
+                    "source": "kaipanla" if deep else "tick_proxy",
+                    "data_quality": "precise" if deep else "proxy_only",
+                    "active_buy_amount": round(metrics["buy"], 2),
+                    "active_sell_amount": round(metrics["sell"], 2),
+                    "net_buy_amount": round(metrics["net"], 2),
+                    "buy_ratio": round(metrics["buy_ratio"], 4),
+                    "max_order_amount": round(metrics["max_order"], 2),
+                    "cancel_rate": self._cancel_rate_locked(state),
+                    "change_pct": round(change_pct, 6) if change_pct is not None else None,
+                    "limit_up_price": round(float(state["limit_up_price"]), 2) if state.get("limit_up_price") is not None else None,
+                    "limit_up_gap_pct": round(limit_gap, 6) if limit_gap is not None else None,
+                    "last_seen_ts": round(float(latest["ts"]), 3) if latest.get("ts") is not None else None,
+                    "freshness_ms": max(0, int((now_ts - float(latest.get("ts") or now_ts)) * 1000)),
+                    "large_threshold": round(metrics["threshold"], 2),
+                    "zscore": round(metrics["zscore"], 3),
+                    "ofi": round(float(book.get("ofi") or 0), 2),
+                    "book_imbalance": round(imbalance, 4),
+                    "windows": serialized_windows,
+                    "explanation": self._explanation(metrics, deep, price_confirmed),
+                })
+        limit = int(self._config.get("candidate_limit", 50))
+        rankings: dict[int, tuple[dict[str, Any], ...]] = {}
+        for window, rows in rows_by_window.items():
+            rows.sort(key=lambda row: (row["score"], row["net_buy_amount"]), reverse=True)
+            rankings[window] = tuple(rows[:limit])
+        return rankings, filtered_near_limit, unassessable
 
     @staticmethod
     def _explanation(metrics: dict[str, float], deep: bool, price_confirmed: bool) -> str:
@@ -406,19 +608,28 @@ class LargeOrderService:
         if not self._config.get("enabled", True) or load_credentials() is None:
             return
         now = time.time()
+        ranked = list(self._rankings.get(60, ()))
+        watchlist: list[str] = []
+        try:
+            from app.services import preferences
+
+            watchlist = preferences.get_realtime_watchlist_symbols()
+        except Exception:  # noqa: BLE001
+            pass
         with self._lock:
             if self._deep_calls_date != cn_today():
                 self._deep_calls_date = cn_today()
                 self._deep_calls_used = 0
-            ranked = self._ranking[: int(self._config.get("candidate_limit", 50))]
-            watchlist: list[str] = []
-            try:
-                from app.services import preferences
-
-                watchlist = preferences.get_realtime_watchlist_symbols()
-            except Exception:  # noqa: BLE001
-                pass
-            symbols = list(dict.fromkeys(watchlist + [str(row["symbol"]) for row in ranked]))
+            min_gap = float(self._config.get("min_limit_up_gap_pct", 0.02))
+            eligible_watchlist = []
+            for symbol in watchlist:
+                state = self._states.get(symbol)
+                if state is None or not state.get("price_limit_assessable"):
+                    continue
+                limit_gap = _finite(state.get("limit_up_gap_pct"))
+                if limit_gap is None or limit_gap > min_gap + 1e-9:
+                    eligible_watchlist.append(symbol)
+            symbols = list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
             budget = max(0, int(self._config.get("daily_call_budget", 60)))
             available_symbols = max(0, (budget - self._deep_calls_used) // 2)
@@ -492,13 +703,12 @@ class LargeOrderService:
         now_ms = int(time.time() * 1000)
         trade_rows: list[dict[str, Any]] = []
         intent_rows: list[dict[str, Any]] = []
+        calculation_started = time.perf_counter()
         with self._lock:
-            state = self._states.setdefault(symbol, {
-                "symbol": symbol, "name": symbol, "snapshots": deque(maxlen=360), "flows": deque(maxlen=720),
-                "baseline": deque(maxlen=120), "trade_events": deque(maxlen=300), "intent_events": deque(maxlen=300),
-                "trade_ids": set(), "intent_ids": set(), "last_side": 0, "deep_source": "proxy_only", "deep_error": None,
-                "last_deep_ms": None,
-            })
+            state = self._states.get(symbol)
+            if state is None:
+                state = self._new_state(symbol, symbol, time.time())
+                self._states[symbol] = state
             for event in trades:
                 if event["event_id"] not in state["trade_ids"]:
                     state["trade_ids"].add(event["event_id"])
@@ -551,9 +761,14 @@ class LargeOrderService:
             state["deep_source"] = "kaipanla"
             state["deep_error"] = None
             state["last_deep_ms"] = now_ms
-            self._ranking = self._build_ranking_locked(time.time())
+            rankings, filtered_near_limit, unassessable = self._build_rankings_locked(time.time())
+            self._rankings = rankings
+            self._filtered_near_limit_count = filtered_near_limit
+            self._unassessable_count = unassessable
             alerts = self._build_alerts_locked(symbol)
             self._last_update_ms = now_ms
+            self._last_calculation_ms = (time.perf_counter() - calculation_started) * 1000
+            self._last_error = None
         if self._storage is not None:
             self._storage.submit("kaipanla_trade", trade_rows)
             self._storage.submit("kaipanla_intent", intent_rows)
@@ -571,7 +786,7 @@ class LargeOrderService:
             interval = float(quote_status.get("interval_s") or 6)
             if quote_age is None or quote_age < 0 or quote_age > max(interval * 2, 30) * 1000:
                 return []
-        row = next((item for item in self._ranking if item["symbol"] == symbol), None)
+        row = next((item for item in self._rankings.get(60, ()) if item["symbol"] == symbol), None)
         if row is None or row["source"] != "kaipanla" or row["score"] < float(self._config["score_threshold"]):
             return []
         metrics = row["windows"]["60"]
@@ -594,7 +809,12 @@ class LargeOrderService:
             "change_pct": row["change_pct"],
             "signals": [row["explanation"]],
             "severity": "warn",
-            "conditions": ["active_buy_ratio>=65%", "zscore>=2.5", "price_confirmed"],
+            "conditions": [
+                "active_buy_ratio>=65%",
+                "zscore>=2.5",
+                "price_confirmed",
+                "limit_up_gap>configured_minimum",
+            ],
             "logic": "and",
         }]
 
@@ -644,60 +864,64 @@ class LargeOrderService:
         quote_age = quote_status.get("quote_age_ms")
         interval = float(quote_status.get("interval_s") or 6)
         stale = quote_age is None or quote_age < 0 or quote_age > max(interval * 2, 30) * 1000
-        with self._lock:
-            precise = sum(1 for row in self._ranking if row.get("source") == "kaipanla")
-            return {
-                "enabled": bool(self._config.get("enabled", True)),
-                "running": self._running,
-                "data_source": "kaipanla" if load_credentials() else "proxy_only",
-                "mode": "stale" if stale else "live",
-                "stale": stale,
-                "coverage_count": quote_status.get("symbol_count", 0),
-                "candidate_count": len(self._ranking),
-                "precise_count": precise,
-                "last_updated_ms": self._last_update_ms,
-                "last_error": self._last_error,
-                "market_phase": quote_status.get("market_phase"),
-                "is_trading_hours": quote_status.get("is_trading_hours", False),
-                "config_version": self._config["version"],
-                "deep_dive_budget": int(self._config.get("max_deep_dive_symbols", 3)),
-                "deep_dive_calls_used": self._deep_calls_used,
-                "deep_dive_calls_remaining": max(0, int(self._config.get("daily_call_budget", 60)) - self._deep_calls_used),
-                "storage": self._storage.status() if self._storage is not None else {
-                    "enabled": False,
-                    "queued_rows": 0,
-                    "written_rows": 0,
-                    "dropped_rows": 0,
-                    "invalid_rows": 0,
-                    "last_flush_ms": None,
-                    "last_error": None,
-                    "storage_root": None,
-                },
-            }
+        ranking = self._rankings.get(60, ())
+        precise = sum(1 for row in ranking if row.get("source") == "kaipanla")
+        return {
+            "enabled": bool(self._config.get("enabled", True)),
+            "running": self._running,
+            "data_source": "kaipanla" if load_credentials() else "proxy_only",
+            "mode": "stale" if stale else "live",
+            "stale": stale,
+            "coverage_count": quote_status.get("symbol_count", 0),
+            "candidate_count": len(ranking),
+            "precise_count": precise,
+            "filtered_near_limit_count": self._filtered_near_limit_count,
+            "unassessable_count": self._unassessable_count,
+            "last_updated_ms": self._last_update_ms,
+            "last_calculation_ms": round(self._last_calculation_ms, 2),
+            "last_error": self._last_error,
+            "market_phase": quote_status.get("market_phase"),
+            "is_trading_hours": quote_status.get("is_trading_hours", False),
+            "config_version": self._config["version"],
+            "deep_dive_budget": int(self._config.get("max_deep_dive_symbols", 3)),
+            "deep_dive_calls_used": self._deep_calls_used,
+            "deep_dive_calls_remaining": max(0, int(self._config.get("daily_call_budget", 60)) - self._deep_calls_used),
+            "storage": self._storage.status() if self._storage is not None else {
+                "enabled": False,
+                "queued_rows": 0,
+                "written_rows": 0,
+                "dropped_rows": 0,
+                "invalid_rows": 0,
+                "last_flush_ms": None,
+                "last_error": None,
+                "storage_root": None,
+            },
+        }
 
     def ranking(self, window: int = 60, scope: str = "all") -> dict:
         if window not in WINDOWS:
             window = 60
-        with self._lock:
-            rows = self._build_ranking_locked(time.time())
-            if scope == "watchlist":
-                try:
-                    from app.services import preferences
+        rows = [dict(row) for row in self._rankings.get(window, ())]
+        if scope == "watchlist":
+            try:
+                from app.services import preferences
 
-                    symbols = set(preferences.get_realtime_watchlist_symbols())
-                    rows = [row for row in rows if row["symbol"] in symbols]
-                except Exception:  # noqa: BLE001
-                    rows = []
-            for row in rows:
-                metrics = row["windows"][str(window)]
-                row.update({
-                    "active_buy_amount": round(metrics["buy"], 2),
-                    "active_sell_amount": round(metrics["sell"], 2),
-                    "net_buy_amount": round(metrics["net"], 2),
-                    "buy_ratio": round(metrics["buy_ratio"], 4),
-                })
-            rows.sort(key=lambda item: (item["score"], item["net_buy_amount"]), reverse=True)
-        return {"rows": rows, "count": len(rows), "window": window, "scope": scope, "stale": self.status()["stale"]}
+                symbols = set(preferences.get_realtime_watchlist_symbols())
+                rows = [row for row in rows if row["symbol"] in symbols]
+            except Exception:  # noqa: BLE001
+                rows = []
+        quote_status = self._quote_service.status() if self._quote_service is not None else {}
+        quote_age = quote_status.get("quote_age_ms")
+        interval = float(quote_status.get("interval_s") or 6)
+        stale = quote_age is None or quote_age < 0 or quote_age > max(interval * 2, 30) * 1000
+        return {
+            "rows": rows,
+            "count": len(rows),
+            "window": window,
+            "scope": scope,
+            "stale": stale,
+            "last_updated_ms": self._last_update_ms,
+        }
 
     def history(
         self,

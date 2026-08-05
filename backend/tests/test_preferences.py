@@ -38,3 +38,17 @@ def test_quote_service_stop_persists_explicit_disabled_value(monkeypatch):
     service.stop()
 
     assert saved == [False]
+
+
+def test_large_order_limit_gap_defaults_and_persists_as_decimal(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(preferences, "load", lambda: dict(stored))
+    monkeypatch.setattr(preferences, "save", lambda values: stored.update(values))
+
+    defaults = preferences.get_large_orders_preferences()
+    assert defaults["min_limit_up_gap_pct"] == 0.02
+    assert defaults["version"] == "large_orders_v2"
+
+    updated = preferences.set_large_orders_preferences({"min_limit_up_gap_pct": 0.035})
+    assert stored["large_orders_min_limit_up_gap_pct"] == 0.035
+    assert updated["min_limit_up_gap_pct"] == 0.035

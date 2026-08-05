@@ -26,7 +26,10 @@ def status(request: Request) -> dict:
             "coverage_count": 0,
             "candidate_count": 0,
             "precise_count": 0,
+            "filtered_near_limit_count": 0,
+            "unassessable_count": 0,
             "last_updated_ms": None,
+            "last_calculation_ms": 0.0,
             "market_phase": None,
             "storage": {
                 "enabled": False,
@@ -50,7 +53,14 @@ def ranking(
 ) -> dict:
     service = _service(request)
     if service is None:
-        return {"rows": [], "count": 0, "window": window, "scope": scope, "stale": True}
+        return {
+            "rows": [],
+            "count": 0,
+            "window": window,
+            "scope": scope,
+            "stale": True,
+            "last_updated_ms": None,
+        }
     return service.ranking(window, scope)
 
 

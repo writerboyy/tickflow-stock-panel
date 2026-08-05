@@ -10,6 +10,7 @@ from app.api import kline
 from app.backtest.matrix import load_market_data_matrix_from_parquet
 from app.indicators import pipeline
 from app.price_limits import (
+    limit_price,
     numpy_limit_price,
     numpy_price_limit_matrix,
     polars_is_risk_warning_name,
@@ -72,6 +73,11 @@ def test_polars_and_numpy_limit_prices_use_identical_half_up_rounding():
         )["price"].to_numpy()
         numpy_values = numpy_limit_price(previous, limits, up=up)
         np.testing.assert_allclose(polars_values, numpy_values)
+        scalar_values = np.array([
+            limit_price(float(value), float(limit), up=up)
+            for value, limit in zip(previous, limits, strict=True)
+        ])
+        np.testing.assert_allclose(scalar_values, numpy_values)
     assert numpy_limit_price(previous, limits, up=False)[0] == pytest.approx(17.96)
 
 
