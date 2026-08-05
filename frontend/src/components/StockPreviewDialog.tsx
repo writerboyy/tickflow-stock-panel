@@ -16,6 +16,8 @@ interface Props {
   symbol: string | null
   name?: string
   onClose: () => void
+  /** 打开或切换标的时是否默认展示分时图。 */
+  defaultShowIntraday?: boolean
   /** 触发信息 (来自监控触发记录, 有值时在顶栏下方显示) */
   triggerInfo?: {
     price?: number | null
@@ -41,8 +43,8 @@ function boardTag(symbol: string): { label: string; color: string } | null {
   return null
 }
 
-export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props) {
-  const [showIntraday, setShowIntraday] = useState(false)
+export function StockPreviewDialog({ symbol, name, onClose, defaultShowIntraday = false, triggerInfo }: Props) {
+  const [showIntraday, setShowIntraday] = useState(defaultShowIntraday)
   const [dateRange, setDateRange] = useState(getDefaultRange)
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
   const qc = useQueryClient()
@@ -81,6 +83,10 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
     setFocusSymbol(symbol)
     return () => clearFocusSymbol()
   }, [symbol])
+
+  useEffect(() => {
+    if (symbol && defaultShowIntraday) setShowIntraday(true)
+  }, [symbol, defaultShowIntraday])
 
   // 分时图实时轮询: 复用自选列表的「分时刷新开关 + 间隔」偏好。
   // 仅实时行情运行 且 用户开启分时刷新时才轮询; 否则 undefined (定格)。

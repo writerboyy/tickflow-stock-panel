@@ -951,6 +951,7 @@ export function LargeOrders() {
       <StockPreviewDialog
         symbol={previewStock?.symbol ?? null}
         name={previewStock?.name}
+        defaultShowIntraday
         onClose={() => setPreviewStock(null)}
       />
     </div>
