@@ -1509,6 +1509,30 @@ def run(context):
     assert engine.context.state["visible"] == 20.0
 
 
+def test_scheduled_close_rejects_missing_position_prices():
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n    context.schedule(run, '15:00', symbols=['X'])\n"
+        "def run(context):\n    pass\n",
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    engine.account.cash = 20
+    engine.account.positions = {"X": 10}
+    engine.account.avg_cost = {"X": 8}
+
+    with pytest.raises(ValueError, match="15:00 收盘任务缺少行情: X"):
+        advance_scheduled_session(
+            ScheduledRepository([]),
+            engine,
+            MarketData(),
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 2, 15, 0),
+            "stock",
+            "1m",
+            finalize=True,
+        )
+
+
 def test_scheduled_aggregated_history_never_reads_minutes_after_cutoff():
     rows = [
         minute_row("X", datetime(2024, 1, 2, 13, 10), 10.0),
