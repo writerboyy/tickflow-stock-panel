@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, AlertTriangle, BarChart3, ChartCandlestick, Clock3, Database, RefreshCw, Settings2, Zap } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
 import { EmptyState } from '@/components/EmptyState'
@@ -48,23 +48,40 @@ function OrderBook({ snapshot }: { snapshot: any }) {
 }
 
 export function LargeOrders() {
+  const qc = useQueryClient()
   const [window, setWindow] = useState<number>(60)
   const [scope, setScope] = useState<'all' | 'watchlist'>('all')
   const [mode, setMode] = useState<LargeOrderEvidenceMode>('combined')
   const [selected, setSelected] = useState<LargeOrderRow | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [auditDate, setAuditDate] = useState('')
+  const preferences = useQuery({ queryKey: QK.preferences, queryFn: api.preferences, staleTime: 60000 })
+  const saveFilters = useMutation({
+    mutationFn: (payload: { exclude_bse?: boolean; exclude_st?: boolean }) => api.updateLargeOrdersPreferences(payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.largeOrders })
+    },
+  })
   const status = useQuery({ queryKey: [...QK.largeOrders, 'status'], queryFn: api.largeOrdersStatus, refetchInterval: 15000, placeholderData: (p) => p })
   const ranking = useQuery({ queryKey: [...QK.largeOrders, 'ranking', window, scope, mode], queryFn: () => api.largeOrdersRanking(window, scope, mode), refetchInterval: 15000, placeholderData: (p) => p })
   const dates = useQuery({ queryKey: [...QK.largeOrders, 'dates'], queryFn: () => api.largeOrdersDates(30), staleTime: 60000 })
   const rows = ranking.data?.rows ?? []
-  useEffect(() => { if (!selected && rows[0]) setSelected(rows[0]) }, [rows, selected])
+  useEffect(() => {
+    if (!rows.length) {
+      if (selected) setSelected(null)
+      return
+    }
+    if (!selected || !rows.some((row) => row.symbol === selected.symbol)) setSelected(rows[0])
+  }, [rows, selected])
   useEffect(() => { if (!auditDate && dates.data?.dates?.[0]) setAuditDate(dates.data.dates[0]) }, [auditDate, dates.data?.dates])
   const analysis = useQuery({ queryKey: QK.largeOrdersAnalysis(selected?.symbol ?? ''), queryFn: () => api.largeOrdersAnalysis(selected!.symbol), enabled: Boolean(selected?.symbol), refetchInterval: 15000, placeholderData: (p) => p })
   const history = useQuery({ queryKey: [...QK.largeOrders, 'history', auditDate, selected?.symbol, 'combined'], queryFn: () => api.largeOrdersHistory({ date: auditDate, symbol: selected?.symbol, mode: 'combined', limit: 300, order: 'desc' }), enabled: Boolean(auditDate), placeholderData: (p) => p })
   const detail = analysis.data
   const selectedRow = detail?.ranking ?? selected
   const flowBars = useMemo(() => detail?.tape.timeline?.slice(-24) ?? [], [detail?.tape.timeline])
+  const excludeBse = preferences.data?.large_orders?.exclude_bse ?? true
+  const excludeSt = preferences.data?.large_orders?.exclude_st ?? true
 
   return <div className="space-y-4">
     <PageHeader title="实时大单" subtitle="发现盘中资金异动，按成交、意图和盘口证据研判，不将代理数据当作真实资金流。" right={<button type="button" title="刷新实时大单" onClick={() => ranking.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>} />
@@ -78,6 +95,10 @@ export function LargeOrders() {
       <div className="flex border border-border bg-surface/30">{WINDOWS.map((item) => <button key={item} type="button" onClick={() => setWindow(item)} className={cn('px-3 py-1.5 text-xs', window === item ? 'bg-accent text-white' : 'text-muted hover:text-foreground')}>{item < 60 ? `${item}秒` : item === 60 ? '1分钟' : '5分钟'}</button>)}</div>
       <div className="flex border border-border bg-surface/30">{(['all', 'watchlist'] as const).map((item) => <button key={item} type="button" onClick={() => setScope(item)} className={cn('px-3 py-1.5 text-xs', scope === item ? 'bg-elevated text-foreground' : 'text-muted hover:text-foreground')}>{item === 'all' ? '异动候选' : '自选股'}</button>)}</div>
       <select value={mode} onChange={(event) => setMode(event.target.value as LargeOrderEvidenceMode)} className="h-8 border border-border bg-surface/30 px-2 text-xs text-foreground outline-none">{MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
+      <div className="flex h-8 items-center gap-3 border border-border bg-surface/30 px-2.5 text-xs text-muted" title="默认过滤北交所和风险警示股票，可按需打开">
+        <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap hover:text-foreground"><input type="checkbox" checked={excludeBse} disabled={saveFilters.isPending} onChange={(event) => saveFilters.mutate({ exclude_bse: event.target.checked })} className="accent-accent" />过滤北交所</label>
+        <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap hover:text-foreground"><input type="checkbox" checked={excludeSt} disabled={saveFilters.isPending} onChange={(event) => saveFilters.mutate({ exclude_st: event.target.checked })} className="accent-accent" />过滤 ST</label>
+      </div>
       <span className="ml-auto text-[11px] text-muted">更新时间 {status.data?.last_updated_ms ? new Date(status.data.last_updated_ms).toLocaleTimeString('zh-CN', { hour12: false }) : '--'}</span>
     </div>
     <div className="grid min-h-[560px] gap-3 xl:grid-cols-[minmax(420px,1.15fr)_minmax(360px,1fr)_300px]">

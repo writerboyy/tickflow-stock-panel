@@ -52,3 +52,18 @@ def test_large_order_limit_gap_defaults_and_persists_as_decimal(monkeypatch):
     updated = preferences.set_large_orders_preferences({"min_limit_up_gap_pct": 0.035})
     assert stored["large_orders_min_limit_up_gap_pct"] == 0.035
     assert updated["min_limit_up_gap_pct"] == 0.035
+
+
+def test_large_order_filters_default_on_and_persist(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(preferences, "load", lambda: dict(stored))
+    monkeypatch.setattr(preferences, "save", lambda values: stored.update(values))
+
+    defaults = preferences.get_large_orders_preferences()
+    assert defaults["exclude_bse"] is True
+    assert defaults["exclude_st"] is True
+
+    updated = preferences.set_large_orders_preferences({"exclude_bse": False, "exclude_st": False})
+    assert updated["exclude_bse"] is False
+    assert updated["exclude_st"] is False
+    assert stored["large_orders_exclude_bse"] is False

@@ -1327,6 +1327,8 @@ export interface Preferences {
     max_deep_dive_symbols: number
     candidate_limit: number
     min_limit_up_gap_pct: number
+    exclude_bse: boolean
+    exclude_st: boolean
     version: string
   }
 }
@@ -1952,6 +1954,8 @@ export const api = {
     max_deep_dive_symbols?: number
     candidate_limit?: number
     min_limit_up_gap_pct?: number
+    exclude_bse?: boolean
+    exclude_st?: boolean
   }) => request<{ large_orders: NonNullable<Preferences['large_orders']> }>(
     '/api/settings/preferences/large-orders',
     { method: 'POST', body: JSON.stringify(payload) },

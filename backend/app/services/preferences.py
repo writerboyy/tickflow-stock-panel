@@ -572,6 +572,8 @@ _LARGE_ORDER_DEFAULTS = {
     "large_orders_max_deep_dive_symbols": 3,
     "large_orders_candidate_limit": 50,
     "large_orders_min_limit_up_gap_pct": 0.02,
+    "large_orders_exclude_bse": True,
+    "large_orders_exclude_st": True,
     "large_orders_config_version": "large_orders_v2",
 }
 
@@ -600,6 +602,8 @@ def get_large_orders_preferences() -> dict:
         "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
         "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
         "min_limit_up_gap_pct": bounded_float("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10),
+        "exclude_bse": bool(data.get("large_orders_exclude_bse", True)),
+        "exclude_st": bool(data.get("large_orders_exclude_st", True)),
         "version": "large_orders_v2",
     }
 
@@ -613,12 +617,14 @@ def set_large_orders_preferences(updates: dict) -> dict:
         "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
         "candidate_limit": "large_orders_candidate_limit",
         "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
+        "exclude_bse": "large_orders_exclude_bse",
+        "exclude_st": "large_orders_exclude_st",
     }
     saved: dict = {}
     for key, storage_key in allowed.items():
         if key not in updates or updates[key] is None:
             continue
-        if key == "enabled":
+        if key in {"enabled", "exclude_bse", "exclude_st"}:
             saved[storage_key] = bool(updates[key])
         elif key == "min_limit_up_gap_pct":
             saved[storage_key] = float(updates[key])

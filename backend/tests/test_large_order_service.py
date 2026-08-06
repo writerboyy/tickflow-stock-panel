@@ -53,16 +53,40 @@ class MutableClock:
         self.value += timedelta(seconds=seconds)
 
 
-def _quote(*, price=10.0, amount=1_000_000.0, volume=100.0, symbol="000001.SZ"):
+def _quote(*, price=10.0, amount=1_000_000.0, volume=100.0, symbol="000001.SZ", name="平安银行"):
     return {
         "symbol": symbol,
-        "name": "平安银行",
+        "name": name,
         "last_price": price,
         "prev_close": 10.0,
         "change_pct": price / 10.0 - 1.0,
         "amount": amount,
         "volume": volume,
     }
+
+
+def test_candidate_filters_default_to_excluding_bse_and_st():
+    service = LargeOrderService(FakeQuoteService())
+    service._running = True
+    service._config["max_deep_dive_symbols"] = 0
+    initial = [
+        _quote(symbol="000001.SZ", name="平安银行"),
+        _quote(symbol="430001.BJ", name="北交测试"),
+        _quote(symbol="000002.SZ", name="*ST测试"),
+    ]
+    updated = [
+        _quote(symbol=row["symbol"], name=row["name"], amount=2_000_000, volume=200)
+        for row in initial
+    ]
+    service._process_snapshot(initial)
+    service._process_snapshot(updated)
+
+    assert [row["symbol"] for row in service.ranking(60)["rows"]] == ["000001.SZ"]
+
+    service._config.update({"exclude_bse": False, "exclude_st": False})
+    rankings, _, _ = service._build_rankings_locked(time.time())
+    assert {row["symbol"] for row in rankings[60]} == {"000001.SZ", "430001.BJ", "000002.SZ"}
+    service.stop()
 
 
 def test_large_order_alert_uses_selected_wecom_channel(monkeypatch):

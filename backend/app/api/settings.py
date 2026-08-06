@@ -475,6 +475,8 @@ class LargeOrderPreferencesIn(BaseModel):
     max_deep_dive_symbols: int | None = Field(default=None, ge=0, le=10)
     candidate_limit: int | None = Field(default=None, ge=10, le=200)
     min_limit_up_gap_pct: float | None = Field(default=None, ge=0.0, le=0.10)
+    exclude_bse: bool | None = None
+    exclude_st: bool | None = None
 
 
 class DatasetFieldMapItem(BaseModel):

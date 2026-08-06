@@ -42,6 +42,8 @@ DEFAULTS: dict[str, Any] = {
     "max_deep_dive_symbols": 3,
     "candidate_limit": 50,
     "min_limit_up_gap_pct": 0.02,
+    "exclude_bse": True,
+    "exclude_st": True,
     "daily_call_budget": 60,
     "version": "large_orders_v2",
 }
@@ -172,7 +174,22 @@ class LargeOrderService:
         current = preferences.set_large_orders_preferences(updates)
         with self._lock:
             self._config.update(current)
+            rankings, filtered_near_limit, unassessable = self._build_rankings_locked(time.time())
+            self._rankings = rankings
+            self._filtered_near_limit_count = filtered_near_limit
+            self._unassessable_count = unassessable
+        if self._quote_service is not None:
+            self._quote_service.notify_large_orders_updated()
         return current
+
+    def _is_filtered_symbol(self, symbol: str, name: object = None) -> bool:
+        normalized = str(symbol).strip().upper()
+        code = normalized.split(".", 1)[0]
+        if self._config.get("exclude_bse", True) and (
+            normalized.endswith(".BJ") or code.startswith(("4", "8"))
+        ):
+            return True
+        return bool(self._config.get("exclude_st", True) and is_risk_warning_name(str(name or "")))
 
     @staticmethod
     def _new_window_tracker(now_ts: float, window: int) -> dict[str, Any]:
@@ -475,7 +492,11 @@ class LargeOrderService:
         symbols = {str(row["symbol"]) for row in self._rankings.get(60, ())}
         try:
             from app.services import preferences
-            symbols.update(preferences.get_realtime_watchlist_symbols())
+            symbols.update(
+                symbol
+                for symbol in preferences.get_realtime_watchlist_symbols()
+                if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
+            )
         except Exception:  # noqa: BLE001
             pass
         depth_service.request_symbols(symbols)
@@ -571,6 +592,8 @@ class LargeOrderService:
         filtered_near_limit = 0
         unassessable = 0
         for symbol, state in self._states.items():
+            if self._is_filtered_symbol(symbol, state.get("name")):
+                continue
             metrics_by_window = {
                 window: self._window_metrics_locked(state, window, now_ts)
                 for window in WINDOWS
@@ -672,7 +695,12 @@ class LargeOrderService:
             if self._deep_calls_date != cn_today():
                 self._deep_calls_date = cn_today()
                 self._deep_calls_used = 0
-            symbols = list(dict.fromkeys(watchlist + [str(row["symbol"]) for row in ranked]))
+            eligible_watchlist = [
+                symbol
+                for symbol in watchlist
+                if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
+            ]
+            symbols = list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
             budget = max(0, int(self._config.get("daily_call_budget", 60)))
             available_symbols = max(0, (budget - self._deep_calls_used) // 2)
