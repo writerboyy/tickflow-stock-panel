@@ -570,7 +570,6 @@ class LargeOrderService:
                 depth_metrics = {}
         filtered_near_limit = 0
         unassessable = 0
-        min_gap = float(self._config.get("min_limit_up_gap_pct", 0.02))
         for symbol, state in self._states.items():
             metrics_by_window = {
                 window: self._window_metrics_locked(state, window, now_ts)
@@ -578,13 +577,7 @@ class LargeOrderService:
             }
             if not any(metrics["amount"] > 0 for metrics in metrics_by_window.values()):
                 continue
-            if not state.get("price_limit_assessable"):
-                unassessable += 1
-                continue
             limit_gap = _finite(state.get("limit_up_gap_pct"))
-            if limit_gap is not None and limit_gap <= min_gap + 1e-9:
-                filtered_near_limit += 1
-                continue
             latest = state["snapshots"][-1] if state["snapshots"] else {}
             change_pct = _finite(state.get("change_pct"))
             book = depth_metrics.get(symbol, {})
@@ -679,16 +672,7 @@ class LargeOrderService:
             if self._deep_calls_date != cn_today():
                 self._deep_calls_date = cn_today()
                 self._deep_calls_used = 0
-            min_gap = float(self._config.get("min_limit_up_gap_pct", 0.02))
-            eligible_watchlist = []
-            for symbol in watchlist:
-                state = self._states.get(symbol)
-                if state is None or not state.get("price_limit_assessable"):
-                    continue
-                limit_gap = _finite(state.get("limit_up_gap_pct"))
-                if limit_gap is None or limit_gap > min_gap + 1e-9:
-                    eligible_watchlist.append(symbol)
-            symbols = list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
+            symbols = list(dict.fromkeys(watchlist + [str(row["symbol"]) for row in ranked]))
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
             budget = max(0, int(self._config.get("daily_call_budget", 60)))
             available_symbols = max(0, (budget - self._deep_calls_used) // 2)
@@ -872,7 +856,6 @@ class LargeOrderService:
                 "active_buy_ratio>=65%",
                 "zscore>=2.5",
                 "price_confirmed",
-                "limit_up_gap>configured_minimum",
             ],
             "logic": "and",
         }]

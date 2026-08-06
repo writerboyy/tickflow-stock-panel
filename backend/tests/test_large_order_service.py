@@ -313,10 +313,10 @@ def test_zscore_compares_complete_buckets_from_the_same_window(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("limit_up", "expected_count", "filtered"),
-    [(10.20, 0, 1), (10.21, 1, 0)],
+    "limit_up",
+    [10.20, 10.21],
 )
-def test_near_limit_threshold_is_hard_filter(limit_up, expected_count, filtered, monkeypatch):
+def test_near_limit_symbols_remain_eligible(limit_up, monkeypatch):
     today = date(2026, 8, 5)
     monkeypatch.setattr(large_order_service, "cn_today", lambda: today)
     quote = FakeQuoteService()
@@ -332,8 +332,8 @@ def test_near_limit_threshold_is_hard_filter(limit_up, expected_count, filtered,
     service._process_snapshot([_quote()])
     service._process_snapshot([_quote(amount=2_000_000, volume=200)])
 
-    assert service.ranking(60)["count"] == expected_count
-    assert service.status()["filtered_near_limit_count"] == filtered
+    assert service.ranking(60)["count"] == 1
+    assert service.status()["filtered_near_limit_count"] == 0
     assert service._deep_calls_used == 0
     assert service._build_alerts_locked("000001.SZ") == []
     service.stop()
@@ -383,8 +383,8 @@ def test_no_limit_and_missing_reference_are_distinguished(monkeypatch):
     service._process_snapshot([unknown])
     unknown["amount"] = 2_000_000
     service._process_snapshot([unknown])
-    assert service.status()["unassessable_count"] == 1
-    assert all(row["symbol"] != "000002.SZ" for row in service.ranking(60)["rows"])
+    assert service.status()["unassessable_count"] == 0
+    assert any(row["symbol"] == "000002.SZ" for row in service.ranking(60)["rows"])
     service.stop()
 
 
