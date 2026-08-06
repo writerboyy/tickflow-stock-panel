@@ -1734,8 +1734,9 @@ def _catch_up_scheduled(
         _scheduled_trading_dates(repo, engine, market, start_day, cutoff, asset_type)
         if start_day <= cutoff.date() else []
     )
-    # 历史补齐只处理已结束交易日；当天必须等待实时行情消息。
-    trading_dates = [day for day in trading_dates if day < cutoff.date()]
+    # 盘中当天必须等待实时行情；收盘后则可以用完整历史数据补齐。
+    if cutoff.time() < clock_time(15, 0):
+        trading_dates = [day for day in trading_dates if day < cutoff.date()]
     existing_sync = current.get("sync")
     if not trading_dates and isinstance(existing_sync, dict) and existing_sync.get("phase") == "live":
         return current
@@ -2368,7 +2369,10 @@ class PaperTradingSupervisor:
                         execution_mode=str(state.get("execution_mode") or "full_bar"),
                         scheduled_times=tuple(state.get("scheduled_times") or ()),
                     )
-                elif sync_phase != "live" and self.hub.has_subscription(account_id):
+                elif (
+                    sync_phase not in {"live", "waiting_market"}
+                    and self.hub.has_subscription(account_id)
+                ):
                     self.hub.unregister(account_id)
                 self.hub.update_symbols(
                     account_id,

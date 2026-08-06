@@ -19,6 +19,7 @@ from app.free_strategy.paper import (
     _append_engine_events,
     _append_strategy_logs,
     _catch_up_bars,
+    _catch_up_scheduled,
     _compatible_checkpoint,
     _dispatch_paper_notification,
     _engine_from_state,
@@ -470,6 +471,57 @@ def test_supervisor_timeout_reports_callback_and_queue_delay(tmp_path):
     message = store.get("paper")["last_error"]
     assert "定时回调 13:10" in message
     assert "队列等待 2.5 秒" in message
+
+
+def test_supervisor_keeps_waiting_market_subscription(tmp_path, monkeypatch):
+    class SubscribedHub:
+        def __init__(self):
+            self.subscribed = True
+            self.registered = []
+            self.unregistered = []
+
+        def has_subscription(self, _account_id):
+            return self.subscribed
+
+        def register(self, account_id, *_args, **_kwargs):
+            self.subscribed = True
+            self.registered.append(account_id)
+
+        def unregister(self, account_id):
+            self.subscribed = False
+            self.unregistered.append(account_id)
+
+        @staticmethod
+        def update_symbols(*_args, **_kwargs):
+            pass
+
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "status": "running",
+        "execution_mode": "full_bar",
+        "last_bar": "2026-08-06T14:48:00",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+        "sync": {"phase": "waiting_market"},
+    })
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.store = store
+    supervisor.hub = SubscribedHub()
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {"paper": FakePaperProcess(alive=True)}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
+    monkeypatch.setattr(
+        "app.free_strategy.paper.cn_naive_now",
+        lambda: datetime(2026, 8, 6, 14, 51),
+    )
+
+    supervisor._monitor_once()  # noqa: SLF001
+    supervisor._monitor_once()  # noqa: SLF001
+
+    assert supervisor.hub.subscribed is True
+    assert supervisor.hub.registered == []
+    assert supervisor.hub.unregistered == []
 
 
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):
@@ -1444,6 +1496,50 @@ def test_scheduled_catch_up_uses_scoped_snapshots_not_minute_ranges(monkeypatch,
     assert engine.context.state["ran"] == "2024-01-02T10:15:00"
     assert engine.execution_mode == "scheduled"
     assert result["last_bar"] == "2024-01-02T15:00:00"
+    assert result["sync"]["phase"] == "live"
+
+
+def test_scheduled_catch_up_includes_today_after_market_close(monkeypatch, tmp_path):
+    trading_day = datetime(2024, 1, 2).date()
+    processed = []
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "last_bar": "2024-01-01T15:00:00",
+    })
+    engine = SimpleNamespace(
+        runtime_snapshot=lambda: {
+            "session_date": "2024-01-01",
+            "session_finished": True,
+        },
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.paper._scheduled_trading_dates",
+        lambda *_args: [trading_day],
+    )
+
+    def process_day(_store, _account_id, state, _engine, _repo, _market, day, cutoff, *_args, **_kwargs):
+        processed.append((day, cutoff))
+        return _store.update_fields(_account_id, {"last_bar": cutoff.isoformat()})
+
+    monkeypatch.setattr("app.free_strategy.paper._process_scheduled_day", process_day)
+
+    result = _catch_up_scheduled(
+        store,
+        "paper",
+        current,
+        engine,
+        repo=object(),
+        market=object(),
+        cutoff=datetime(2024, 1, 2, 15, 0),
+        asset_type="stock",
+        timeframe="1m",
+    )
+
+    assert processed == [(trading_day, datetime(2024, 1, 2, 15, 0))]
+    assert result["last_bar"] == "2024-01-02T15:00:00"
+    assert result["sync"]["processed_days"] == 1
     assert result["sync"]["phase"] == "live"
 
 
