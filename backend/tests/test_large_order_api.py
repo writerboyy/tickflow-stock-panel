@@ -159,6 +159,32 @@ def test_large_order_history_combines_execution_events_and_pages(tmp_path):
     storage.stop()
 
 
+def test_large_order_analysis_returns_evidence_and_snapshot_history(tmp_path):
+    client, storage = _client(tmp_path)
+    day = client.app.state.large_order_service._trade_date
+    storage.submit("orderbook_snapshot", [{
+        "trade_date": day,
+        "event_ts_ms": _ts(1),
+        "symbol": "000001.SZ",
+        "event_id": "depth-1",
+        "bid_prices": [10.0],
+        "bid_volumes": [1000],
+        "ask_prices": [10.01],
+        "ask_volumes": [500],
+        "book_imbalance": 0.3333,
+        "ofi": 500,
+    }])
+
+    response = client.get("/api/large-orders/000001.sz/analysis")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "000001.SZ"
+    assert payload["evidence"]["orderbook"] is False
+    assert payload["orderbook_history"][0]["event_id"] == "depth-1"
+    storage.stop()
+
+
 def test_large_order_reconciliation_aggregates_minute_and_daily_reference(tmp_path):
     client, storage = _client(tmp_path)
     day = date(2026, 8, 4)

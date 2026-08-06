@@ -365,7 +365,30 @@ export interface LargeOrderTape {
   timeline: Array<{ ts: number; amount: number; buy: number; sell: number; price: number }>
 }
 
-export type LargeOrderHistoryKind = 'proxy_flow' | 'kaipanla_trade' | 'kaipanla_intent'
+export interface OrderBookSnapshot {
+  symbol: string
+  bid_prices: number[]
+  bid_volumes: number[]
+  ask_prices: number[]
+  ask_volumes: number[]
+  book_imbalance: number
+  ofi: number
+  fetched_at_ms: number
+  freshness_ms: number
+}
+
+export interface LargeOrderAnalysis {
+  symbol: string
+  name: string
+  ranking: LargeOrderRow | null
+  orderbook: OrderBookSnapshot | null
+  orderbook_history: Array<OrderBookSnapshot & { event_ts_ms: number; trade_date: string }>
+  tape: LargeOrderTape
+  evidence: { proxy: boolean; execution: boolean; intent: boolean; orderbook: boolean }
+  degraded_reason: string | null
+}
+
+export type LargeOrderHistoryKind = 'proxy_flow' | 'kaipanla_trade' | 'kaipanla_intent' | 'orderbook_snapshot'
 export type LargeOrderEvidenceMode = 'combined' | 'execution' | 'intent'
 
 export interface LargeOrderHistoryEvent {
@@ -393,6 +416,14 @@ export interface LargeOrderHistoryEvent {
   order_id?: string | null
   limit_flag?: boolean | null
   cancel_flag?: boolean | null
+  bid_prices?: number[] | null
+  bid_volumes?: number[] | null
+  ask_prices?: number[] | null
+  ask_volumes?: number[] | null
+  book_imbalance?: number | null
+  ofi?: number | null
+  freshness_ms?: number | null
+  target_kind?: string | null
 }
 
 export interface LargeOrderHistoryResponse {
@@ -1911,6 +1942,8 @@ export const api = {
   },
   largeOrdersTape: (symbol: string) =>
     request<LargeOrderTape>(`/api/large-orders/${encodeURIComponent(symbol)}/tape`),
+  largeOrdersAnalysis: (symbol: string, limit = 120) =>
+    request<LargeOrderAnalysis>(`/api/large-orders/${encodeURIComponent(symbol)}/analysis?limit=${limit}`),
   updateLargeOrdersPreferences: (payload: {
     enabled?: boolean
     score_threshold?: number

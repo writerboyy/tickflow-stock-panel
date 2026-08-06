@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -170,3 +170,47 @@ def test_store_history_reads_legacy_parquet_with_missing_columns(tmp_path: Path)
     assert result["rows"][0]["event_id"] == "legacy-flow"
     assert result["rows"][0]["buy_amount"] is None
     assert result["rows"][0]["event_kind"] == "proxy_flow"
+
+
+def test_store_persists_orderbook_snapshots(tmp_path: Path):
+    day = date(2026, 8, 4)
+    store = LargeOrderStore(tmp_path, flush_interval=0.01)
+    store.start()
+    store.submit("orderbook_snapshot", [{
+        "trade_date": day,
+        "event_ts_ms": _event_ts(10),
+        "symbol": "000001.SZ",
+        "event_id": "depth-1",
+        "bid_prices": [10.0, 9.99],
+        "bid_volumes": [1000, 800],
+        "ask_prices": [10.01, 10.02],
+        "ask_volumes": [600, 400],
+        "book_imbalance": 0.2857,
+        "ofi": 800,
+        "freshness_ms": 12,
+        "target_kind": "watchlist",
+    }])
+    store.stop(compact_date=day)
+
+    result = store.query_events(day, kinds=("orderbook_snapshot",), symbol="000001.SZ")
+
+    assert result["count"] == 1
+    row = result["rows"][0]
+    assert row["event_kind"] == "orderbook_snapshot"
+    assert row["bid_volumes"] == [1000.0, 800.0]
+    assert row["book_imbalance"] == 0.2857
+
+
+def test_store_cleans_orderbook_history_by_day_partitions(tmp_path: Path):
+    root = tmp_path / "large_orders" / "orderbook_snapshot"
+    for offset in range(22):
+        day = date(2026, 8, 4) - timedelta(days=offset)
+        (root / f"date={day}" / "hour=10").mkdir(parents=True)
+        (root / f"date={day}" / "hour=10" / "part.parquet").touch()
+    store = LargeOrderStore(tmp_path)
+
+    removed = store.cleanup_orderbook_history(today=date(2026, 8, 4))
+
+    assert removed == 2
+    assert (root / "date=2026-08-04").exists()
+    assert not (root / "date=2026-07-14").exists()

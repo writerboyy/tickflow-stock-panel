@@ -81,7 +81,7 @@ def dates(request: Request, limit: int = Query(30, ge=1, le=250)) -> dict:
 def history(
     request: Request,
     trade_date: date = Query(..., alias="date", description="交易日 YYYY-MM-DD"),
-    kind: str | None = Query(None, pattern="^(proxy_flow|kaipanla_trade|kaipanla_intent)$"),
+    kind: str | None = Query(None, pattern="^(proxy_flow|kaipanla_trade|kaipanla_intent|orderbook_snapshot)$"),
     mode: str = Query("combined", pattern="^(combined|execution|intent)$"),
     symbol: str | None = Query(None, min_length=1),
     from_ms: int | None = Query(None, ge=0),
@@ -154,3 +154,20 @@ def tape(symbol: str, request: Request) -> dict:
     if service is None:
         return {"symbol": symbol.upper(), "trades": [], "intents": [], "timeline": [], "source": "proxy_only"}
     return service.tape(symbol)
+
+
+@router.get("/{symbol}/analysis")
+def analysis(symbol: str, request: Request, limit: int = Query(120, ge=1, le=500)) -> dict:
+    service = _service(request)
+    if service is None:
+        return {
+            "symbol": symbol.upper(),
+            "name": symbol.upper(),
+            "ranking": None,
+            "orderbook": None,
+            "orderbook_history": [],
+            "tape": {"symbol": symbol.upper(), "trades": [], "intents": [], "timeline": []},
+            "evidence": {"proxy": False, "execution": False, "intent": False, "orderbook": False},
+            "degraded_reason": "实时大单服务未启用",
+        }
+    return service.analysis(symbol, limit=limit)

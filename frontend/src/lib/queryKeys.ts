@@ -22,6 +22,7 @@ export const QK = {
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
   indexQuotes:    ['index-quotes'] as const,
   largeOrders:   ['large-orders'] as const,
+  largeOrdersAnalysis: (symbol: string) => ['large-orders', 'analysis', symbol] as const,
   indexList:      ['index-list'] as const,
 
   // Watchlist

@@ -28,13 +28,14 @@ from app.services.ingestion_manifest import archive_source_payload, stable_conte
 
 logger = logging.getLogger(__name__)
 
-EVENT_KINDS = ("proxy_flow", "kaipanla_trade", "kaipanla_intent")
+EVENT_KINDS = ("proxy_flow", "kaipanla_trade", "kaipanla_intent", "orderbook_snapshot")
 SCHEMA_VERSION = "large_orders_v1"
 PARSER_VERSION = "large_orders_v1"
 FLUSH_INTERVAL_SECONDS = 30.0
 MAX_BATCH_ROWS = 50_000
 MAX_QUEUE_BATCHES = 128
 RAW_RETENTION_DAYS = 90
+ORDERBOOK_RETENTION_DAYS = 20
 
 _COMMON_SCHEMA: dict[str, pl.DataType] = {
     "trade_date": pl.Date,
@@ -74,6 +75,17 @@ _KIND_SCHEMA: dict[str, dict[str, pl.DataType]] = {
         "limit_flag": pl.Boolean,
         "cancel_flag": pl.Boolean,
         "event_time": pl.String,
+    },
+    "orderbook_snapshot": {
+        **_COMMON_SCHEMA,
+        "bid_prices": pl.List(pl.Float64),
+        "bid_volumes": pl.List(pl.Float64),
+        "ask_prices": pl.List(pl.Float64),
+        "ask_volumes": pl.List(pl.Float64),
+        "book_imbalance": pl.Float64,
+        "ofi": pl.Float64,
+        "freshness_ms": pl.Int64,
+        "target_kind": pl.String,
     },
 }
 
@@ -175,6 +187,7 @@ class LargeOrderStore:
             )
             self._thread.start()
         self.cleanup_raw_archives()
+        self.cleanup_orderbook_history()
 
     def stop(self, *, timeout: float = 15.0, compact_date: date | None = None) -> None:
         with self._lock:
@@ -279,6 +292,24 @@ class LargeOrderStore:
                     snapshot_dir.rmdir()
             except OSError:
                 pass
+        return removed
+
+    def cleanup_orderbook_history(self, *, today: date | None = None) -> int:
+        """Remove only monitored depth snapshots older than the 20-trading-day retention window."""
+        cutoff = today or cn_today()
+        root = self.root / "orderbook_snapshot"
+        removed = 0
+        if not root.exists():
+            return removed
+        dates = []
+        for day_root in root.glob("date=*"):
+            try:
+                dates.append((date.fromisoformat(day_root.name.removeprefix("date=")), day_root))
+            except ValueError:
+                continue
+        for _value, day_root in sorted(dates, reverse=True)[ORDERBOOK_RETENTION_DAYS:]:
+            shutil.rmtree(day_root)
+            removed += 1
         return removed
 
     def query(
@@ -651,6 +682,12 @@ class LargeOrderStore:
             value = row.get(field)
             if field in {"delta_amount", "delta_volume", "buy_amount", "sell_amount"}:
                 normalized[field] = _as_float(value)
+            elif field in {"bid_prices", "bid_volumes", "ask_prices", "ask_volumes"}:
+                normalized[field] = [item for item in (_as_float(item) for item in (value or [])) if item is not None]
+            elif field in {"book_imbalance", "ofi"}:
+                normalized[field] = _as_float(value)
+            elif field == "freshness_ms":
+                normalized[field] = _as_int(value)
             elif field in {"direction_code", "side_code", "side"}:
                 normalized[field] = _as_int(value) if field != "side" or isinstance(value, (int, float)) else value
             elif field in {"limit_flag", "cancel_flag"}:

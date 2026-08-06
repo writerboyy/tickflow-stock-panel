@@ -83,6 +83,98 @@ class DepthService:
         # 系统接管状态(防通知刷屏)
         self._last_taken_over: bool | None = None
         self._last_user_interval: float | None = None
+        self._orderbook_cache: dict[str, dict] = {}
+        self._target_symbols: set[str] = set()
+        self._target_lock = threading.Lock()
+        self._target_executor = None
+        self._target_fetching = False
+        self._snapshot_sink = None
+        self._target_last_fetch_at = 0.0
+
+    def set_snapshot_sink(self, sink) -> None:
+        """Register a non-blocking consumer for monitored five-level snapshots."""
+        self._snapshot_sink = sink
+
+    def request_symbols(self, symbols: set[str] | list[str]) -> None:
+        """Schedule depth sampling for the monitored target pool."""
+        if not self._has_capability():
+            return
+        targets = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        if not targets:
+            return
+        with self._target_lock:
+            self._target_symbols.update(targets)
+            if self._target_fetching:
+                return
+            self._target_fetching = True
+        from concurrent.futures import ThreadPoolExecutor
+        if self._target_executor is None:
+            self._target_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="depth-targets")
+        self._target_executor.submit(self._fetch_target_depths)
+
+    def get_cached_orderbooks(self, symbols: set[str] | None = None) -> dict[str, dict]:
+        requested = {str(s).strip().upper() for s in symbols or set()}
+        with self._lock:
+            cache = dict(self._orderbook_cache)
+        if requested:
+            return {key: value for key, value in cache.items() if key in requested}
+        return cache
+
+    def _fetch_target_depths(self) -> None:
+        try:
+            with self._target_lock:
+                targets = set(self._target_symbols)
+                self._target_symbols.clear()
+            if not targets:
+                return
+            capset = self._get_capset()
+            from app.tickflow.capabilities import Cap
+            limit = resolve_limit(capset, Cap.DEPTH5_BATCH, default_batch=100, default_rpm=30)
+            min_interval = max(10.0, 60.0 / max(float(limit.rpm or 1) * 0.8, 1.0))
+            wait = min_interval - (time.monotonic() - self._target_last_fetch_at)
+            if wait > 0:
+                time.sleep(wait)
+            with self._fetch_lock:
+                payload = self._call_depth_batch(sorted(targets))
+            self._target_last_fetch_at = time.monotonic()
+            now_ms = int(time.time() * 1000)
+            snapshots = []
+            for symbol, value in payload.items():
+                bids = [float(v) for v in (value.get("bid_volumes") or [])[:5]]
+                asks = [float(v) for v in (value.get("ask_volumes") or [])[:5]]
+                bid_prices = [float(v) for v in (value.get("bid_prices") or [])[:5]]
+                ask_prices = [float(v) for v in (value.get("ask_prices") or [])[:5]]
+                bid_total = sum(bids)
+                ask_total = sum(asks)
+                total = bid_total + ask_total
+                if total <= 0:
+                    continue
+                fetched_ms = int((value.get("timestamp") or now_ms / 1000) * (1000 if value.get("timestamp", 0) < 10_000_000_000 else 1))
+                snapshot = {
+                    "symbol": str(symbol).strip().upper(),
+                    "bid_prices": bid_prices,
+                    "bid_volumes": bids,
+                    "ask_prices": ask_prices,
+                    "ask_volumes": asks,
+                    "book_imbalance": (bid_total - ask_total) / total,
+                    "ofi": bid_total - ask_total,
+                    "fetched_at_ms": fetched_ms,
+                    "freshness_ms": max(0, now_ms - fetched_ms),
+                }
+                snapshots.append(snapshot)
+            with self._lock:
+                self._orderbook_cache.update({row["symbol"]: row for row in snapshots})
+            if snapshots and self._snapshot_sink is not None:
+                self._snapshot_sink(snapshots)
+        finally:
+            with self._target_lock:
+                self._target_fetching = False
+                pending = bool(self._target_symbols)
+            if pending:
+                with self._target_lock:
+                    self._target_fetching = True
+                if self._target_executor is not None:
+                    self._target_executor.submit(self._fetch_target_depths)
 
     # ================================================================
     # 注入
@@ -98,14 +190,15 @@ class DepthService:
         """读取已有盘口缓存，不触发 depth.batch 请求。"""
         requested = {str(symbol).strip().upper() for symbol in symbols or set() if str(symbol).strip()}
         with self._lock:
-            items = list(self._sealed_cache.items())
+            cache = {**self._sealed_cache, **self._orderbook_cache}
+            items = list(cache.items())
         result: dict[str, dict[str, float]] = {}
         for symbol, value in items:
             symbol = str(symbol).strip().upper()
             if requested and symbol not in requested:
                 continue
-            bid = float(value.get("bid1_vol") or 0)
-            ask = float(value.get("ask1_vol") or 0)
+            bid = sum(float(item) for item in (value.get("bid_volumes") or [])[:5]) or float(value.get("bid1_vol") or 0)
+            ask = sum(float(item) for item in (value.get("ask_volumes") or [])[:5]) or float(value.get("ask1_vol") or 0)
             total = bid + ask
             if total <= 0:
                 continue
@@ -188,6 +281,9 @@ class DepthService:
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
+        if self._target_executor is not None:
+            self._target_executor.shutdown(wait=True, cancel_futures=False)
+            self._target_executor = None
         logger.info("depth sealed 盘中轮询已停止")
 
     def apply_monitor_toggle(self, enabled: bool) -> None:

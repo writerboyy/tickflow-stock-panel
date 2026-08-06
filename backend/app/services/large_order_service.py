@@ -364,6 +364,7 @@ class LargeOrderService:
                 try:
                     self._storage.compact(previous_date)
                     self._storage.cleanup_raw_archives(today=today)
+                    self._storage.cleanup_orderbook_history(today=today)
                 except Exception:  # noqa: BLE001
                     logger.exception("实时大单跨日存储处理失败: %s", previous_date)
             self._reset_for_new_day()
@@ -462,9 +463,53 @@ class LargeOrderService:
             self._last_calculation_ms = (time.perf_counter() - calculation_started) * 1000
         if self._storage is not None and flow_events:
             self._storage.submit("proxy_flow", flow_events)
+        self._request_orderbook_targets()
         self._schedule_deep_dive()
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()
+
+    def _request_orderbook_targets(self) -> None:
+        depth_service = getattr(self._app_state, "depth_service", None) if self._app_state else None
+        if depth_service is None:
+            return
+        symbols = {str(row["symbol"]) for row in self._rankings.get(60, ())}
+        try:
+            from app.services import preferences
+            symbols.update(preferences.get_realtime_watchlist_symbols())
+        except Exception:  # noqa: BLE001
+            pass
+        depth_service.request_symbols(symbols)
+
+    def record_depth_snapshots(self, snapshots: list[dict[str, Any]]) -> None:
+        """Persist monitored five-level snapshots without blocking quote processing."""
+        if self._storage is None or not snapshots:
+            return
+        now_ms = int(time.time() * 1000)
+        rows = []
+        watchlist = set()
+        try:
+            from app.services import preferences
+            watchlist = set(preferences.get_realtime_watchlist_symbols())
+        except Exception:  # noqa: BLE001
+            pass
+        for snapshot in snapshots:
+            row = dict(snapshot)
+            row.update({
+                "trade_date": self._trade_date,
+                "event_ts_ms": int(snapshot.get("fetched_at_ms") or now_ms),
+                "name": self._states.get(snapshot["symbol"], {}).get("name", snapshot["symbol"]),
+                "price": None,
+                "amount": None,
+                "volume": None,
+                "source": "tickflow_depth5",
+                "event_id": f"depth:{snapshot['symbol']}:{snapshot.get('fetched_at_ms', now_ms)}",
+                "received_at_ms": now_ms,
+                "schema_version": SCHEMA_VERSION,
+                "parser_version": "depth5_v1",
+                "target_kind": "watchlist" if snapshot["symbol"] in watchlist else "candidate",
+            })
+            rows.append(row)
+        self._storage.submit("orderbook_snapshot", rows)
 
     def _window_metrics_locked(self, state: dict[str, Any], window: int, now_ts: float) -> dict[str, Any]:
         tracker = state["windows"][window]
@@ -961,7 +1006,7 @@ class LargeOrderService:
         order: str = "asc",
     ) -> dict:
         kinds_by_mode = {
-            "combined": ("proxy_flow", "kaipanla_trade", "kaipanla_intent"),
+            "combined": ("proxy_flow", "kaipanla_trade", "kaipanla_intent", "orderbook_snapshot"),
             "execution": ("proxy_flow", "kaipanla_trade"),
             "intent": ("kaipanla_intent",),
         }
@@ -1217,3 +1262,30 @@ class LargeOrderService:
                 "last_deep_ms": state["last_deep_ms"],
                 "error": state["deep_error"],
             }
+
+    def analysis(self, symbol: str, *, limit: int = 120) -> dict[str, Any]:
+        normalized = str(symbol).strip().upper()
+        depth_service = getattr(self._app_state, "depth_service", None) if self._app_state else None
+        orderbook = {}
+        if depth_service is not None:
+            orderbook = depth_service.get_cached_orderbooks({normalized}).get(normalized, {})
+        snapshot_rows: list[dict] = []
+        if self._storage is not None:
+            result = self._storage.query("orderbook_snapshot", self._trade_date, symbol=normalized, limit=limit, order="asc")
+            snapshot_rows = result["rows"]
+        ranking = next((row for row in self._rankings.get(60, ()) if row["symbol"] == normalized), None)
+        return {
+            "symbol": normalized,
+            "name": (ranking or {}).get("name", normalized),
+            "ranking": ranking,
+            "orderbook": orderbook or None,
+            "orderbook_history": snapshot_rows,
+            "tape": self.tape(normalized),
+            "evidence": {
+                "proxy": bool(ranking),
+                "execution": bool(ranking and ranking.get("data_quality") == "precise"),
+                "intent": bool(ranking and ranking.get("intent_count", 0)),
+                "orderbook": bool(orderbook),
+            },
+            "degraded_reason": None if orderbook else "当前标的不在盘口采样池或数据源无五档能力",
+        }

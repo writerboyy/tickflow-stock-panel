@@ -120,6 +120,7 @@ async def lifespan(app: FastAPI):
     depth_service = DepthService()
     depth_service.set_repo(repo)
     depth_service.set_app_state(app.state)
+    depth_service.set_snapshot_sink(large_order_service.record_depth_snapshots)
     app.state.depth_service = depth_service
 
     # 启动调度器(若 enriched 数据为空,首次启动可手动 POST /api/pipeline/run)
