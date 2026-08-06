@@ -1327,11 +1327,14 @@ export interface Preferences {
     max_deep_dive_symbols: number
     candidate_limit: number
     min_limit_up_gap_pct: number
+    market_segments: LargeOrderMarketSegment[]
     exclude_bse: boolean
     exclude_st: boolean
     version: string
   }
 }
+
+export type LargeOrderMarketSegment = 'main' | 'star' | 'chinext' | 'bse' | 'st'
 
 /** 监控中心 ext 字段单项配置 (行业/概念标签的来源 + 显示裁剪) */
 export interface MonitorExtFieldItem {
@@ -1954,6 +1957,7 @@ export const api = {
     max_deep_dive_symbols?: number
     candidate_limit?: number
     min_limit_up_gap_pct?: number
+    market_segments?: LargeOrderMarketSegment[]
     exclude_bse?: boolean
     exclude_st?: boolean
   }) => request<{ large_orders: NonNullable<Preferences['large_orders']> }>(

@@ -572,14 +572,32 @@ _LARGE_ORDER_DEFAULTS = {
     "large_orders_max_deep_dive_symbols": 3,
     "large_orders_candidate_limit": 50,
     "large_orders_min_limit_up_gap_pct": 0.02,
+    "large_orders_market_segments": ["main", "star", "chinext"],
     "large_orders_exclude_bse": True,
     "large_orders_exclude_st": True,
     "large_orders_config_version": "large_orders_v2",
 }
+_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
+
+
+def _get_large_order_market_segments(data: dict) -> list[str]:
+    raw = data.get("large_orders_market_segments")
+    if isinstance(raw, list):
+        selected = {str(item) for item in raw}
+        return [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
+
+    segments = list(_LARGE_ORDER_DEFAULTS["large_orders_market_segments"])
+    if not bool(data.get("large_orders_exclude_bse", True)):
+        segments.append("bse")
+    if not bool(data.get("large_orders_exclude_st", True)):
+        segments.append("st")
+    return segments
 
 
 def get_large_orders_preferences() -> dict:
     data = load()
+    market_segments = _get_large_order_market_segments(data)
+
     def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
         try:
             value = int(data.get(key, default))
@@ -602,8 +620,9 @@ def get_large_orders_preferences() -> dict:
         "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
         "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
         "min_limit_up_gap_pct": bounded_float("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10),
-        "exclude_bse": bool(data.get("large_orders_exclude_bse", True)),
-        "exclude_st": bool(data.get("large_orders_exclude_st", True)),
+        "market_segments": market_segments,
+        "exclude_bse": "bse" not in market_segments,
+        "exclude_st": "st" not in market_segments,
         "version": "large_orders_v2",
     }
 
@@ -617,20 +636,42 @@ def set_large_orders_preferences(updates: dict) -> dict:
         "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
         "candidate_limit": "large_orders_candidate_limit",
         "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
-        "exclude_bse": "large_orders_exclude_bse",
-        "exclude_st": "large_orders_exclude_st",
     }
     saved: dict = {}
     for key, storage_key in allowed.items():
         if key not in updates or updates[key] is None:
             continue
-        if key in {"enabled", "exclude_bse", "exclude_st"}:
+        if key == "enabled":
             saved[storage_key] = bool(updates[key])
         elif key == "min_limit_up_gap_pct":
             saved[storage_key] = float(updates[key])
         else:
             saved[storage_key] = int(updates[key])
-    if saved:
+    if updates:
+        market_segments = _get_large_order_market_segments(load())
+        if updates.get("market_segments") is not None:
+            selected = {str(item) for item in updates["market_segments"]}
+            market_segments = [
+                item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected
+            ]
+        else:
+            if updates.get("exclude_bse") is not None:
+                if bool(updates["exclude_bse"]):
+                    market_segments = [item for item in market_segments if item != "bse"]
+                elif "bse" not in market_segments:
+                    market_segments.append("bse")
+            if updates.get("exclude_st") is not None:
+                if bool(updates["exclude_st"]):
+                    market_segments = [item for item in market_segments if item != "st"]
+                elif "st" not in market_segments:
+                    market_segments.append("st")
+        selected = set(market_segments)
+        market_segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
+        saved.update({
+            "large_orders_market_segments": market_segments,
+            "large_orders_exclude_bse": "bse" not in market_segments,
+            "large_orders_exclude_st": "st" not in market_segments,
+        })
         save(saved)
     return get_large_orders_preferences()
 

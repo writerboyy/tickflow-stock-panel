@@ -42,6 +42,7 @@ DEFAULTS: dict[str, Any] = {
     "max_deep_dive_symbols": 3,
     "candidate_limit": 50,
     "min_limit_up_gap_pct": 0.02,
+    "market_segments": ("main", "star", "chinext"),
     "exclude_bse": True,
     "exclude_st": True,
     "daily_call_budget": 60,
@@ -182,14 +183,29 @@ class LargeOrderService:
             self._quote_service.notify_large_orders_updated()
         return current
 
-    def _is_filtered_symbol(self, symbol: str, name: object = None) -> bool:
+    @staticmethod
+    def _market_segment(symbol: str, name: object = None) -> str:
         normalized = str(symbol).strip().upper()
         code = normalized.split(".", 1)[0]
-        if self._config.get("exclude_bse", True) and (
-            normalized.endswith(".BJ") or code.startswith(("4", "8"))
-        ):
-            return True
-        return bool(self._config.get("exclude_st", True) and is_risk_warning_name(str(name or "")))
+        if is_risk_warning_name(str(name or "")):
+            return "st"
+        if normalized.endswith(".BJ") or code.startswith(("4", "8")):
+            return "bse"
+        if code.startswith(("688", "689")):
+            return "star"
+        if code.startswith(("300", "301")):
+            return "chinext"
+        return "main"
+
+    def _is_filtered_symbol(self, symbol: str, name: object = None) -> bool:
+        configured = self._config.get("market_segments")
+        if configured is None:
+            configured = ["main", "star", "chinext"]
+            if not self._config.get("exclude_bse", True):
+                configured.append("bse")
+            if not self._config.get("exclude_st", True):
+                configured.append("st")
+        return self._market_segment(symbol, name) not in configured
 
     @staticmethod
     def _new_window_tracker(now_ts: float, window: int) -> dict[str, Any]:

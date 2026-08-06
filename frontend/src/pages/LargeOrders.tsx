@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, AlertTriangle, BarChart3, ChartCandlestick, Clock3, Database, RefreshCw, Settings2, Zap } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, ChartCandlestick, Check, ChevronDown, Clock3, Database, RefreshCw, Settings2, Zap } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
 import { EmptyState } from '@/components/EmptyState'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
-import { api, type LargeOrderEvidenceMode, type LargeOrderRow } from '@/lib/api'
+import { api, type LargeOrderEvidenceMode, type LargeOrderMarketSegment, type LargeOrderRow, type Preferences } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { QK } from '@/lib/queryKeys'
 
@@ -15,6 +15,14 @@ const MODES: Array<{ value: LargeOrderEvidenceMode; label: string }> = [
   { value: 'execution', label: '主动成交' },
   { value: 'intent', label: '委托意图' },
 ]
+const MARKET_SEGMENTS: Array<{ value: LargeOrderMarketSegment; label: string }> = [
+  { value: 'main', label: '沪深主板' },
+  { value: 'star', label: '科创板' },
+  { value: 'chinext', label: '创业板' },
+  { value: 'bse', label: '北交所' },
+  { value: 'st', label: 'ST' },
+]
+const DEFAULT_MARKET_SEGMENTS: LargeOrderMarketSegment[] = ['main', 'star', 'chinext']
 
 const money = (value: number | null | undefined) => {
   if (value == null || !Number.isFinite(Number(value))) return '--'
@@ -47,6 +55,72 @@ function OrderBook({ snapshot }: { snapshot: any }) {
   </div>
 }
 
+function MarketScopeSelect({ selected, pending, error, onChange }: {
+  selected: LargeOrderMarketSegment[]
+  pending: boolean
+  error: boolean
+  onChange: (segments: LargeOrderMarketSegment[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  const toggle = (segment: LargeOrderMarketSegment) => {
+    const next = selected.includes(segment)
+      ? selected.filter((item) => item !== segment)
+      : MARKET_SEGMENTS.map((item) => item.value).filter((item) => item === segment || selected.includes(item))
+    onChange(next)
+  }
+
+  return <div ref={rootRef} className="relative">
+    <button
+      type="button"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      onClick={() => setOpen((value) => !value)}
+      className="inline-flex h-8 items-center gap-1.5 border border-border bg-surface/30 px-2.5 text-xs text-muted hover:text-foreground"
+    >
+      <span>市场范围 {selected.length}/{MARKET_SEGMENTS.length}</span>
+      <ChevronDown className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-180')} />
+    </button>
+    {open && <div role="menu" className="absolute left-0 z-40 mt-1 w-40 border border-border bg-surface py-1 shadow-lg">
+      {MARKET_SEGMENTS.map((item) => {
+        const checked = selected.includes(item.value)
+        return <button
+          key={item.value}
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked={checked}
+          disabled={pending}
+          onClick={() => toggle(item.value)}
+          className="flex h-8 w-full items-center gap-2 px-2.5 text-left text-xs text-secondary hover:bg-elevated hover:text-foreground disabled:cursor-wait disabled:opacity-60"
+        >
+          <span className={cn('grid h-3.5 w-3.5 shrink-0 place-items-center border', checked ? 'border-accent bg-accent text-white' : 'border-border')}>
+            {checked && <Check className="h-3 w-3" strokeWidth={3} />}
+          </span>
+          {item.label}
+        </button>
+      })}
+      {error && <div className="border-t border-border px-2.5 py-1.5 text-[11px] text-danger">保存失败，请重试</div>}
+    </div>}
+  </div>
+}
+
 export function LargeOrders() {
   const qc = useQueryClient()
   const [window, setWindow] = useState<number>(60)
@@ -57,8 +131,9 @@ export function LargeOrders() {
   const [auditDate, setAuditDate] = useState('')
   const preferences = useQuery({ queryKey: QK.preferences, queryFn: api.preferences, staleTime: 60000 })
   const saveFilters = useMutation({
-    mutationFn: (payload: { exclude_bse?: boolean; exclude_st?: boolean }) => api.updateLargeOrdersPreferences(payload),
-    onSuccess: () => {
+    mutationFn: (market_segments: LargeOrderMarketSegment[]) => api.updateLargeOrdersPreferences({ market_segments }),
+    onSuccess: (response) => {
+      qc.setQueryData<Preferences>(QK.preferences, (current) => current ? { ...current, large_orders: response.large_orders } : current)
       qc.invalidateQueries({ queryKey: QK.preferences })
       qc.invalidateQueries({ queryKey: QK.largeOrders })
     },
@@ -80,8 +155,7 @@ export function LargeOrders() {
   const detail = analysis.data
   const selectedRow = detail?.ranking ?? selected
   const flowBars = useMemo(() => detail?.tape.timeline?.slice(-24) ?? [], [detail?.tape.timeline])
-  const excludeBse = preferences.data?.large_orders?.exclude_bse ?? true
-  const excludeSt = preferences.data?.large_orders?.exclude_st ?? true
+  const marketSegments = preferences.data?.large_orders?.market_segments ?? DEFAULT_MARKET_SEGMENTS
 
   return <div className="space-y-4">
     <PageHeader title="实时大单" subtitle="发现盘中资金异动，按成交、意图和盘口证据研判，不将代理数据当作真实资金流。" right={<button type="button" title="刷新实时大单" onClick={() => ranking.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-foreground"><RefreshCw className="h-4 w-4" /></button>} />
@@ -95,10 +169,7 @@ export function LargeOrders() {
       <div className="flex border border-border bg-surface/30">{WINDOWS.map((item) => <button key={item} type="button" onClick={() => setWindow(item)} className={cn('px-3 py-1.5 text-xs', window === item ? 'bg-accent text-white' : 'text-muted hover:text-foreground')}>{item < 60 ? `${item}秒` : item === 60 ? '1分钟' : '5分钟'}</button>)}</div>
       <div className="flex border border-border bg-surface/30">{(['all', 'watchlist'] as const).map((item) => <button key={item} type="button" onClick={() => setScope(item)} className={cn('px-3 py-1.5 text-xs', scope === item ? 'bg-elevated text-foreground' : 'text-muted hover:text-foreground')}>{item === 'all' ? '异动候选' : '自选股'}</button>)}</div>
       <select value={mode} onChange={(event) => setMode(event.target.value as LargeOrderEvidenceMode)} className="h-8 border border-border bg-surface/30 px-2 text-xs text-foreground outline-none">{MODES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select>
-      <div className="flex h-8 items-center gap-3 border border-border bg-surface/30 px-2.5 text-xs text-muted" title="默认过滤北交所和风险警示股票，可按需打开">
-        <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap hover:text-foreground"><input type="checkbox" checked={excludeBse} disabled={saveFilters.isPending} onChange={(event) => saveFilters.mutate({ exclude_bse: event.target.checked })} className="accent-accent" />过滤北交所</label>
-        <label className="flex cursor-pointer items-center gap-1.5 whitespace-nowrap hover:text-foreground"><input type="checkbox" checked={excludeSt} disabled={saveFilters.isPending} onChange={(event) => saveFilters.mutate({ exclude_st: event.target.checked })} className="accent-accent" />过滤 ST</label>
-      </div>
+      <MarketScopeSelect selected={marketSegments} pending={saveFilters.isPending} error={saveFilters.isError} onChange={(segments) => saveFilters.mutate(segments)} />
       <span className="ml-auto text-[11px] text-muted">更新时间 {status.data?.last_updated_ms ? new Date(status.data.last_updated_ms).toLocaleTimeString('zh-CN', { hour12: false }) : '--'}</span>
     </div>
     <div className="grid min-h-[560px] gap-3 xl:grid-cols-[minmax(420px,1.15fr)_minmax(360px,1fr)_300px]">

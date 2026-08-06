@@ -65,12 +65,14 @@ def _quote(*, price=10.0, amount=1_000_000.0, volume=100.0, symbol="000001.SZ", 
     }
 
 
-def test_candidate_filters_default_to_excluding_bse_and_st():
+def test_candidate_market_segments_default_to_main_star_and_chinext():
     service = LargeOrderService(FakeQuoteService())
     service._running = True
     service._config["max_deep_dive_symbols"] = 0
     initial = [
         _quote(symbol="000001.SZ", name="平安银行"),
+        _quote(symbol="688001.SH", name="科创测试"),
+        _quote(symbol="300001.SZ", name="创业测试"),
         _quote(symbol="430001.BJ", name="北交测试"),
         _quote(symbol="000002.SZ", name="*ST测试"),
     ]
@@ -81,12 +83,37 @@ def test_candidate_filters_default_to_excluding_bse_and_st():
     service._process_snapshot(initial)
     service._process_snapshot(updated)
 
-    assert [row["symbol"] for row in service.ranking(60)["rows"]] == ["000001.SZ"]
+    assert {row["symbol"] for row in service.ranking(60)["rows"]} == {
+        "000001.SZ",
+        "688001.SH",
+        "300001.SZ",
+    }
 
-    service._config.update({"exclude_bse": False, "exclude_st": False})
+    service._config["market_segments"] = ["main", "star", "chinext", "bse", "st"]
     rankings, _, _ = service._build_rankings_locked(time.time())
-    assert {row["symbol"] for row in rankings[60]} == {"000001.SZ", "430001.BJ", "000002.SZ"}
+    assert {row["symbol"] for row in rankings[60]} == {
+        "000001.SZ",
+        "688001.SH",
+        "300001.SZ",
+        "430001.BJ",
+        "000002.SZ",
+    }
     service.stop()
+
+
+@pytest.mark.parametrize(
+    ("symbol", "name", "expected"),
+    [
+        ("600000.SH", "浦发银行", "main"),
+        ("688001.SH", "科创测试", "star"),
+        ("689001.SH", "科创存托", "star"),
+        ("301001.SZ", "创业测试", "chinext"),
+        ("430001.BJ", "北交测试", "bse"),
+        ("688002.SH", "*ST科创", "st"),
+    ],
+)
+def test_market_segment_classification(symbol, name, expected):
+    assert LargeOrderService._market_segment(symbol, name) == expected
 
 
 def test_large_order_alert_uses_selected_wecom_channel(monkeypatch):
