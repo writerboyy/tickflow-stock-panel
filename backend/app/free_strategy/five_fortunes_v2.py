@@ -712,6 +712,16 @@ def _prepare_and_sell(context) -> None:
     candidate_rows = _candidate_pool(filtered_rows, state["regime"])
     state["filtered_rows"] = filtered_rows
     state["candidate_rows"] = candidate_rows
+    print(
+        "五福2.0候选排名："
+        + (
+            "；".join(
+                f"{rank}. {row['symbol']}（评分 {float(row['score']):.4f}）"
+                for rank, row in enumerate(candidate_rows[:10], start=1)
+            )
+            or "无"
+        )
+    )
     held = _held_symbols(context)
     nav_unavailable = list(state.get("nav_unavailable_symbols", []))
     targets = (

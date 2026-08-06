@@ -624,7 +624,16 @@ def _get_stock_list(context) -> list[str]:
     else:
         state["stock_list_cache_date"] = None
         state["stock_list_cache"] = []
-    context.log(f"小市值候选：{final}")
+    print(
+        "小市值涨停候选排名："
+        + (
+            "；".join(
+                f"{rank}. {symbol}"
+                for rank, symbol in enumerate(final[:10], start=1)
+            )
+            or "无"
+        )
+    )
     return final
 
 

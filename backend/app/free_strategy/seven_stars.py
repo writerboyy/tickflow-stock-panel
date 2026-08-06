@@ -361,6 +361,16 @@ def _cached_rankings(context) -> list[dict[str, Any]]:
     if state.get("rankings_date") != today:
         state["rankings"] = _rank_candidates(context)
         state["rankings_date"] = today
+        print(
+            "七星候选排名："
+            + (
+                "；".join(
+                    f"{rank}. {row['symbol']}（评分 {float(row['score']):.4f}）"
+                    for rank, row in enumerate(state["rankings"][:10], start=1)
+                )
+                or "无"
+            )
+        )
     return state["rankings"]
 
 

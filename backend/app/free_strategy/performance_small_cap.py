@@ -358,6 +358,16 @@ def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
             if _valid_name(by_symbol.get(symbol, {}), current_day)
             and _tradable_at_snapshot(symbol, current.get(symbol))
         ]
+    print(
+        "绩优小市值候选排名："
+        + (
+            "；".join(
+                f"{rank}. {symbol}"
+                for rank, symbol in enumerate(symbols[:10], start=1)
+            )
+            or "无"
+        )
+    )
     selected = symbols[:STOCK_COUNT]
     state["selection_cache_key"] = cache_key
     state["selection_cache"] = selected
