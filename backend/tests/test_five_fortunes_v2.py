@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 
 from app.free_strategy import five_fortunes_v2 as five
 from app.free_strategy.engine import FreeStrategyEngine
@@ -11,6 +12,8 @@ def metric(**overrides):
         "r2": 0.5,
         "passed_momentum": True,
         "passed_r2": True,
+        "nav_available": True,
+        "passed_premium": True,
         "passed_volume": False,
         "passed_loss": False,
         "passed_volume_divergence": False,
@@ -32,6 +35,35 @@ def test_choppy_regime_applies_volume_price_divergence_filter():
 
     assert five._passes_filters(row, "震荡期") is False
     assert five._filter_failures(row, "震荡期") == ["volume_divergence"]
+
+
+def test_premium_filter_is_enforced_in_every_regime():
+    row = metric(passed_premium=False)
+
+    assert five._passes_filters(row, "正常期") is False
+    assert five._passes_filters(row, "走弱期") is False
+
+
+def test_metric_requires_nav_from_the_requested_date():
+    closes = [100 * (1.001 ** index) for index in range(46)]
+
+    class Context:
+        now = datetime(2026, 7, 20, 13, 10)
+        state = {"five_fortunes_v2": {"weak_momentum_lookback": 25}}
+
+        @staticmethod
+        def extra_history(_name, _symbol, count=1, end_date=None):
+            return [{"date": "2026-07-18", "value": closes[-2]}][-count:]
+
+    row = five._metric_for(
+        "510300.SH", closes, [1_000_000.0] * 45, 550_000, Context(),
+        "正常期", "2026-07-19",
+    )
+
+    assert row is not None
+    assert row["nav_available"] is False
+    assert row["premium_rate"] is None
+    assert row["passed_premium"] is False
 
 
 def test_intraday_trend_confirmation_uses_price_only():
@@ -157,6 +189,49 @@ def test_daily_decision_signal_uses_the_v2_identity(monkeypatch):
     assert signal_type == "daily_decision"
     assert payload["strategy"] == "five_fortunes_v2"
     assert event_id == "five_fortunes_v2:2026-07-28:decision"
+
+
+def test_nav_unavailable_candidate_keeps_existing_holding(monkeypatch):
+    emitted = []
+    orders = []
+
+    class Context:
+        now = datetime(2026, 7, 28, 13, 10)
+        portfolio = SimpleNamespace(cash=100_000, positions={"159985.SZ": 100})
+        state = {"five_fortunes_v2": {
+            "regime": "正常期",
+            "raw_regime": "正常期",
+            "regime_changed_today": False,
+            "decision": {},
+            "intraday": {"raw_close": {}},
+            "nav_unavailable_symbols": [],
+        }}
+
+        @staticmethod
+        def order_target_percent(symbol, target):
+            orders.append((symbol, target))
+
+        @staticmethod
+        def emit_signal(signal_type, payload, *, event_id):
+            emitted.append((signal_type, payload, event_id))
+
+        @staticmethod
+        def log(_message):
+            pass
+
+    def rank(context):
+        context.state["five_fortunes_v2"]["nav_unavailable_symbols"] = ["159920.SZ"]
+        return []
+
+    monkeypatch.setattr(five, "_rank_candidates", rank)
+    monkeypatch.setattr(five, "_buy_targets", lambda _context: None)
+
+    five._prepare_and_sell(Context())
+
+    assert orders == []
+    assert Context.state["five_fortunes_v2"]["target"] == ["159985.SZ"]
+    assert emitted[-1][1]["decision"] == "hold"
+    assert emitted[-1][1]["reason_code"] == "data_unavailable_hold"
 
 
 def test_historical_names_keep_reference_medical_etfs_in_separate_groups():

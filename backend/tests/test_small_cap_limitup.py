@@ -16,6 +16,7 @@ from app.free_strategy.small_cap_limitup import (
     _select_industries,
     _turnover_sell_symbols,
 )
+from app.free_strategy import small_cap_limitup
 
 
 def test_known_limit_price_prevents_false_limit_up_inference():
@@ -593,3 +594,41 @@ def test_empty_selection_is_not_cached(monkeypatch):
 
     assert _get_stock_list(context) == []
     assert context.state["small_cap_limitup"]["stock_list_cache_date"] is None
+
+
+def test_weekly_sell_keeps_holding_when_selection_data_is_unavailable(monkeypatch):
+    held = "000001.SZ"
+    orders = []
+    signals = []
+    context = SimpleNamespace(
+        now=datetime(2026, 8, 4, 9, 30),
+        state={"small_cap_limitup": {
+            "no_trading_today": False,
+            "not_buy_again": [],
+            "hold_list": [held],
+            "yesterday_high_limit": [],
+            "target_list": [],
+            "stock_list_cache_date": None,
+            "stock_list_cache": [],
+            "decision": {},
+        }},
+        portfolio=SimpleNamespace(
+            positions={held: 100},
+            available_positions={held: 100},
+        ),
+        instruments=lambda _asset: [],
+        current_bars=lambda: {},
+        order_target=lambda symbol, quantity: orders.append((symbol, quantity)),
+        emit_signal=lambda signal_type, payload, **kwargs: signals.append(
+            (signal_type, payload, kwargs)
+        ),
+        log=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(small_cap_limitup, "_is_weekly_rebalance_day", lambda *_args: True)
+
+    small_cap_limitup._weekly_sell(context)
+
+    assert orders == []
+    assert context.state["small_cap_limitup"]["target_list"] == [held]
+    assert signals[-1][1]["decision"] == "hold"
+    assert signals[-1][1]["reason"] == "data_unavailable_hold"

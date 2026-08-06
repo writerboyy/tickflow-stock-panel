@@ -62,6 +62,7 @@ DECISION_REASON_LABELS = {
     "trend_pending": "目标标的盘中趋势未确认，等待复检",
     "trend_confirmed": "盘中趋势确认后买入",
     "force_buy": "14:55 强制买入待确认标的",
+    "data_unavailable_hold": "净值数据未更新到所需交易日，保留当前持仓",
 }
 CORRELATION_REASON_LABELS = {
     "low_correlation_allow": "修正相关性较低，允许换仓",
@@ -272,6 +273,7 @@ def initialize(context) -> None:
         "candidate_rows": [],
         "filtered_rows": [],
         "all_metric_rows": [],
+        "nav_unavailable_symbols": [],
         "liquidity_pool": list(fixed_pool),
         "normal_liquidity_pool": list(fixed_pool),
         "weak_liquidity_pool": list(global_pool),
@@ -710,11 +712,22 @@ def _prepare_and_sell(context) -> None:
     candidate_rows = _candidate_pool(filtered_rows, state["regime"])
     state["filtered_rows"] = filtered_rows
     state["candidate_rows"] = candidate_rows
-    targets = _choose_targets(context, candidate_rows, filtered_rows)
     held = _held_symbols(context)
+    nav_unavailable = list(state.get("nav_unavailable_symbols", []))
+    targets = (
+        list(held)
+        if nav_unavailable
+        else _choose_targets(context, candidate_rows, filtered_rows)
+    )
     day = context.now.date().isoformat()
     state["filter_fail_streak"] = 0
     state["filter_fail_last_date"] = None
+    if nav_unavailable:
+        state["pending_buy_etfs"] = []
+        state["decision"]["reason"] = "data_unavailable_hold"
+        state["decision"]["trigger_reason"] = "data_unavailable_hold"
+        state["decision"]["missing_inputs"] = list(nav_unavailable)
+        context.log("五福2.0净值数据未更新到所需交易日，本次保留持仓且不调仓")
     state["target"] = targets
     state["decision"].update({
         "target": list(targets),
@@ -961,6 +974,12 @@ def _rank_candidates(context) -> list[dict[str, Any]]:
         metric["regime"] = regime
         rows.append(metric)
     state["all_metric_rows"] = rows
+    state["nav_unavailable_symbols"] = [
+        metric["symbol"]
+        for metric in rows
+        if metric.get("nav_available") is False
+        and _passes_non_premium_filters(metric, regime)
+    ]
     filtered = []
     for metric in rows:
         if _passes_filters(metric, regime):
@@ -994,7 +1013,17 @@ def _metric_for(
     nav_rows = context.extra_history(
         "unit_net_value", symbol, count=1, end_date=nav_date,
     )
-    nav = nav_rows[-1]["value"] if nav_rows else None
+    required_nav_date = str(nav_date)[:10]
+    nav_row = (
+        nav_rows[-1]
+        if nav_rows and str(nav_rows[-1].get("date") or "")[:10] == required_nav_date
+        else None
+    )
+    try:
+        nav = float(nav_row.get("value")) if nav_row is not None else None
+    except (TypeError, ValueError):
+        nav = None
+    nav_available = nav is not None and nav > 0
     premium_rate = (closes[-2] - nav) / nav * 100 if nav is not None and nav > 0 else None
     premium_limit = 30.0
     passed_volume_divergence, volume_divergence = _volume_price_divergence(closes[:-1], volumes)
@@ -1015,7 +1044,8 @@ def _metric_for(
         "gaussian_slope": gaussian_slope,
         "premium_rate": premium_rate,
         "premium_limit": premium_limit,
-        "passed_premium": premium_rate is None or premium_rate <= premium_limit,
+        "nav_available": nav_available,
+        "passed_premium": premium_rate is not None and premium_rate <= premium_limit,
         "passed_momentum": 0 <= score <= MOMENTUM_SCORE_MAX,
         "passed_r2": r2 is not None and r2 > 0.4,
         "passed_ma": current > ma10,
@@ -1030,6 +1060,12 @@ def _metric_for(
 
 
 def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
+    if not metric.get("nav_available", False) or not metric.get("passed_premium", False):
+        return False
+    return _passes_non_premium_filters(metric, regime)
+
+
+def _passes_non_premium_filters(metric: dict[str, Any], regime: str) -> bool:
     if not metric.get("passed_momentum", False):
         return False
     if not metric.get("passed_r2", False):
@@ -1310,6 +1346,10 @@ def _daily_report(context) -> dict[str, Any]:
 
 def _filter_failures(metric: dict[str, Any], regime: str) -> list[str]:
     failures = []
+    if not metric.get("nav_available", False):
+        failures.append("nav_unavailable")
+    elif not metric.get("passed_premium", False):
+        failures.append("premium")
     if not metric.get("passed_momentum", False):
         failures.append("momentum")
     if not metric.get("passed_r2", False):

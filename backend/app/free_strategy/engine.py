@@ -534,10 +534,13 @@ class Context:
             requested_end = self.now.date() - timedelta(days=1)
         cutoff = min(requested_end, self.now.date() - timedelta(days=1))
         values = self._engine.extra_history.get(name, {})
-        if normalized not in values and self._engine._extra_history_loader is not None:
+        actual_date = max(values.get(normalized, {}), default=None)
+        if (
+            self._engine._extra_history_loader is not None
+            and (actual_date is None or actual_date < cutoff)
+        ):
             load_start = self._engine.run_start or (cutoff - timedelta(days=365))
-            load_end = self._engine.run_end or cutoff
-            self._engine._extra_history_loader(name, [normalized], load_start, load_end)
+            self._engine._extra_history_loader(name, [normalized], load_start, cutoff)
             values = self._engine.extra_history.get(name, {})
         rows = sorted(
             (day, value)

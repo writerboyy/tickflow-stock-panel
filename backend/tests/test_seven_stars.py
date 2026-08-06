@@ -213,7 +213,32 @@ def test_sell_keeps_top_ranked_holding_when_previous_nav_is_missing(monkeypatch)
     assert context.orders == []
     assert context.signals[-1]["decision"] == "hold"
     assert context.signals[-1]["target_symbols"] == ["513690.SH"]
-    assert context.signals[-1]["reason"] == "hold_without_target"
+    assert context.signals[-1]["reason"] == "data_unavailable_hold"
+
+
+def test_rank_change_with_missing_candidate_nav_keeps_existing_holding(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 20, 13, 9)
+    context.portfolio.positions = {"513690.SH": 80_000.0}
+    context.portfolio.available_positions = {"513690.SH": 80_000.0}
+    previous = bar(1.14)
+    previous.timestamp = datetime(2026, 7, 17, 15)
+    context.daily_rows["513050.SH"] = [previous]
+    seven.on_bar(context, {"513690.SH": bar(1.15), "513050.SH": bar(1.18)})
+    monkeypatch.setattr(
+        seven,
+        "_rank_candidates",
+        lambda _context: [{"symbol": "513050.SH", "score": 2.0}],
+    )
+
+    seven._sell_targets(context)
+    context.now = datetime(2026, 7, 20, 13, 10)
+    seven._buy_targets(context)
+
+    assert context.orders == []
+    assert context.signals[-1]["decision"] == "hold"
+    assert context.signals[-1]["target_symbols"] == ["513690.SH"]
+    assert context.signals[-1]["reason"] == "data_unavailable_hold"
 
 
 def test_sell_exits_top_ranked_holding_when_premium_exceeds_limit(monkeypatch):
@@ -237,6 +262,40 @@ def test_sell_exits_top_ranked_holding_when_premium_exceeds_limit(monkeypatch):
     assert context.orders == [("513690.SH", 0)]
 
 
+def test_high_premium_candidate_is_skipped_for_next_eligible_target(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 20, 13, 9)
+    context.portfolio.positions = {"513690.SH": 80_000.0}
+    context.portfolio.available_positions = {"513690.SH": 80_000.0}
+    for symbol, close, nav in (
+        ("513050.SH", 1.20, 0.90),
+        ("588080.SH", 1.00, 1.00),
+    ):
+        previous = bar(close)
+        previous.timestamp = datetime(2026, 7, 17, 15)
+        context.daily_rows[symbol] = [previous]
+        context.nav_rows[symbol] = [{"date": "2026-07-17", "value": nav}]
+    seven.on_bar(context, {
+        "513690.SH": bar(1.15),
+        "513050.SH": bar(1.21),
+        "588080.SH": bar(1.01),
+    })
+    monkeypatch.setattr(
+        seven,
+        "_rank_candidates",
+        lambda _context: [
+            {"symbol": "513050.SH", "score": 2.0},
+            {"symbol": "588080.SH", "score": 1.9},
+        ],
+    )
+
+    seven._sell_targets(context)
+
+    assert context.orders == [("513690.SH", 0)]
+    assert seven._state(context)["target_selection"] == ["588080.SH"]
+    assert seven._state(context)["target_selection_unavailable"] is False
+
+
 def test_buy_fails_closed_when_previous_nav_is_missing(monkeypatch):
     context = initialized_context()
     context.now = datetime(2026, 7, 20, 13, 10)
@@ -251,3 +310,4 @@ def test_buy_fails_closed_when_previous_nav_is_missing(monkeypatch):
 
     assert context.orders == []
     assert context.signals[-1]["decision"] == "empty"
+    assert context.signals[-1]["reason"] == "data_unavailable_hold"

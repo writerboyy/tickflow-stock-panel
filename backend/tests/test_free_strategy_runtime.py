@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -385,10 +385,37 @@ def on_bar(context, bars):
         "unit_net_value",
         ["510300.SH"],
         datetime(2025, 7, 1).date(),
-        datetime(2025, 7, 24).date(),
+        datetime(2025, 7, 23).date(),
     )]
     assert engine.extra_history_requirements == {"unit_net_value"}
     assert result["state"]["nav"] == [{"date": "2025-07-23", "value": 0.7}]
+
+
+def test_native_extra_history_refreshes_again_for_a_later_required_date():
+    source = """
+def on_bar(context, bars):
+    pass
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    engine.set_run_window(date(2025, 7, 1), date(2025, 7, 31))
+    calls = []
+
+    def load(info, symbols, start, end):
+        calls.append((info, symbols, start, end))
+        existing = dict(engine.extra_history.get(info, {}).get(symbols[0], {}))
+        existing[end] = float(end.day)
+        engine.set_extra_history(info, {symbols[0]: existing})
+
+    engine.set_extra_history_loader(load)
+    engine.context.now = datetime(2025, 7, 24, 13, 10)
+    first = engine.context.extra_history("unit_net_value", "510300.SH")
+    repeated = engine.context.extra_history("unit_net_value", "510300.SH")
+    engine.context.now = datetime(2025, 7, 25, 13, 10)
+    second = engine.context.extra_history("unit_net_value", "510300.SH")
+
+    assert first == repeated == [{"date": "2025-07-23", "value": 23.0}]
+    assert second == [{"date": "2025-07-24", "value": 24.0}]
+    assert [item[3] for item in calls] == [date(2025, 7, 23), date(2025, 7, 24)]
 
 
 def test_five_fortunes_template_uses_reference_backtest_parameters():
@@ -809,6 +836,86 @@ def test_performance_small_cap_monthly_rebalance_submits_cash_weight_after_exit(
         ("quantity", exit_symbol, 0),
         ("weight", new_symbol, 1.0),
     ]
+
+
+def test_performance_small_cap_missing_selection_data_keeps_holding_for_retry():
+    now = datetime(2025, 8, 1, 9, 30)
+    held = "000001.SZ"
+    submitted = []
+    signals = []
+    context = SimpleNamespace(
+        now=now,
+        previous_date=datetime(2025, 7, 31).date(),
+        portfolio=SimpleNamespace(positions={held: 100}, available_positions={held: 100}),
+        state={"performance_small_cap": {
+            "first_rebalance_done": False,
+            "today_trade_allowed": True,
+            "sorted_stocks": [],
+            "just_sold": [],
+            "candidate_cache_key": None,
+            "candidate_cache": [],
+            "selection_cache_key": None,
+            "selection_cache": [],
+            "decision": {},
+        }},
+        instruments=lambda _asset="stock": [],
+        current_bars=lambda: {},
+        order_target=lambda symbol, quantity: submitted.append((symbol, quantity)),
+        emit_signal=lambda signal_type, payload, **kwargs: signals.append(
+            (signal_type, payload, kwargs)
+        ),
+        log=lambda *_args, **_kwargs: None,
+    )
+
+    performance_small_cap._monthly_adjustment(context)
+
+    assert submitted == []
+    assert context.state["performance_small_cap"]["first_rebalance_done"] is False
+    assert signals[-1][1]["decision"] == "hold"
+    assert signals[-1][1]["reason"] == "data_unavailable_hold"
+
+
+def test_performance_small_cap_complete_data_can_produce_a_valid_empty_selection():
+    previous_day = date(2025, 7, 31)
+    symbol = "000001.SZ"
+    history = {
+        symbol: [
+            Bar(
+                symbol, datetime(2025, 7, 31, 15), 5, 5, 5, 5,
+                raw_close=5, total_shares=1_000_000,
+            ),
+        ],
+    }
+    context = SimpleNamespace(
+        now=datetime(2025, 8, 1, 9, 30),
+        previous_date=previous_day,
+        portfolio=SimpleNamespace(positions={}),
+        state={"performance_small_cap": {
+            "candidate_cache_key": None,
+            "candidate_cache": [],
+        }},
+        instruments=lambda _asset="stock": [{"symbol": symbol, "name": "样本"}],
+        dividend_ratio_ranked=lambda requested, _cutoff: list(requested),
+        financial_snapshot=lambda requested, _cutoff: {
+            item: {
+                "revenue": 10_000_000,
+                "net_income": -1,
+                "net_income_attributable": -1,
+                "roe": -1,
+                "roa": -1,
+            }
+            for item in requested
+        },
+        history_batch=lambda requested, **_kwargs: {
+            item: history.get(item, []) for item in requested
+        },
+        valuation_market_caps=lambda requested, _cutoff: {
+            item: 5_000_000 for item in requested
+        },
+    )
+
+    assert performance_small_cap._candidate_symbols(context, previous_day) == []
+    assert context.state["performance_small_cap"]["candidate_cache_key"] == "2025-07-31"
 
 
 def test_performance_small_cap_selected_parameters_are_active():

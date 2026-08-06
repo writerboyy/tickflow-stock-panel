@@ -20,6 +20,10 @@ TRADE_CAPITAL_LIMIT = 130_000.0
 INDUSTRY_DATA_ERROR = "涨停基因小市值策略缺少 EasyTDX 申万行业快照，无法执行行业去重"
 
 
+class SelectionDataUnavailable(ValueError):
+    """Required stock-selection inputs are unavailable for this rebalance."""
+
+
 def _state(context) -> dict[str, Any]:
     return context.state["small_cap_limitup"]
 
@@ -144,6 +148,7 @@ def initialize(context) -> None:
         "no_trading_hold": False,
         "stock_list_cache_date": None,
         "stock_list_cache": [],
+        "selection_data_error": None,
         "selection_scope_key": None,
         "selection_scope_symbols": [],
         "weekly_rebalance_check": {},
@@ -233,6 +238,7 @@ def _is_historical_st(values: list[Any]) -> bool:
 
 def _prepare_stock_list(context) -> None:
     state = _state(context)
+    state["selection_data_error"] = None
     held = _held_symbols(context)
     state["hold_list"] = held
     history = context.history_batch(held, count=1, timeframe="1d") if held else {}
@@ -269,6 +275,10 @@ def _loss_blacklisted(context, symbol: str) -> bool:
 
 def _selection_pool_symbols(context) -> list[str]:
     records = _instrument_records(context)
+    if not records:
+        raise SelectionDataUnavailable("股票标的维表为空")
+    if not any(_parse_date(item.get("listing_date")) is not None for item in records):
+        raise SelectionDataUnavailable("股票上市日期数据为空")
     previous_date = _previous_trading_date(context, records)
     state = _state(context)
     active_loss_black = tuple(sorted(
@@ -301,6 +311,10 @@ def _selection_pool_symbols(context) -> list[str]:
         count=1,
         timeframe="1d",
     )
+    if eligible_records and not any(
+        latest_history.get(str(item["symbol"])) for item in eligible_records
+    ):
+        raise SelectionDataUnavailable("候选日线行情无有效覆盖")
     candidates: list[tuple[float, str]] = []
     for item in eligible_records:
         symbol = str(item["symbol"])
@@ -333,6 +347,8 @@ def _selection_pool_symbols(context) -> list[str]:
             )
             if status_symbols else {}
         )
+        if status_symbols and not any(status_history.get(symbol) for symbol in status_symbols):
+            raise SelectionDataUnavailable("历史ST状态行情无有效覆盖")
         for symbol in batch:
             if not has_name_history[symbol] and _is_historical_st(status_history.get(symbol, [])):
                 continue
@@ -347,10 +363,12 @@ def _selection_pool_symbols(context) -> list[str]:
 
 
 def _afternoon_selection_symbols(context, _timestamp: datetime) -> list[str]:
-    return list(dict.fromkeys([
-        *_held_symbols(context),
-        *_selection_pool_symbols(context),
-    ]))
+    try:
+        candidates = _selection_pool_symbols(context)
+    except SelectionDataUnavailable as exc:
+        _state(context)["selection_data_error"] = str(exc)
+        candidates = []
+    return list(dict.fromkeys([*_held_symbols(context), *candidates]))
 
 
 def _eligible_market_records(context) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -556,7 +574,7 @@ def _select_industries(
     }
     missing = [symbol for symbol in ranked if not industry_by_symbol.get(symbol)]
     if missing:
-        raise ValueError(
+        raise SelectionDataUnavailable(
             f"{INDUSTRY_DATA_ERROR}；缺失标的: {', '.join(missing[:3])}"
         )
     selected: list[str] = []
@@ -574,17 +592,25 @@ def _select_industries(
 
 def _get_stock_list(context) -> list[str]:
     state = _state(context)
+    if state.get("selection_data_error"):
+        raise SelectionDataUnavailable(str(state["selection_data_error"]))
     records = _instrument_records(context)
+    if not records:
+        raise SelectionDataUnavailable("股票标的维表为空")
     if not any(str(item.get("industry_sw") or "").strip() for item in records):
-        raise ValueError(INDUSTRY_DATA_ERROR)
+        raise SelectionDataUnavailable(INDUSTRY_DATA_ERROR)
     previous_date = _previous_trading_date(context, records)
     cache_date = previous_date.isoformat()
     cached = state.get("stock_list_cache", [])
     if state.get("stock_list_cache_date") == cache_date and cached:
         return list(cached)
     initial, bars = _eligible_market_records(context)
+    if not bars:
+        raise SelectionDataUnavailable("候选盘中行情无有效覆盖")
     symbols = [str(item["symbol"]) for item in initial]
     history = context.history_batch(symbols, count=HISTORY_DAYS, timeframe="1d")
+    if symbols and not any(history.get(symbol) for symbol in symbols):
+        raise SelectionDataUnavailable("候选历史行情无有效覆盖")
     reliable_limit_symbols = {
         str(item["symbol"])
         for item in initial
@@ -665,9 +691,22 @@ def _weekly_sell(context) -> None:
         return
     state = _state(context)
     state["not_buy_again"] = []
-    target = _get_stock_list(context)
+    try:
+        target = _get_stock_list(context)
+    except SelectionDataUnavailable as exc:
+        target = _held_symbols(context)
+        state["target_list"] = list(target)
+        context.log(f"涨停基因选股数据不可用，本次保留持仓：{exc}")
+        _emit_decision(context, target, "data_unavailable_hold")
+        return
     state["target_list"] = target
     current = _current_bars(context)
+    if not current:
+        target = _held_symbols(context)
+        state["target_list"] = list(target)
+        context.log("涨停基因候选盘中行情不可用，本次保留持仓")
+        _emit_decision(context, target, "data_unavailable_hold")
+        return
     yesterday_limit = set(state.get("yesterday_high_limit", []))
     for symbol in list(state.get("hold_list", [])):
         bar = current.get(symbol)
@@ -683,7 +722,20 @@ def _weekly_buy(context) -> None:
         return
     state = _state(context)
     state["not_buy_again"] = []
-    target = _get_stock_list(context)
+    try:
+        target = _get_stock_list(context)
+    except SelectionDataUnavailable as exc:
+        target = _held_symbols(context)
+        state["target_list"] = list(target)
+        context.log(f"涨停基因选股数据不可用，本次暂停买入：{exc}")
+        _emit_decision(context, target, "data_unavailable_hold")
+        return
+    if not _current_bars(context):
+        target = _held_symbols(context)
+        state["target_list"] = list(target)
+        context.log("涨停基因候选盘中行情不可用，本次暂停买入")
+        _emit_decision(context, target, "data_unavailable_hold")
+        return
     state["target_list"] = target
     submitted = _buy_security(context, target)
     state["not_buy_again"] = list(dict.fromkeys([*_held_symbols(context), *submitted]))
@@ -818,7 +870,7 @@ def _emit_decision(context, target: list[str], reason: str) -> None:
         {
             "strategy": "small_cap_limitup",
             "trading_date": day,
-            "decision": "rebalance",
+            "decision": "hold" if reason == "data_unavailable_hold" else "rebalance",
             "target_symbols": list(target),
             "holding_symbols": holdings,
             "reason": reason,

@@ -57,6 +57,7 @@ const DECISION_REASON_LABEL: Record<string, string> = {
   ranked_target: '调仓至排名最高的合格标的',
   weekly_rebalance: '例行更新候选池',
   afternoon_replacement: '盘中替换涨停失效标的',
+  data_unavailable_hold: '选股数据暂不可用，已保留当前持仓并暂停本次调仓',
 }
 
 type DetailTab = 'positions' | 'decisions' | 'trades' | 'logs'

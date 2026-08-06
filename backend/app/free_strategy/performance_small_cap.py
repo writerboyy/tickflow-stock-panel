@@ -18,6 +18,10 @@ INDEX_SYMBOL = "399303.SZ"
 INDEX_HISTORY_BARS = (12 + 26 + 9) * 5
 
 
+class SelectionDataUnavailable(RuntimeError):
+    """Required stock-selection inputs are unavailable for this rebalance."""
+
+
 def _state(context) -> dict[str, Any]:
     return context.state["performance_small_cap"]
 
@@ -162,18 +166,31 @@ def _tradable_at_snapshot(symbol: str, bar: Any, *, allow_held: bool = False) ->
     return bool(symbol)
 
 
-def _valuation_market_caps(context, symbols: list[str], previous_date: date) -> dict[str, float]:
+def _valuation_market_caps(
+    context,
+    symbols: list[str],
+    previous_date: date,
+    *,
+    required: bool = False,
+) -> dict[str, float]:
     loader = getattr(context, "valuation_market_caps", None)
     if not callable(loader):
+        if required and symbols:
+            raise SelectionDataUnavailable("缺少估值市值数据加载器")
         return {}
     try:
-        return {
+        values = {
             str(symbol): float(value)
             for symbol, value in loader(symbols, previous_date).items()
             if value is not None and float(value) > 0
         }
-    except (TypeError, ValueError):
+    except Exception as exc:  # noqa: BLE001
+        if required and symbols:
+            raise SelectionDataUnavailable("估值市值数据加载失败") from exc
         return {}
+    if required and symbols and not values:
+        raise SelectionDataUnavailable("估值市值数据无有效覆盖")
+    return values
 
 
 def _eligible_records(context, previous_date: date) -> list[dict[str, Any]]:
@@ -187,10 +204,17 @@ def _eligible_records(context, previous_date: date) -> list[dict[str, Any]]:
 
 
 def _financially_qualified(context, symbols: list[str], previous_date: date) -> list[str]:
+    if not symbols:
+        return []
     loader = getattr(context, "financial_snapshot", None)
     if not callable(loader):
-        return []
-    snapshot = loader(symbols, previous_date)
+        raise SelectionDataUnavailable("缺少财务快照数据加载器")
+    try:
+        snapshot = loader(symbols, previous_date)
+    except Exception as exc:  # noqa: BLE001
+        raise SelectionDataUnavailable("财务快照数据加载失败") from exc
+    if not snapshot or not any(snapshot.get(symbol) for symbol in symbols):
+        raise SelectionDataUnavailable("财务快照数据无有效覆盖")
     result: list[str] = []
     for symbol in symbols:
         row = snapshot.get(symbol) or {}
@@ -219,13 +243,28 @@ def _positive(value: Any) -> bool:
 
 
 def _dividend_ratio_ranked(context, symbols: list[str], previous_date: date) -> list[str]:
+    if not symbols:
+        return []
     loader = getattr(context, "dividend_ratio_ranked", None)
     if callable(loader):
-        ranked = loader(symbols, previous_date)
+        try:
+            ranked = loader(symbols, previous_date)
+        except Exception as exc:  # noqa: BLE001
+            raise SelectionDataUnavailable("分红排名数据加载失败") from exc
         if ranked is not None:
             return list(ranked)
-    history = context.history_batch(symbols, count=260, timeframe="1d")
-    valuation_caps = _valuation_market_caps(context, symbols, previous_date)
+    history_loader = getattr(context, "history_batch", None)
+    if not callable(history_loader):
+        raise SelectionDataUnavailable("缺少分红历史行情加载器")
+    try:
+        history = history_loader(symbols, count=260, timeframe="1d")
+    except Exception as exc:  # noqa: BLE001
+        raise SelectionDataUnavailable("分红历史行情加载失败") from exc
+    if not any(history.get(symbol) for symbol in symbols):
+        raise SelectionDataUnavailable("分红历史行情无有效覆盖")
+    valuation_caps = _valuation_market_caps(
+        context, symbols, previous_date, required=True,
+    )
     ranked: list[tuple[float, str]] = []
     for symbol in symbols:
         values = history.get(symbol, [])
@@ -258,12 +297,25 @@ def _candidate_symbols(context, previous_date: date) -> list[str]:
     if state.get("candidate_cache_key") == cache_key:
         return list(state.get("candidate_cache", []))
 
-    by_symbol = {str(item["symbol"]): item for item in _eligible_records(context, previous_date)}
+    eligible_records = _eligible_records(context, previous_date)
+    if not eligible_records:
+        raise SelectionDataUnavailable("股票标的维表为空")
+    by_symbol = {str(item["symbol"]): item for item in eligible_records}
     symbols = list(by_symbol)
     symbols = _dividend_ratio_ranked(context, symbols, previous_date)
     symbols = _financially_qualified(context, symbols, previous_date)
-    history = context.history_batch(symbols, count=1, timeframe="1d")
-    valuation_caps = _valuation_market_caps(context, symbols, previous_date)
+    try:
+        history = (
+            context.history_batch(symbols, count=1, timeframe="1d")
+            if symbols else {}
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SelectionDataUnavailable("候选日线行情加载失败") from exc
+    if symbols and not any(history.get(symbol) for symbol in symbols):
+        raise SelectionDataUnavailable("候选日线行情无有效覆盖")
+    valuation_caps = _valuation_market_caps(
+        context, symbols, previous_date, required=True,
+    )
     held = set(_held_symbols(context))
     candidates: list[tuple[float, str]] = []
     for symbol in symbols:
@@ -296,6 +348,8 @@ def _select_stocks(context, *, require_snapshot: bool) -> list[str]:
     symbols = _candidate_symbols(context, previous_date)
     if require_snapshot:
         current = _current_bars(context)
+        if symbols and not any(symbol in current for symbol in symbols):
+            raise SelectionDataUnavailable("候选盘中行情无有效覆盖")
         by_symbol = {str(item.get("symbol") or ""): item for item in records}
         current_day = context.now.date()
         symbols = [
@@ -328,7 +382,10 @@ def _held_and_selection_symbols(context, timestamp: datetime) -> list[str]:
     previous_date = _previous_trading_date(context, records)
     if timestamp.strftime("%H:%M") == "09:30" and not _should_monthly_adjust(context, previous_date):
         return _held_symbols(context)
-    return _selection_symbols(context, timestamp)
+    try:
+        return _selection_symbols(context, timestamp)
+    except SelectionDataUnavailable:
+        return _held_symbols(context)
 
 
 def initialize(context) -> None:
@@ -639,10 +696,17 @@ def _monthly_adjustment(context) -> None:
     previous_date = _previous_trading_date(context, records)
     if not _should_monthly_adjust(context, previous_date):
         return
-    state["first_rebalance_done"] = True
     if not state.get("today_trade_allowed", True):
         return
-    target = _select_stocks(context, require_snapshot=True)
+    try:
+        target = _select_stocks(context, require_snapshot=True)
+    except SelectionDataUnavailable as exc:
+        held = _held_symbols(context)
+        state["sorted_stocks"] = list(held)
+        context.log(f"绩优小市值选股数据不可用，本次保留持仓：{exc}")
+        _emit_decision(context, held, "data_unavailable_hold")
+        return
+    state["first_rebalance_done"] = True
     state["sorted_stocks"] = target
     current = _current_bars(context)
     for symbol in list(_held_symbols(context)):
@@ -689,7 +753,12 @@ def _buy_missing_targets(
 
 
 def _execute_recovery_buying(context) -> None:
-    target = _select_stocks(context, require_snapshot=True)
+    try:
+        target = _select_stocks(context, require_snapshot=True)
+    except SelectionDataUnavailable as exc:
+        context.log(f"绩优小市值恢复买入暂停：{exc}")
+        _emit_decision(context, _held_symbols(context), "data_unavailable_hold")
+        return
     _state(context)["sorted_stocks"] = target
     submitted = _buy_missing_targets(context, target, _current_bars(context))
     if submitted:
@@ -734,7 +803,11 @@ def _emit_decision(context, target: list[str], reason: str) -> None:
         {
             "strategy": "performance_small_cap",
             "trading_date": day,
-            "decision": "rebalance" if target else "risk_off",
+            "decision": (
+                "hold" if reason == "data_unavailable_hold"
+                else "rebalance" if target
+                else "risk_off"
+            ),
             "target_symbols": list(target),
             "holding_symbols": _held_symbols(context),
             "reason": reason,

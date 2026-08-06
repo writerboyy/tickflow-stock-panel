@@ -164,6 +164,25 @@ def test_laplace_smoothing_is_regime_specific():
     assert weak["laplace_value"] > normal["laplace_value"]
 
 
+def test_metric_rejects_nav_from_a_different_date():
+    context = initialized_context()
+    context.now = datetime(2026, 7, 20, 13, 10)
+    closes = [100 * (1.001 ** index) for index in range(70)]
+    volumes = [1_000_000.0] * 69
+    context.extra_rows[("unit_net_value", "510300.SH")] = [
+        {"date": "2026-07-18", "value": closes[-2]},
+    ]
+
+    row = five._metric_for(
+        "510300.SH", closes, volumes, 550_000, context, "正常期", "2026-07-19",
+    )
+
+    assert row is not None
+    assert row["nav_available"] is False
+    assert row["premium_rate"] is None
+    assert row["passed_premium"] is False
+
+
 def test_history_is_aligned_to_previous_raw_close():
     context = initialized_context()
     context.market_rows["159667.SZ"] = [
@@ -455,6 +474,26 @@ def test_no_trade_decision_is_emitted_as_structured_signal(monkeypatch):
     assert signal["decision"] == "empty"
     assert signal["target_symbols"] == []
     assert signal["reason"]
+
+
+def test_nav_unavailable_candidate_keeps_existing_holding(monkeypatch):
+    context = initialized_context()
+    context.now = datetime(2026, 7, 28, 13, 10)
+    context.portfolio.positions = {"159985.SZ": 100.0}
+    state = context.state["five_fortunes"]
+
+    def rank(_context):
+        state["nav_unavailable_symbols"] = ["159920.SZ"]
+        return []
+
+    monkeypatch.setattr(five, "_rank_candidates", rank)
+
+    five._prepare_and_sell(context)
+
+    assert context.orders == []
+    assert state["target"] == ["159985.SZ"]
+    assert context.signals[-1]["decision"] == "hold"
+    assert context.signals[-1]["reason_code"] == "data_unavailable_hold"
 
 
 def test_four_consecutive_filter_fail_days_force_defensive(monkeypatch):

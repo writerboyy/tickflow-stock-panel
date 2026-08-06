@@ -47,6 +47,7 @@ DECISION_REASON_LABELS = {
     "high_pair_overlay": "高相关组合保护生效，继续持有",
     "correlation_hold_guard": "相关性换仓保护生效，继续持有",
     "four_day_filter_fail_defensive": "连续四个交易日未通过筛选，切换防御标的",
+    "data_unavailable_hold": "净值数据未更新到所需交易日，保留当前持仓",
 }
 CORRELATION_REASON_LABELS = {
     "low_correlation_allow": "修正相关性较低，允许换仓",
@@ -233,6 +234,7 @@ def initialize(context) -> None:
         "candidate_rows": [],
         "filtered_rows": [],
         "all_metric_rows": [],
+        "nav_unavailable_symbols": [],
         "liquidity_pool": list(fixed_pool),
         "normal_liquidity_pool": list(fixed_pool),
         "weak_liquidity_pool": list(global_pool),
@@ -584,13 +586,28 @@ def _prepare_and_sell(context) -> None:
     candidate_rows = _candidate_pool(filtered_rows, state["regime"])
     state["filtered_rows"] = filtered_rows
     state["candidate_rows"] = candidate_rows
-    targets = _choose_targets(context, candidate_rows, filtered_rows)
     held = _held_symbols(context)
+    nav_unavailable = list(state.get("nav_unavailable_symbols", []))
+    targets = (
+        list(held)
+        if nav_unavailable
+        else _choose_targets(context, candidate_rows, filtered_rows)
+    )
     filtered = {row["symbol"] for row in filtered_rows}
     all_metrics = {row["symbol"] for row in state.get("all_metric_rows", [])}
-    filter_fail = [symbol for symbol in held if symbol not in filtered and symbol in all_metrics and symbol not in targets]
+    filter_fail = [] if nav_unavailable else [
+        symbol for symbol in held
+        if symbol not in filtered and symbol in all_metrics and symbol not in targets
+    ]
     day = context.now.date().isoformat()
-    if filter_fail:
+    if nav_unavailable:
+        state["decision"]["reason"] = "data_unavailable_hold"
+        state["decision"]["trigger_reason"] = "data_unavailable_hold"
+        state["decision"]["missing_inputs"] = list(nav_unavailable)
+        context.log(
+            "五福净值数据未更新到所需交易日，本次保留持仓且不切换防御标的"
+        )
+    elif filter_fail:
         if state.get("filter_fail_last_date") != day:
             state["filter_fail_streak"] = int(state.get("filter_fail_streak", 0)) + 1
             state["filter_fail_last_date"] = day
@@ -793,6 +810,12 @@ def _rank_candidates(context) -> list[dict[str, Any]]:
         metric["regime"] = regime
         rows.append(metric)
     state["all_metric_rows"] = rows
+    state["nav_unavailable_symbols"] = [
+        metric["symbol"]
+        for metric in rows
+        if metric.get("nav_available") is False
+        and _passes_non_premium_filters(metric, regime)
+    ]
     filtered = []
     for metric in rows:
         if _passes_filters(metric, regime):
@@ -829,7 +852,17 @@ def _metric_for(
     nav_rows = context.extra_history(
         "unit_net_value", symbol, count=1, end_date=nav_date,
     )
-    nav = nav_rows[-1]["value"] if nav_rows else None
+    required_nav_date = str(nav_date)[:10]
+    nav_row = (
+        nav_rows[-1]
+        if nav_rows and str(nav_rows[-1].get("date") or "")[:10] == required_nav_date
+        else None
+    )
+    try:
+        nav = float(nav_row.get("value")) if nav_row is not None else None
+    except (TypeError, ValueError):
+        nav = None
+    nav_available = nav is not None and nav > 0
     premium_rate = (closes[-2] - nav) / nav * 100 if nav is not None and nav > 0 else None
     premium_limit = 8.0 if regime == "走弱期" else (10.0 if regime == "震荡期" else 30.0)
     return {
@@ -850,12 +883,19 @@ def _metric_for(
         "gaussian_slope": gaussian_slope,
         "premium_rate": premium_rate,
         "premium_limit": premium_limit,
+        "nav_available": nav_available,
         "passed_premium": premium_rate is not None and premium_rate <= premium_limit,
         "history": closes[-61:],
     }
 
 
 def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
+    if not _passes_non_premium_filters(metric, regime):
+        return False
+    return bool(metric["passed_premium"])
+
+
+def _passes_non_premium_filters(metric: dict[str, Any], regime: str) -> bool:
     if not (0 < metric["score"] <= MOMENTUM_SCORE_MAX):
         return False
     if regime != "走弱期" and metric["r2"] <= (0.39 if regime == "正常期" else 0.4):
@@ -865,8 +905,6 @@ def _passes_filters(metric: dict[str, Any], regime: str) -> bool:
     if metric["volume_ratio"] is None or metric["volume_ratio"] >= 1.9:
         return False
     if min(metric["day_ratios"]) < 0.97:
-        return False
-    if not metric["passed_premium"]:
         return False
     if regime == "正常期" and not (metric["close"] > metric["laplace_value"] and metric["laplace_slope"] > 0.0022):
         return False

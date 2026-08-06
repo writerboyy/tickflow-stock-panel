@@ -116,6 +116,9 @@ def initialize(context) -> None:
         "reentry_block_date": None,
         "reentry_blocked_today": [],
         "target": [],
+        "target_selection_date": None,
+        "target_selection": [],
+        "target_selection_unavailable": False,
         "held_before_sell": [],
         "decision": {},
         "intraday": {"date": None, "bars": {}, "volume": {}},
@@ -445,22 +448,25 @@ def _effective_trade_capital(context) -> float:
 def _sell_targets(context) -> None:
     state = _state(context)
     rankings = _cached_rankings(context)
-    raw_targets = [row["symbol"] for row in rankings[:1]]
+    targets, unavailable = _eligible_targets(context, rankings)
     held = _held_symbols(context)
     state["held_before_sell"] = held
-    sold = set()
+    state["target_selection_date"] = context.now.date().isoformat()
+    state["target_selection"] = list(targets)
+    state["target_selection_unavailable"] = unavailable
+    if unavailable:
+        state["target"] = list(held)
+        context.log("七星净值数据未更新到所需交易日，本次保留持仓且不执行调仓卖出")
+        return
     for symbol in held:
-        if symbol not in raw_targets and _available_quantity(context, symbol) > 0:
-            if _exit_position(context, symbol):
-                sold.add(symbol)
-    for symbol in held:
-        if symbol in sold or _available_quantity(context, symbol) <= 0:
-            continue
-        if _passes_premium_filter(context, symbol) is False:
+        if symbol not in targets and _available_quantity(context, symbol) > 0:
             _exit_position(context, symbol)
 
 
-def _eligible_targets(context, rankings: list[dict[str, Any]]) -> list[str]:
+def _eligible_targets(
+    context,
+    rankings: list[dict[str, Any]],
+) -> tuple[list[str], bool]:
     _reset_reentry_blocklist(context)
     blocked = set(_state(context).get("reentry_blocked_today", []))
     for row in rankings:
@@ -469,15 +475,31 @@ def _eligible_targets(context, rankings: list[dict[str, Any]]) -> list[str]:
             continue
         if _profit_triggered(context, symbol):
             continue
-        if _passes_premium_filter(context, symbol) is True:
-            return [symbol]
-    return []
+        premium_status = _passes_premium_filter(context, symbol)
+        if premium_status is None:
+            return [], True
+        if premium_status:
+            return [symbol], False
+    return [], False
 
 
 def _buy_targets(context) -> None:
     state = _state(context)
     rankings = _cached_rankings(context)
-    targets = _eligible_targets(context, rankings)
+    today = context.now.date().isoformat()
+    if state.get("target_selection_date") == today:
+        targets = list(state.get("target_selection", []))
+        unavailable = bool(state.get("target_selection_unavailable"))
+    else:
+        targets, unavailable = _eligible_targets(context, rankings)
+        state["target_selection_date"] = today
+        state["target_selection"] = list(targets)
+        state["target_selection_unavailable"] = unavailable
+    if unavailable:
+        held = _held_symbols(context)
+        state["target"] = list(held)
+        _emit_decision(context, held, reason="data_unavailable_hold")
+        return
     state["target"] = targets
     held = _held_symbols(context)
     if not targets and held:

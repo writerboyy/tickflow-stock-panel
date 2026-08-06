@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import polars as pl
@@ -76,6 +78,42 @@ def _read_cached_nav(path: Path) -> list[dict[str, Any]]:
         return []
 
 
+def _merge_nav_rows(
+    symbol: str,
+    cached: list[dict[str, Any]],
+    fetched: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_date: dict[date, float] = {}
+    for row in [*cached, *fetched]:
+        day = row.get("date")
+        value = row.get("unit_net_value")
+        if not isinstance(day, date) or value is None:
+            continue
+        by_date[day] = float(value)
+    return [
+        {
+            "symbol": symbol,
+            "date": day,
+            "unit_net_value": by_date[day],
+            "date_timezone": "Asia/Shanghai",
+        }
+        for day in sorted(by_date)
+    ]
+
+
+def _write_nav_cache(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        pl.DataFrame(rows).select(
+            "symbol", "date", "unit_net_value", "date_timezone",
+        ).sort("date").write_parquet(temporary)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def load_fund_nav_history(
     data_dir: Path,
     engine: Any,
@@ -84,17 +122,19 @@ def load_fund_nav_history(
     end: date,
 ) -> dict[str, Any]:
     values: dict[str, list[dict[str, Any]]] = {}
-    missing = []
+    refresh: list[str] = []
+    refresh_failed: set[str] = set()
     for symbol in symbols:
         path = _fund_nav_path(data_dir, symbol)
         cached = _read_cached_nav(path)
         if cached:
             values[symbol] = cached
-        else:
-            missing.append(symbol)
+        actual_date = max((row["date"] for row in cached), default=None)
+        if actual_date is None or actual_date < end:
+            refresh.append(symbol)
 
-    with ThreadPoolExecutor(max_workers=min(4, max(1, len(missing)))) as pool:
-        futures = {pool.submit(_fetch_fund_nav, symbol): symbol for symbol in missing}
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(refresh)))) as pool:
+        futures = {pool.submit(_fetch_fund_nav, symbol): symbol for symbol in refresh}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -103,11 +143,15 @@ def load_fund_nav_history(
                 logger.warning("基金净值拉取失败 %s: %s", symbol, exc)
                 rows = []
             if not rows:
+                refresh_failed.add(symbol)
                 continue
-            values[symbol] = rows
+            merged = _merge_nav_rows(symbol, values.get(symbol, []), rows)
+            values[symbol] = merged
             path = _fund_nav_path(data_dir, symbol)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pl.DataFrame(rows).sort("date").write_parquet(path)
+            try:
+                _write_nav_cache(path, merged)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("基金净值缓存写入失败 %s: %s", symbol, exc)
 
     visible: dict[str, dict[date, float]] = {}
     cutoff_start = start - timedelta(days=90)
@@ -120,6 +164,23 @@ def load_fund_nav_history(
         if selected:
             visible[symbol] = selected
     engine.set_extra_history("unit_net_value", visible)
+    symbol_freshness: dict[str, dict[str, str | None]] = {}
+    for symbol in symbols:
+        actual_date = max(
+            (row["date"] for row in values.get(symbol, [])),
+            default=None,
+        )
+        if actual_date is not None and actual_date >= end:
+            status = "fresh"
+        elif symbol in refresh_failed:
+            status = "unavailable"
+        else:
+            status = "stale"
+        symbol_freshness[symbol] = {
+            "required_date": end.isoformat(),
+            "actual_date": actual_date.isoformat() if actual_date is not None else None,
+            "freshness_status": status,
+        }
     from app.services.fund_nav_schema import write_fund_nav_schema_registry
 
     write_fund_nav_schema_registry(data_dir)
@@ -128,6 +189,15 @@ def load_fund_nav_history(
         "requested_symbols": len(symbols),
         "available_symbols": len(visible),
         "missing_symbols": sorted(set(symbols) - set(visible)),
+        "stale_symbols": sorted(
+            symbol for symbol, item in symbol_freshness.items()
+            if item["freshness_status"] == "stale"
+        ),
+        "unavailable_symbols": sorted(
+            symbol for symbol, item in symbol_freshness.items()
+            if item["freshness_status"] == "unavailable"
+        ),
+        "symbol_freshness": symbol_freshness,
         "rows": sum(len(rows) for rows in visible.values()),
     }
 
@@ -144,30 +214,48 @@ def prepare_fund_nav_data(
         "requested_symbols": 0,
         "available_symbols": 0,
         "missing_symbols": [],
+        "stale_symbols": [],
+        "unavailable_symbols": [],
+        "symbol_freshness": {},
         "rows": 0,
     }
-    attempted: set[str] = set()
+    attempted_through: dict[str, date] = {}
+    freshness: dict[str, dict[str, str | None]] = {}
 
     def load_nav(info: str, symbols: list[str], load_start: date, load_end: date) -> None:
         if info != "unit_net_value":
             return
-        pending = sorted(set(symbols) - attempted)
+        pending = sorted(
+            symbol for symbol in set(symbols)
+            if attempted_through.get(symbol, date.min) < load_end
+        )
         if not pending:
             return
-        attempted.update(pending)
-        load_fund_nav_history(
+        result = load_fund_nav_history(
             repo.store.data_dir,
             engine,
             pending,
             load_start,
-            engine.run_end or load_end,
+            load_end,
         )
+        for symbol in pending:
+            attempted_through[symbol] = load_end
+        freshness.update(result.get("symbol_freshness", {}))
         visible = engine.extra_history.get("unit_net_value", {})
         nav.update({
-            "requested_symbols": len(attempted),
-            "available_symbols": len(set(attempted) & set(visible)),
-            "missing_symbols": sorted(attempted - set(visible)),
-            "rows": sum(len(visible.get(symbol, {})) for symbol in attempted),
+            "requested_symbols": len(attempted_through),
+            "available_symbols": len(set(attempted_through) & set(visible)),
+            "missing_symbols": sorted(set(attempted_through) - set(visible)),
+            "stale_symbols": sorted(
+                symbol for symbol, item in freshness.items()
+                if item.get("freshness_status") == "stale"
+            ),
+            "unavailable_symbols": sorted(
+                symbol for symbol, item in freshness.items()
+                if item.get("freshness_status") == "unavailable"
+            ),
+            "symbol_freshness": dict(freshness),
+            "rows": sum(len(visible.get(symbol, {})) for symbol in attempted_through),
         })
 
     engine.set_extra_history_loader(load_nav)
