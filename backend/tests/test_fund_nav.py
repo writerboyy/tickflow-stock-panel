@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 import polars as pl
@@ -10,9 +11,14 @@ from app.services.fund_nav_schema import write_fund_nav_schema_registry
 class FakeEngine:
     def __init__(self) -> None:
         self.extra_history = {}
+        self.universe = []
+        self.extra_history_loader = None
 
     def set_extra_history(self, name, values) -> None:
         self.extra_history.setdefault(name, {}).update(values)
+
+    def set_extra_history_loader(self, loader) -> None:
+        self.extra_history_loader = loader
 
 
 def _write_current_cache(path, symbol: str, rows: list[tuple[date, float]]) -> None:
@@ -162,3 +168,53 @@ def test_fresh_cache_does_not_fetch(tmp_path, monkeypatch):
     )
 
     assert result["symbol_freshness"][symbol]["freshness_status"] == "fresh"
+
+
+def test_lazy_loader_batches_the_strategy_universe_once_per_required_date(
+    tmp_path,
+    monkeypatch,
+):
+    engine = FakeEngine()
+    engine.universe = ["510300.SH", "159915.SZ"]
+    calls = []
+
+    def load(_data_dir, target_engine, symbols, start, end):
+        calls.append((symbols, start, end))
+        target_engine.set_extra_history("unit_net_value", {
+            symbol: {end: 1.0} for symbol in symbols
+        })
+        return {
+            "symbol_freshness": {
+                symbol: {
+                    "required_date": end.isoformat(),
+                    "actual_date": end.isoformat(),
+                    "freshness_status": "fresh",
+                }
+                for symbol in symbols
+            },
+        }
+
+    monkeypatch.setattr(fund_nav, "load_fund_nav_history", load)
+    metadata = fund_nav.prepare_fund_nav_data(
+        SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path)),
+        engine,
+        date(2025, 7, 1),
+        date(2025, 7, 24),
+    )
+
+    engine.extra_history_loader(
+        "unit_net_value", ["510300.SH"], date(2025, 7, 1), date(2025, 7, 23),
+    )
+    engine.extra_history_loader(
+        "unit_net_value", ["159915.SZ"], date(2025, 7, 1), date(2025, 7, 23),
+    )
+    engine.extra_history_loader(
+        "unit_net_value", ["510300.SH"], date(2025, 7, 1), date(2025, 7, 24),
+    )
+
+    assert calls == [
+        (["159915.SZ", "510300.SH"], date(2025, 7, 1), date(2025, 7, 23)),
+        (["159915.SZ", "510300.SH"], date(2025, 7, 1), date(2025, 7, 24)),
+    ]
+    assert metadata["requested_symbols"] == 2
+    assert metadata["available_symbols"] == 2

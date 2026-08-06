@@ -225,8 +225,13 @@ def prepare_fund_nav_data(
     def load_nav(info: str, symbols: list[str], load_start: date, load_end: date) -> None:
         if info != "unit_net_value":
             return
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in [*symbols, *engine.universe]
+            if str(symbol).strip()
+        }
         pending = sorted(
-            symbol for symbol in set(symbols)
+            symbol for symbol in requested
             if attempted_through.get(symbol, date.min) < load_end
         )
         if not pending:
