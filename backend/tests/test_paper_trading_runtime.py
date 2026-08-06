@@ -707,15 +707,38 @@ def test_poll_accounts_share_one_feed_and_receive_filtered_quotes():
     assert service.released == 1
 
 
-def test_bar_account_registers_only_held_symbols_for_live_valuation():
+def test_bar_account_registers_execution_and_valuation_symbols_for_realtime_quotes():
     service = FakeQuoteService()
     hub = MarketDataHub(service, repo=None)
 
     hub.register("paper", "bar_1m", {"A", "513690.SH"}, "etf", queue.Queue(), valuation_symbols={"513690.SH"})
 
-    assert service.symbol_consumers == {"paper:paper": {"513690.SH"}}
+    assert service.symbol_consumers == {"paper:paper": {"A", "513690.SH"}}
     hub.unregister("paper")
     assert service.symbol_consumers == {}
+
+
+def test_bar_accounts_aggregate_realtime_quotes_without_duplicate_minutes():
+    service = FakeQuoteService()
+    hub = MarketDataHub(service, repo=None)
+    hub._subscriptions["paper"] = _Subscription(  # noqa: SLF001
+        "paper", "bar_1m", {"A"}, "stock", queue.Queue(), execution_mode="full_bar",
+    )
+    hub._accumulate_live_bars("stock", [  # noqa: SLF001
+        {"symbol": "A", "timestamp": "2024-01-02T09:30:05", "last_price": 10.0, "volume": 100, "amount": 1_000},
+        {"symbol": "A", "timestamp": "2024-01-02T09:30:35", "last_price": 11.0, "volume": 150, "amount": 1_500},
+        {"symbol": "A", "timestamp": "2024-01-02T09:31:05", "last_price": 12.0, "volume": 200, "amount": 2_000},
+    ])
+    hub._flush_live_bars(datetime(2024, 1, 2, 9, 32))  # noqa: SLF001
+    hub._flush_live_bars(datetime(2024, 1, 2, 9, 32))  # noqa: SLF001
+
+    rows = hub._live_rows(  # noqa: SLF001
+        "stock", {"A"}, "1m", datetime(2024, 1, 2, 9, 29), datetime(2024, 1, 2, 9, 32),
+    )
+    assert [(row.timestamp, row.close, row.volume, row.amount) for row in rows] == [
+        (datetime(2024, 1, 2, 9, 31), 11.0, 50.0, 500.0),
+        (datetime(2024, 1, 2, 9, 32), 12.0, 50.0, 500.0),
+    ]
 
 
 def test_scheduled_bar_account_receives_clock_without_reading_minute_ranges():
@@ -739,6 +762,8 @@ def test_scheduled_bar_account_receives_clock_without_reading_minute_ranges():
         "type": "scheduled_clock",
         "account_id": "paper",
         "cutoff": "2024-01-02T10:15:00",
+        "quotes": [],
+        "live_bars": [],
     }
     assert target.empty()
 
@@ -1347,9 +1372,15 @@ def test_scheduled_catch_up_uses_scoped_snapshots_not_minute_ranges(monkeypatch,
     current = store.save({
         "id": "paper",
         "status": "running",
+        "last_bar": "2024-01-01T15:00:00",
         "config": {"market_mode": "bar_1m", "asset_type": "stock"},
     })
-    monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: datetime(2024, 1, 2, 15, 5))
+    engine.restore_runtime({
+        "session_date": "2024-01-01",
+        "session_finished": True,
+        "last_timestamp": "2024-01-01T15:00:00",
+    })
+    monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: datetime(2024, 1, 3, 15, 5))
 
     result = _catch_up_bars(
         store,

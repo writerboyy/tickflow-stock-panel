@@ -84,12 +84,13 @@ function syncLabel(account: PaperAccount) {
     const total = account.sync?.total_days ?? 0
     return total > 0 ? `补齐中 ${done}/${total}` : '补齐中'
   }
+  if (phase === 'waiting_market') return '等待实时行情'
   if (phase === 'error') return '同步失败'
   return ''
 }
 
 function syncClass(account: PaperAccount) {
-  if (account.sync?.phase === 'catching_up') return 'text-warning'
+  if (account.sync?.phase === 'catching_up' || account.sync?.phase === 'waiting_market') return 'text-warning'
   if (account.sync?.phase === 'error') return 'text-danger'
   return 'text-muted'
 }
@@ -743,6 +744,7 @@ export function PaperTrading() {
         {syncLabel(account) || account.market_mode === 'poll_3s' || account.market_mode === 'websocket' ? <section className="flex min-h-10 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border px-4 py-2 text-[10px] text-muted">
           {syncLabel(account) ? <span className={`inline-flex items-center gap-1.5 ${syncClass(account)}`}><Activity className="h-3.5 w-3.5" />{syncLabel(account)}</span> : null}
           {account.sync?.phase === 'catching_up' ? <span className="font-mono text-warning">目标 {formatTime(account.sync.target ?? undefined)}</span> : null}
+          {account.sync?.phase === 'waiting_market' && account.sync.reason ? <span className="min-w-0 truncate text-warning" title={account.sync.reason}>{account.sync.reason}</span> : null}
           {(account.sync?.queue_delay_seconds ?? 0) > 0.05 ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />队列等待 {Number(account.sync?.queue_delay_seconds).toFixed(1)} 秒</span> : null}
           {account.market_mode === 'poll_3s' ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span> : null}
           {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span> : null}

@@ -7,6 +7,7 @@ from hashlib import sha256
 import polars as pl
 import pytest
 
+from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
@@ -1344,6 +1345,129 @@ def run(context):
         )
 
     assert "executed" not in engine.context.state
+
+
+def test_live_scheduled_event_uses_realtime_snapshot_instead_of_today_history():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '10:00', symbols=['X'])
+
+def run(context):
+    context.state['price'] = context.current_bars()['X'].close
+"""
+    repo = ScheduledRepository([
+        minute_row("X", datetime(2024, 1, 2, 10, 0), 99.0),
+    ])
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    live = Bar("X", datetime(2024, 1, 2, 10, 0), 10.0, 10.0, 10.0, 10.0)
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        scheduled_market("X"),
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 10, 0),
+        "stock",
+        "1m",
+        live_bars=[live],
+        live_only=True,
+    )
+
+    assert engine.context.state["price"] == 10.0
+
+
+def test_live_scheduled_event_waits_instead_of_using_today_history():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '14:00', symbols=['X'])
+
+def run(context):
+    context.state['executed'] = True
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    with pytest.raises(ScheduledOpeningDataPending, match="14:00 定时任务缺少实时行情"):
+        advance_scheduled_session(
+            ScheduledRepository([
+                minute_row("X", datetime(2024, 1, 2, 14, 0), 99.0),
+            ]),
+            engine,
+            scheduled_market("X"),
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 2, 14, 0),
+            "stock",
+            "1m",
+            live_bars=[],
+            live_only=True,
+        )
+
+    assert "executed" not in engine.context.state
+
+
+def test_live_scheduled_pending_order_never_fills_from_today_history():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '10:00', symbols=['X'])
+
+def run(context):
+    context.buy('X', quantity=100)
+"""
+    repo = ScheduledRepository([
+        minute_row("X", datetime(2024, 1, 2, 10, 0), 99.0),
+        minute_row("X", datetime(2024, 1, 2, 10, 1), 99.0),
+    ])
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            asset_type="stock",
+            benchmark_symbol="X",
+            fill_policy="next_open",
+            slippage_bps=0,
+        ),
+    )
+    opening = Bar("X", datetime(2024, 1, 2, 10, 0), 10.0, 10.0, 10.0, 10.0)
+
+    advance_scheduled_session(
+        repo,
+        engine,
+        scheduled_market("X"),
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 10, 1),
+        "stock",
+        "1m",
+        live_bars=[opening],
+        live_only=True,
+    )
+
+    assert engine.account.fills == []
+    assert engine.pending_orders
+
+    realtime_fill = Bar("X", datetime(2024, 1, 2, 10, 2), 11.0, 11.0, 11.0, 11.0)
+    advance_scheduled_session(
+        repo,
+        engine,
+        scheduled_market("X"),
+        datetime(2024, 1, 2).date(),
+        datetime(2024, 1, 2, 10, 2),
+        "stock",
+        "1m",
+        live_bars=[opening, realtime_fill],
+        live_only=True,
+    )
+
+    assert engine.account.fills[0].price == 11.0
 
 
 def test_scheduled_lunch_event_uses_latest_visible_bar_and_dynamic_universe():

@@ -1370,7 +1370,7 @@ export interface PaperRiskConfig {
 }
 
 export interface PaperSyncState {
-  phase: 'idle' | 'catching_up' | 'live' | 'error'
+  phase: 'idle' | 'catching_up' | 'live' | 'waiting_market' | 'error'
   from?: string | null
   target?: string | null
   through?: string | null
@@ -1379,6 +1379,8 @@ export interface PaperSyncState {
   missing_symbols?: string[]
   queue_delay_seconds?: number
   error?: string | null
+  reason?: string | null
+  source?: 'realtime' | string
   updated_at?: string
 }
 

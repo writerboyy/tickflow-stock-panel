@@ -14,10 +14,11 @@ from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time as clock_time, timedelta
 from hashlib import sha256
 from itertools import groupby
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
-from app.free_strategy.bars import Bar, rows_to_bars
+from app.free_strategy.bars import Bar, group_bars, rows_to_bars
 from app.free_strategy.continuation import compact_paper_checkpoint
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
 from app.free_strategy.store import PaperAccountStore, now_iso
@@ -83,6 +84,22 @@ class _Subscription:
     scheduled_times: tuple[str, ...] = ()
     last_dispatch_cutoff: str = ""
     last_dispatch_at: float = 0.0
+
+
+@dataclass(slots=True)
+class _LiveMinuteBucket:
+    bucket: datetime
+    first: float
+    high: float
+    low: float
+    last: float
+    volume: float
+    amount: float
+    session_volume: float
+    prev_close: float | None
+    limit_up: float | None
+    limit_down: float | None
+    suspended: bool
 
 
 class _QueuedPayload(dict[str, Any]):
@@ -184,6 +201,32 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
     return quotes
 
 
+def _quote_to_live_bar(quote: Quote) -> Bar:
+    """将一个实时快照转换为当前可见价格 Bar，不引入历史 OHLC。"""
+    timestamp = quote.timestamp.replace(second=0, microsecond=0)
+    if quote.timestamp.second:
+        timestamp += timedelta(minutes=1)
+    price = float(quote.last_price)
+    return Bar(
+        symbol=quote.symbol,
+        timestamp=timestamp,
+        open=price,
+        high=price,
+        low=price,
+        close=price,
+        session_volume=float(quote.volume or 0),
+        raw_open=price,
+        raw_high=price,
+        raw_low=price,
+        raw_close=price,
+        previous_close=quote.prev_close,
+        tradable=not quote.suspended,
+        suspended=quote.suspended,
+        limit_up=quote.limit_up,
+        limit_down=quote.limit_down,
+    )
+
+
 def _dispatch_paper_notification(state: dict[str, Any], event: dict[str, Any]) -> None:
     """Send one paper-account event to the channels enabled for that account."""
     from app.services import notify_adapter, preferences, webhook_adapter
@@ -236,7 +279,10 @@ class MarketDataHub:
         self.repo = repo
         self._lock = threading.RLock()
         self._subscriptions: dict[str, _Subscription] = {}
-        self._poll_leased = False
+        self._quote_feed_leased = False
+        self._live_quote_last: dict[tuple[str, str], tuple[datetime, float, float]] = {}
+        self._live_quote_buckets: dict[tuple[str, str], _LiveMinuteBucket] = {}
+        self._live_bars: dict[tuple[str, str], deque[Bar]] = {}
         self._bar_stop = threading.Event()
         self._bar_thread: threading.Thread | None = None
         self._stream = None
@@ -281,25 +327,33 @@ class MarketDataHub:
                 tuple(scheduled_times),
             )
             try:
-                if mode == "poll_3s" and not self._poll_leased:
-                    self.quote_service.add_fetch_listener(self._on_poll_quotes)
+                if (mode.startswith("bar_") or mode == "poll_3s") and not self._quote_feed_leased:
+                    self.quote_service.add_fetch_listener(self._on_quote_fetch)
                     self.quote_service.acquire_temporary_polling(3.0)
-                    self._poll_leased = True
+                    self._quote_feed_leased = True
                 if mode.startswith("bar_"):
                     self._ensure_bar_thread()
                 if mode == "websocket":
                     self._sync_websocket()
-                self.quote_service.set_symbol_consumer(f"paper:{account_id}", valuation)
+                consumer_symbols = (
+                    cleaned | valuation
+                    if mode.startswith("bar_") or mode == "poll_3s"
+                    else valuation
+                )
+                self.quote_service.set_symbol_consumer(f"paper:{account_id}", consumer_symbols)
             except Exception:
                 if previous is None:
                     self._subscriptions.pop(account_id, None)
                 else:
                     self._subscriptions[account_id] = previous
-                if mode == "poll_3s" and not any(sub.mode == "poll_3s" for sub in self._subscriptions.values()):
-                    self.quote_service.remove_fetch_listener(self._on_poll_quotes)
-                    if self._poll_leased:
+                if (
+                    (mode.startswith("bar_") or mode == "poll_3s")
+                    and not any(sub.mode.startswith("bar_") or sub.mode == "poll_3s" for sub in self._subscriptions.values())
+                ):
+                    self.quote_service.remove_fetch_listener(self._on_quote_fetch)
+                    if self._quote_feed_leased:
                         self.quote_service.release_temporary_polling()
-                        self._poll_leased = False
+                        self._quote_feed_leased = False
                 if mode == "websocket":
                     try:
                         self._sync_websocket()
@@ -308,8 +362,11 @@ class MarketDataHub:
                 if previous is None:
                     self.quote_service.remove_symbol_consumer(f"paper:{account_id}")
                 else:
+                    previous_consumer = set(previous.valuation_symbols or set())
+                    if previous.mode.startswith("bar_") or previous.mode == "poll_3s":
+                        previous_consumer |= previous.symbols
                     self.quote_service.set_symbol_consumer(
-                        f"paper:{account_id}", previous.valuation_symbols or set(),
+                        f"paper:{account_id}", previous_consumer,
                     )
                 raise
 
@@ -319,10 +376,13 @@ class MarketDataHub:
             if removed is None:
                 return
             self.quote_service.remove_symbol_consumer(f"paper:{account_id}")
-            if removed.mode == "poll_3s" and not any(s.mode == "poll_3s" for s in self._subscriptions.values()):
-                self.quote_service.remove_fetch_listener(self._on_poll_quotes)
+            if (
+                (removed.mode.startswith("bar_") or removed.mode == "poll_3s")
+                and not any(s.mode.startswith("bar_") or s.mode == "poll_3s" for s in self._subscriptions.values())
+            ):
+                self.quote_service.remove_fetch_listener(self._on_quote_fetch)
                 self.quote_service.release_temporary_polling()
-                self._poll_leased = False
+                self._quote_feed_leased = False
             if removed.mode == "websocket":
                 self._sync_websocket()
             if removed.mode.startswith("bar_") and not any(s.mode.startswith("bar_") for s in self._subscriptions.values()):
@@ -349,9 +409,12 @@ class MarketDataHub:
                     for symbol in valuation_symbols
                     if str(symbol).strip()
                 }
-                self.quote_service.set_symbol_consumer(
-                    f"paper:{account_id}", subscription.valuation_symbols,
-                )
+            consumer_symbols = set(subscription.valuation_symbols or set())
+            if subscription.mode.startswith("bar_") or subscription.mode == "poll_3s":
+                consumer_symbols |= subscription.symbols
+            self.quote_service.set_symbol_consumer(
+                f"paper:{account_id}", consumer_symbols,
+            )
             if last_bar is not None:
                 subscription.last_bar = str(last_bar)
             if subscription.mode == "websocket":
@@ -361,21 +424,214 @@ class MarketDataHub:
         with self._lock:
             return account_id in self._subscriptions
 
-    def _on_poll_quotes(self) -> None:
-        self._dispatch_quotes("poll_3s", self._cached_quote_records())
+    def _on_quote_fetch(self) -> None:
+        records_by_asset = self._cached_quote_records_by_asset()
+        normalized: list[dict[str, Any]] = []
+        for asset_type, records in records_by_asset.items():
+            values = [item for item in (_quote_record(row) for row in records) if item is not None]
+            normalized.extend(values)
+            self._accumulate_live_bars(asset_type, values)
+        self._dispatch_quotes("poll_3s", normalized)
 
-    def _cached_quote_records(self) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
+    def _cached_quote_records_by_asset(self) -> dict[str, list[dict[str, Any]]]:
+        records: dict[str, list[dict[str, Any]]] = {}
         for asset_type in ("stock", "etf"):
             frame = self.quote_service.get_quotes_compat(asset_type)
             if frame is not None and not frame.is_empty():
-                records.extend(frame.to_dicts())
+                records[asset_type] = frame.to_dicts()
         get_index_quotes = getattr(self.quote_service, "get_index_quotes", None)
         if get_index_quotes is not None:
             frame = get_index_quotes()
             if frame is not None and not frame.is_empty():
-                records.extend(frame.to_dicts())
+                records["index"] = frame.to_dicts()
         return records
+
+    def _cached_quote_records(self) -> list[dict[str, Any]]:
+        return [row for rows in self._cached_quote_records_by_asset().values() for row in rows]
+
+    def _live_bar_targets(self, asset_type: str) -> set[str]:
+        with self._lock:
+            return set().union(*(
+                sub.symbols
+                for sub in self._subscriptions.values()
+                if sub.asset_type == asset_type
+                and sub.mode.startswith("bar_")
+            )) if any(
+                sub.asset_type == asset_type
+                and sub.mode.startswith("bar_")
+                for sub in self._subscriptions.values()
+            ) else set()
+
+    @staticmethod
+    def _quote_datetime(value: object) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        return as_cn_naive(parsed)
+
+    def _append_live_bar(self, asset_type: str, bar: Bar) -> None:
+        self._live_bars.setdefault((asset_type, bar.symbol), deque(maxlen=600)).append(bar)
+
+    def _finish_live_bucket(self, asset_type: str, symbol: str, bucket: _LiveMinuteBucket) -> None:
+        self._append_live_bar(
+            asset_type,
+            Bar(
+                symbol=symbol,
+                timestamp=bucket.bucket + timedelta(minutes=1),
+                open=bucket.first,
+                high=bucket.high,
+                low=bucket.low,
+                close=bucket.last,
+                volume=bucket.volume,
+                amount=bucket.amount,
+                session_volume=bucket.session_volume,
+                raw_open=bucket.first,
+                raw_high=bucket.high,
+                raw_low=bucket.low,
+                raw_close=bucket.last,
+                previous_close=bucket.prev_close,
+                tradable=not bucket.suspended,
+                suspended=bucket.suspended,
+                limit_up=bucket.limit_up,
+                limit_down=bucket.limit_down,
+            ),
+        )
+
+    def _accumulate_live_bars(self, asset_type: str, records: list[dict[str, Any]]) -> None:
+        targets = self._live_bar_targets(asset_type)
+        if not targets:
+            return
+        with self._lock:
+            for raw in records:
+                symbol = str(raw.get("symbol") or "").strip().upper()
+                if symbol not in targets:
+                    continue
+                timestamp = self._quote_datetime(raw.get("timestamp"))
+                price = raw.get("last_price")
+                if timestamp is None or price is None:
+                    continue
+                price = float(price)
+                if not isfinite(price) or price <= 0:
+                    continue
+                if not (clock_time(9, 30) <= timestamp.time() < clock_time(11, 30)
+                        or clock_time(13, 0) <= timestamp.time() < clock_time(15, 0)):
+                    continue
+                key = (asset_type, symbol)
+                previous = self._live_quote_last.get(key)
+                if previous is not None and timestamp <= previous[0]:
+                    continue
+                current_volume = float(raw.get("volume") or 0)
+                current_amount = float(raw.get("amount") or 0)
+                volume_delta = max(0.0, current_volume - previous[1]) if previous else 0.0
+                amount_delta = max(0.0, current_amount - previous[2]) if previous else 0.0
+                self._live_quote_last[key] = (timestamp, current_volume, current_amount)
+                bucket_time = timestamp.replace(second=0, microsecond=0)
+                bucket = self._live_quote_buckets.get(key)
+                if bucket is not None and bucket.bucket != bucket_time:
+                    self._finish_live_bucket(asset_type, symbol, bucket)
+                    bucket = None
+                if bucket is None:
+                    bucket = _LiveMinuteBucket(
+                        bucket=bucket_time,
+                        first=price,
+                        high=price,
+                        low=price,
+                        last=price,
+                        volume=volume_delta,
+                        amount=amount_delta,
+                        session_volume=max(0.0, current_volume),
+                        prev_close=(
+                            float(raw["prev_close"])
+                            if raw.get("prev_close") is not None else None
+                        ),
+                        limit_up=(
+                            float(raw["limit_up"])
+                            if raw.get("limit_up") is not None else None
+                        ),
+                        limit_down=(
+                            float(raw["limit_down"])
+                            if raw.get("limit_down") is not None else None
+                        ),
+                        suspended=bool(raw.get("suspended", False)),
+                    )
+                    self._live_quote_buckets[key] = bucket
+                else:
+                    bucket.high = max(bucket.high, price)
+                    bucket.low = min(bucket.low, price)
+                    bucket.last = price
+                    bucket.volume += volume_delta
+                    bucket.amount += amount_delta
+                    bucket.session_volume = max(bucket.session_volume, current_volume)
+                    bucket.suspended = bucket.suspended and bool(raw.get("suspended", False))
+
+    def _flush_live_bars(self, cutoff: datetime) -> None:
+        with self._lock:
+            for key, bucket in list(self._live_quote_buckets.items()):
+                if bucket.bucket + timedelta(minutes=1) <= cutoff:
+                    self._finish_live_bucket(key[0], key[1], bucket)
+                    self._live_quote_buckets.pop(key, None)
+
+    def _live_rows(
+        self,
+        asset_type: str,
+        symbols: set[str],
+        timeframe: str,
+        after: datetime,
+        cutoff: datetime,
+    ) -> list[Bar]:
+        raw_after = after
+        if timeframe in {"5m", "30m"}:
+            raw_after -= timedelta(minutes=int(timeframe[:-1]))
+        with self._lock:
+            rows = [
+                bar
+                for symbol in symbols
+                for bar in self._live_bars.get((asset_type, symbol), ())
+                if raw_after < bar.timestamp <= cutoff
+            ]
+        if timeframe == "1d":
+            grouped: dict[tuple[str, date], list[Bar]] = {}
+            for bar in rows:
+                grouped.setdefault((bar.symbol, bar.date), []).append(bar)
+            daily_rows: list[Bar] = []
+            for (symbol, day), values in grouped.items():
+                values.sort(key=lambda item: item.timestamp)
+                daily_rows.append(Bar(
+                    symbol=symbol,
+                    timestamp=datetime.combine(day, clock_time(15, 0)),
+                    open=values[0].open,
+                    high=max(item.high for item in values),
+                    low=min(item.low for item in values),
+                    close=values[-1].close,
+                    volume=sum(item.volume for item in values),
+                    amount=sum(item.amount for item in values),
+                    session_volume=values[-1].session_volume,
+                    raw_open=values[0].raw_open,
+                    raw_high=max(item.raw_high or item.high for item in values),
+                    raw_low=min(item.raw_low or item.low for item in values),
+                    raw_close=values[-1].raw_close,
+                    tradable=any(item.tradable for item in values),
+                    suspended=all(item.suspended for item in values),
+                    limit_up=next((item.limit_up for item in reversed(values) if item.limit_up is not None), None),
+                    limit_down=next((item.limit_down for item in reversed(values) if item.limit_down is not None), None),
+                    previous_close=next((item.previous_close for item in values if item.previous_close is not None), None),
+                ))
+            rows = sorted(daily_rows, key=lambda bar: (bar.timestamp, bar.symbol))
+        elif timeframe != "1m":
+            rows = group_bars(rows, timeframe)
+            rows = [bar for bar in rows if after < bar.timestamp <= cutoff]
+        return rows
+
+    def _scheduled_live_bars(self, sub: _Subscription, cutoff: datetime) -> list[Bar]:
+        self._flush_live_bars(cutoff)
+        try:
+            after = datetime.fromisoformat(sub.last_bar) if sub.last_bar else datetime.combine(
+                cutoff.date(), clock_time.min,
+            ) - timedelta(microseconds=1)
+        except ValueError:
+            after = datetime.combine(cutoff.date(), clock_time.min) - timedelta(microseconds=1)
+        return self._live_rows(sub.asset_type, sub.symbols, "1m", after, cutoff)
 
     def _dispatch_quotes(self, mode: str, records: list[dict[str, Any]]) -> None:
         normalized = [item for item in (_quote_record(row) for row in records) if item is not None]
@@ -431,6 +687,7 @@ class MarketDataHub:
                     continue
                 timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1d")
                 after = min(parsed_last, default=datetime.combine(cutoff.date(), clock_time.min) - timedelta(microseconds=1))
+                self._flush_live_bars(cutoff)
                 try:
                     rows = list(_read_rows(
                         self.repo,
@@ -445,13 +702,35 @@ class MarketDataHub:
                         until=cutoff,
                     ))
                 except ValueError:
-                    continue
+                    rows = []
                 except Exception:  # noqa: BLE001
                     logger.exception("模拟盘闭合 K 线读取失败")
-                    continue
+                    rows = []
                 if mode in {"bar_1m", "bar_5m", "bar_30m"}:
                     minutes = int(timeframe[:-1])
                     rows = [bar for bar in rows if bar.timestamp + timedelta(minutes=minutes - 1) <= cutoff]
+                if cutoff.date() == cn_today():
+                    # 当天执行价只能来自本次实时轮询；本地当天 K 线可能是旧快照。
+                    rows = [bar for bar in rows if bar.date < cutoff.date()]
+                    live_rows = self._live_rows(
+                        asset_type,
+                        set(symbols),
+                        timeframe,
+                        after,
+                        cutoff,
+                    )
+                    if timeframe in {"5m", "30m"}:
+                        minutes = int(timeframe[:-1])
+                        live_rows = [
+                            bar for bar in live_rows
+                            if bar.timestamp + timedelta(minutes=minutes) <= cutoff
+                        ]
+                    existing = {(bar.symbol, bar.timestamp) for bar in rows}
+                    rows.extend(
+                        bar for bar in live_rows
+                        if (bar.symbol, bar.timestamp) not in existing
+                    )
+                    rows.sort(key=lambda bar: (bar.timestamp, bar.symbol))
                 for sub in subscriptions:
                     fresh = [
                         bar for bar in rows
@@ -496,13 +775,40 @@ class MarketDataHub:
                 and monotonic_now - sub.last_dispatch_at < 5
             ):
                 continue
-            if _put_bar_batch(sub.input_queue, {
+            payload = {
                 "type": "scheduled_clock",
                 "account_id": sub.account_id,
                 "cutoff": cutoff_value,
-            }):
+            }
+            payload["quotes"] = self._fresh_quote_records(sub.symbols, cutoff.date())
+            payload["live_bars"] = [bar.as_dict() for bar in self._scheduled_live_bars(sub, cutoff)]
+            if _put_bar_batch(sub.input_queue, payload):
                 sub.last_dispatch_cutoff = cutoff_value
                 sub.last_dispatch_at = monotonic_now
+
+    def _fresh_quote_records(self, symbols: set[str], expected_date: date) -> list[dict[str, Any]]:
+        getter = getattr(self.quote_service, "get_fresh_quotes", None)
+        if not callable(getter):
+            return []
+        try:
+            snapshot = getter(set(symbols))
+        except Exception:  # noqa: BLE001
+            logger.exception("模拟盘读取实时行情快照失败")
+            return []
+        if snapshot.get("date") != expected_date.isoformat():
+            return []
+        values: list[dict[str, Any]] = []
+        for symbol, raw in (snapshot.get("quotes") or {}).items():
+            row = dict(raw)
+            row["symbol"] = str(symbol).strip().upper()
+            normalized = _quote_record(row)
+            if normalized is None:
+                continue
+            timestamp = self._quote_datetime(normalized.get("timestamp"))
+            if timestamp is None or timestamp.date() != expected_date:
+                continue
+            values.append(normalized)
+        return values
 
     def _websocket_symbols(self, *, exclude: str | None = None) -> set[str]:
         return set().union(*(
@@ -915,6 +1221,28 @@ def _closed_bar_cutoff(mode: str, now: datetime) -> datetime:
     return datetime.combine(now.date(), clock_time(15, 0))
 
 
+def _full_bar_wait_reason(state: dict[str, Any], now: datetime) -> str | None:
+    """返回闭合 K 线账户的实时行情等待原因，不把进程存活当成行情正常。"""
+    if str(state.get("execution_mode") or "full_bar") != "full_bar":
+        return None
+    mode = state_market_mode(state)
+    if not mode.startswith("bar_"):
+        return None
+    cutoff = _closed_bar_cutoff(mode, now)
+    if cutoff.date() != cn_today() or cutoff.time() < clock_time(9, 30):
+        return None
+    if mode == "bar_1d" and now.time() < clock_time(15, 1):
+        return None
+    last_value = state.get("last_bar") or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
+    try:
+        last_bar = datetime.fromisoformat(str(last_value)) if last_value else None
+    except ValueError:
+        last_bar = None
+    if last_bar is None or last_bar < cutoff:
+        return f"等待当日实时{mode.removeprefix('bar_')}分钟行情，未推进至 {cutoff.strftime('%H:%M')}"
+    return None
+
+
 def _fill_event_id(fill: Any) -> str:
     raw = ":".join(str(value) for value in (
         getattr(fill, "order_id", ""),
@@ -1237,16 +1565,6 @@ def _scheduled_trading_dates(
         for symbol, day in market.daily
         if symbol in probes and start <= day <= cutoff.date()
     }
-    if (
-        cutoff.date() not in result
-        and cutoff.date().weekday() < 5
-        and cutoff.time() >= clock_time(9, 30)
-    ):
-        get_snapshot = getattr(repo, "get_minute_snapshot", None)
-        if callable(get_snapshot):
-            frame = get_snapshot(probes, cutoff, asset_type)
-            if frame is not None and not frame.is_empty():
-                result.add(cutoff.date())
     return sorted(result)
 
 
@@ -1264,6 +1582,8 @@ def _process_scheduled_day(
     *,
     finalize: bool,
     allow_opening_data_retry: bool = False,
+    live_bars: list[Bar] | None = None,
+    live_only: bool = False,
     notify: Any = None,
 ) -> dict[str, Any]:
     from app.free_strategy.process import advance_scheduled_session
@@ -1282,6 +1602,8 @@ def _process_scheduled_day(
         timeframe,
         finalize=finalize,
         allow_opening_data_retry=allow_opening_data_retry,
+        live_bars=live_bars,
+        live_only=live_only,
     )
     timestamp = engine._last_timestamp  # noqa: SLF001
     if timestamp is None:
@@ -1337,6 +1659,8 @@ def _catch_up_scheduled(
         _scheduled_trading_dates(repo, engine, market, start_day, cutoff, asset_type)
         if start_day <= cutoff.date() else []
     )
+    # 历史补齐只处理已结束交易日；当天必须等待实时行情消息。
+    trading_dates = [day for day in trading_dates if day < cutoff.date()]
     existing_sync = current.get("sync")
     if not trading_dates and isinstance(existing_sync, dict) and existing_sync.get("phase") == "live":
         return current
@@ -1484,6 +1808,8 @@ def _catch_up_bars(
         after=last_timestamp,
         until=cutoff,
     ))
+    if cutoff.date() == cn_today():
+        rows = [bar for bar in rows if bar.date < cutoff.date()]
     rows = [bar for bar in rows if (last_timestamp is None or bar.timestamp > last_timestamp) and bar.timestamp <= cutoff]
     existing_sync = current.get("sync")
     if not rows and isinstance(existing_sync, dict) and existing_sync.get("phase") == "live":
@@ -1691,6 +2017,19 @@ def _paper_worker(
                     continue
                 cutoff = datetime.fromisoformat(str(message["cutoff"]))
                 asset_type = str(current.get("config", {}).get("asset_type", "stock"))
+                quote_bars = [
+                    _quote_to_live_bar(quote)
+                    for quote in _quotes_from_records(message.get("quotes", []))
+                ]
+                streamed_bars = rows_to_bars(message.get("live_bars", []))
+                live_by_key = {
+                    (bar.symbol, bar.timestamp): bar
+                    for bar in [*quote_bars, *streamed_bars]
+                    if bar.date == cutoff.date() and bar.timestamp <= cutoff
+                }
+                live_bars = sorted(
+                    live_by_key.values(), key=lambda bar: (bar.timestamp, bar.symbol),
+                )
                 trading_dates = _scheduled_trading_dates(
                     repo,
                     engine,
@@ -1699,6 +2038,12 @@ def _paper_worker(
                     cutoff,
                     asset_type,
                 )
+                if (
+                    cutoff.date().weekday() < 5
+                    and cutoff.time() >= clock_time(9, 30)
+                    and cutoff.date() not in trading_dates
+                ):
+                    trading_dates.append(cutoff.date())
                 if not trading_dates:
                     continue
                 current = _process_scheduled_day(
@@ -1718,11 +2063,15 @@ def _paper_worker(
                     }.get(state_market_mode(current), "1d"),
                     finalize=cutoff.time() >= clock_time(15, 0),
                     allow_opening_data_retry=True,
+                    live_bars=live_bars,
+                    live_only=True,
                     notify=notify,
                 )
                 sync = dict(current.get("sync", {}))
                 sync.update({
                     "phase": "live",
+                    "source": "realtime",
+                    "reason": None,
                     "through": current.get("last_bar"),
                     "target": current.get("last_bar"),
                     "queue_delay_seconds": round(queue_wait, 3),
@@ -1778,11 +2127,16 @@ def _paper_worker(
                 current = store.update_fields(account_id, {"sync": sync})
             else:
                 continue
-        except ScheduledOpeningDataPending:
-            # The first opening minute can arrive after the clock boundary. Keep the
-            # account subscribed and let the next closed-minute clock retry it.
+        except ScheduledOpeningDataPending as exc:
             sync = dict(current.get("sync", {}))
-            sync.update({"phase": "live", "updated_at": now_iso()})
+            sync.update({
+                "phase": "waiting_market",
+                "source": "realtime",
+                "reason": str(exc),
+                "through": current.get("last_bar"),
+                "queue_delay_seconds": round(queue_wait, 3),
+                "updated_at": now_iso(),
+            })
             current = store.update_fields(account_id, {
                 "last_error": None,
                 "sync": sync,
@@ -1905,7 +2259,27 @@ class PaperTradingSupervisor:
             symbols.add(str(state.get("config", {}).get("benchmark_symbol", "510300.SH")))
             try:
                 sync_phase = str(state.get("sync", {}).get("phase") or "live")
-                if sync_phase == "live" and not self.hub.has_subscription(account_id):
+                wait_reason = _full_bar_wait_reason(state, cn_naive_now())
+                sync = dict(state.get("sync", {}))
+                if wait_reason:
+                    updates = {
+                        "phase": "waiting_market",
+                        "reason": wait_reason,
+                        "source": "realtime",
+                        "updated_at": now_iso(),
+                    }
+                    if any(sync.get(key) != value for key, value in updates.items()):
+                        sync.update(updates)
+                        state = self.store.update_fields(account_id, {"sync": sync})
+                        sync_phase = "waiting_market"
+                elif (
+                    sync_phase == "waiting_market"
+                    and str(state.get("execution_mode") or "full_bar") == "full_bar"
+                ):
+                    sync.update({"phase": "live", "reason": None, "updated_at": now_iso()})
+                    state = self.store.update_fields(account_id, {"sync": sync})
+                    sync_phase = "live"
+                if sync_phase in {"live", "waiting_market"} and not self.hub.has_subscription(account_id):
                     self.hub.register(
                         account_id,
                         state_market_mode(state),

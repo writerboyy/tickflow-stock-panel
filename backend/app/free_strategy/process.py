@@ -219,7 +219,7 @@ SCHEDULED_OPENING_RETRY_MINUTES = 5
 
 
 class ScheduledOpeningDataPending(RuntimeError):
-    """实时纸盘的开盘分钟 K 尚未落库，等待下一次行情时钟重试。"""
+    """实时纸盘缺少当前任务需要的实时行情，等待下一次时钟重试。"""
 
 
 @dataclass
@@ -1547,6 +1547,69 @@ def _scheduled_symbols(engine: FreeStrategyEngine, timestamp: datetime) -> list[
     return result
 
 
+def _live_daily_snapshot(rows: list[Bar], timestamp: datetime) -> list[Bar]:
+    grouped: dict[str, list[Bar]] = {}
+    for bar in rows:
+        grouped.setdefault(bar.symbol, []).append(bar)
+    result: list[Bar] = []
+    for symbol, values in grouped.items():
+        values.sort(key=lambda bar: bar.timestamp)
+        result.append(replace(
+            values[-1],
+            timestamp=timestamp,
+            open=values[0].open,
+            high=max(bar.high for bar in values),
+            low=min(bar.low for bar in values),
+            close=values[-1].close,
+            volume=sum(bar.volume for bar in values),
+            amount=sum(bar.amount for bar in values),
+            raw_open=values[0].raw_open,
+            raw_high=max(bar.raw_high or bar.high for bar in values),
+            raw_low=min(bar.raw_low or bar.low for bar in values),
+            raw_close=values[-1].raw_close,
+            session_volume=values[-1].session_volume,
+            tradable=any(bar.tradable for bar in values),
+            suspended=all(bar.suspended for bar in values),
+        ))
+    return sorted(result, key=lambda bar: (bar.timestamp, bar.symbol))
+
+
+def _live_scheduled_snapshot(
+    live_bars: Iterable[Bar],
+    symbols: list[str],
+    timestamp: datetime,
+    timeframe: str,
+) -> list[Bar]:
+    visible = [
+        bar for bar in live_bars
+        if bar.date == timestamp.date()
+        and bar.timestamp <= timestamp
+        and bar.symbol in symbols
+    ]
+    freshness_floor = timestamp
+    if time(11, 30) < timestamp.time() < time(13, 0):
+        freshness_floor = datetime.combine(timestamp.date(), time(11, 30))
+    latest_timestamp: dict[str, datetime] = {}
+    for bar in visible:
+        latest_timestamp[bar.symbol] = max(
+            latest_timestamp.get(bar.symbol, bar.timestamp), bar.timestamp,
+        )
+    fresh_symbols = {
+        symbol for symbol, latest in latest_timestamp.items()
+        if latest >= freshness_floor
+    }
+    visible = [bar for bar in visible if bar.symbol in fresh_symbols]
+    if timeframe == "1d":
+        return _live_daily_snapshot(visible, timestamp)
+    if timeframe != "1m":
+        visible = group_bars(visible, timeframe)
+    latest: dict[str, Bar] = {}
+    for bar in visible:
+        if bar.symbol not in latest or bar.timestamp > latest[bar.symbol].timestamp:
+            latest[bar.symbol] = bar
+    return sorted(latest.values(), key=lambda bar: (bar.timestamp, bar.symbol))
+
+
 def _scheduled_snapshot(
     repo: Any,
     engine: FreeStrategyEngine,
@@ -1556,11 +1619,17 @@ def _scheduled_snapshot(
     timeframe: str,
     *,
     symbols: list[str] | None = None,
+    live_bars: Iterable[Bar] | None = None,
+    live_only: bool = False,
 ) -> list[Bar]:
     symbols = _scheduled_symbols(engine, timestamp) if symbols is None else symbols
     _ensure_scheduled_market_data(
         repo, market, symbols, timestamp.date() - timedelta(days=45), timestamp.date(), asset_type,
     )
+    if live_only:
+        # Historical rows remain available to history()/indicators, but they can
+        # never become today's execution snapshot.
+        return _live_scheduled_snapshot(live_bars or (), symbols, timestamp, timeframe)
     if timeframe == "1d" and timestamp.time() >= time(15, 0):
         return [
             bar for symbol in symbols
@@ -1734,6 +1803,9 @@ def _process_scheduled_fills(
     until: datetime,
     asset_type: str,
     timeframe: str,
+    *,
+    live_bars: Iterable[Bar] | None = None,
+    live_only: bool = False,
 ) -> None:
     due_groups: dict[datetime, list[str]] = {}
     for order, due_at in engine.pending_orders:
@@ -1752,7 +1824,20 @@ def _process_scheduled_fills(
         asset_type,
     )
     for due_at, symbols in sorted(due_groups.items()):
-        if timeframe == "1d":
+        if live_only:
+            lower = _next_period_after(due_at, timeframe)
+            candidates = [
+                bar for bar in live_bars or ()
+                if bar.symbol in symbols
+                and lower <= bar.timestamp <= until
+                and (timeframe != "1d" or bar.date > due_at.date())
+            ]
+            if timeframe == "1d":
+                first_by_symbol: dict[str, Bar] = {}
+                for bar in sorted(candidates, key=lambda item: (item.timestamp, item.symbol)):
+                    first_by_symbol.setdefault(bar.symbol, bar)
+                candidates = list(first_by_symbol.values())
+        elif timeframe == "1d":
             candidates: list[Bar] = []
             for symbol in symbols:
                 days = [
@@ -1788,6 +1873,8 @@ def advance_scheduled_session(
     *,
     finalize: bool = False,
     allow_opening_data_retry: bool = False,
+    live_bars: Iterable[Bar] | None = None,
+    live_only: bool = False,
 ) -> None:
     engine.begin_session(day)
     due_times = sorted({
@@ -1796,7 +1883,10 @@ def advance_scheduled_session(
     })
     for at in due_times:
         timestamp = datetime.combine(day, time.fromisoformat(at))
-        _process_scheduled_fills(repo, engine, market, timestamp, asset_type, timeframe)
+        _process_scheduled_fills(
+            repo, engine, market, timestamp, asset_type, timeframe,
+            live_bars=live_bars, live_only=live_only,
+        )
         symbols = _scheduled_symbols(engine, timestamp)
         snapshot = _scheduled_snapshot(
             repo,
@@ -1806,9 +1896,52 @@ def advance_scheduled_session(
             asset_type,
             timeframe,
             symbols=symbols,
+            live_bars=live_bars,
+            live_only=live_only,
         )
         event_timestamp = timestamp
-        if timestamp.time() == time(9, 30) and not any(
+        market_time = timestamp.time()
+        needs_live = live_only and market_time >= time(9, 30)
+        if needs_live and not all(
+            any(bar.symbol == symbol for bar in snapshot)
+            for symbol in symbols
+        ):
+            if timestamp.time() == time(9, 30):
+                first_continuous_minute = timestamp + timedelta(minutes=1)
+                if first_continuous_minute <= cutoff:
+                    opening_snapshot = _scheduled_snapshot(
+                        repo,
+                        engine,
+                        market,
+                        first_continuous_minute,
+                        asset_type,
+                        timeframe,
+                        symbols=symbols,
+                        live_bars=live_bars,
+                        live_only=live_only,
+                    )
+                    if all(
+                        any(bar.symbol == symbol for bar in opening_snapshot)
+                        for symbol in symbols
+                    ):
+                        event_timestamp = first_continuous_minute
+                        snapshot = opening_snapshot
+            if event_timestamp == timestamp:
+                if live_only:
+                    raise ScheduledOpeningDataPending(
+                        f"{day.isoformat()} {at} 定时任务缺少实时行情，等待下一次行情同步"
+                    )
+                if (
+                    allow_opening_data_retry
+                    and cutoff < timestamp + timedelta(minutes=SCHEDULED_OPENING_RETRY_MINUTES)
+                ):
+                    raise ScheduledOpeningDataPending(
+                        f"{day.isoformat()} 09:30 定时任务等待可交易分钟K，下一次行情同步将重试"
+                    )
+                raise ValueError(
+                    f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
+                )
+        elif timestamp.time() == time(9, 30) and not any(
             bar.tradable and not bar.suspended for bar in snapshot
         ):
             first_continuous_minute = timestamp + timedelta(minutes=1)
@@ -1844,14 +1977,30 @@ def advance_scheduled_session(
                 event_timestamp,
                 asset_type,
                 timeframe,
+                live_bars=live_bars,
+                live_only=live_only,
             )
         engine.run_scheduled_event(event_timestamp, snapshot, scheduled_at=at)
-    _process_scheduled_fills(repo, engine, market, cutoff, asset_type, timeframe)
+    _process_scheduled_fills(
+        repo, engine, market, cutoff, asset_type, timeframe,
+        live_bars=live_bars, live_only=live_only,
+    )
     if finalize:
         closing_time = max(cutoff, datetime.combine(day, time(15, 0)))
+        closing_symbols = _scheduled_symbols(engine, closing_time)
         snapshot = _scheduled_snapshot(
             repo, engine, market, closing_time, asset_type, timeframe,
+            symbols=closing_symbols,
+            live_bars=live_bars,
+            live_only=live_only,
         )
+        if live_only and not all(
+            any(bar.symbol == symbol for bar in snapshot)
+            for symbol in closing_symbols
+        ):
+            raise ScheduledOpeningDataPending(
+                f"{day.isoformat()} 15:00 收盘任务缺少实时行情，等待下一次行情同步"
+            )
         engine.update_scheduled_market(closing_time, snapshot)
         engine.finish_session()
 
