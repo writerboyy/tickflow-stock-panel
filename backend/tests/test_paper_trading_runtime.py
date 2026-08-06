@@ -473,7 +473,7 @@ def test_supervisor_timeout_reports_callback_and_queue_delay(tmp_path):
     assert "队列等待 2.5 秒" in message
 
 
-def test_supervisor_keeps_waiting_market_subscription(tmp_path, monkeypatch):
+def test_supervisor_keeps_subscription_and_clears_stale_wait_reason(tmp_path, monkeypatch):
     class SubscribedHub:
         def __init__(self):
             self.subscribed = True
@@ -511,10 +511,8 @@ def test_supervisor_keeps_waiting_market_subscription(tmp_path, monkeypatch):
     supervisor._processes = {"paper": FakePaperProcess(alive=True)}  # noqa: SLF001
     supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
     initialize_supervisor_runtime(supervisor)
-    monkeypatch.setattr(
-        "app.free_strategy.paper.cn_naive_now",
-        lambda: datetime(2026, 8, 6, 14, 51),
-    )
+    current_time = [datetime(2026, 8, 6, 14, 51)]
+    monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: current_time[0])
 
     supervisor._monitor_once()  # noqa: SLF001
     supervisor._monitor_once()  # noqa: SLF001
@@ -522,6 +520,18 @@ def test_supervisor_keeps_waiting_market_subscription(tmp_path, monkeypatch):
     assert supervisor.hub.subscribed is True
     assert supervisor.hub.registered == []
     assert supervisor.hub.unregistered == []
+
+    waiting_sync = store.get("paper")["sync"]
+    assert waiting_sync["phase"] == "waiting_market"
+    assert waiting_sync["reason"] == "等待当日实时1m分钟行情，未推进至 14:50"
+
+    store.update_fields("paper", {"sync": {**waiting_sync, "phase": "live"}})
+    current_time[0] = datetime(2026, 8, 6, 15, 1)
+    supervisor._monitor_once()  # noqa: SLF001
+
+    settled_sync = store.get("paper")["sync"]
+    assert settled_sync["phase"] == "live"
+    assert settled_sync["reason"] is None
 
 
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):

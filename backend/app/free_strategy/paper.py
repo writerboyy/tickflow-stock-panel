@@ -2366,7 +2366,10 @@ class PaperTradingSupervisor:
                         state = self.store.update_fields(account_id, {"sync": sync})
                         sync_phase = "waiting_market"
                 elif (
-                    sync_phase == "waiting_market"
+                    (
+                        sync_phase == "waiting_market"
+                        or (sync.get("source") == "realtime" and sync.get("reason"))
+                    )
                     and str(state.get("execution_mode") or "full_bar") == "full_bar"
                 ):
                     sync.update({"phase": "live", "reason": None, "updated_at": now_iso()})
