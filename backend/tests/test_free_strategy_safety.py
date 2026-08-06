@@ -196,6 +196,19 @@ def test_max_drawdown_is_monotonic_when_curve_rows_expire(tmp_path):
     assert saved["max_drawdown_pct"] == 25
 
 
+def test_equity_snapshot_rejects_missing_position_prices():
+    engine = FreeStrategyEngine(
+        "def on_bar(context, bars):\n    pass\n",
+        config=FreeStrategyConfig(initial_capital=100),
+    )
+    engine.account.cash = 20
+    engine.account.positions = {"X": 10}
+    engine.account.avg_cost = {"X": 8}
+
+    with pytest.raises(ValueError, match="估值缺少持仓行情: X"):
+        _equity_snapshot(engine, {"equity_peak": 100}, datetime(2026, 7, 29, 15))
+
+
 def test_paper_supervisor_pauses_worker_when_strategy_deadline_expires(tmp_path):
     class FakeProcess:
         alive = True

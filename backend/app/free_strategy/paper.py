@@ -1243,8 +1243,7 @@ def _equity_snapshot(
     state: dict[str, Any],
     timestamp: datetime,
 ) -> dict[str, Any]:
-    prices = dict(engine._current_close_prices)  # noqa: SLF001
-    equity = engine.account.equity(prices)
+    equity = _paper_equity(engine)
     initial_capital = float(engine.config.initial_capital)
     peak = max(float(state.get("equity_peak", initial_capital)), equity)
     state["equity_peak"] = peak
@@ -1271,6 +1270,23 @@ def _equity_snapshot(
         },
         "source": "paper",
     }
+
+
+def _paper_equity(engine: FreeStrategyEngine) -> float:
+    prices = dict(engine._current_close_prices)  # noqa: SLF001
+    missing = sorted(
+        symbol
+        for symbol, quantity in engine.account.positions.items()
+        if float(quantity) > 0
+        and (
+            symbol not in prices
+            or not isfinite(float(prices[symbol]))
+            or float(prices[symbol]) <= 0
+        )
+    )
+    if missing:
+        raise ValueError(f"估值缺少持仓行情: {', '.join(missing)}")
+    return engine.account.equity(prices)
 
 
 def _closed_bar_cutoff(mode: str, now: datetime) -> datetime:
@@ -1349,8 +1365,7 @@ def _persist_engine_state(
         store.upsert_equity_curve(account_id, snapshots)
     engine.account.equity_curve.clear()
     checkpoint = compact_paper_checkpoint(engine.checkpoint())
-    prices = dict(engine._current_close_prices)  # noqa: SLF001
-    equity = engine.account.equity(prices)
+    equity = _paper_equity(engine)
     peak = max(float(current.get("equity_peak", engine.config.initial_capital)), equity)
     drawdown_pct = ((peak - equity) / peak * 100) if peak else 0.0
     maximum_drawdown = max(

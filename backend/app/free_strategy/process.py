@@ -1994,12 +1994,24 @@ def advance_scheduled_session(
             live_bars=live_bars,
             live_only=live_only,
         )
-        if live_only and not all(
-            any(bar.symbol == symbol for bar in snapshot)
-            for symbol in closing_symbols
-        ):
-            raise ScheduledOpeningDataPending(
-                f"{day.isoformat()} 15:00 收盘任务缺少实时行情，等待下一次行情同步"
+        closing_found = {bar.symbol for bar in snapshot}
+        required_closing_symbols = closing_symbols if live_only else [
+            symbol
+            for symbol, quantity in engine.account.positions.items()
+            if float(quantity) > 0
+        ]
+        closing_missing = [
+            symbol for symbol in required_closing_symbols if symbol not in closing_found
+        ]
+        if closing_missing:
+            missing_text = ", ".join(closing_missing)
+            if live_only:
+                raise ScheduledOpeningDataPending(
+                    f"{day.isoformat()} 15:00 收盘任务缺少实时行情: {missing_text}，"
+                    "等待下一次行情同步"
+                )
+            raise ValueError(
+                f"{day.isoformat()} 15:00 收盘任务缺少行情: {missing_text}"
             )
         engine.update_scheduled_market(closing_time, snapshot)
         engine.finish_session()
