@@ -227,17 +227,85 @@ def _quote_to_live_bar(quote: Quote) -> Bar:
     )
 
 
+_PAPER_STRATEGY_LABELS = {
+    "five_fortunes": "WF",
+    "five_fortunes_v2": "WF2",
+    "small_cap_limitup": "SCL",
+}
+
+
+def _paper_strategy_label(state: dict[str, Any]) -> str:
+    checkpoint_state = (state.get("checkpoint") or {}).get("state")
+    if isinstance(checkpoint_state, dict):
+        for strategy_id, label in _PAPER_STRATEGY_LABELS.items():
+            if strategy_id in checkpoint_state:
+                return label
+    strategy_id = str(state.get("strategy_id") or "").strip()
+    return _PAPER_STRATEGY_LABELS.get(strategy_id, strategy_id or "PAPER")
+
+
+def _paper_instrument_name(state: dict[str, Any], symbol: str) -> str:
+    symbol = str(symbol).strip().upper()
+    if not symbol:
+        return ""
+    direct = state.get("instrument_names")
+    if isinstance(direct, dict) and direct.get(symbol):
+        return str(direct[symbol])
+    checkpoint_state = (state.get("checkpoint") or {}).get("state")
+    if isinstance(checkpoint_state, dict):
+        for value in checkpoint_state.values():
+            if not isinstance(value, dict):
+                continue
+            names = value.get("instrument_names")
+            if isinstance(names, dict) and names.get(symbol):
+                return str(names[symbol])
+    return symbol
+
+
+def _paper_event_body(state: dict[str, Any], event: dict[str, Any]) -> str:
+    """Render a compact, human-readable paper-trading notification."""
+    strategy = _paper_strategy_label(state)
+    if event.get("type") == "fill":
+        symbol = str(event.get("symbol") or "").strip().upper()
+        name = _paper_instrument_name(state, symbol)
+        side = "买入" if event.get("side") == "buy" else "卖出"
+        timestamp = str(event.get("timestamp") or "")
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            time_text = parsed.strftime("%H:%M:%S")
+            if parsed.microsecond:
+                time_text += f".{parsed.microsecond // 1000:03d}"
+        except ValueError:
+            time_text = timestamp
+        quantity = float(event.get("quantity") or 0)
+        quantity_text = (
+            f"{int(quantity):,}" if quantity.is_integer() else f"{quantity:,.4f}".rstrip("0").rstrip(".")
+        )
+        return "\n".join([
+            f"[{strategy}] {side} {name}",
+            f"时间: {time_text}",
+            f"代码: {symbol}",
+            f"名称: {name}",
+            f"数量: {quantity_text} 股",
+            f"价格: {float(event.get('price') or 0):.3f}",
+            f"金额: {float(event.get('value') or 0):,.2f}",
+            f"策略: {strategy}",
+        ])
+    detail = str(event.get("reason") or event.get("message") or event.get("status") or "").strip()
+    symbol = str(event.get("symbol") or "").strip().upper()
+    suffix = f" {symbol}" if symbol else ""
+    return f"[{strategy}] {detail or event.get('type', '通知')}{suffix}".strip()
+
+
 def _dispatch_paper_notification(state: dict[str, Any], event: dict[str, Any]) -> None:
     """Send one paper-account event to the channels enabled for that account."""
     from app.services import notify_adapter, preferences, webhook_adapter
 
     enabled = state.get("system_notify_enabled")
-    if enabled is False:
+    if enabled is False or event.get("type") == "order":
         return
 
-    symbol = str(event.get("symbol") or "")
-    detail = str(event.get("reason") or event.get("message") or event.get("status") or "")
-    body = f"{state.get('name', state.get('id', '模拟策略'))} {symbol} {detail}".strip()
+    body = _paper_event_body(state, event)
 
     # Accounts using the bell follow the channels currently configured in Settings.
     # Legacy accounts without the field retain their persisted channel selection.
@@ -266,7 +334,7 @@ def _dispatch_paper_notification(state: dict[str, Any], event: dict[str, Any]) -
         _PAPER_WEBHOOK_EXECUTOR.submit(
             webhook_adapter.send_wecom,
             preferences.get_wecom_webhook_url(),
-            "模拟",
+            "",
             body,
         )
 
@@ -1228,6 +1296,11 @@ def _full_bar_wait_reason(state: dict[str, Any], now: datetime) -> str | None:
     mode = state_market_mode(state)
     if not mode.startswith("bar_"):
         return None
+    # 收盘后的最终同步属于行情服务的结算阶段，不应让账户在下一次
+    # 交易日前一直显示“等待实时行情”。未完成的收盘 K 线会在下一次
+    # 启动时通过历史补齐继续处理，不能在收盘后再触发交易。
+    if now.time() >= clock_time(15, 1):
+        return None
     cutoff = _closed_bar_cutoff(mode, now)
     if cutoff.date() != cn_today() or cutoff.time() < clock_time(9, 30):
         return None
@@ -1238,7 +1311,9 @@ def _full_bar_wait_reason(state: dict[str, Any], now: datetime) -> str | None:
         last_bar = datetime.fromisoformat(str(last_value)) if last_value else None
     except ValueError:
         last_bar = None
-    if last_bar is None or last_bar < cutoff:
+    period_minutes = {"bar_1m": 1, "bar_5m": 5, "bar_30m": 30}.get(mode, 0)
+    required = cutoff - timedelta(minutes=period_minutes)
+    if last_bar is None or last_bar < required:
         return f"等待当日实时{mode.removeprefix('bar_')}分钟行情，未推进至 {cutoff.strftime('%H:%M')}"
     return None
 
@@ -1961,7 +2036,9 @@ def _paper_worker(
     notification_times: deque[float] = deque()
 
     def notify(event: dict[str, Any]) -> None:
-        if event.get("type") not in {"order", "fill", "rejected", "risk"}:
+        # An order event is persisted for the UI, while the user-facing hook
+        # should fire once when that order actually fills (or is rejected).
+        if event.get("type") not in {"fill", "rejected", "risk"}:
             return
         key = ":".join(str(event.get(name) or "") for name in ("type", "id", "order_id", "symbol", "status", "reason"))
         if key in notified:

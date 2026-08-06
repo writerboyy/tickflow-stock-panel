@@ -23,6 +23,7 @@ from app.free_strategy.paper import (
     _dispatch_paper_notification,
     _engine_from_state,
     _equity_snapshot,
+    _full_bar_wait_reason,
     _queue_delay_seconds,
     _queued_payload,
     _process_bar_rows,
@@ -54,12 +55,38 @@ def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):
     monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: sent.append(args) or True)
 
     _dispatch_paper_notification(
-        {"id": "paper", "name": "报价策略", "system_notify_enabled": True, "notification_channels": []},
-        {"type": "fill", "symbol": "510300.SH", "status": "filled"},
+        {
+            "id": "paper",
+            "name": "报价策略",
+            "strategy_id": "custom-copy",
+            "system_notify_enabled": True,
+            "notification_channels": [],
+            "checkpoint": {"state": {"five_fortunes": {"instrument_names": {"510300.SH": "沪深300ETF"}}}},
+        },
+        {
+            "type": "fill",
+            "symbol": "510300.SH",
+            "side": "buy",
+            "quantity": 100,
+            "price": 4.123,
+            "value": 412.3,
+            "timestamp": "2026-08-06T13:11:10.945",
+        },
     )
 
     assert len(submitted) == 1
-    assert sent == [("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test", "模拟", "报价策略 510300.SH filled")]
+    assert sent == [(
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test",
+        "",
+        "[WF] 买入 沪深300ETF\n"
+        "时间: 13:11:10.945\n"
+        "代码: 510300.SH\n"
+        "名称: 沪深300ETF\n"
+        "数量: 100 股\n"
+        "价格: 4.123\n"
+        "金额: 412.30\n"
+        "策略: WF",
+    )]
 
 
 def test_disabled_paper_notification_sends_nothing(monkeypatch):
@@ -76,6 +103,19 @@ def test_disabled_paper_notification_sends_nothing(monkeypatch):
         {"id": "paper", "system_notify_enabled": False, "notification_channels": ["wecom"]},
         {"type": "fill", "symbol": "510300.SH"},
     )
+
+
+def test_full_bar_wait_does_not_survive_market_close():
+    state = {
+        "execution_mode": "full_bar",
+        "market_mode": "bar_1m",
+        "last_bar": "2026-08-06T14:48:00",
+    }
+
+    assert _full_bar_wait_reason(state, datetime(2026, 8, 6, 14, 51))
+    state["last_bar"] = "2026-08-06T14:49:00"
+    assert _full_bar_wait_reason(state, datetime(2026, 8, 6, 14, 51)) is None
+    assert _full_bar_wait_reason(state, datetime(2026, 8, 6, 15, 1)) is None
 
 
 class FakePaperProcess:
@@ -556,8 +596,10 @@ def on_quote(context, quotes):
     )
 
     assert [event["type"] for event in store.events("paper")] == ["order", "fill"]
-    assert len(sent) == 2
-    assert all(call[0].endswith("key=test") and call[1] == "模拟" for call in sent)
+    assert len(sent) == 1
+    assert sent[0][0].endswith("key=test")
+    assert sent[0][1] == ""
+    assert sent[0][2].startswith("[PAPER] 买入 X\n")
 
 
 def test_quote_mapping_and_quote_values_are_read_only():
