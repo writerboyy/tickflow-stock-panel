@@ -82,6 +82,7 @@ class Order:
     id: str
     symbol: str
     side: str
+    requested_quantity: float | None
     quantity: float | None = None
     value: float | None = None
     cash_weight: float | None = None
@@ -1144,7 +1145,14 @@ class FreeStrategyEngine:
 
     def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
         self._counter += 1
-        order = Order(id=f"o{self._counter}", symbol=symbol, side=side, submitted_at=self.context.now.isoformat() if self.context.now else "", **kwargs)
+        order = Order(
+            id=f"o{self._counter}",
+            symbol=symbol,
+            side=side,
+            requested_quantity=kwargs.get("quantity"),
+            submitted_at=self.context.now.isoformat() if self.context.now else "",
+            **kwargs,
+        )
         self.account.orders.append(order)
         if self._reject_for_risk(order):
             return
@@ -1310,6 +1318,16 @@ class FreeStrategyEngine:
             if qty is None and order.value is not None:
                 qty = order.value / raw_price
             qty = qty or 0
+        lot = max(1, self.config.lot_size)
+        liquidates_position = (
+            side == "sell"
+            and order.side == "target"
+            and target is not None
+            and target <= 0
+        )
+        if not liquidates_position:
+            qty = math.floor(qty / lot) * lot
+        order.requested_quantity = qty
         if bar.suspended or not bar.tradable:
             order.status = "rejected"
             order.reason = "证券停牌或不可交易"
@@ -1336,15 +1354,6 @@ class FreeStrategyEngine:
             if side == "sell" and self.config.sell_commission_pct is not None
             else buy_commission_rate
         )
-        lot = max(1, self.config.lot_size)
-        liquidates_position = (
-            side == "sell"
-            and order.side == "target"
-            and target is not None
-            and target <= 0
-        )
-        if not liquidates_position:
-            qty = math.floor(qty / lot) * lot
         if side == "sell":
             bought_today = (
                 self.config.settlement == "t1"
@@ -2203,16 +2212,13 @@ class FreeStrategyEngine:
             fills = fills_by_order.get(order.id, [])
             executed_quantity = sum(fill.quantity for fill in fills)
             amount = sum(fill.value for fill in fills)
-            requested_quantity = order.quantity
-            if requested_quantity is None and order.target_quantity is not None:
-                requested_quantity = order.target_quantity
             records.append(ExecutionRecord(
                 order_id=order.id,
                 submitted_at=order.submitted_at,
                 executed_at=fills[-1].timestamp if fills else None,
                 symbol=order.symbol,
                 side=fills[-1].side if fills else order.side,
-                requested_quantity=requested_quantity,
+                requested_quantity=order.requested_quantity,
                 executed_quantity=executed_quantity,
                 price=amount / executed_quantity if executed_quantity else None,
                 amount=amount,

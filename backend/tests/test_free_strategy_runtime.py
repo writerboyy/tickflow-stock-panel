@@ -1262,6 +1262,30 @@ def on_bar(context, bars):
     assert "fee_components_complete" not in execution
 
 
+def test_execution_record_preserves_requested_quantity_before_cash_limit():
+    source = """
+def on_bar(context, bars):
+    context.order_target_value('X', 2_000)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            fees_pct=0,
+            min_commission=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
+    ])
+
+    execution = result["executions"][0]
+    assert execution["requested_quantity"] == 200
+    assert execution["executed_quantity"] == 100
+
+
 def test_legacy_checkpoint_fill_is_rejected_instead_of_migrated():
     source = """
 def on_bar(context, bars):

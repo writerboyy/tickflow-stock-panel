@@ -1426,6 +1426,7 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
         id="o1",
         symbol="159920.SZ",
         side="buy",
+        requested_quantity=100,
         cash_weight=1.0,
         submitted_at="2026-07-28T13:11:00",
         status="filled",
