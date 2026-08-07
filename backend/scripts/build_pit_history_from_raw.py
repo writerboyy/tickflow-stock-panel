@@ -25,6 +25,7 @@ from app.plugins.pit_history.storage import (
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     PARSER_VERSION,
     SOURCE,
+    merge_index_membership_history,
     normalize_index_membership_history,
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
@@ -225,30 +226,44 @@ def build_index_history(
     source: str,
     logical_snapshot: str,
     raw_label: str,
-    validate_strict: bool = False,
 ) -> int:
     frame = normalize_index_membership_history(
         raw_rows,
         index_symbol=index_symbol,
         source=source,
     )
-    if validate_strict:
-        coverage = validate_index_membership_history(frame, index_symbol=index_symbol)
-        if not coverage["usable"]:
-            raise ValueError(
-                f"incomplete strict index history for {index_symbol.upper()}: "
-                f"{coverage['message']}; pass --allow-incomplete-index only for "
-                "archived non-backtest reference data"
-            )
-    return _publish(
-        data_dir=data_dir,
-        table=INDEX_MEMBERSHIP_HISTORY_TABLE,
-        source=source,
-        logical_snapshot=logical_snapshot,
-        raw_label=raw_label,
-        raw_rows=raw_rows,
-        frame=frame,
+    coverage = validate_index_membership_history(frame, index_symbol=index_symbol)
+    if not coverage["usable"]:
+        raise ValueError(
+            f"incomplete strict index history for {index_symbol.upper()}: "
+            f"{coverage['message']}"
+        )
+    _, source_hash = archive_source_payload(
+        data_dir,
+        SOURCE,
+        INDEX_MEMBERSHIP_HISTORY_TABLE,
+        logical_snapshot,
+        raw_label,
+        raw_rows,
+        parser_version=PARSER_VERSION,
     )
+    result = merge_index_membership_history(data_dir, frame)
+    added_rows = int(result["added_rows"])
+    update_ingestion_manifest(
+        data_dir,
+        SOURCE,
+        INDEX_MEMBERSHIP_HISTORY_TABLE,
+        logical_snapshot,
+        status="published",
+        parser_version=PARSER_VERSION,
+        schema_version=1,
+        source_content_hash=source_hash,
+        content_hash=stable_content_hash(frame.to_dicts()),
+        published_rows=added_rows,
+        provenance="dated_snapshot",
+        upstream_source=source,
+    )
+    return added_rows
 
 
 def build_industry_history(
@@ -307,11 +322,6 @@ def main(argv: Iterable[str] | None = None) -> None:
     )
     parser.add_argument("--index-symbol", default="000300.SH")
     parser.add_argument("--index-source", default="raw")
-    parser.add_argument(
-        "--allow-incomplete-index",
-        action="store_true",
-        help="Archive/publish incomplete index snapshots instead of failing exact-count checks",
-    )
     parser.add_argument("--industry-history-file", type=Path)
     parser.add_argument("--industry-source", default="raw")
     parser.add_argument("--lifecycle-file", type=Path)
@@ -333,7 +343,6 @@ def main(argv: Iterable[str] | None = None) -> None:
             source=args.index_source,
             logical_snapshot=args.logical_snapshot,
             raw_label=_label(args.index_history_file, "index"),
-            validate_strict=not args.allow_incomplete_index,
         )
 
     if args.industry_history_file:

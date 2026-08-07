@@ -24,13 +24,7 @@ def status(request: Request) -> dict:
 @router.post("/sync-snapshots")
 async def sync_snapshots(request: Request) -> dict:
     data_dir = _data_dir(request)
-    return await asyncio.to_thread(pit_reference.sync_baostock_reference, data_dir)
-
-
-@router.post("/sync-baostock-candidates")
-async def sync_baostock_candidates(request: Request) -> dict:
-    data_dir = _data_dir(request)
-    return await asyncio.to_thread(pit_reference.sync_baostock_index_candidates, data_dir)
+    return await asyncio.to_thread(pit_reference.sync_pit_reference, data_dir)
 
 
 @router.post("/sync-baostock-lifecycle")

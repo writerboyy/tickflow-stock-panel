@@ -508,17 +508,21 @@ def run_now(
     else:
         skipped.append("sync_index")
 
-    # Step 2.4: PIT Reference 同步 — 只采集 BaoStock 候选快照和股票生命周期。
+    # Step 2.4: PIT Reference 同步 — HiThink 指数成分主源，BaoStock 核对及生命周期。
     pit_reference_rows = 0
-    pit_reference_baostock_candidate_rows = 0
+    pit_reference_index_membership_rows = 0
+    pit_reference_crosschecked_snapshots = 0
     pit_reference_baostock_lifecycle_rows = 0
     pit_reference_instrument_appended_symbols = 0
     try:
-        emit("sync_pit_reference", 89, "同步 BaoStock PIT Reference…")
-        pit_result = pit_reference.sync_baostock_reference(repo.store.data_dir)
+        emit("sync_pit_reference", 89, "同步 PIT 指数成分与股票生命周期…")
+        pit_result = pit_reference.sync_pit_reference(repo.store.data_dir)
         pit_reference_rows = int(pit_result.get("published_rows") or 0)
-        pit_reference_baostock_candidate_rows = int(
-            pit_result.get("index_candidate_rows") or 0
+        pit_reference_index_membership_rows = int(
+            pit_result.get("index_membership_rows") or 0
+        )
+        pit_reference_crosschecked_snapshots = int(
+            pit_result.get("crosschecked_snapshots") or 0
         )
         pit_reference_baostock_lifecycle_rows = int(
             pit_result.get("lifecycle_rows") or 0
@@ -528,20 +532,21 @@ def run_now(
         )
         if pit_result.get("status") == "failed":
             errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
-            emit("sync_pit_reference", 90, f"BaoStock PIT Reference 失败:{errors}")
-            stage_errors.append(f"BaoStock PIT reference: {errors}")
+            emit("sync_pit_reference", 90, f"PIT Reference 失败:{errors}")
+            stage_errors.append(f"PIT reference: {errors}")
         else:
             emit(
                 "sync_pit_reference",
                 90,
-                f"BaoStock 完成,候选快照 {pit_reference_baostock_candidate_rows} 行,"
+                f"PIT 完成,指数成分 {pit_reference_index_membership_rows} 行,"
+                f"交叉核对 {pit_reference_crosschecked_snapshots} 组,"
                 f"生命周期 {pit_reference_baostock_lifecycle_rows} 行"
                 + (
                     f",追加退市标的 {pit_reference_instrument_appended_symbols} 只"
                     if pit_reference_instrument_appended_symbols else ""
                 ),
             )
-            logger.info("sync_baostock_reference done: %s", pit_result)
+            logger.info("sync_pit_reference done: %s", pit_result)
         if pit_reference_rows == 0 and pit_result.get("status") != "failed":
             skipped.append("sync_pit_reference")
     except Exception as e:  # noqa: BLE001
@@ -658,7 +663,8 @@ def run_now(
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
         "pit_reference_rows": pit_reference_rows,
-        "pit_reference_baostock_candidate_rows": pit_reference_baostock_candidate_rows,
+        "pit_reference_index_membership_rows": pit_reference_index_membership_rows,
+        "pit_reference_crosschecked_snapshots": pit_reference_crosschecked_snapshots,
         "pit_reference_baostock_lifecycle_rows": pit_reference_baostock_lifecycle_rows,
         "pit_reference_instrument_appended_symbols": pit_reference_instrument_appended_symbols,
         "minute_rows": written_minute,

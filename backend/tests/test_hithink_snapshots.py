@@ -10,11 +10,14 @@ from app.plugins.hithink.client import HiThinkAuthError, HiThinkClient
 from app.plugins.hithink.collector import HiThinkSnapshotCollector
 from app.plugins.hithink import client as hithink_client_module
 from app.plugins.hithink.storage import (
-    INDEX_CONSTITUENTS_TABLE,
     INSTRUMENT_LIFECYCLE_TABLE,
     THS_SECTOR_CONSTITUENTS_TABLE,
     normalize_lifecycle_observed,
     read_latest_snapshot,
+)
+from app.plugins.pit_history.storage import (
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
+    read_history_table,
 )
 
 
@@ -24,9 +27,12 @@ class FakeHiThinkClient:
             "000300.SH": {
                 "timestamp": 1817203200000,
                 "item": [
-                    {"thscode": "600519.SH", "ticker": "600519", "name": "贵州茅台"},
-                    {"thscode": "000001.SZ", "ticker": "000001", "name": "平安银行"},
-                    {"thscode": "600519.SH", "ticker": "600519", "name": "重复行"},
+                    {
+                        "thscode": f"{600000 + index}.SH",
+                        "ticker": str(600000 + index),
+                        "name": f"member-{index}",
+                    }
+                    for index in range(300)
                 ],
             },
             "881001.TI": {
@@ -68,28 +74,18 @@ def test_hithink_index_constituents_are_frozen_as_snapshot(tmp_path):
         index_names={"000300.SH": "沪深300"},
     )
 
-    assert count == 2
-    frame = read_latest_snapshot(tmp_path, INDEX_CONSTITUENTS_TABLE)
-    assert frame.select("index_symbol", "member_symbol", "provenance").to_dicts() == [
-        {
-            "index_symbol": "000300.SH",
-            "member_symbol": "000001.SZ",
-            "provenance": "snapshot_frozen",
-        },
-        {
-            "index_symbol": "000300.SH",
-            "member_symbol": "600519.SH",
-            "provenance": "snapshot_frozen",
-        },
-    ]
+    assert count == 300
+    frame = read_history_table(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE)
+    assert frame.height == 300
+    assert frame["provenance"].unique().to_list() == ["snapshot_frozen"]
     manifest = json.loads(
         (
             tmp_path / "ext_data" / "_ingestion" / "hithink"
-            / INDEX_CONSTITUENTS_TABLE / "2027-08-01.json"
+            / INDEX_MEMBERSHIP_HISTORY_TABLE / "2027-08-01.json"
         ).read_text(encoding="utf-8")
     )
     assert manifest["status"] == "published"
-    assert manifest["published_rows"] == 2
+    assert manifest["published_rows"] == 300
     assert manifest["provenance"] == "snapshot_frozen"
 
 

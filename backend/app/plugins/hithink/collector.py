@@ -27,6 +27,10 @@ from app.plugins.hithink.storage import (
     normalize_sector_constituents,
     publish_snapshot,
 )
+from app.plugins.pit_history.storage import (
+    merge_index_membership_history,
+    validate_index_membership_history,
+)
 from app.services.ingestion_manifest import (
     archive_source_payload,
     stable_content_hash,
@@ -49,6 +53,21 @@ class HiThinkSnapshotCollector:
         snapshot_date: date,
         index_names: dict[str, str] | None = None,
     ) -> int:
+        frame = self.fetch_index_constituents(
+            indices,
+            snapshot_date=snapshot_date,
+            index_names=index_names,
+        )
+        result = merge_index_membership_history(self.data_dir, frame)
+        return int(result["added_rows"])
+
+    def fetch_index_constituents(
+        self,
+        indices: Iterable[str],
+        *,
+        snapshot_date: date,
+        index_names: dict[str, str] | None = None,
+    ) -> pl.DataFrame:
         frames: list[pl.DataFrame] = []
         raw_payloads: dict[str, Any] = {}
         names = {key.upper(): value for key, value in (index_names or {}).items()}
@@ -87,18 +106,28 @@ class HiThinkSnapshotCollector:
                 empty_reason="source_empty",
                 provenance="snapshot_frozen",
             )
-            return 0
+            return pl.DataFrame()
 
         merged = pl.concat(frames, how="diagonal_relaxed").unique(
             subset=["index_symbol", "member_symbol"],
             keep="last",
         ).sort(["index_symbol", "member_symbol"])
-        count = publish_snapshot(
-            self.data_dir,
-            INDEX_CONSTITUENTS_TABLE,
-            snapshot_date,
-            merged,
-        )
+        validation = validate_index_membership_history(merged)
+        if not validation["usable"]:
+            update_ingestion_manifest(
+                self.data_dir,
+                SOURCE,
+                INDEX_CONSTITUENTS_TABLE,
+                logical_snapshot,
+                status="rejected",
+                parser_version=PARSER_VERSION,
+                schema_version=1,
+                source_content_hash=source_hash,
+                content_hash=stable_content_hash(merged.to_dicts()),
+                published_rows=0,
+                provenance="snapshot_frozen",
+            )
+            raise ValueError(f"HiThink index membership failed strict validation: {validation}")
         update_ingestion_manifest(
             self.data_dir,
             SOURCE,
@@ -109,11 +138,11 @@ class HiThinkSnapshotCollector:
             schema_version=1,
             source_content_hash=source_hash,
             content_hash=stable_content_hash(merged.to_dicts()),
-            published_rows=count,
+            published_rows=merged.height,
             provenance="snapshot_frozen",
         )
-        logger.info("HiThink index constituent snapshot published: %d rows", count)
-        return count
+        logger.info("HiThink index constituent snapshot fetched: %d rows", merged.height)
+        return merged
 
     def collect_sector_constituents(
         self,

@@ -149,17 +149,14 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(daily_pipeline._prefs, "get_etf_minute_sync_enabled", lambda: True)
     monkeypatch.setattr(daily_pipeline._prefs, "get_minute_sync_days", lambda: 5)
 
-    def fail_hithink(*_args, **_kwargs):
-        raise AssertionError("daily pipeline must not call HiThink PIT sync")
-
-    monkeypatch.setattr(daily_pipeline.pit_reference, "sync_hithink_snapshots", fail_hithink)
     monkeypatch.setattr(
         daily_pipeline.pit_reference,
-        "sync_baostock_reference",
+        "sync_pit_reference",
         lambda *_: {
             "status": "published",
-            "published_rows": 312,
-            "index_candidate_rows": 300,
+            "published_rows": 2612,
+            "index_membership_rows": 2600,
+            "crosschecked_snapshots": 2,
             "lifecycle_rows": 12,
             "instrument_appended_symbols": 2,
             "errors": [],
@@ -169,8 +166,9 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
     result = daily_pipeline.run_now(repo, capset)
 
     assert result["etf_minute_rows"] == 321
-    assert result["pit_reference_rows"] == 312
-    assert result["pit_reference_baostock_candidate_rows"] == 300
+    assert result["pit_reference_rows"] == 2612
+    assert result["pit_reference_index_membership_rows"] == 2600
+    assert result["pit_reference_crosschecked_snapshots"] == 2
     assert result["pit_reference_baostock_lifecycle_rows"] == 12
     assert result["pit_reference_instrument_appended_symbols"] == 2
     assert "sync_pit_reference" not in result["skipped_stages"]

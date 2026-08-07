@@ -258,6 +258,151 @@ def validate_index_membership_history(
     }
 
 
+def merge_index_membership_frames(
+    existing: pl.DataFrame,
+    incoming: pl.DataFrame,
+) -> tuple[pl.DataFrame, dict[str, Any]]:
+    """Combine complete snapshots while preserving every existing dated fact."""
+    if incoming.is_empty():
+        validation = validate_index_membership_history(existing)
+        if not validation["usable"]:
+            raise ValueError(
+                "canonical index membership history failed strict validation: "
+                f"{validation}"
+            )
+        return existing, {
+            "table": INDEX_MEMBERSHIP_HISTORY_TABLE,
+            "incoming_rows": 0,
+            "added_rows": 0,
+            "incoming_snapshot_dates": 0,
+            "skipped_existing_snapshot_dates": 0,
+            "total_rows": existing.height,
+            "validation": validation,
+        }
+    incoming_validation = validate_index_membership_history(incoming)
+    if not incoming_validation["usable"]:
+        raise ValueError(
+            "incoming index membership snapshots failed strict validation: "
+            f"{incoming_validation}"
+        )
+
+    if existing.is_empty():
+        merged = incoming
+        existing_keys: set[tuple[str, date]] = set()
+    else:
+        existing_validation = validate_index_membership_history(existing)
+        if not existing_validation["usable"]:
+            raise ValueError(
+                "existing canonical index membership history failed strict validation: "
+                f"{existing_validation}"
+            )
+        existing_keys = {
+            (str(row["index_symbol"]), row["snapshot_date"])
+            for row in existing.select("index_symbol", "snapshot_date").unique().iter_rows(
+                named=True
+            )
+        }
+        incoming_keys = {
+            (str(row["index_symbol"]), row["snapshot_date"])
+            for row in incoming.select("index_symbol", "snapshot_date").unique().iter_rows(
+                named=True
+            )
+        }
+        conflicts: list[dict[str, Any]] = []
+        for index_symbol, snapshot_date in sorted(existing_keys & incoming_keys):
+            existing_members = set(
+                existing.filter(
+                    (pl.col("index_symbol") == index_symbol)
+                    & (pl.col("snapshot_date") == snapshot_date)
+                )["member_symbol"].to_list()
+            )
+            incoming_members = set(
+                incoming.filter(
+                    (pl.col("index_symbol") == index_symbol)
+                    & (pl.col("snapshot_date") == snapshot_date)
+                )["member_symbol"].to_list()
+            )
+            if existing_members != incoming_members:
+                conflicts.append(
+                    {
+                        "index_symbol": index_symbol,
+                        "snapshot_date": snapshot_date.isoformat(),
+                        "existing_only": sorted(existing_members - incoming_members)[:20],
+                        "incoming_only": sorted(incoming_members - existing_members)[:20],
+                    }
+                )
+        if conflicts:
+            raise ValueError(
+                "same-date index membership conflict; canonical table was not changed: "
+                f"{conflicts[:20]}"
+            )
+
+        key_frame = pl.DataFrame(
+            {
+                "index_symbol": [item[0] for item in existing_keys],
+                "snapshot_date": [item[1] for item in existing_keys],
+            },
+            schema={"index_symbol": pl.String, "snapshot_date": pl.Date},
+        )
+        additions = incoming.join(
+            key_frame,
+            on=["index_symbol", "snapshot_date"],
+            how="anti",
+        )
+        merged = (
+            pl.concat([existing, additions], how="diagonal_relaxed")
+            .unique(
+                subset=["index_symbol", "snapshot_date", "member_symbol"],
+                keep="first",
+            )
+            .sort(["index_symbol", "snapshot_date", "member_symbol"])
+        )
+
+    validation = validate_index_membership_history(merged)
+    if not validation["usable"]:
+        raise ValueError(f"merged index membership history failed strict validation: {validation}")
+    incoming_key_count = incoming.select("index_symbol", "snapshot_date").unique().height
+    skipped_key_count = len(
+        existing_keys
+        & {
+            (str(row["index_symbol"]), row["snapshot_date"])
+            for row in incoming.select("index_symbol", "snapshot_date").unique().iter_rows(
+                named=True
+            )
+        }
+    )
+    return merged, {
+        "table": INDEX_MEMBERSHIP_HISTORY_TABLE,
+        "incoming_rows": incoming.height,
+        "added_rows": merged.height - existing.height,
+        "incoming_snapshot_dates": incoming_key_count,
+        "skipped_existing_snapshot_dates": skipped_key_count,
+        "total_rows": merged.height,
+        "validation": validation,
+    }
+
+
+def merge_index_membership_history(
+    data_dir: Path,
+    incoming: pl.DataFrame,
+) -> dict[str, Any]:
+    """Append complete dated snapshots without replacing conflicting facts."""
+    existing = read_history_table(data_dir, INDEX_MEMBERSHIP_HISTORY_TABLE)
+    merged, result = merge_index_membership_frames(existing, incoming)
+    if incoming.is_empty():
+        result["published_rows"] = 0
+        return result
+    published_rows = publish_history_table(data_dir, INDEX_MEMBERSHIP_HISTORY_TABLE, merged)
+    stored = read_history_table(data_dir, INDEX_MEMBERSHIP_HISTORY_TABLE)
+    if stored.height != merged.height:
+        raise RuntimeError(
+            "canonical index membership history verification failed: "
+            f"expected {merged.height} rows, found {stored.height}"
+        )
+    result["published_rows"] = published_rows
+    return result
+
+
 def summarize_industry_standards(frame: pl.DataFrame) -> dict[str, Any]:
     if frame.is_empty() or "industry_standard" not in frame.columns:
         standards: list[dict[str, Any]] = []

@@ -4,16 +4,6 @@ from datetime import date
 
 import polars as pl
 
-from app.plugins.baostock.index_candidates import (
-    INDEX_CONSTITUENT_CANDIDATES_TABLE,
-    normalize_index_constituent_candidates,
-    publish_candidate_snapshot,
-)
-from app.plugins.hithink.storage import (
-    INDEX_CONSTITUENTS_TABLE,
-    INSTRUMENT_LIFECYCLE_TABLE,
-    publish_snapshot,
-)
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_HISTORY_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
@@ -21,20 +11,9 @@ from app.plugins.pit_history.storage import (
     publish_history_table,
 )
 from app.services import pit_reference
-from app.plugins.hithink import client as hithink_client_module
 
 
-class MissingHiThinkClient:
-    def _api_key(self):
-        raise pit_reference.HiThinkAuthError("missing")
-
-
-def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
-    monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
-    monkeypatch.delenv("FUYAO_TOKEN", raising=False)
-    monkeypatch.delenv("API_KEY", raising=False)
-    monkeypatch.setattr(hithink_client_module.settings, "hithink_finance_api_key", "")
-    monkeypatch.setattr(pit_reference, "HiThinkClient", MissingHiThinkClient)
+def test_pit_reference_status_uses_only_canonical_membership_table(tmp_path):
 
     publish_history_table(
         tmp_path,
@@ -48,7 +27,7 @@ def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
                 "member_name": [f"member-{index}" for index in range(300)],
                 "snapshot_date": [date(2026, 8, 1)] * 300,
                 "source_update_date": [date(2026, 8, 1)] * 300,
-                "source": ["joinquant"] * 300,
+                "source": ["fixture"] * 300,
                 "provenance": ["dated_snapshot"] * 300,
                 "snapshot_hash": [f"hash-{index}" for index in range(300)],
             }
@@ -91,121 +70,135 @@ def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
             }
         ),
     )
-    publish_snapshot(
-        tmp_path,
-        INDEX_CONSTITUENTS_TABLE,
-        date(2026, 8, 2),
-        pl.DataFrame(
-            {
-                "index_symbol": ["000300.SH"],
-                "index_name": ["沪深300"],
-                "member_symbol": ["600519.SH"],
-                "member_code": ["600519"],
-                "member_name": ["贵州茅台"],
-                "snapshot_date": [date(2026, 8, 2)],
-                "source_timestamp": [None],
-                "source": ["hithink"],
-                "provenance": ["snapshot_frozen"],
-                "snapshot_hash": ["x"],
-            }
-        ),
-    )
-    candidate_date = date(2026, 8, 2)
-    publish_candidate_snapshot(
-        tmp_path,
-        candidate_date,
-        normalize_index_constituent_candidates(
-            [{"code": "sh.600519", "code_name": "贵州茅台"}],
-            index_symbol="000300.SH",
-            index_name="沪深300",
-            snapshot_date=candidate_date,
-        ),
-    )
-
     status = pit_reference.get_status(tmp_path)
 
-    assert status["summary"]["source"] == "baostock"
+    assert status["summary"]["source"] == "canonical"
+    assert status["summary"]["historical_default_source"] == "baostock"
+    assert status["summary"]["daily_snapshot_primary_source"] == "hithink"
     assert status["summary"]["history_rows"] == 301
-    assert status["summary"]["snapshot_rows"] == 1
+    assert status["summary"]["snapshot_rows"] == 0
     assert status["summary"]["earliest_date"] == "2001-08-27"
-    assert status["summary"]["latest_snapshot_date"] == "2026-08-02"
+    assert status["summary"]["latest_snapshot_date"] == "2026-08-01"
     assert status["summary"]["strict_index_membership_usable"] is True
     assert set(status["history"]) == {
         INDEX_MEMBERSHIP_HISTORY_TABLE,
         INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     }
-    assert set(status["snapshots"]) == {INDEX_CONSTITUENT_CANDIDATES_TABLE}
+    assert status["snapshots"] == {}
     assert status["history"][INSTRUMENT_LIFECYCLE_EVENTS_TABLE]["sources"] == ["baostock"]
-    assert status["history"][INDEX_MEMBERSHIP_HISTORY_TABLE]["sources"] == ["joinquant"]
-    assert status["snapshots"][INDEX_CONSTITUENT_CANDIDATES_TABLE]["provenance_counts"] == {
-        "candidate_snapshot": 1
-    }
+    assert status["history"][INDEX_MEMBERSHIP_HISTORY_TABLE]["sources"] == ["fixture"]
 
 
-def test_pit_reference_sync_skips_without_hithink_key(monkeypatch, tmp_path):
-    monkeypatch.delenv("HITHINK_FINANCE_API_KEY", raising=False)
-    monkeypatch.delenv("FUYAO_TOKEN", raising=False)
-    monkeypatch.delenv("API_KEY", raising=False)
-    monkeypatch.setattr(hithink_client_module.settings, "hithink_finance_api_key", "")
-    monkeypatch.setattr(pit_reference, "HiThinkClient", MissingHiThinkClient)
-
-    result = pit_reference.sync_hithink_snapshots(
-        tmp_path,
-        snapshot_date=date(2026, 8, 2),
+def _membership_frame(snapshot_date: date, *, source: str = "hithink") -> pl.DataFrame:
+    csi300 = [f"{600000 + index}.SH" for index in range(300)]
+    csi500 = [f"{index + 1:06d}.SZ" for index in range(500)]
+    rows = []
+    for index_symbol, members in (
+        ("000300.SH", csi300),
+        ("000905.SH", csi500),
+        ("000906.SH", [*csi300, *csi500]),
+        ("000852.SH", [f"{2000 + index:06d}.SZ" for index in range(1000)]),
+    ):
+        rows.extend(
+            {
+                "index_symbol": index_symbol,
+                "index_name": "",
+                "member_symbol": member,
+                "member_code": member.split(".")[0],
+                "member_name": "",
+                "snapshot_date": snapshot_date,
+                "source_update_date": None,
+                "source": source,
+                "provenance": "snapshot_frozen",
+                "snapshot_hash": f"{source}-{index_symbol}",
+            }
+            for member in members
+        )
+    return pl.DataFrame(rows).with_columns(
+        pl.col("snapshot_date").cast(pl.Date),
+        pl.col("source_update_date").cast(pl.Date),
     )
 
-    assert result["status"] == "skipped"
-    assert result["reason"] == "missing_hithink_api_key"
-    assert result["published_rows"] == 0
+
+def test_daily_membership_uses_hithink_and_crosschecks_baostock(tmp_path):
+    snapshot_date = date(2026, 8, 3)
+    primary = _membership_frame(snapshot_date)
+    crosscheck = primary.filter(
+        pl.col("index_symbol").is_in(["000300.SH", "000905.SH"])
+    ).with_columns(pl.lit("baostock").alias("source"))
+
+    class HiThinkCollector:
+        def fetch_index_constituents(self, indices, *, snapshot_date, index_names):
+            assert set(indices) == set(pit_reference.DEFAULT_INDEX_NAMES)
+            return primary
+
+    class BaoStockCollector:
+        def fetch_index_snapshots(self, indices, *, snapshot_dates, index_names):
+            assert tuple(indices) == pit_reference.BAOSTOCK_CROSSCHECK_INDICES
+            return crosscheck
+
+    result = pit_reference.sync_index_membership_snapshots(
+        tmp_path,
+        snapshot_date=snapshot_date,
+        hithink_collector=HiThinkCollector(),
+        baostock_collector=BaoStockCollector(),
+    )
+
+    assert result["status"] == "published"
+    assert result["source"] == "hithink"
+    assert result["published_rows"] == 2600
+    assert result["crosschecked_snapshots"] == 2
+    canonical = pl.read_parquet(
+        tmp_path / "pit_reference/history/index_membership_history/part.parquet"
+    )
+    assert canonical.height == 2600
+    assert canonical["source"].unique().to_list() == ["hithink"]
 
 
-def test_pit_reference_sync_uses_injected_collector(tmp_path):
-    calls = []
+def test_daily_membership_rejects_provider_conflict_before_publish(tmp_path):
+    snapshot_date = date(2026, 8, 3)
+    primary = _membership_frame(snapshot_date)
+    crosscheck = primary.filter(pl.col("index_symbol") == "000300.SH")
+    crosscheck = crosscheck.with_row_index().with_columns(
+        pl.when(pl.col("index") == 0)
+        .then(pl.lit("688999.SH"))
+        .otherwise(pl.col("member_symbol"))
+        .alias("member_symbol")
+    ).drop("index")
 
     class Collector:
-        def collect_index_constituents(self, indices, *, snapshot_date, index_names):
-            calls.append(("index", tuple(indices), snapshot_date, index_names))
-            return 2
+        def __init__(self, frame):
+            self.frame = frame
 
-        def collect_sector_constituents(self, tags, *, snapshot_date, sector_limit):
-            calls.append(("sector", tuple(tags), snapshot_date, sector_limit))
-            return 3
+        def fetch_index_constituents(self, *_args, **_kwargs):
+            return self.frame
 
-        def collect_lifecycle_observed(self, *, observed_as_of, daily_rows):
-            calls.append(("lifecycle", observed_as_of, daily_rows.height))
-            return 4
+        def fetch_index_snapshots(self, *_args, **_kwargs):
+            return self.frame
 
-    result = pit_reference.sync_hithink_snapshots(
+    result = pit_reference.sync_index_membership_snapshots(
         tmp_path,
-        snapshot_date=date(2026, 8, 2),
-        collector=Collector(),
+        snapshot_date=snapshot_date,
+        hithink_collector=Collector(primary),
+        baostock_collector=Collector(crosscheck),
     )
 
-    assert result == {
-        "status": "published",
-        "snapshot_date": "2026-08-02",
-        "tables": {
-            INDEX_CONSTITUENTS_TABLE: 2,
-            "ths_sector_constituents_snapshots": 3,
-            INSTRUMENT_LIFECYCLE_TABLE: 4,
-        },
-        "published_rows": 9,
-        "errors": [],
-    }
-    assert calls[0][0] == "index"
-    assert calls[1][0] == "sector"
-    assert calls[2] == ("lifecycle", date(2026, 8, 2), 0)
+    assert result["status"] == "failed"
+    assert "provider conflict" in result["errors"][0]
+    assert not (tmp_path / "pit_reference/history/index_membership_history/part.parquet").exists()
 
 
-def test_pit_reference_syncs_baostock_only(monkeypatch, tmp_path):
+def test_pit_reference_sync_combines_membership_and_lifecycle(monkeypatch, tmp_path):
     calls = []
 
-    def sync_candidates(data_dir, *, snapshot_dates):
-        calls.append(("candidates", data_dir, tuple(snapshot_dates)))
+    def sync_membership(data_dir, *, snapshot_date):
+        calls.append(("membership", data_dir, snapshot_date))
         return {
             "status": "published",
-            "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: 300},
-            "published_rows": 300,
+            "source": "hithink",
+            "tables": {INDEX_MEMBERSHIP_HISTORY_TABLE: 2600},
+            "published_rows": 2600,
+            "crosschecked_snapshots": 2,
             "errors": [],
         }
 
@@ -219,30 +212,32 @@ def test_pit_reference_syncs_baostock_only(monkeypatch, tmp_path):
             "errors": [],
         }
 
-    monkeypatch.setattr(pit_reference, "sync_baostock_index_candidates", sync_candidates)
+    monkeypatch.setattr(pit_reference, "sync_index_membership_snapshots", sync_membership)
     monkeypatch.setattr(pit_reference, "sync_baostock_lifecycle", sync_lifecycle)
 
-    result = pit_reference.sync_baostock_reference(
+    result = pit_reference.sync_pit_reference(
         tmp_path,
         snapshot_date=date(2026, 8, 3),
     )
 
     assert result == {
         "status": "published",
-        "source": "baostock",
+        "source": "hithink",
         "snapshot_date": "2026-08-03",
         "tables": {
-            INDEX_CONSTITUENT_CANDIDATES_TABLE: 300,
+            INDEX_MEMBERSHIP_HISTORY_TABLE: 2600,
             INSTRUMENT_LIFECYCLE_EVENTS_TABLE: 5587,
         },
-        "published_rows": 5887,
-        "index_candidate_rows": 300,
+        "published_rows": 8187,
+        "index_membership_rows": 2600,
+        "crosschecked_snapshots": 2,
         "lifecycle_rows": 5587,
         "instrument_appended_symbols": 2,
+        "warnings": [],
         "errors": [],
     }
     assert calls == [
-        ("candidates", tmp_path, (date(2026, 8, 3),)),
+        ("membership", tmp_path, date(2026, 8, 3)),
         ("lifecycle", tmp_path, date(2026, 8, 3), 5),
     ]
 

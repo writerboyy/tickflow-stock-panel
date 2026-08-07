@@ -108,7 +108,6 @@ def test_build_index_history_rejects_incomplete_strict_hs300(tmp_path):
             source="fixture",
             logical_snapshot="2026-08-02",
             raw_label="sample",
-            validate_strict=True,
         )
 
 
@@ -430,16 +429,19 @@ def test_publish_history_table_round_trips(tmp_path):
 def test_build_index_history_records_manifest_and_published_table(tmp_path):
     count = build_index_history(
         data_dir=tmp_path,
-        raw_rows=[{"品种代码": "600519", "快照日期": "2025-04-25"}],
+        raw_rows=[
+            {"品种代码": f"{600000 + index}", "快照日期": "2025-04-25"}
+            for index in range(300)
+        ],
         index_symbol="000300.SH",
         source="fixture",
         logical_snapshot="2026-08-02",
         raw_label="sample",
     )
 
-    assert count == 1
+    assert count == 300
     frame = read_history_table(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE)
-    assert frame.select("member_symbol").to_series().to_list() == ["600519.SH"]
+    assert frame.height == 300
     manifest = (
         tmp_path
         / "ext_data"
