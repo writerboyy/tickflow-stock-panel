@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import calendar
 import copy
 import io
 import logging
@@ -1480,10 +1481,16 @@ class FreeStrategyEngine:
 
     @staticmethod
     def _dividend_tax_rate(acquired: date, sold: date) -> float:
-        held_days = (sold - acquired).days
-        if held_days <= 30:
+        def add_months(value: date, months: int) -> date:
+            month_index = value.month - 1 + months
+            year = value.year + month_index // 12
+            month = month_index % 12 + 1
+            day = min(value.day, calendar.monthrange(year, month)[1])
+            return date(year, month, day)
+
+        if sold <= add_months(acquired, 1):
             return 0.2
-        if held_days <= 365:
+        if sold <= add_months(acquired, 12):
             return 0.1
         return 0.0
 

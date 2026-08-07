@@ -1569,6 +1569,100 @@ def on_bar(context, bars):
     assert result["corporate_actions"][-1]["tax_withheld"] == 4.0
 
 
+@pytest.mark.parametrize(
+    ("acquired", "sold", "rate"),
+    [
+        (date(2024, 1, 31), date(2024, 2, 29), 0.2),
+        (date(2024, 1, 31), date(2024, 3, 1), 0.1),
+        (date(2024, 1, 31), date(2025, 1, 31), 0.1),
+        (date(2024, 1, 31), date(2025, 2, 1), 0.0),
+        (date(2024, 2, 29), date(2025, 2, 28), 0.1),
+        (date(2024, 2, 29), date(2025, 3, 1), 0.0),
+    ],
+)
+def test_dividend_tax_uses_calendar_month_and_year_boundaries(acquired, sold, rate):
+    assert FreeStrategyEngine._dividend_tax_rate(acquired, sold) == rate
+
+
+def test_dividend_tax_consumes_multiple_lots_fifo_with_partial_sale():
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+    engine._position_lots = {  # noqa: SLF001
+        "X": [
+            {"quantity": 100.0, "acquired": date(2024, 1, 1), "dividend_per_share": 0.2},
+            {"quantity": 100.0, "acquired": date(2024, 12, 1), "dividend_per_share": 0.4},
+        ],
+    }
+
+    tax = engine._consume_position_lots("X", 150, date(2025, 1, 20))  # noqa: SLF001
+
+    assert tax == 2.0
+    assert engine._position_lots["X"] == [{  # noqa: SLF001
+        "quantity": 50.0,
+        "acquired": date(2024, 12, 1),
+        "dividend_per_share": 0.4,
+    }]
+
+
+def test_split_dividend_lot_restores_without_repeating_tax_or_action():
+    source = """
+def on_bar(context, bars):
+    if context.now.date().isoformat() == '2024-01-31':
+        context.buy('X', quantity=100)
+    elif context.now.date().isoformat() == '2024-02-29':
+        context.sell('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000,
+        asset_type="stock",
+        fill_policy="close",
+        fees_pct=0,
+        min_commission=0,
+        stamp_tax_pct=0,
+        slippage_bps=0,
+    )
+    initial = FreeStrategyEngine(source, timeframe="1m", config=config)
+    initial.run([
+        Bar("X", datetime(2024, 1, 31, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X",
+            datetime(2024, 2, 1, 9, 31),
+            4.85,
+            4.85,
+            4.85,
+            4.85,
+            raw_close=4.85,
+            split_ratio=2,
+            cash_dividend=0.3,
+        ),
+    ], finalize_session=False, return_result=False)
+    resumed = FreeStrategyEngine(source, timeframe="1m", config=config)
+    resumed.restore_checkpoint(initial.checkpoint())
+
+    result = resumed.run([
+        Bar(
+            "X",
+            datetime(2024, 2, 29, 15),
+            4.85,
+            4.85,
+            4.85,
+            4.85,
+            raw_close=4.85,
+        ),
+    ])
+
+    sell = result["fills"][-1]
+    assert sell["quantity"] == 100
+    assert sell["dividend_tax"] == 3.0
+    assert [action["type"] for action in result["corporate_actions"]] == [
+        "cash_dividend", "split", "dividend_tax",
+    ]
+    assert result["checkpoint"]["position_lots"]["X"] == [{
+        "quantity": 100.0,
+        "acquired": "2024-01-31",
+        "dividend_per_share": 0.15,
+    }]
+
+
 def test_stock_sale_after_one_year_does_not_withhold_dividend_tax():
     source = """
 def on_bar(context, bars):
