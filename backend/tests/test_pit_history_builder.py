@@ -276,6 +276,23 @@ def test_cninfo_sw_name_alone_normalizes_standard_code_and_level():
     ).row(0) == ("申银万国行业分类标准", "008003", 1)
 
 
+def test_cninfo_industry_normalizes_302_chinext_symbol():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "302132",
+                "分类标准": "申银万国行业分类标准",
+                "分类标准编码": "008003",
+                "行业门类": "国防军工",
+                "变更日期": "2021-07-30",
+            }
+        ],
+        source="akshare_cninfo",
+    )
+
+    assert frame["member_symbol"].to_list() == ["302132.SZ"]
+
+
 def test_industry_history_preserves_provider_effective_to():
     frame = normalize_industry_membership_history(
         [

@@ -163,7 +163,7 @@ def normalize_symbol(value: object) -> str:
     code = code.zfill(6)
     if code.startswith(("600", "601", "603", "605", "688", "689", "900")):
         suffix = "SH"
-    elif code.startswith(("000", "001", "002", "003", "300", "301", "200")):
+    elif code.startswith(("000", "001", "002", "003", "300", "301", "302", "200")):
         suffix = "SZ"
     elif code.startswith(("4", "8", "9")):
         suffix = "BJ"
