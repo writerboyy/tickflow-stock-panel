@@ -920,6 +920,8 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "member_code": "证券纯数字代码",
         "member_name": "证券名称",
         "industry_standard": "行业分类标准",
+        "industry_standard_code": "行业分类标准编码",
+        "industry_level": "行业级别",
         "industry_code": "行业代码",
         "industry_name": "行业名称",
         "effective_from": "PIT 生效开始日期(含)",

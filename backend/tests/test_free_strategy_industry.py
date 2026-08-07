@@ -46,6 +46,24 @@ def test_industry_history_uses_half_open_intervals(tmp_path):
     )["X"]["industry_code"] == "NEW"
 
 
+def test_industry_history_loads_declared_level_one(tmp_path):
+    item = row("X", "BANK", date(2024, 1, 1))
+    item["industry_standard_code"] = "008003"
+    item["industry_level"] = 1
+    write_history(tmp_path, [item])
+
+    loaded = load_industry_history(
+        tmp_path,
+        ["X"],
+        date(2024, 1, 2),
+        "申银万国行业分类标准",
+        1,
+    )
+
+    assert loaded["X"]["industry_standard_code"] == "008003"
+    assert loaded["X"]["industry_level"] == 1
+
+
 def test_industry_history_fails_closed_on_gap_overlap_and_unknown_level(tmp_path):
     write_history(tmp_path, [
         row("X", "A", date(2024, 1, 1), date(2024, 3, 1)),
