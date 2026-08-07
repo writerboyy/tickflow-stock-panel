@@ -222,6 +222,137 @@ def test_industry_history_accepts_public_raw_columns():
     ]
 
 
+def test_cninfo_sw_history_normalizes_to_level_one_without_reusing_leaf_code():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "000016",
+                "新证券简称": "*ST康佳A",
+                "分类标准": "申银万国行业分类标准",
+                "分类标准编码": "008003",
+                "行业门类": "家用电器",
+                "行业次类": "白色家电",
+                "行业中类": "冰洗",
+                "行业大类": "冰洗",
+                "行业编码": "S330106",
+                "变更日期": "2024-07-30",
+            }
+        ],
+        source="akshare_cninfo",
+    )
+
+    assert frame.select(
+        "member_symbol",
+        "industry_standard_code",
+        "industry_level",
+        "industry_code",
+        "industry_name",
+    ).to_dicts() == [
+        {
+            "member_symbol": "000016.SZ",
+            "industry_standard_code": "008003",
+            "industry_level": 1,
+            "industry_code": "",
+            "industry_name": "家用电器",
+        }
+    ]
+
+
+def test_cninfo_sw_name_alone_normalizes_standard_code_and_level():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "证券代码": "000001",
+                "分类标准": "申银万国行业分类标准",
+                "行业门类": "金融业",
+                "行业编码": "S480000",
+                "变更日期": "2024-01-02",
+            }
+        ],
+        source="akshare_cninfo",
+    )
+
+    assert frame.select(
+        "industry_standard", "industry_standard_code", "industry_level"
+    ).row(0) == ("申银万国行业分类标准", "008003", 1)
+
+
+def test_industry_history_preserves_provider_effective_to():
+    frame = normalize_industry_membership_history(
+        [
+            {
+                "member_symbol": "000001.SZ",
+                "industry_standard": "sw",
+                "industry_level": 1,
+                "industry_name": "银行",
+                "effective_from": "2024-01-01",
+                "effective_to": "2024-06-01",
+            },
+            {
+                "member_symbol": "000001.SZ",
+                "industry_standard": "sw",
+                "industry_level": 1,
+                "industry_name": "非银金融",
+                "effective_from": "2024-07-01",
+            },
+        ],
+        source="fixture",
+    )
+
+    assert frame.select("industry_name", "effective_from", "effective_to").to_dicts() == [
+        {
+            "industry_name": "银行",
+            "effective_from": date(2024, 1, 1),
+            "effective_to": date(2024, 6, 1),
+        },
+        {
+            "industry_name": "非银金融",
+            "effective_from": date(2024, 7, 1),
+            "effective_to": None,
+        },
+    ]
+
+
+def test_read_raw_rows_accepts_archived_json_gzip_envelope(tmp_path):
+    import gzip
+    import json
+
+    path = tmp_path / "industry.json.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump({"payload": [{"证券代码": "000001"}]}, handle, ensure_ascii=False)
+
+    assert read_raw_rows(path) == [{"证券代码": "000001"}]
+
+
+def test_industry_history_coverage_checks_levels_independently():
+    frame = pl.DataFrame(
+        {
+            "member_symbol": ["000001.SZ", "000001.SZ"],
+            "industry_standard": ["sw", "sw"],
+            "industry_standard_code": ["008003", "008003"],
+            "industry_level": [1, 2],
+            "effective_from": [date(2024, 1, 1), date(2024, 1, 1)],
+            "effective_to": [None, None],
+        }
+    )
+    daily = pl.DataFrame(
+        {"symbol": ["000001.SZ"], "date": [date(2024, 1, 2)]}
+    )
+
+    report = validate_industry_history_coverage(
+        frame,
+        industry_standard="sw",
+        industry_standard_code="008003",
+        industry_level=1,
+        sample_dates=[date(2024, 1, 2)],
+        daily_frame=daily,
+        min_coverage=1.0,
+    )
+
+    assert report["usable"] is True
+    assert report["overlap_intervals"] == 0
+
+
 def test_industry_history_coverage_fails_closed_on_observed_daily_gap():
     frame = normalize_industry_membership_history(
         [

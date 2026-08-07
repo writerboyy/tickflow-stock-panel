@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterable
 from datetime import date
+import gzip
 from html.parser import HTMLParser
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.config import settings
 from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_HISTORY_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
+    INDUSTRY_PARSER_VERSION,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     PARSER_VERSION,
     SOURCE,
@@ -169,11 +171,16 @@ def read_raw_rows(path: Path, *, encoding: str = "utf-8") -> list[dict]:
         return pl.read_parquet(path).to_dicts()
     if suffix in {".html", ".htm"}:
         return _rows_from_html(path.read_text(encoding=encoding))
-    if suffix == ".json":
-        payload = json.loads(path.read_text(encoding=encoding))
-        if not isinstance(payload, list) or any(not isinstance(row, dict) for row in payload):
+    if suffix == ".json" or path.name.casefold().endswith(".json.gz"):
+        if suffix == ".gz":
+            with gzip.open(path, "rt", encoding=encoding) as handle:
+                payload = json.load(handle)
+        else:
+            payload = json.loads(path.read_text(encoding=encoding))
+        rows = payload.get("payload") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError(f"JSON raw file must contain a list of objects: {path}")
-        return payload
+        return rows
     raise ValueError(f"unsupported raw file type: {path}")
 
 
@@ -187,6 +194,9 @@ def _publish(
     raw_rows: list[dict],
     frame: pl.DataFrame,
 ) -> int:
+    parser_version = (
+        INDUSTRY_PARSER_VERSION if table == INDUSTRY_MEMBERSHIP_HISTORY_TABLE else PARSER_VERSION
+    )
     _, source_hash = archive_source_payload(
         data_dir,
         SOURCE,
@@ -194,7 +204,7 @@ def _publish(
         logical_snapshot,
         raw_label,
         raw_rows,
-        parser_version=PARSER_VERSION,
+        parser_version=parser_version,
     )
     count = publish_history_table(data_dir, table, frame)
     update_ingestion_manifest(
@@ -203,8 +213,8 @@ def _publish(
         table,
         logical_snapshot,
         status="published" if count else "valid_empty",
-        parser_version=PARSER_VERSION,
-        schema_version=1,
+        parser_version=parser_version,
+        schema_version=2 if table == INDUSTRY_MEMBERSHIP_HISTORY_TABLE else 1,
         source_content_hash=source_hash,
         content_hash=stable_content_hash(frame.to_dicts()) if count else None,
         published_rows=count,
