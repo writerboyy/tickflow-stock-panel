@@ -1009,6 +1009,96 @@ class MarketDataHub:
         self._ws_state = "disconnected"
 
 
+def _held_schedule_scope(context, _timestamp: datetime) -> list[str]:
+    return [
+        symbol
+        for symbol, quantity in context.portfolio.positions.items()
+        if float(quantity) > 0
+    ]
+
+
+def _legacy_schedule_condition(
+    strategy_id: str,
+    callback_name: str,
+    namespace: dict[str, Any],
+):
+    if strategy_id == "performance_small_cap":
+        if callback_name == "_monthly_adjustment":
+            def monthly_due(context, _timestamp: datetime) -> bool:
+                records = namespace["_instrument_records"](context)
+                previous_date = namespace["_previous_trading_date"](context, records)
+                return bool(namespace["_should_monthly_adjust"](context, previous_date))
+
+            return monthly_due
+        if callback_name == "_check_limit_up_and_buy":
+            def limit_up_due(context, _timestamp: datetime) -> bool:
+                state = namespace["_state"](context)
+                return bool(state.get("high_limit_list")) and not state.get(
+                    "risk_control_executed",
+                )
+
+            return limit_up_due
+        return None
+    if strategy_id != "small_cap_limitup":
+        return None
+    no_trading_months = set(namespace.get("NO_TRADING_MONTHS", {1, 4}))
+    if callback_name in {"_weekly_sell", "_weekly_buy"}:
+        def weekly_due(context, timestamp: datetime) -> bool:
+            return timestamp.month not in no_trading_months and bool(
+                namespace["_is_weekly_rebalance_day"](context, timestamp),
+            )
+
+        return weekly_due
+    if callback_name in {"_sell_stocks", "_trade_afternoon"}:
+        def regular_month(_context, timestamp: datetime) -> bool:
+            return timestamp.month not in no_trading_months
+
+        return regular_month
+    if callback_name == "_close_account":
+        def close_due(context, timestamp: datetime) -> bool:
+            return timestamp.month in no_trading_months and not namespace["_state"](
+                context,
+            ).get("no_trading_hold")
+
+        return close_due
+    return None
+
+
+def _apply_legacy_builtin_schedule_contracts(
+    engine: FreeStrategyEngine,
+    strategy_id: str,
+) -> None:
+    """Give immutable pre-contract strategy snapshots the current scheduler semantics."""
+    if strategy_id not in {"performance_small_cap", "small_cap_limitup"}:
+        return
+    optional_callbacks = {
+        "performance_small_cap": {"_monthly_adjustment", "_check_limit_up_and_buy"},
+        "small_cap_limitup": {"_weekly_sell", "_weekly_buy", "_trade_afternoon"},
+    }[strategy_id]
+    held_only_callbacks = {"_sell_stocks", "_close_account"}
+    for at, callback, _done in engine.context._scheduled:  # noqa: SLF001
+        callback_name = getattr(callback, "__name__", "")
+        key = (at, callback)
+        condition = _legacy_schedule_condition(
+            strategy_id,
+            callback_name,
+            getattr(callback, "__globals__", {}),
+        )
+        if condition is not None:
+            engine._scheduled_conditions.setdefault(key, condition)  # noqa: SLF001
+        current_scope = engine._scheduled_symbol_scopes.get(key)  # noqa: SLF001
+        if current_scope is None or getattr(current_scope, "__name__", "") == "_held_scope":
+            continue
+        if (
+            callback_name in optional_callbacks
+            and key not in engine._scheduled_optional_symbol_scopes  # noqa: SLF001
+        ):
+            engine._scheduled_optional_symbol_scopes[key] = current_scope  # noqa: SLF001
+            engine._scheduled_symbol_scopes[key] = _held_schedule_scope  # noqa: SLF001
+        elif callback_name in held_only_callbacks:
+            engine._scheduled_symbol_scopes[key] = _held_schedule_scope  # noqa: SLF001
+
+
 def _engine_from_state(
     state: dict[str, Any],
     account_root: Path,
@@ -1067,6 +1157,10 @@ def _engine_from_state(
         callback_deadline=callback_deadline,
         callback_label=callback_label,
     )
+    strategy_id = str(
+        state.get("strategy_id") or state.get("config", {}).get("strategy_id") or "",
+    )
+    _apply_legacy_builtin_schedule_contracts(engine, strategy_id)
     runtime_timestamp = (
         state.get("last_bar")
         or state.get("checkpoint", {}).get("runtime", {}).get("last_timestamp")
