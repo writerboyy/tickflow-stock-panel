@@ -2051,58 +2051,56 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             for symbol, day in market_data.daily
             if symbol in market_symbols and start <= day <= end
         )
-        readiness_manifest: dict[str, Any] | None = None
-        if engine.readiness_requirements:
-            trading_dates = sorted({
-                day
-                for symbol, day in market_data.daily
-                if symbol in market_symbols and start <= day <= end
-            })
-            calendar_dates = sorted({
-                day
-                for symbol, day in market_data.daily
-                if symbol in market_symbols and day <= end
-            })
-            benchmark_dates = {
-                day
-                for symbol, day in market_data.daily
-                if symbol == config.benchmark_symbol and day <= end
-            }
-            daily_root = {
-                "stock": "kline_daily",
-                "etf": "kline_etf_daily",
-                "index": "kline_index_daily",
-            }.get(payload["asset_type"], "kline_daily")
-            minute_root = (
-                "kline_etf_minute"
-                if payload["asset_type"] == "etf"
-                else "kline_minute"
+        trading_dates = sorted({
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and start <= day <= end
+        })
+        calendar_dates = sorted({
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and day <= end
+        })
+        benchmark_dates = {
+            day
+            for symbol, day in market_data.daily
+            if symbol == config.benchmark_symbol and day <= end
+        }
+        daily_root = {
+            "stock": "kline_daily",
+            "etf": "kline_etf_daily",
+            "index": "kline_index_daily",
+        }.get(payload["asset_type"], "kline_daily")
+        minute_root = (
+            "kline_etf_minute"
+            if payload["asset_type"] == "etf"
+            else "kline_minute"
+        )
+        try:
+            readiness_manifest = build_readiness_manifest(
+                Path(payload["data_dir"]),
+                engine.readiness_requirements,
+                strategy_sha256=source_digest,
+                universe=engine.universe,
+                trading_dates=trading_dates,
+                calendar_dates=calendar_dates,
+                benchmark_symbol=config.benchmark_symbol,
+                benchmark_dates=benchmark_dates,
+                dataset_roots=[
+                    Path(daily_root),
+                    Path(minute_root) if payload["timeframe"] != "1d" else Path(daily_root),
+                ],
             )
-            try:
-                readiness_manifest = build_readiness_manifest(
-                    repo.store.data_dir,
-                    engine.readiness_requirements,
-                    strategy_sha256=source_digest,
-                    universe=engine.universe,
-                    trading_dates=trading_dates,
-                    calendar_dates=calendar_dates,
-                    benchmark_symbol=config.benchmark_symbol,
-                    benchmark_dates=benchmark_dates,
-                    dataset_roots=[
-                        Path(daily_root),
-                        Path(minute_root) if payload["timeframe"] != "1d" else Path(daily_root),
-                    ],
-                )
-            except ReadinessUnavailable as exc:
-                if payload.get("run_dir"):
-                    persist_readiness_report(Path(payload["run_dir"]), exc.report)
-                raise
+        except ReadinessUnavailable as exc:
             if payload.get("run_dir"):
-                readiness_path = Path(payload["run_dir"]) / "readiness-manifest.json"
-                readiness_path.write_text(
-                    json.dumps(readiness_manifest, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
-                )
+                persist_readiness_report(Path(payload["run_dir"]), exc.report)
+            raise
+        if payload.get("run_dir"):
+            readiness_path = Path(payload["run_dir"]) / "readiness-manifest.json"
+            readiness_path.write_text(
+                json.dumps(readiness_manifest, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
         replayed_rows = 0
         first_bar: datetime | None = None
         last_bar: datetime | None = None
