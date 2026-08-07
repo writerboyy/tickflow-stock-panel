@@ -865,8 +865,23 @@ class MarketDataHub:
             return []
         if snapshot.get("date") != expected_date.isoformat():
             return []
+        quotes = dict(snapshot.get("quotes") or {})
+        missing = set(symbols) - set(quotes)
+        index_getter = getattr(self.quote_service, "get_index_quotes", None)
+        if missing and callable(index_getter):
+            try:
+                frame = index_getter(sorted(missing))
+            except Exception:  # noqa: BLE001
+                logger.exception("模拟盘读取指数实时行情失败")
+            else:
+                if frame is not None and not frame.is_empty():
+                    quotes.update({
+                        str(row["symbol"]).strip().upper(): row
+                        for row in frame.to_dicts()
+                        if row.get("symbol") in missing
+                    })
         values: list[dict[str, Any]] = []
-        for symbol, raw in (snapshot.get("quotes") or {}).items():
+        for symbol, raw in quotes.items():
             row = dict(raw)
             row["symbol"] = str(symbol).strip().upper()
             normalized = _quote_record(row)

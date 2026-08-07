@@ -1537,9 +1537,14 @@ def _ensure_scheduled_market_data(
 def _scheduled_symbols(engine: FreeStrategyEngine, timestamp: datetime) -> list[str]:
     result: list[str] = []
     scoped = engine.scheduled_snapshot_symbols(timestamp)
+    held_symbols = [
+        symbol
+        for symbol, quantity in engine.account.positions.items()
+        if float(quantity) > 0
+    ]
     for symbol in [
         *(engine.universe if scoped is None else scoped),
-        *engine.account.positions,
+        *held_symbols,
         engine.config.benchmark_symbol,
     ]:
         if symbol and symbol not in result:
@@ -1553,9 +1558,14 @@ def _scheduled_required_symbols(
 ) -> list[str]:
     result: list[str] = []
     scoped = engine.scheduled_required_snapshot_symbols(timestamp)
+    held_symbols = [
+        symbol
+        for symbol, quantity in engine.account.positions.items()
+        if float(quantity) > 0
+    ]
     for symbol in [
         *(engine.universe if scoped is None else scoped),
-        *engine.account.positions,
+        *held_symbols,
         engine.config.benchmark_symbol,
     ]:
         if symbol and symbol not in result:

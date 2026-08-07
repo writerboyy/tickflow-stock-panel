@@ -4,7 +4,7 @@ import threading
 import time
 from collections import deque
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -1362,6 +1362,36 @@ def test_live_valuation_uses_current_quote_without_mutating_state():
     assert valuation["return_pct"] == pytest.approx(10)
     assert valuation["drawdown_pct"] == pytest.approx(100 / 1_200 * 100)
     assert state == original
+
+
+def test_scheduled_snapshot_falls_back_to_index_quote_cache():
+    class QuoteSnapshot:
+        @staticmethod
+        def get_fresh_quotes(_symbols):
+            return {
+                "live": False,
+                "quotes": {},
+                "missing_symbols": ["399303.SZ"],
+                "as_of": None,
+                "date": "2026-08-07",
+            }
+
+        @staticmethod
+        def get_index_quotes(symbols):
+            assert symbols == ["399303.SZ"]
+            return pl.DataFrame([{
+                "symbol": "399303.SZ",
+                "last_price": 9890.197,
+                "timestamp": "2026-08-07T11:30:00+08:00",
+            }])
+
+    hub = MarketDataHub(QuoteSnapshot(), None)
+
+    rows = hub._fresh_quote_records({"399303.SZ"}, date(2026, 8, 7))  # noqa: SLF001
+
+    assert [(row["symbol"], row["last_price"]) for row in rows] == [
+        ("399303.SZ", 9890.197),
+    ]
 
 
 def test_live_valuation_reports_missing_quote_without_false_zero():

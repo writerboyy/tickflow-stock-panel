@@ -1481,6 +1481,7 @@ def run(context):
         timeframe="1m",
         config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
     )
+    engine.account.positions["ZERO"] = 0.0
 
     assert engine.scheduled_snapshot_symbols(datetime(2024, 1, 2, 10)) == ["X", "Y"]
     assert engine.scheduled_required_snapshot_symbols(datetime(2024, 1, 2, 10)) == ["X"]
