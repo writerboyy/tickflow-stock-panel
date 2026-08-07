@@ -1896,7 +1896,7 @@ def _process_scheduled_fills(
         for bar in candidates:
             by_time.setdefault(bar.timestamp, []).append(bar)
         for timestamp, bars in sorted(by_time.items()):
-            engine.process_fill_event(timestamp, bars)
+            engine.advance_event(timestamp, bars, event_type="fill")
 
 
 def advance_scheduled_session(
@@ -2032,7 +2032,12 @@ def advance_scheduled_session(
                 live_bars=live_bars,
                 live_only=live_only,
             )
-        engine.run_scheduled_event(event_timestamp, snapshot, scheduled_at=at)
+        engine.advance_event(
+            event_timestamp,
+            snapshot,
+            event_type="scheduled",
+            scheduled_at=at,
+        )
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
         live_bars=live_bars, live_only=live_only,
@@ -2065,7 +2070,7 @@ def advance_scheduled_session(
             raise ValueError(
                 f"{day.isoformat()} 15:00 收盘任务缺少行情: {missing_text}"
             )
-        engine.update_scheduled_market(closing_time, snapshot)
+        engine.advance_event(closing_time, snapshot, event_type="market")
         engine.finish_session()
 
 

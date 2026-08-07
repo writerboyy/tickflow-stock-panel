@@ -1039,7 +1039,7 @@ def initialize(context):
     engine.account.available = {exit_symbol: 100}
     engine.account.avg_cost = {exit_symbol: 10}
 
-    engine.run_scheduled_event(now, [
+    engine.advance_event(now, [
         Bar(
             exit_symbol, now, 10, 10, 10, 10,
             raw_close=10, limit_up=11, limit_down=9,
@@ -1048,7 +1048,7 @@ def initialize(context):
             new_symbol, now, 10, 10, 10, 10,
             raw_close=10, limit_up=11, limit_down=9,
         ),
-    ])
+    ], event_type="scheduled")
 
     assert [(fill.symbol, fill.side, fill.quantity) for fill in engine.account.fills] == [
         (exit_symbol, "sell", 100),
@@ -2240,8 +2240,8 @@ def initialize(context):
     for day in (2, 3):
         timestamp = datetime(2024, 1, day, 13, 10)
         bar = Bar("X", timestamp, 10, 10, 10, 10)
-        engine.run_scheduled_event(timestamp, [bar])
-        engine.run_scheduled_event(timestamp, [bar])
+        engine.advance_event(timestamp, [bar], event_type="scheduled")
+        engine.advance_event(timestamp, [bar], event_type="scheduled")
         engine.finish_session()
 
     assert engine.context.state["events"] == [
@@ -2317,9 +2317,10 @@ def run(context):
         ]
 
     engine.set_history_loader(load_history)
-    engine.run_scheduled_event(
+    engine.advance_event(
         datetime(2024, 1, 2, 13, 10),
         [Bar("X", datetime(2024, 1, 2, 13, 10), 10, 10, 10, 10)],
+        event_type="scheduled",
     )
 
     assert engine.context.state["history"] == [9]
@@ -2342,7 +2343,7 @@ def run(context):
         timeframe="1m",
         config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
     )
-    close_engine.run_scheduled_event(timestamp, [snapshot])
+    close_engine.advance_event(timestamp, [snapshot], event_type="scheduled")
     assert close_engine.account.fills[0].timestamp == timestamp.isoformat()
     assert close_engine.account.fills[0].price == 10
 
@@ -2351,11 +2352,12 @@ def run(context):
         timeframe="1m",
         config=FreeStrategyConfig(fill_policy="next_open", slippage_bps=0),
     )
-    next_engine.run_scheduled_event(timestamp, [snapshot])
+    next_engine.advance_event(timestamp, [snapshot], event_type="scheduled")
     assert next_engine.account.fills == []
-    next_engine.process_fill_event(
+    next_engine.advance_event(
         datetime(2024, 1, 2, 13, 11),
         [Bar("X", datetime(2024, 1, 2, 13, 11), 11, 11, 11, 11)],
+        event_type="fill",
     )
     assert next_engine.account.fills[0].timestamp == "2024-01-02T13:11:00"
     assert next_engine.account.fills[0].price == 11
@@ -2369,7 +2371,7 @@ def run(context):
             timeframe="1m",
             config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
         )
-        blocked_engine.run_scheduled_event(timestamp, [blocked])
+        blocked_engine.advance_event(timestamp, [blocked], event_type="scheduled")
         assert blocked_engine.account.fills == []
         assert blocked_engine.account.orders[0].status == "rejected"
 
@@ -2386,11 +2388,11 @@ def run(context):
     timestamp = datetime(2024, 1, 2, 13, 10)
     bar = Bar("X", timestamp, 10, 10, 10, 10)
     initial = FreeStrategyEngine(source, timeframe="1m")
-    initial.run_scheduled_event(timestamp, [bar])
+    initial.advance_event(timestamp, [bar], event_type="scheduled")
 
     resumed = FreeStrategyEngine(source, timeframe="1m")
     resumed.restore_checkpoint(initial.checkpoint())
-    resumed.run_scheduled_event(timestamp, [bar])
+    resumed.advance_event(timestamp, [bar], event_type="scheduled")
 
     assert resumed.context.state["runs"] == 1
     assert resumed.callbacks_executed == 1
@@ -2410,7 +2412,7 @@ def run(context):
 """
     timestamp = datetime(2026, 7, 30, 10, 30)
     initial = FreeStrategyEngine(source)
-    initial.update_scheduled_market(timestamp, [])
+    initial.advance_event(timestamp, event_type="market")
     resumed = FreeStrategyEngine(source)
 
     resumed.restore_checkpoint(initial.checkpoint())

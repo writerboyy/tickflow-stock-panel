@@ -41,6 +41,14 @@ def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
 
 
+def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:
+    engine.advance_event(
+        max(value.timestamp for value in values),
+        event_type="quote",
+        quotes=values,
+    )
+
+
 def test_session_final_quote_is_clamped_to_closed_market_boundary():
     final_quote = Quote(
         "399303.SZ",
@@ -125,7 +133,8 @@ def test_disabled_paper_notification_sends_nothing(monkeypatch):
     )
 
 
-def test_full_bar_wait_does_not_survive_market_close():
+def test_full_bar_wait_does_not_survive_market_close(monkeypatch):
+    monkeypatch.setattr("app.free_strategy.paper.cn_today", lambda: date(2026, 8, 6))
     state = {
         "execution_mode": "full_bar",
         "market_mode": "bar_1m",
@@ -532,6 +541,7 @@ def test_supervisor_keeps_subscription_and_clears_stale_wait_reason(tmp_path, mo
     initialize_supervisor_runtime(supervisor)
     current_time = [datetime(2026, 8, 6, 14, 51)]
     monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: current_time[0])
+    monkeypatch.setattr("app.free_strategy.paper.cn_today", lambda: date(2026, 8, 6))
 
     supervisor._monitor_once()  # noqa: SLF001
     supervisor._monitor_once()  # noqa: SLF001
@@ -651,7 +661,7 @@ def on_quote(context, quotes):
         timeframe="1m",
         config=FreeStrategyConfig(initial_capital=1_000, lot_size=1, fees_pct=0, slippage_bps=0, fill_policy="close", settlement="t0"),
     )
-    current.process_quotes([quote(0, 10)])
+    advance_quotes(current, quote(0, 10))
     assert current.account.fills[0].price == 10
 
     following = FreeStrategyEngine(
@@ -659,9 +669,9 @@ def on_quote(context, quotes):
         timeframe="1m",
         config=FreeStrategyConfig(initial_capital=1_000, lot_size=1, fees_pct=0, slippage_bps=0, fill_policy="next_open"),
     )
-    following.process_quotes([quote(0, 10)])
+    advance_quotes(following, quote(0, 10))
     assert following.account.fills == []
-    following.process_quotes([quote(3, 11)])
+    advance_quotes(following, quote(3, 11))
     assert following.account.fills[0].price == 11
 
 
@@ -705,7 +715,7 @@ def on_quote(context, quotes):
     monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: sent.append(args) or True)
 
     before_risk = dict(engine.risk_status)
-    engine.process_quotes([quote(0, 10)])
+    advance_quotes(engine, quote(0, 10))
     _append_engine_events(
         store,
         "paper",
@@ -737,7 +747,7 @@ def on_quote(context, quotes):
         context.state['value_readonly'] = True
 """
     engine = FreeStrategyEngine(source)
-    engine.process_quotes([quote(0, 10)])
+    advance_quotes(engine, quote(0, 10))
     assert engine.state == {"mapping_readonly": True, "value_readonly": True}
 
 
@@ -775,8 +785,8 @@ def on_quote(context, quotes):
         ),
         risk_config=RiskConfig(daily_loss_pct=0.1, max_drawdown_pct=0.3),
     )
-    engine.process_quotes([quote(0, 10)])
-    engine.process_quotes([quote(3, 5)])
+    advance_quotes(engine, quote(0, 10))
+    advance_quotes(engine, quote(3, 5))
 
     assert engine.risk_status["daily_loss_locked"] is True
     assert engine.account.orders[-2].status == "rejected"
@@ -801,8 +811,8 @@ def on_quote(context, quotes):
         ),
         risk_config=RiskConfig(max_orders_per_minute=1),
     )
-    engine.process_quotes([quote(0, 10)])
-    engine.process_quotes([quote(3, 10)])
+    advance_quotes(engine, quote(0, 10))
+    advance_quotes(engine, quote(3, 10))
 
     assert engine.account.orders[-1].status == "filled"
     assert engine.account.positions["X"] == 9

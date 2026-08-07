@@ -3,7 +3,7 @@ from datetime import date, datetime
 import pytest
 
 from app.free_strategy.bars import Bar
-from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
 from app.free_strategy.schedule import ScheduleRule, parse_time_expression
 
 
@@ -45,9 +45,10 @@ def second(context):
 """
     engine = FreeStrategyEngine(source, timeframe="1m")
     engine.set_trading_calendar([date(2024, 1, 2)])
-    engine.run_scheduled_event(
+    engine.advance_event(
         datetime(2024, 1, 2, 9, 0),
         [],
+        event_type="scheduled",
         scheduled_at="09:00",
     )
 
@@ -98,4 +99,94 @@ def monthly(context):
         ("monthly", "2024-01-03"),
         ("weekly", "2024-01-05"),
         ("weekly", "2024-01-08"),
+    ]
+
+
+def test_advance_event_has_one_deterministic_callback_and_fill_order():
+    source = """
+def initialize(context):
+    context.set_universe(['X', 'Y'])
+    context.schedule(scheduled, '09:32')
+
+def on_bar(context, bars):
+    context.state.setdefault('events', []).append(
+        ('bar', context.portfolio.positions.get('X', 0), context.portfolio.positions.get('Y', 0))
+    )
+    context.buy('Y', quantity=100)
+
+def scheduled(context):
+    context.state['events'].append(
+        ('scheduled', context.portfolio.positions.get('X', 0), context.portfolio.positions.get('Y', 0))
+    )
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(fill_policy="next_open", slippage_bps=0),
+    )
+    engine.context.now = datetime(2024, 1, 2, 9, 31)
+    engine._next_timestamp = engine.context.now  # noqa: SLF001
+    engine.context.buy("X", quantity=100)
+    engine.config.fill_policy = "current_close"
+
+    timestamp = datetime(2024, 1, 2, 9, 32)
+    engine.advance_event(
+        timestamp,
+        [
+            Bar("X", timestamp, 10, 10, 10, 10),
+            Bar("Y", timestamp, 20, 20, 20, 20),
+        ],
+        event_type="bar",
+    )
+
+    assert engine.context.state["events"] == [
+        ("bar", 100, 0),
+        ("scheduled", 100, 0),
+    ]
+    assert [(fill.symbol, fill.timestamp) for fill in engine.account.fills] == [
+        ("X", timestamp.isoformat()),
+        ("Y", timestamp.isoformat()),
+    ]
+
+
+def test_bar_and_quote_paths_share_the_same_event_trajectory():
+    bar_source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(scheduled, '09:31')
+
+def on_bar(context, bars):
+    context.state.setdefault('events', []).append(('primary', context.portfolio.positions.get('X', 0)))
+    context.buy('X', quantity=100)
+
+def scheduled(context):
+    context.state['events'].append(('scheduled', context.portfolio.positions.get('X', 0)))
+"""
+    quote_source = bar_source.replace("def on_bar(context, bars):", "def on_quote(context, quotes):")
+    config = FreeStrategyConfig(fill_policy="current_close", slippage_bps=0)
+    bar_engine = FreeStrategyEngine(bar_source, timeframe="1m", config=config)
+    quote_engine = FreeStrategyEngine(
+        quote_source,
+        timeframe="1m",
+        config=FreeStrategyConfig(fill_policy="current_close", slippage_bps=0),
+    )
+    timestamp = datetime(2024, 1, 2, 9, 31)
+    bar_engine.advance_event(
+        timestamp,
+        [Bar("X", timestamp, 10, 10, 10, 10)],
+        event_type="bar",
+    )
+    quote_engine.advance_event(
+        timestamp,
+        event_type="quote",
+        quotes=[Quote("X", timestamp, 10, open=10, high=10, low=10)],
+    )
+
+    assert quote_engine.context.state["events"] == bar_engine.context.state["events"]
+    assert [
+        (fill.symbol, fill.side, fill.quantity, fill.price, fill.value, fill.total_fee)
+        for fill in quote_engine.account.fills
+    ] == [
+        (fill.symbol, fill.side, fill.quantity, fill.price, fill.value, fill.total_fee)
+        for fill in bar_engine.account.fills
     ]

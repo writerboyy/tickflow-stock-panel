@@ -15,7 +15,7 @@ from decimal import Decimal
 from itertools import groupby
 from statistics import mean, pstdev
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Literal
 
 from .bars import Bar
 from .schedule import RegisteredSchedule, ScheduleRule, parse_time_expression
@@ -23,6 +23,8 @@ from app.market_time import cn_naive_now
 from app.services.data_authority import normalize_reference_asset
 
 logger = logging.getLogger(__name__)
+
+EventType = Literal["bar", "quote", "scheduled", "fill", "market"]
 
 
 @dataclass(slots=True)
@@ -1704,19 +1706,25 @@ class FreeStrategyEngine:
         self.context._sync(self._current_close_prices)
         self._run_callback("before_trading_start", bars_now)
 
-    def _run_scheduled_before(self, timestamp: datetime) -> None:
+    def _advance_scheduled_before(self, timestamp: datetime) -> None:
         current = timestamp.strftime("%H:%M")
-        for task in self.context._scheduled:
-            at = task.resolved_time
-            if task.done or at == "every_bar" or at >= current:
-                continue
+        due_times = sorted({
+            task.resolved_time
+            for task in self.context._scheduled
+            if not task.done
+            and task.resolved_time != "every_bar"
+            and task.resolved_time < current
+        })
+        for at in due_times:
             scheduled_timestamp = datetime.combine(
                 timestamp.date(), datetime_time.fromisoformat(at),
             )
-            self.context.now = scheduled_timestamp
-            if self._scheduled_condition_met(task, scheduled_timestamp):
-                self._run_scheduled_callback(task.callback, at)
-            task.done = True
+            self.advance_event(
+                scheduled_timestamp,
+                event_type="scheduled",
+                scheduled_at=at,
+                run_prior_schedules=False,
+            )
 
     def _run_scheduled_at(
         self,
@@ -1790,17 +1798,20 @@ class FreeStrategyEngine:
         self.finish_session()
         timestamp = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=29)
         self._start_session(timestamp, BarsView())
-        self._run_scheduled_before(timestamp)
 
     def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""
         if self._active_session_date is None or self._session_finished:
             return False
-        timestamp = self._last_timestamp or datetime.combine(self._active_session_date, datetime_time(15, 0))
+        timestamp = self._last_timestamp or datetime.combine(
+            self._active_session_date,
+            datetime_time(15, 0),
+        )
         if self.execution_mode != "scheduled":
-            self._run_scheduled_before(
+            self._advance_scheduled_before(
                 datetime.combine(self._active_session_date, datetime_time(23, 59)),
             )
+            timestamp = self._last_timestamp or timestamp
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
         self._fill_immediate_orders(self._session_bars, timestamp)
@@ -1827,19 +1838,32 @@ class FreeStrategyEngine:
         self._session_finished = True
         return True
 
-    def _update_market(self, timestamp: datetime, bars_now: BarsView) -> None:
-        self._apply_splits(bars_now, timestamp)
-        self._current_prices.update({symbol: bar.execution_price("open") for symbol, bar in bars_now.items()})
+    def _publish_market(
+        self,
+        timestamp: datetime,
+        bars_now: BarsView,
+        *,
+        record_history: bool,
+    ) -> None:
         self._current_close_prices.update({symbol: bar.execution_price("close") for symbol, bar in bars_now.items()})
         self.context.now = timestamp
         self.context._sync(self._current_close_prices)
-        self._current_bar = next(iter(bars_now.values()), None)
+        current_bar = next(iter(bars_now.values()), None)
+        if current_bar is not None:
+            self._current_bar = current_bar
         benchmark = bars_now.get(self.config.benchmark_symbol)
         if benchmark is not None:
             self._session_benchmark_close = benchmark.close
-        self._last_bars = bars_now
-        self._session_bars.update(bars_now)
+        if bars_now:
+            self._last_bars = bars_now
+            self._session_bars.update(bars_now)
         self._last_timestamp = timestamp
+        if record_history:
+            self._accumulate_session_daily_bars(bars_now)
+            for symbol, bar in bars_now.items():
+                self.history.setdefault(symbol, []).append(bar)
+                if len(self.history[symbol]) > 5_000:
+                    del self.history[symbol][:-5_000]
         self._session_equity_snapshot = {
             "timestamp": timestamp.isoformat(),
             "equity": self.account.equity(self._current_close_prices),
@@ -1870,71 +1894,95 @@ class FreeStrategyEngine:
             limit_down=quote.limit_down,
         )
 
-    def process_quotes(self, quotes: Iterable[Quote]) -> None:
-        """处理一批实时报价；挂单先用本次报价成交，再执行策略回调。"""
-        values = list(quotes)
-        if not values:
-            return
-        timestamp = max(quote.timestamp for quote in values)
-        quote_view = QuotesView({quote.symbol: quote for quote in values})
-        bars_now = BarsView({quote.symbol: self._quote_bar(quote) for quote in values})
-        if self._active_session_date != timestamp.date():
-            self.finish_session()
-            premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
-            self._start_session(premarket, BarsView())
-        self._next_timestamp = timestamp
-        self._update_market(timestamp, bars_now)
-        due = [item for item in self.pending if item[0].symbol in bars_now]
-        self.pending = [item for item in self.pending if item[0].symbol not in bars_now]
-        self._fill_orders(due, bars_now, timestamp, "close")
-        callback = self._callbacks.get("on_quote")
-        if callback is not None:
-            self._protected_call("on_quote 回调", callback, self.context, quote_view)
-            self.callbacks_executed += 1
-        self._run_scheduled_before(timestamp)
-        self._run_scheduled_at(timestamp)
-        self._fill_immediate_orders(bars_now, timestamp)
-        self.context._sync(self._current_close_prices)
-        self.state = copy.deepcopy(self.context.state)
-
-    def update_scheduled_market(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
-        values = list(bars)
-        bars_now = BarsView({bar.symbol: bar for bar in values})
-        if self._active_session_date != timestamp.date():
-            self.finish_session()
-            self._start_session(timestamp, BarsView())
-        self.market_rows_consumed += len(values)
-        self._next_timestamp = timestamp
-        self._update_market(timestamp, bars_now)
-
-    def run_scheduled_event(
+    def advance_event(
         self,
         timestamp: datetime,
-        bars: Iterable[Bar],
+        bars: Iterable[Bar] = (),
         *,
+        event_type: EventType,
+        quotes: Iterable[Quote] = (),
         scheduled_at: str | None = None,
+        run_prior_schedules: bool = True,
     ) -> None:
-        self.update_scheduled_market(timestamp, bars)
-        self._fill_immediate_orders(self._session_bars, timestamp)
-        self._run_scheduled_at(timestamp, scheduled_at=scheduled_at)
-        self._fill_immediate_orders(self._session_bars, timestamp)
-        self.context._sync(self._current_close_prices)
-
-    def process_fill_event(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
+        """Advance one deterministic market event through the shared state machine."""
+        if event_type not in {"bar", "quote", "scheduled", "fill", "market"}:
+            raise ValueError(f"不支持的事件类型: {event_type}")
+        quote_values = list(quotes)
         values = list(bars)
+        if event_type == "quote":
+            if not quote_values:
+                return
+            values = [self._quote_bar(quote) for quote in quote_values]
+        elif quote_values:
+            raise ValueError("只有 quote 事件可以携带 quotes")
         bars_now = BarsView({bar.symbol: bar for bar in values})
+        quote_view = QuotesView({quote.symbol: quote for quote in quote_values})
+        if self._active_session_date != timestamp.date():
+            self.finish_session()
+            premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(
+                hour=9,
+                minute=29,
+            )
+            self._start_session(premarket, BarsView())
+        if run_prior_schedules and event_type in {"bar", "quote"}:
+            self._advance_scheduled_before(timestamp)
         self.market_rows_consumed += len(values)
         self._next_timestamp = timestamp
         self.context.now = timestamp
+
+        # 1. Settlement is completed by _start_session; corporate actions are first.
         self._apply_splits(bars_now, timestamp)
         self._current_prices.update({symbol: bar.execution_price("open") for symbol, bar in bars_now.items()})
-        due = [item for item in self.pending if item[1] < timestamp and item[0].symbol in bars_now]
+
+        # 2. Orders waiting for the next tradable open are matched before publication.
+        due = [
+            item
+            for item in self.pending
+            if item[1] < timestamp and item[0].symbol in bars_now
+        ]
         self.pending = [
             item for item in self.pending
             if item[1] >= timestamp or item[0].symbol not in bars_now
         ]
         self._fill_orders(due, bars_now, timestamp, "open")
+
+        # 3. Publish the market snapshot and history visible at this timestamp.
+        self._publish_market(
+            timestamp,
+            bars_now,
+            record_history=event_type == "bar",
+        )
+
+        # 4. Primary market callback.
+        if event_type == "bar":
+            self._run_callback("on_bar", bars_now)
+        elif event_type == "quote":
+            callback = self._callbacks.get("on_quote")
+            if callback is not None:
+                self._protected_call("on_quote 回调", callback, self.context, quote_view)
+                self.callbacks_executed += 1
+
+        # 5. Scheduled callbacks keep their registration order.
+        if event_type in {"bar", "quote", "scheduled"}:
+            self._run_scheduled_at(
+                timestamp,
+                actual_bar=event_type == "bar",
+                scheduled_at=scheduled_at,
+            )
+
+        # 6. Current-price orders are matched after every callback at this timestamp.
+        if bars_now:
+            self._fill_immediate_orders(bars_now, timestamp)
+
+        # 7. Record the complete post-event state used by checkpoints and paper mode.
         self.context._sync(self._current_close_prices)
+        self._session_equity_snapshot = {
+            "timestamp": timestamp.isoformat(),
+            "equity": self.account.equity(self._current_close_prices),
+            "cash": self.account.cash,
+            "positions": dict(self.account.positions),
+        }
+        self.state = copy.deepcopy(self.context.state)
 
     def run(
         self,
@@ -1967,41 +2015,7 @@ class FreeStrategyEngine:
         handled = False
         for timestamp, rows_at_time in groupby(stream, key=lambda bar: bar.timestamp):
             handled = True
-            self._next_timestamp = timestamp
-            bars_now = BarsView({bar.symbol: bar for bar in rows_at_time})
-            self.market_rows_consumed += len(bars_now)
-            if self._active_session_date != timestamp.date():
-                self.finish_session(persist_state=return_result)
-                self._apply_splits(bars_now, timestamp)
-                premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
-                self._start_session(premarket, BarsView())
-            else:
-                self._apply_splits(bars_now, timestamp)
-            self._run_scheduled_before(timestamp)
-            # next-open orders created on the previous callback are filled before this bar.
-            self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
-            due = [p for p in self.pending if p[1] <= timestamp and p[0].symbol in bars_now]
-            self.pending = [p for p in self.pending if p[1] > timestamp or p[0].symbol not in bars_now]
-            self._fill_orders(due, bars_now, timestamp, "open")
-            self.context.now = timestamp
-            self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
-            self.context._sync(self._current_close_prices)
-            self._current_bar = next(iter(bars_now.values()), None)
-            benchmark = bars_now.get(self.config.benchmark_symbol)
-            if benchmark is not None:
-                self._session_benchmark_close = benchmark.close
-            self._last_bars = bars_now
-            self._session_bars.update(bars_now)
-            self._accumulate_session_daily_bars(bars_now)
-            self._last_timestamp = timestamp
-            for symbol, bar in bars_now.items():
-                self.history.setdefault(symbol, []).append(bar)
-                if len(self.history[symbol]) > 5_000:
-                    del self.history[symbol][:-5_000]
-            self._run_callback("on_bar", bars_now)
-            self._run_scheduled_at(timestamp, actual_bar=True)
-            self._fill_immediate_orders(bars_now, timestamp)
-            self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(self._current_close_prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
+            self.advance_event(timestamp, rows_at_time, event_type="bar")
         if handled and finalize_session:
             self.finish_session(persist_state=return_result)
         if return_result:

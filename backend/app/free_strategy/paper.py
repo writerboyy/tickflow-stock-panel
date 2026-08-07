@@ -2204,7 +2204,11 @@ def _paper_worker(
                     quotes = [quote for quote in quotes if quote.timestamp > engine._last_timestamp]  # noqa: SLF001
                 if not quotes:
                     continue
-                engine.process_quotes(quotes)
+                engine.advance_event(
+                    max(quote.timestamp for quote in quotes),
+                    event_type="quote",
+                    quotes=quotes,
+                )
                 current["last_quote"] = max((quote.timestamp.isoformat() for quote in quotes), default=current.get("last_quote"))
                 _append_engine_events(
                     store,
