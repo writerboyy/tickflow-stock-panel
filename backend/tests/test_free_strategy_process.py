@@ -11,7 +11,6 @@ from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
-    _assert_performance_small_cap_financial_coverage,
     _aligned_warmup_bars,
     _is_performance_small_cap_source,
     _load_financial_snapshot,
@@ -136,21 +135,6 @@ def test_financial_snapshot_uses_latest_announced_records_without_future_data(tm
     assert snapshot["X"]["net_income_attributable"] == 9_000_000.0
     assert snapshot["X"]["roe"] == 6.0
     assert snapshot["X"]["roa"] == 5.0
-
-
-def test_performance_small_cap_financial_coverage_allows_historical_records(tmp_path):
-    rows = {
-        "symbol": ["X"],
-        "period_end": ["2024-03-31"],
-        "announce_date": ["2024-04-30"],
-    }
-    for table in ("income", "metrics", "balance_sheet"):
-        _write_financial_table(tmp_path, table, rows)
-
-    _assert_performance_small_cap_financial_coverage(
-        tmp_path,
-        datetime(2024, 7, 1).date(),
-    )
 
 
 def test_dividend_ratio_loader_matches_top_quartile_with_persisted_market_cap(tmp_path):
@@ -379,44 +363,25 @@ def test_smallcap_index_loader_uses_canonical_market_cap_and_adjusted_close(tmp_
     assert _load_smallcap_index_value(Repo(), tmp_path, ["A", "B"], date(2024, 1, 3)) == 15.0
 
 
-def test_performance_small_cap_financial_coverage_rejects_future_only_data(tmp_path):
-    rows = {
-        "symbol": ["X"],
-        "period_end": ["2024-06-30"],
-        "announce_date": ["2024-08-30"],
-    }
-    for table in ("income", "metrics", "balance_sheet"):
-        _write_financial_table(tmp_path, table, rows)
-
-    with pytest.raises(ValueError, match="绩优小市值回测需要.*income.*metrics.*balance_sheet"):
-        _assert_performance_small_cap_financial_coverage(
-            tmp_path,
-            datetime(2024, 7, 1).date(),
-        )
-
-
-def test_performance_small_cap_financial_preflight_uses_template_source(tmp_path):
+def test_performance_small_cap_declares_readiness_contract():
     source = TEMPLATES["performance_small_cap"]["source"]
 
     assert _is_performance_small_cap_source(source) is True
     assert _is_performance_small_cap_source("def on_bar(context, bars):\n    pass\n") is False
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        instruments=[{"symbol": "X", "asset_type": "stock", "has_minute": True}],
+    )
 
-    output: queue.SimpleQueue = queue.SimpleQueue()
-    execute_backtest({
-        "data_dir": str(tmp_path),
-        "source": source,
-        "strategy_id": "saved-template-copy",
-        "timeframe": "1m",
-        "asset_type": "stock",
-        "start": "2025-07-24",
-        "end": "2025-07-24",
-        "config": {},
-    }, output)
-
-    assert output.get_nowait()["type"] == "progress"
-    error = output.get_nowait()
-    assert error["type"] == "error"
-    assert "绩优小市值回测需要首个回测日前已公告的历史财务数据" in error["error"]
+    requirement = engine.readiness_requirements[0]
+    assert requirement.rebalance == "monthly"
+    assert {item.table for item in requirement.financials} == {
+        "income", "metrics", "balance_sheet",
+    }
+    assert requirement.lifecycle is True
+    assert requirement.adjustment == "pre"
+    assert requirement.corporate_actions is True
 
 
 def test_scheduled_daily_bar_cache_invalidates_when_row_changes():

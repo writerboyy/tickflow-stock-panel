@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Literal
 
 from .bars import Bar
+from .readiness import ReadinessRequirement, make_requirement
 from .schedule import RegisteredSchedule, ScheduleRule, parse_time_expression
 from app.market_time import cn_naive_now
 from app.services.data_authority import normalize_reference_asset
@@ -209,6 +210,7 @@ class Context:
         self._history_requirements: dict[str, int] = {}
         self._market_history_requirements: dict[tuple[str, str], int] = {}
         self._extra_history_requirements: set[str] = set()
+        self._readiness_requirements: list[ReadinessRequirement] = []
 
     @property
     def universe(self) -> list[str]:
@@ -292,6 +294,35 @@ class Context:
     def extra_history_requirements(self) -> set[str]:
         return set(self._extra_history_requirements)
 
+    @property
+    def readiness_requirements(self) -> tuple[ReadinessRequirement, ...]:
+        return tuple(self._readiness_requirements)
+
+    def require_data_readiness(
+        self,
+        *,
+        rebalance: str,
+        financials: dict[str, dict[str, Any]] | None = None,
+        valuation_fields: Iterable[str] = (),
+        industry_standard: str | None = None,
+        industry_level: str | int | None = None,
+        lifecycle: bool = False,
+        adjustment: str | None = None,
+        corporate_actions: bool = False,
+    ) -> None:
+        requirement = make_requirement(
+            rebalance=rebalance,
+            financials=financials,
+            valuation_fields=valuation_fields,
+            industry_standard=industry_standard,
+            industry_level=industry_level,
+            lifecycle=lifecycle,
+            adjustment=adjustment,
+            corporate_actions=corporate_actions,
+        )
+        if requirement not in self._readiness_requirements:
+            self._readiness_requirements.append(requirement)
+
     @staticmethod
     def _normalize_symbol(raw: Any) -> str:
         symbol = str(raw).strip().upper()
@@ -336,6 +367,31 @@ class Context:
         if self._engine._financial_snapshot_loader is None:
             return {}
         return self._engine._financial_snapshot_loader(normalized, cutoff)
+
+    def get_industry(
+        self,
+        symbols: Iterable[str],
+        as_of: date | datetime | str,
+        standard: str,
+        level: str | int | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        normalized = list(dict.fromkeys(
+            self._normalize_symbol(symbol)
+            for symbol in symbols
+            if str(symbol).strip()
+        ))
+        if isinstance(as_of, datetime):
+            cutoff = as_of.date()
+        elif isinstance(as_of, date):
+            cutoff = as_of
+        else:
+            cutoff = date.fromisoformat(str(as_of)[:10])
+        if self.now is not None and cutoff > self.now.date():
+            raise ValueError("PIT 行业查询日期不能晚于当前策略时间")
+        loader = self._engine._industry_history_loader
+        if loader is None:
+            raise ValueError("缺少 TickFlow PIT 行业历史加载器")
+        return loader(normalized, cutoff, standard, level)
 
     def dividend_ratio_ranked(
         self,
@@ -780,6 +836,10 @@ class FreeStrategyEngine:
         self._valuation_market_cap_loader: Callable[[list[str], date], dict[str, float]] | None = None
         self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
         self._style_liquidity_loader: Callable[[date], dict[str, Any] | None] | None = None
+        self._industry_history_loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
@@ -855,6 +915,10 @@ class FreeStrategyEngine:
     @property
     def extra_history_requirements(self) -> set[str]:
         return self.context.extra_history_requirements
+
+    @property
+    def readiness_requirements(self) -> tuple[ReadinessRequirement, ...]:
+        return self.context.readiness_requirements
 
     @property
     def scheduled_times(self) -> list[str]:
@@ -1029,6 +1093,15 @@ class FreeStrategyEngine:
         loader: Callable[[date], dict[str, Any] | None] | None,
     ) -> None:
         self._style_liquidity_loader = loader
+
+    def set_industry_history_loader(
+        self,
+        loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None,
+    ) -> None:
+        self._industry_history_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""

@@ -1106,6 +1106,17 @@ def _engine_from_state(
             cutoff,
         )
     )
+    from app.free_strategy.industry import load_industry_history
+
+    engine.set_industry_history_loader(
+        lambda symbols, cutoff, standard, level: load_industry_history(
+            data_dir,
+            symbols,
+            cutoff,
+            standard,
+            level,
+        )
+    )
     engine.set_dividend_ratio_loader(
         lambda symbols, cutoff: _load_dividend_ratio_ranked(
             repo,
