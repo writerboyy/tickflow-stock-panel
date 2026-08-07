@@ -586,6 +586,7 @@ def _symbol_hash(symbols: Iterable[str]) -> str:
 class BackfillConfig:
     data_dir: Path
     run_id: str | None = None
+    reuse_run_id: str | None = None
     phases: tuple[str, ...] = PHASES
     symbols: tuple[str, ...] | None = None
     etfs: tuple[str, ...] | None = None
@@ -609,6 +610,9 @@ class BackfillConfig:
         symbols = tuple(dict.fromkeys(str(item).strip().upper() for item in self.symbols or () if str(item).strip())) or None
         etfs = tuple(dict.fromkeys(str(item).strip().upper() for item in self.etfs or () if str(item).strip())) or None
         indexes = tuple(dict.fromkeys(str(item).strip().upper() for item in self.indexes or () if str(item).strip())) or None
+        reuse_run_id = _safe_part(self.reuse_run_id) if self.reuse_run_id else None
+        if reuse_run_id and reuse_run_id == self.run_id:
+            raise ValueError("reuse_run_id must differ from run_id")
         if self.max_symbols is not None and self.max_symbols <= 0:
             raise ValueError("max_symbols must be positive")
         if self.rate_interval < TEAJOIN_MIN_RATE_INTERVAL:
@@ -627,6 +631,7 @@ class BackfillConfig:
         return BackfillConfig(
             data_dir=root,
             run_id=self.run_id,
+            reuse_run_id=reuse_run_id,
             phases=phases,
             symbols=symbols,
             etfs=etfs,
@@ -652,6 +657,7 @@ class TushareHistoryBackfill:
         self.run_root = self.config.data_dir / "backfill_state" / "tushare_proxy" / _safe_part(self.run_id)
         self.manifest_path = self.run_root / "manifest.json"
         self.manifest = self._load_manifest()
+        self.reuse_root, self.reuse_manifest = self._load_reuse_manifest()
 
     def _load_manifest(self) -> dict[str, Any]:
         if self.manifest_path.exists():
@@ -674,6 +680,8 @@ class TushareHistoryBackfill:
                     "datasets": list(self.config.datasets),
                     "incremental": self.config.incremental,
                 })
+            if schema_version >= 3:
+                expected["reuse_run_id"] = self.config.reuse_run_id
             for key, val in expected.items():
                 if value.get(key) != val:
                     raise BackfillBlocked(f"resume configuration mismatch for {key}")
@@ -684,9 +692,10 @@ class TushareHistoryBackfill:
             value.setdefault("history_end", (self.config.end or date.today()).isoformat())
             value.setdefault("datasets", list(self.config.datasets))
             value.setdefault("incremental", self.config.incremental)
+            value.setdefault("reuse_run_id", None)
             return value
         value = {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "tushare_proxy_history_backfill",
             "run_id": self.run_id,
             "data_dir": str(self.config.data_dir),
@@ -703,9 +712,23 @@ class TushareHistoryBackfill:
             "history_end": (self.config.end or date.today()).isoformat(),
             "datasets": list(self.config.datasets),
             "incremental": self.config.incremental,
+            "reuse_run_id": self.config.reuse_run_id,
         }
         _atomic_json(self.manifest_path, value)
         return value
+
+    def _load_reuse_manifest(self) -> tuple[Path | None, dict[str, Any]]:
+        if not self.config.reuse_run_id:
+            return None, {}
+        root = self.config.data_dir / "backfill_state" / "tushare_proxy" / self.config.reuse_run_id
+        path = root / "manifest.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise BackfillBlocked(f"reuse manifest is unavailable: {path}") from exc
+        if not isinstance(value, dict) or value.get("kind") != "tushare_proxy_history_backfill":
+            raise BackfillBlocked("invalid Tushare reuse manifest")
+        return root, value
 
     def _requested_symbols(self) -> tuple[str, ...]:
         return (
@@ -748,6 +771,66 @@ class TushareHistoryBackfill:
             phase["status"] = "running"
             self._save()
             return phase
+
+    def _reuse_item(self, phase: str, key: str) -> dict[str, Any] | None:
+        item = (
+            self.reuse_manifest.get("phases_state", {})
+            .get(phase, {})
+            .get("items", {})
+            .get(key)
+        )
+        return item if isinstance(item, dict) and item.get("status") == "completed" else None
+
+    def _reuse_adjustment(self, kind: str, symbol: str, target: Path) -> bool:
+        prior = self._reuse_item("adjustment", symbol)
+        if prior is None or self.reuse_root is None:
+            return False
+        source = self.reuse_root / "batches" / "adjustment" / kind / f"{_safe_part(symbol)}.parquet"
+        if not source.exists():
+            if prior.get("empty") is not True:
+                return False
+            self._record(
+                "adjustment",
+                symbol,
+                status="completed",
+                api=prior.get("api"),
+                rows=0,
+                empty=True,
+                reused_from_run=self.config.reuse_run_id,
+            )
+            return True
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            os.link(source, temporary)
+            os.replace(temporary, target)
+        except OSError:
+            if temporary.exists():
+                temporary.unlink()
+            _atomic_parquet(pl.read_parquet(source), target)
+        self._record(
+            "adjustment",
+            symbol,
+            status="completed",
+            api=prior.get("api"),
+            rows=int(prior.get("rows") or 0),
+            empty=False,
+            content_hash=prior.get("content_hash"),
+            reused_from_run=self.config.reuse_run_id,
+        )
+        return True
+
+    def _minute_raw_root(self, kind: str, *, reuse: bool = False) -> Path:
+        label = "minute_stock_raw" if kind == "stock" else "minute_etf_raw"
+        if reuse:
+            if self.reuse_root is None:
+                raise BackfillBlocked("minute reuse root is unavailable")
+            if self.reuse_manifest.get("reuse_run_id"):
+                return self.reuse_root / "raw" / label
+            return self.config.data_dir / "tushare_archive" / label
+        if self.config.reuse_run_id:
+            return self.run_root / "raw" / label
+        return self.config.data_dir / "tushare_archive" / label
 
     def _archive(self, api_name: str, key: str, response: TushareResponse) -> None:
         archive_source_payload(self.config.data_dir, "tushare_proxy", api_name, self.run_id, key, response.raw, parser_version="tushare_proxy_v1")
@@ -1068,6 +1151,8 @@ class TushareHistoryBackfill:
             path = self.run_root / "batches" / "adjustment" / kind / f"{_safe_part(symbol)}.parquet"
             if state.get("status") == "completed" and (path.exists() or state.get("empty") is True):
                 return
+            if self._reuse_adjustment(kind, symbol, path):
+                return
             try:
                 params: dict[str, Any] = {"ts_code": symbol}
                 if self.config.incremental:
@@ -1093,18 +1178,97 @@ class TushareHistoryBackfill:
         phase["status"] = "completed"
         self._save()
 
+    def _reuse_minute(
+        self,
+        kind: str,
+        api_name: str,
+        phase_name: str,
+        symbol: str,
+        target: Path,
+        history_start: datetime,
+        history_end: datetime,
+    ) -> bool:
+        prior = self._reuse_item(phase_name, symbol)
+        if prior is None:
+            return False
+        source = self._minute_raw_root(kind, reuse=True) / f"symbol={_safe_part(symbol)}" / "part.parquet"
+        if not source.exists():
+            return False
+        reusable, audit = validate_minute_frame(pl.read_parquet(source))
+        if any(int(item.get("rows") or 0) > 0 for item in audit):
+            return False
+        reusable = reusable.filter(
+            pl.col("datetime").is_between(history_start, history_end, closed="both")
+        )
+        added_rows = 0
+        if not reusable.is_empty():
+            latest = reusable["datetime"].max()
+            if latest.date() < history_end.date():
+                response = self.client.request(
+                    api_name,
+                    {
+                        "ts_code": symbol,
+                        "freq": "1min",
+                        "start_date": (latest + timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                        "end_date": history_end.strftime("%Y-%m-%d %H:%M:%S"),
+                        "limit": MAX_MINUTE_ROWS,
+                    },
+                )
+                self._archive(api_name, f"{symbol}-reuse-tail", response)
+                if len(response.items) >= MAX_MINUTE_ROWS:
+                    return False
+                incoming, incoming_audit = validate_minute_frame(
+                    normalize_rows(response.rows, asset_type=kind).filter(
+                        pl.col("datetime").is_between(history_start, history_end, closed="both")
+                    )
+                )
+                if any(int(item.get("rows") or 0) > 0 for item in incoming_audit):
+                    return False
+                reusable, overlap = overlap_merge(reusable, incoming)
+                added_rows = int(overlap.get("added_rows", 0))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_parquet(reusable, target)
+        self._record(
+            phase_name,
+            symbol,
+            status="completed",
+            rows=reusable.height,
+            added_rows=added_rows,
+            min_datetime=str(reusable["datetime"].min()) if reusable.height else None,
+            max_datetime=str(reusable["datetime"].max()) if reusable.height else None,
+            source_content_hash=prior.get("content_hash"),
+            reused_from_run=self.config.reuse_run_id,
+        )
+        return True
+
     def _fetch_minutes(self, kind: str, api_name: str, symbols: list[str]) -> None:
         phase_name = f"{kind}_minute"
         phase = self._start_phase(phase_name)
         today = date.today()
+        history_start = datetime.combine(self.config.start, datetime.min.time())
+        history_end = datetime.combine(
+            self.config.end or today,
+            datetime.max.time().replace(microsecond=0),
+        )
 
         def fetch_one(symbol: str) -> None:
             assert_disk_reserve(self.config.data_dir)
             page_root = self.run_root / "batches" / phase_name / _safe_part(symbol)
-            raw_root = self.config.data_dir / "tushare_archive" / ("minute_stock_raw" if kind == "stock" else "minute_etf_raw") / f"symbol={_safe_part(symbol)}"
+            raw_root = self._minute_raw_root(kind) / f"symbol={_safe_part(symbol)}"
             raw_path = raw_root / "part.parquet"
             state = self._item_state(phase_name, symbol, {"status": "pending", "pages": 0})
             if state.get("status") == "completed" and raw_path.exists():
+                self._clear_minute_pages(page_root)
+                return
+            if self._reuse_minute(
+                kind,
+                api_name,
+                phase_name,
+                symbol,
+                raw_path,
+                history_start,
+                history_end,
+            ):
                 self._clear_minute_pages(page_root)
                 return
             if self.config.incremental:
@@ -1183,19 +1347,33 @@ class TushareHistoryBackfill:
                     raise BackfillBlocked(f"staged minute page has no valid cursor for {symbol}")
                 cursor = (last_valid["datetime"].min() - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
             else:
-                cursor = str(state.get("cursor") or f"{today.isoformat()} 23:59:59")
+                cursor = str(state.get("cursor") or history_end.strftime("%Y-%m-%d %H:%M:%S"))
             state.update({"pages": len(raw_pages), "rows": staged_rows, "cursor": cursor})
             self._record(phase_name, symbol, status="running", pages=state["pages"], rows=state["rows"], cursor=cursor)
             try:
                 while True:
                     page_number = int(state.get("pages", 0))
-                    response = self.client.request(api_name, {"ts_code": symbol, "freq": "1min", "start_date": "1990-01-01 00:00:00", "end_date": cursor, "limit": MAX_MINUTE_ROWS})
+                    response = self.client.request(
+                        api_name,
+                        {
+                            "ts_code": symbol,
+                            "freq": "1min",
+                            "start_date": history_start.strftime("%Y-%m-%d %H:%M:%S"),
+                            "end_date": cursor,
+                            "limit": MAX_MINUTE_ROWS,
+                        },
+                    )
                     self._archive(api_name, f"{symbol}-page-{page_number:06d}", response)
                     if not response.items:
                         state.update({"status": "completed", "reason": "no_earlier_data", "cursor": cursor})
                         break
-                    frame = normalize_rows(response.rows, asset_type=kind)
+                    frame = normalize_rows(response.rows, asset_type=kind).filter(
+                        pl.col("datetime").is_between(history_start, history_end, closed="both")
+                    )
                     valid, audit = validate_minute_frame(frame)
+                    if valid.is_empty():
+                        state.update({"status": "completed", "reason": "outside_history_window", "cursor": cursor})
+                        break
                     timestamps = [item for item in valid["datetime"].to_list()] if not valid.is_empty() else []
                     oldest = min(timestamps) if timestamps else None
                     newest = max(timestamps) if timestamps else None
@@ -1230,6 +1408,9 @@ class TushareHistoryBackfill:
                         rows=state["rows"],
                         last_page_hash=state["last_page_hash"],
                     )
+                    if next_cursor < history_start:
+                        state.update({"status": "completed", "reason": "history_start_reached", "cursor": state["cursor"]})
+                        break
                     if len(response.items) < MAX_MINUTE_ROWS:
                         state.update({"status": "completed", "reason": "provider_page_short", "cursor": state["cursor"]})
                         break
@@ -1303,7 +1484,7 @@ class TushareHistoryBackfill:
         report: dict[str, Any] = {"partitions": 0, "added_rows": 0, "conflicts": []}
         pending: list[tuple[Path, Path, pl.DataFrame, dict[str, Any], dict[str, Any]]] = []
         for kind in kinds:
-            raw_root = self.config.data_dir / "tushare_archive" / ("minute_stock_raw" if kind == "stock" else "minute_etf_raw")
+            raw_root = self._minute_raw_root(kind)
             target_root = self.config.data_dir / ("kline_minute" if kind == "stock" else "kline_etf_minute")
             for raw_path in sorted(raw_root.glob("symbol=*/part.parquet")):
                 symbol = raw_path.parent.name.removeprefix("symbol=")

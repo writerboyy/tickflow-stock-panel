@@ -64,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preflight", action="store_true", help="只探测接口权限和响应协议")
     parser.add_argument("--key-stdin", action="store_true", help="从 stdin 读取一行 API key 并保存为 0600")
     parser.add_argument("--run-id", help="可恢复任务 ID；不传则创建新的 ID")
+    parser.add_argument("--reuse-run-id", help="复用既有成功批次；源 manifest 和原始文件保持只读")
     parser.add_argument("--resume", action="store_true", help="恢复 --run-id 对应的 manifest")
     parser.add_argument("--phases", type=_phase_list, help=f"逗号分隔阶段：{','.join(PHASES)}")
     parser.add_argument("--datasets", type=_datasets, default=(), help="数据集或分组：reference,daily,financials,factors")
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             BackfillConfig(
                 data_dir=data_dir,
                 run_id=args.run_id,
+                reuse_run_id=args.reuse_run_id,
                 phases=tuple(phases),
                 start=start,
                 end=args.end,
@@ -145,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     config = BackfillConfig(
         data_dir=data_dir,
         run_id=args.run_id,
+        reuse_run_id=args.reuse_run_id,
         phases=tuple(phases),
         symbols=_symbols(args.symbols),
         etfs=_symbols(args.etfs),

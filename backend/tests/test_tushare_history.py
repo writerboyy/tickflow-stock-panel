@@ -248,7 +248,7 @@ def test_adjustment_and_minute_phases_are_resumable(tmp_path):
     assert (tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "batches" / "adjustment" / "stock" / "000001.SZ.parquet").exists()
     assert json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "manifest.json").read_text())["phases_state"]["stock_minute"]["items"]["000001.SZ"]["status"] == "completed"
     minute_params = next(params for api, params in client.calls if api == "stk_mins")
-    assert minute_params["start_date"] == "1990-01-01 00:00:00"
+    assert minute_params["start_date"] == "2010-01-01 00:00:00"
     assert minute_params["end_date"].count("-") == 2
     item = json.loads((tmp_path / "backfill_state" / "tushare_proxy" / "resume-me" / "manifest.json").read_text())["phases_state"]["stock_minute"]["items"]["000001.SZ"]
     assert item["pages"] == 1
@@ -284,6 +284,99 @@ def test_adjustment_resume_skips_a_completed_empty_response(tmp_path):
     item = second["phases_state"]["adjustment"]["items"]["000001.SZ"]
     assert item["status"] == "completed"
     assert item["empty"] is True
+
+
+def test_new_run_reuses_completed_adjustment_batch(tmp_path):
+    prior_root = tmp_path / "backfill_state/tushare_proxy/prior"
+    source = prior_root / "batches/adjustment/stock/000001.SZ.parquet"
+    source.parent.mkdir(parents=True)
+    pl.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20250102"], "adj_factor": [1.0]}).write_parquet(source)
+    th._atomic_json(
+        prior_root / "manifest.json",
+        {
+            "schema_version": 1,
+            "kind": "tushare_proxy_history_backfill",
+            "run_id": "prior",
+            "phases_state": {
+                "adjustment": {
+                    "status": "completed",
+                    "items": {"000001.SZ": {"status": "completed", "rows": 1, "empty": False}},
+                }
+            },
+        },
+    )
+
+    class NoNetworkClient:
+        def request(self, *_args, **_kwargs):
+            raise AssertionError("reused adjustment must not access the network")
+
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="current",
+            reuse_run_id="prior",
+            phases=("adjustment",),
+            symbols=("000001.SZ",),
+        ),
+        NoNetworkClient(),
+    )
+    run._fetch_adjustment("stock", "adj_factor", ["000001.SZ"])
+
+    target = run.run_root / "batches/adjustment/stock/000001.SZ.parquet"
+    assert target.exists()
+    assert run.manifest["phases_state"]["adjustment"]["items"]["000001.SZ"]["reused_from_run"] == "prior"
+
+
+def test_new_run_reuses_and_clips_completed_minute_raw_without_overwriting_source(tmp_path):
+    prior_root = tmp_path / "backfill_state/tushare_proxy/prior"
+    th._atomic_json(
+        prior_root / "manifest.json",
+        {
+            "schema_version": 1,
+            "kind": "tushare_proxy_history_backfill",
+            "run_id": "prior",
+            "phases_state": {
+                "stock_minute": {
+                    "status": "running",
+                    "items": {"000001.SZ": {"status": "completed", "rows": 2}},
+                }
+            },
+        },
+    )
+    source = tmp_path / "tushare_archive/minute_stock_raw/symbol=000001.SZ/part.parquet"
+    source.parent.mkdir(parents=True)
+    th.normalize_rows(
+        [
+            {"ts_code": "000001.SZ", "trade_time": "2019-12-31 15:00:00", "open": 10, "high": 10, "low": 10, "close": 10, "vol": 1, "amount": 10},
+            {"ts_code": "000001.SZ", "trade_time": "2020-01-02 15:00:00", "open": 11, "high": 11, "low": 11, "close": 11, "vol": 1, "amount": 11},
+        ],
+        asset_type="stock",
+    ).write_parquet(source)
+
+    class NoNetworkClient:
+        def request(self, *_args, **_kwargs):
+            raise AssertionError("covered minute history must not access the network")
+
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(
+            tmp_path,
+            run_id="current",
+            reuse_run_id="prior",
+            phases=("stock_minute",),
+            symbols=("000001.SZ",),
+            start=date(2020, 1, 1),
+            end=date(2020, 1, 2),
+        ),
+        NoNetworkClient(),
+    )
+    run._fetch_minutes("stock", "stk_mins", ["000001.SZ"])
+
+    target = run.run_root / "raw/minute_stock_raw/symbol=000001.SZ/part.parquet"
+    assert pl.read_parquet(source).height == 2
+    reused = pl.read_parquet(target)
+    assert reused.height == 1
+    assert reused["datetime"].min() == datetime(2020, 1, 2, 15, 0)
+    assert run.manifest["phases_state"]["stock_minute"]["items"]["000001.SZ"]["reused_from_run"] == "prior"
 
 
 def test_minute_pagination_uses_the_next_cursor_for_each_request(tmp_path, monkeypatch):
