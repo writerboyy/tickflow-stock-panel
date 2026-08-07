@@ -81,6 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rate-interval", type=float, default=0.2)
     parser.add_argument("--attempts", type=int, default=4)
     parser.add_argument("--workers", type=int, default=4, help="并发标的数，范围 1-64；请求频率仍受全局限流器控制")
+    parser.add_argument("--timeout", type=float, default=60.0, help="单次请求超时秒数")
+    parser.add_argument("--direct", action="store_true", help="直连固定服务并复用连接，不读取系统代理")
     args = parser.parse_args(argv)
     data_dir = Path(args.data_dir).expanduser().resolve()
     phases = args.phases or (("universe",) if args.datasets else PHASES)
@@ -116,8 +118,11 @@ def main(argv: list[str] | None = None) -> int:
 
     client = TushareProxyClient(
         key,
+        timeout=args.timeout,
         limiter=GlobalRateLimiter(args.rate_interval),
         attempts=args.attempts,
+        direct=args.direct,
+        max_connections=args.workers,
     )
     if args.preflight:
         run = TushareHistoryBackfill(

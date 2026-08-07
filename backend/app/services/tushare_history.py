@@ -25,6 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import httpx
 import polars as pl
 
 from app import secrets_store
@@ -249,8 +250,11 @@ class TushareProxyClient:
         base_url: str = TUSHARE_PROXY_URL,
         timeout: float = 60.0,
         attempts: int = 4,
+        direct: bool = False,
+        max_connections: int = MAX_CONFIGURED_WORKERS,
         limiter: GlobalRateLimiter | None = None,
         opener: Callable[..., Any] | None = None,
+        http_client: Any | None = None,
         backoff: Callable[[float], None] | None = None,
     ) -> None:
         if not token or not token.strip():
@@ -260,13 +264,46 @@ class TushareProxyClient:
             raise ValueError("Tushare Proxy URL is fixed to https://teajoin.com/")
         if attempts < 1:
             raise ValueError("attempts must be positive")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if max_connections < 1:
+            raise ValueError("max_connections must be positive")
         self._token = token.strip()
         self.base_url = normalized
         self.timeout = timeout
         self.attempts = attempts
         self.limiter = limiter or GlobalRateLimiter()
         self._opener = opener or urlopen
+        self._http_client = http_client
+        if direct and self._http_client is None:
+            self._http_client = httpx.Client(
+                timeout=timeout,
+                trust_env=False,
+                limits=httpx.Limits(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_connections,
+                    keepalive_expiry=30.0,
+                ),
+            )
         self._backoff = backoff or time.sleep
+
+    def close(self) -> None:
+        if self._http_client is not None:
+            self._http_client.close()
+
+    def _send(self, request: Request, body: bytes) -> tuple[int, bytes]:
+        if self._http_client is not None:
+            response = self._http_client.post(
+                self.base_url,
+                content=body,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            return int(response.status_code), bytes(response.content)
+        response_context = self._opener(request, timeout=self.timeout)
+        with response_context as response:
+            status_value = getattr(response, "status", None)
+            status = int(status_value if status_value is not None else response.getcode())
+            return status, response.read()
 
     def request(self, api_name: str, params: Mapping[str, Any] | None = None) -> TushareResponse:
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", api_name):
@@ -277,13 +314,11 @@ class TushareProxyClient:
         last_error: Exception | None = None
         for attempt in range(self.attempts):
             self.limiter.wait()
+            provider_overloaded = False
             try:
-                response_context = self._opener(request, timeout=self.timeout)
-                with response_context as response:
-                    status_value = getattr(response, "status", None)
-                    status = int(status_value if status_value is not None else response.getcode())
-                    raw_body = response.read()
+                status, raw_body = self._send(request, body)
                 if status == 429 or status >= 500:
+                    provider_overloaded = True
                     raise TushareRetryableError(f"HTTP {status}")
                 if status >= 400:
                     raise TusharePermissionError(f"HTTP {status}") if status in {401, 403} else TushareError(f"HTTP {status}")
@@ -294,7 +329,7 @@ class TushareProxyClient:
                 parsed = self._parse_response(api_name, decoded)
                 # Do not return to the provider ceiling immediately after a
                 # transient failure in a long minute-history download.
-                self.limiter.recover(factor=0.95)
+                self.limiter.recover(factor=0.8)
                 return parsed
             except HTTPError as exc:
                 last_error = exc
@@ -302,17 +337,20 @@ class TushareProxyClient:
                     if exc.code in {401, 403}:
                         raise TusharePermissionError(f"HTTP {exc.code}") from exc
                     raise TushareError(f"HTTP {exc.code}") from exc
+                provider_overloaded = True
             except (
                 IncompleteRead,
                 RemoteDisconnected,
                 URLError,
                 TimeoutError,
                 OSError,
+                httpx.TransportError,
                 TushareRetryableError,
             ) as exc:
                 last_error = exc
             if attempt + 1 < self.attempts:
-                self.limiter.slow_down()
+                if provider_overloaded:
+                    self.limiter.slow_down(factor=1.5, maximum=2.0)
                 self._backoff(min(30.0, 0.5 * (2**attempt)))
         raise TushareRetryableError(f"request failed after {self.attempts} attempts: {type(last_error).__name__}") from last_error
 

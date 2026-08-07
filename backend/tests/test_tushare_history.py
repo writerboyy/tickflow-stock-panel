@@ -52,6 +52,8 @@ def test_http_client_validates_protocol_and_redacts_token_from_errors():
     assert response.raw["code"] == 0
     with pytest.raises(ValueError, match="fixed"):
         th.TushareProxyClient("x", base_url="https://example.com", attempts=1)
+    with pytest.raises(ValueError, match="timeout"):
+        th.TushareProxyClient("x", timeout=0)
 
 
 def test_http_client_rejects_field_mismatch_and_empty_is_valid():
@@ -68,6 +70,19 @@ def test_http_client_rejects_field_mismatch_and_empty_is_valid():
 def test_http_client_retries_429_and_does_not_log_or_expose_key():
     calls = 0
 
+    class TrackingLimiter:
+        def __init__(self):
+            self.slow_down_calls = 0
+
+        def wait(self):
+            pass
+
+        def slow_down(self, **_kwargs):
+            self.slow_down_calls += 1
+
+        def recover(self, **_kwargs):
+            pass
+
     class RetryResponse(_Response):
         status = 429
 
@@ -78,14 +93,29 @@ def test_http_client_retries_429_and_does_not_log_or_expose_key():
             return RetryResponse(_payload())
         return _Response(_payload())
 
-    client = th.TushareProxyClient("very-secret", opener=opener, attempts=3, limiter=th.GlobalRateLimiter(0), backoff=lambda _: None)
+    limiter = TrackingLimiter()
+    client = th.TushareProxyClient("very-secret", opener=opener, attempts=3, limiter=limiter, backoff=lambda _: None)
     assert client.request("daily").code == 0
     assert calls == 3
+    assert limiter.slow_down_calls == 2
 
 
 def test_http_client_retries_incomplete_response_reads():
     calls = 0
     delays = []
+
+    class TrackingLimiter:
+        def __init__(self):
+            self.slow_down_calls = 0
+
+        def wait(self):
+            pass
+
+        def slow_down(self, **_kwargs):
+            self.slow_down_calls += 1
+
+        def recover(self, **_kwargs):
+            pass
 
     class InterruptedResponse(_Response):
         def read(self):
@@ -96,16 +126,53 @@ def test_http_client_retries_incomplete_response_reads():
         calls += 1
         return InterruptedResponse(_payload()) if calls < 3 else _Response(_payload())
 
+    limiter = TrackingLimiter()
     client = th.TushareProxyClient(
         "very-secret",
         opener=opener,
         attempts=3,
-        limiter=th.GlobalRateLimiter(0),
+        limiter=limiter,
         backoff=delays.append,
     )
     assert client.request("daily").code == 0
     assert calls == 3
     assert delays == [0.5, 1.0]
+    assert limiter.slow_down_calls == 0
+
+
+def test_http_client_direct_mode_uses_injected_connection_pool():
+    class DirectResponse:
+        status_code = 200
+        content = json.dumps(_payload()).encode()
+
+    class DirectClient:
+        def __init__(self):
+            self.calls = []
+            self.closed = False
+
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return DirectResponse()
+
+        def close(self):
+            self.closed = True
+
+    transport = DirectClient()
+    client = th.TushareProxyClient(
+        "secret-token",
+        direct=True,
+        http_client=transport,
+        attempts=1,
+        limiter=th.GlobalRateLimiter(0),
+    )
+
+    response = client.request("daily", {"ts_code": "000001.SZ"})
+    client.close()
+
+    assert response.code == 0
+    assert transport.calls[0][0] == th.TUSHARE_PROXY_URL
+    assert b"secret-token" in transport.calls[0][1]["content"]
+    assert transport.closed is True
 
 
 def test_global_rate_limiter_is_shared_across_worker_threads(monkeypatch):
