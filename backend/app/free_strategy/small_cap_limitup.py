@@ -183,19 +183,22 @@ def initialize(context) -> None:
     context.schedule(
         _weekly_sell,
         "10:15",
-        symbols=_weekly_selection_symbols,
+        symbols=_held_scope,
+        optional_symbols=_weekly_selection_symbols,
         when=_weekly_rebalance_due,
     )
     context.schedule(
         _weekly_buy,
         "10:30",
-        symbols=_held_and_candidates,
+        symbols=_held_scope,
+        optional_symbols=_held_and_candidates,
         when=_weekly_rebalance_due,
     )
     context.schedule(
         _trade_afternoon,
         "14:20",
-        symbols=_afternoon_selection_symbols,
+        symbols=_held_scope,
+        optional_symbols=_afternoon_selection_symbols,
         when=_regular_trading_month,
     )
     context.schedule(
@@ -204,7 +207,8 @@ def initialize(context) -> None:
     context.schedule(
         _trade_afternoon,
         "14:55",
-        symbols=_afternoon_selection_symbols,
+        symbols=_held_scope,
+        optional_symbols=_afternoon_selection_symbols,
         when=_regular_trading_month,
     )
     context.log("涨停基因小市值策略已初始化：全市场日线选股，定时点按需读取分钟快照")

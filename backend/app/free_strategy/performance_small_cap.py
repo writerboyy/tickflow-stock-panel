@@ -443,13 +443,15 @@ def initialize(context) -> None:
     context.schedule(
         _monthly_adjustment,
         "09:30",
-        symbols=_held_and_selection_symbols,
+        symbols=_held_scope,
+        optional_symbols=_held_and_selection_symbols,
         when=_monthly_adjustment_due,
     )
     context.schedule(
         _check_limit_up_and_buy,
         "14:00",
-        symbols=_held_and_selection_symbols,
+        symbols=_held_scope,
+        optional_symbols=_held_and_selection_symbols,
         when=_limit_up_check_due,
     )
     context.log("绩优小市值策略已初始化：高股息/绩优过滤，低价小市值月度调仓")

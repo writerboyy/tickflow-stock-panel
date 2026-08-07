@@ -1547,6 +1547,33 @@ def _scheduled_symbols(engine: FreeStrategyEngine, timestamp: datetime) -> list[
     return result
 
 
+def _scheduled_required_symbols(
+    engine: FreeStrategyEngine,
+    timestamp: datetime,
+) -> list[str]:
+    result: list[str] = []
+    scoped = engine.scheduled_required_snapshot_symbols(timestamp)
+    for symbol in [
+        *(engine.universe if scoped is None else scoped),
+        *engine.account.positions,
+        engine.config.benchmark_symbol,
+    ]:
+        if symbol and symbol not in result:
+            result.append(symbol)
+    return result
+
+
+def _missing_snapshot_symbols(snapshot: Iterable[Bar], symbols: Iterable[str]) -> list[str]:
+    found = {bar.symbol for bar in snapshot}
+    return [symbol for symbol in symbols if symbol not in found]
+
+
+def _missing_snapshot_text(symbols: list[str]) -> str:
+    visible = ", ".join(symbols[:12])
+    remainder = len(symbols) - 12
+    return f"{visible}{f' 等 {len(symbols)} 只' if remainder > 0 else ''}"
+
+
 def _live_daily_snapshot(rows: list[Bar], timestamp: datetime) -> list[Bar]:
     grouped: dict[str, list[Bar]] = {}
     for bar in rows:
@@ -1890,6 +1917,7 @@ def advance_scheduled_session(
             live_bars=live_bars, live_only=live_only,
         )
         symbols = _scheduled_symbols(engine, timestamp)
+        required_symbols = _scheduled_required_symbols(engine, timestamp)
         snapshot = _scheduled_snapshot(
             repo,
             engine,
@@ -1904,34 +1932,41 @@ def advance_scheduled_session(
         event_timestamp = timestamp
         market_time = timestamp.time()
         needs_live = live_only and market_time >= time(9, 30)
-        if needs_live and not all(
-            any(bar.symbol == symbol for bar in snapshot)
-            for symbol in symbols
-        ):
-            if timestamp.time() == time(9, 30):
-                first_continuous_minute = timestamp + timedelta(minutes=1)
-                if first_continuous_minute <= cutoff:
-                    opening_snapshot = _scheduled_snapshot(
-                        repo,
-                        engine,
-                        market,
-                        first_continuous_minute,
-                        asset_type,
-                        timeframe,
-                        symbols=symbols,
-                        live_bars=live_bars,
-                        live_only=live_only,
-                    )
-                    if all(
-                        any(bar.symbol == symbol for bar in opening_snapshot)
-                        for symbol in symbols
-                    ):
-                        event_timestamp = first_continuous_minute
-                        snapshot = opening_snapshot
+        missing_required = _missing_snapshot_symbols(snapshot, required_symbols)
+        if needs_live and missing_required:
+            retry_times: list[datetime] = []
+            first_continuous_minute = timestamp + timedelta(minutes=1)
+            if timestamp.time() == time(9, 30) and first_continuous_minute <= cutoff:
+                retry_times.append(first_continuous_minute)
+            if cutoff > timestamp and cutoff not in retry_times:
+                retry_times.append(cutoff)
+            for retry_timestamp in retry_times:
+                retry_snapshot = _scheduled_snapshot(
+                    repo,
+                    engine,
+                    market,
+                    retry_timestamp,
+                    asset_type,
+                    timeframe,
+                    symbols=symbols,
+                    live_bars=live_bars,
+                    live_only=live_only,
+                )
+                retry_missing = _missing_snapshot_symbols(
+                    retry_snapshot, required_symbols,
+                )
+                if not retry_missing:
+                    event_timestamp = retry_timestamp
+                    snapshot = retry_snapshot
+                    missing_required = []
+                    break
+                missing_required = retry_missing
             if event_timestamp == timestamp:
                 if live_only:
+                    missing_text = _missing_snapshot_text(missing_required)
                     raise ScheduledOpeningDataPending(
-                        f"{day.isoformat()} {at} 定时任务缺少实时行情，等待下一次行情同步"
+                        f"{day.isoformat()} {at} 定时任务缺少实时行情: "
+                        f"{missing_text}，等待下一次行情同步"
                     )
                 if (
                     allow_opening_data_retry

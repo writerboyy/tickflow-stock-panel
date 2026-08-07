@@ -1434,6 +1434,72 @@ def run(context):
     assert engine.context.state["price"] == 10.0
 
 
+def test_live_scheduled_event_recovers_with_fresh_quote_after_scheduled_time():
+    source = """
+def initialize(context):
+    context.schedule(run, '10:00', symbols=['X'])
+
+def run(context):
+    context.state['executed_at'] = context.now.isoformat()
+    context.state['price'] = context.current_bars()['X'].close
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+    recovered = Bar("X", datetime(2024, 1, 2, 10, 5), 11.0, 11.0, 11.0, 11.0)
+
+    advance_scheduled_session(
+        ScheduledRepository([]),
+        engine,
+        scheduled_market("X"),
+        date(2024, 1, 2),
+        datetime(2024, 1, 2, 10, 5),
+        "stock",
+        "1m",
+        live_bars=[recovered],
+        live_only=True,
+    )
+
+    assert engine.context.state == {
+        "executed_at": "2024-01-02T10:05:00",
+        "price": 11.0,
+    }
+
+
+def test_live_scheduled_event_does_not_wait_for_optional_symbols():
+    source = """
+def initialize(context):
+    context.schedule(run, '10:00', symbols=['X'], optional_symbols=['Y'])
+
+def run(context):
+    context.state['visible'] = sorted(context.current_bars())
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    assert engine.scheduled_snapshot_symbols(datetime(2024, 1, 2, 10)) == ["X", "Y"]
+    assert engine.scheduled_required_snapshot_symbols(datetime(2024, 1, 2, 10)) == ["X"]
+
+    advance_scheduled_session(
+        ScheduledRepository([]),
+        engine,
+        scheduled_market("X", "Y"),
+        date(2024, 1, 2),
+        datetime(2024, 1, 2, 10),
+        "stock",
+        "1m",
+        live_bars=[Bar("X", datetime(2024, 1, 2, 10), 10, 10, 10, 10)],
+        live_only=True,
+    )
+
+    assert engine.context.state["visible"] == ["X"]
+
+
 def test_live_scheduled_event_waits_instead_of_using_today_history():
     source = """
 def initialize(context):
@@ -1449,7 +1515,10 @@ def run(context):
         config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
     )
 
-    with pytest.raises(ScheduledOpeningDataPending, match="14:00 定时任务缺少实时行情"):
+    with pytest.raises(
+        ScheduledOpeningDataPending,
+        match="14:00 定时任务缺少实时行情: X",
+    ):
         advance_scheduled_session(
             ScheduledRepository([
                 minute_row("X", datetime(2024, 1, 2, 14, 0), 99.0),
@@ -1465,6 +1534,38 @@ def run(context):
         )
 
     assert "executed" not in engine.context.state
+
+
+def test_missing_live_scheduled_event_is_not_replayed_without_market_on_next_day():
+    source = """
+def initialize(context):
+    context.schedule(run, '10:00', symbols=['X'])
+
+def run(context):
+    context.state['executed'] = context.now.isoformat()
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    with pytest.raises(ScheduledOpeningDataPending):
+        advance_scheduled_session(
+            ScheduledRepository([]),
+            engine,
+            scheduled_market("X"),
+            date(2024, 1, 2),
+            datetime(2024, 1, 2, 10),
+            "stock",
+            "1m",
+            live_only=True,
+        )
+
+    engine.begin_session(date(2024, 1, 3))
+
+    assert "executed" not in engine.context.state
+    assert engine.callbacks_executed == 0
 
 
 def test_live_scheduled_pending_order_never_fills_from_today_history():

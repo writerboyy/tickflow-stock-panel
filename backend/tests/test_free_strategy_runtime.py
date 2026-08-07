@@ -537,6 +537,14 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
         ("09:30", "_monthly_adjustment"): "_monthly_adjustment_due",
         ("14:00", "_check_limit_up_and_buy"): "_limit_up_check_due",
     }
+    optional_scopes = {
+        (at, callback.__name__): scope.__name__
+        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+    }
+    assert optional_scopes == {
+        ("09:30", "_monthly_adjustment"): "_held_and_selection_symbols",
+        ("14:00", "_check_limit_up_and_buy"): "_held_and_selection_symbols",
+    }
 
 
 def test_performance_small_cap_ema_ignores_leading_missing_values():

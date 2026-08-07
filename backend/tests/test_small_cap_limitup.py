@@ -42,6 +42,16 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         ("14:50", "_close_account"): "_close_account_due",
         ("14:55", "_trade_afternoon"): "_regular_trading_month",
     }
+    optional_scopes = {
+        (at, callback.__name__): scope.__name__
+        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+    }
+    assert optional_scopes == {
+        ("10:15", "_weekly_sell"): "_weekly_selection_symbols",
+        ("10:30", "_weekly_buy"): "_held_and_candidates",
+        ("14:20", "_trade_afternoon"): "_afternoon_selection_symbols",
+        ("14:55", "_trade_afternoon"): "_afternoon_selection_symbols",
+    }
 
 
 def test_known_limit_price_prevents_false_limit_up_inference():

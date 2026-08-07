@@ -445,6 +445,9 @@ class Context:
         at: str | datetime_time,
         *,
         symbols: Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None = None,
+        optional_symbols: (
+            Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None
+        ) = None,
         when: Callable[["Context", datetime], bool] | None = None,
     ) -> None:
         if not callable(callback):
@@ -461,6 +464,8 @@ class Context:
         self._scheduled.append((value, callback, False))
         if symbols is not None:
             self._engine._scheduled_symbol_scopes[(value, callback)] = symbols
+        if optional_symbols is not None:
+            self._engine._scheduled_optional_symbol_scopes[(value, callback)] = optional_symbols
         if when is not None:
             self._engine._scheduled_conditions[(value, callback)] = when
 
@@ -634,6 +639,10 @@ class FreeStrategyEngine:
             tuple[str, Callable[..., Any]],
             Iterable[str] | Callable[[Context, datetime], Iterable[str]],
         ] = {}
+        self._scheduled_optional_symbol_scopes: dict[
+            tuple[str, Callable[..., Any]],
+            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
+        ] = {}
         self._scheduled_conditions: dict[
             tuple[str, Callable[..., Any]], Callable[[Context, datetime], bool]
         ] = {}
@@ -740,6 +749,17 @@ class FreeStrategyEngine:
         return sorted({at for at, _, _ in self.context._scheduled})
 
     def scheduled_snapshot_symbols(self, timestamp: datetime) -> list[str] | None:
+        return self._scheduled_scope_symbols(timestamp, include_optional=True)
+
+    def scheduled_required_snapshot_symbols(self, timestamp: datetime) -> list[str] | None:
+        return self._scheduled_scope_symbols(timestamp, include_optional=False)
+
+    def _scheduled_scope_symbols(
+        self,
+        timestamp: datetime,
+        *,
+        include_optional: bool,
+    ) -> list[str] | None:
         current_time = timestamp.strftime("%H:%M")
         due = [
             (callback, done)
@@ -755,14 +775,23 @@ class FreeStrategyEngine:
             scope = self._scheduled_symbol_scopes.get((current_time, callback))
             if scope is None:
                 return None
-            values = (
-                self._protected_call("定时任务标的范围", scope, self.context, timestamp)
-                if callable(scope) else scope
+            scopes = [("定时任务必需标的范围", scope)]
+            optional_scope = self._scheduled_optional_symbol_scopes.get(
+                (current_time, callback),
             )
-            for raw in values:
-                symbol = str(raw).strip().upper()
-                if symbol and symbol not in result:
-                    result.append(symbol)
+            if include_optional and optional_scope is not None:
+                scopes.append(("定时任务可选标的范围", optional_scope))
+            for label, current_scope in scopes:
+                values = (
+                    self._protected_call(
+                        label, current_scope, self.context, timestamp,
+                    )
+                    if callable(current_scope) else current_scope
+                )
+                for raw in values:
+                    symbol = str(raw).strip().upper()
+                    if symbol and symbol not in result:
+                        result.append(symbol)
         return result
 
     def _scheduled_condition_met(
@@ -1626,7 +1655,10 @@ class FreeStrategyEngine:
         if self._active_session_date is None or self._session_finished:
             return False
         timestamp = self._last_timestamp or datetime.combine(self._active_session_date, datetime_time(15, 0))
-        self._run_scheduled_before(datetime.combine(self._active_session_date, datetime_time(23, 59)))
+        if self.execution_mode != "scheduled":
+            self._run_scheduled_before(
+                datetime.combine(self._active_session_date, datetime_time(23, 59)),
+            )
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
         self._fill_immediate_orders(self._session_bars, timestamp)
