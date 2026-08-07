@@ -44,9 +44,7 @@ def execution(symbol="000001.SZ", side="buy", quantity=100):
         "stamp_tax": 2.0,
         "transfer_fee": 0.3,
         "dividend_tax": 0.4,
-        "fee": 3.3,
         "total_fee": 3.7,
-        "fee_components_complete": True,
         "status": "filled",
         "reason": "",
     }
@@ -116,6 +114,20 @@ def test_total_fee_only_is_evidence_insufficient_not_pass(tmp_path):
     assert report["differences"] == []
     assert report["status"] == "fee_component_evidence_insufficient"
     assert report["fee_evidence"]["joinquant_components_complete"] is False
+
+
+def test_missing_tickflow_fee_component_is_reproduction_evidence_incomplete(tmp_path):
+    incomplete = execution()
+    incomplete.pop("transfer_fee")
+
+    report = compare_executions(
+        write_run(tmp_path, [incomplete]),
+        write_reference(tmp_path, [reference_row()], components=False),
+    )
+
+    assert report["differences"] == []
+    assert report["status"] == "reproduction_evidence_incomplete"
+    assert report["fee_evidence"]["tickflow_components_complete"] is False
 
 
 def test_alignment_diagnostic_cannot_turn_reordered_rows_into_pass(tmp_path):

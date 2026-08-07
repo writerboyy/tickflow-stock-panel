@@ -21,6 +21,7 @@ _FEE_COLUMNS = {
     "transfer_fee": ("过户费",),
     "dividend_tax": ("红利税", "股息红利税"),
 }
+_ACTUAL_FEE_FIELDS = (*_FEE_COLUMNS, "total_fee")
 _STATUS = {
     "全部成交": "filled",
     "已成交": "filled",
@@ -274,14 +275,15 @@ def compare_executions(
         locks["strategy_hash_matches_file"]
     )
     actual_components_complete = all(
-        bool(item.get("fee_components_complete")) for item in actual
-    ) if actual else True
+        all(field in item and item[field] is not None for field in _ACTUAL_FEE_FIELDS)
+        for item in actual
+    )
     if differences:
         status = "failed"
-    elif not reference_components_complete:
-        status = "fee_component_evidence_insufficient"
     elif not actual_components_complete or not locks_complete:
         status = "reproduction_evidence_incomplete"
+    elif not reference_components_complete:
+        status = "fee_component_evidence_insufficient"
     else:
         status = "passed"
     report: dict[str, Any] = {

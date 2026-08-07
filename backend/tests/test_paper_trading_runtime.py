@@ -1437,8 +1437,15 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
         quantity=100,
         price=1.49,
         value=149,
-        fee=0.01,
         timestamp="2026-07-28T13:11:00",
+        commission=0.01,
+        stamp_tax=0,
+        transfer_fee=0,
+        dividend_tax=0,
+        total_fee=0.01,
+        status="filled",
+        reason="",
+        submitted_at="2026-07-28T13:11:00",
     )
     engine = SimpleNamespace(
         account=SimpleNamespace(orders=[order], fills=[fill]),

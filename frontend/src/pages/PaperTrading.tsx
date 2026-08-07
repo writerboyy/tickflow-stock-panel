@@ -781,7 +781,7 @@ function TradeTable({ orders, fills, instrumentLabel }: { orders: PaperOrder[]; 
       const matchedFills = fills.filter(fill => fill.order_id === order.id)
       const filledQuantity = matchedFills.reduce((sum, fill) => sum + Number(fill.quantity), 0)
       const filledValue = matchedFills.reduce((sum, fill) => sum + Number(fill.value), 0)
-      const fee = matchedFills.reduce((sum, fill) => sum + Number(fill.fee), 0)
+      const totalFee = matchedFills.reduce((sum, fill) => sum + Number(fill.total_fee), 0)
       const averagePrice = filledQuantity > 0 ? filledValue / filledQuantity : null
       const side = orderDirection(order, matchedFills)
       const fillText = averagePrice == null ? '未成交' : `${side === 'buy' ? '买入' : '卖出'} ${filledQuantity.toLocaleString()} 股 @ ${averagePrice.toFixed(3)}`
@@ -792,7 +792,7 @@ function TradeTable({ orders, fills, instrumentLabel }: { orders: PaperOrder[]; 
         <td className="whitespace-nowrap px-2 py-2.5">{orderInstruction(order)}</td>
         <td className={`whitespace-nowrap px-2 py-2.5 font-mono ${side === 'buy' ? 'text-bull' : side === 'sell' ? 'text-bear' : 'text-muted'}`}>{fillText}</td>
         <td className={`whitespace-nowrap px-2 py-2.5 ${orderStatusClass(order.status)}`}>{orderStatusLabel(order.status)}</td>
-        <td className="whitespace-nowrap px-2 py-2.5 text-right font-mono">{fee > 0 ? MONEY.format(fee) : '—'}</td>
+        <td className="whitespace-nowrap px-2 py-2.5 text-right font-mono">{totalFee > 0 ? MONEY.format(totalFee) : '—'}</td>
         <td className="px-2 py-2.5 text-muted">{explanation}</td>
       </tr>
     })}</tbody>

@@ -101,20 +101,18 @@ class Fill:
     quantity: float
     price: float
     value: float
-    fee: float
     timestamp: str
+    commission: float
+    stamp_tax: float
+    transfer_fee: float
+    dividend_tax: float
+    total_fee: float
+    status: str
+    reason: str
+    submitted_at: str
     market_amount: float | None = None
     market_volume: float | None = None
     participation_pct: float | None = None
-    commission: float = 0.0
-    stamp_tax: float = 0.0
-    transfer_fee: float = 0.0
-    dividend_tax: float = 0.0
-    total_fee: float = 0.0
-    status: str = "filled"
-    reason: str = ""
-    submitted_at: str = ""
-    fee_components_complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,9 +130,7 @@ class ExecutionRecord:
     stamp_tax: float
     transfer_fee: float
     dividend_tax: float
-    fee: float
     total_fee: float
-    fee_components_complete: bool
     status: str
     reason: str
 
@@ -163,14 +159,7 @@ class Account:
         self.available = {k: float(v) for k, v in raw.get("available", {}).items()}
         self.avg_cost = {k: float(v) for k, v in raw.get("avg_cost", {}).items()}
         self.orders = [Order(**item) for item in raw.get("orders", [])]
-        self.fills = []
-        for item in raw.get("fills", []):
-            migrated = dict(item)
-            if "total_fee" not in migrated:
-                migrated["total_fee"] = float(migrated.get("fee", 0.0))
-            if "fee_components_complete" not in migrated:
-                migrated["fee_components_complete"] = False
-            self.fills.append(Fill(**migrated))
+        self.fills = [Fill(**item) for item in raw.get("fills", [])]
         self.corporate_actions = list(raw.get("corporate_actions", []))
         self.equity_curve = list(raw.get("equity_curve", []))
 
@@ -1419,12 +1408,16 @@ class FreeStrategyEngine:
                     order.reason = "数量不足、现金不足或 T+1 未结算"
                 return
         gross = float(gross_decimal)
-        fee = float(fee_decimal)
+        transaction_fee = float(fee_decimal)
         dividend_tax = 0.0
         if side == "buy":
-            self.account.cash = max(0.0, self.account.cash - gross - fee)
+            self.account.cash = max(0.0, self.account.cash - gross - transaction_fee)
             old = self.account.positions.get(order.symbol, 0.0)
-            self.account.avg_cost[order.symbol] = ((old * self.account.avg_cost.get(order.symbol, price)) + gross + fee) / (old + qty)
+            self.account.avg_cost[order.symbol] = (
+                old * self.account.avg_cost.get(order.symbol, price)
+                + gross
+                + transaction_fee
+            ) / (old + qty)
             if old <= 0 and order.symbol in self.account.positions:
                 del self.account.positions[order.symbol]
             self.account.positions[order.symbol] = old + qty
@@ -1445,7 +1438,7 @@ class FreeStrategyEngine:
                 qty,
                 timestamp.date() if timestamp else self.context.now.date(),
             )
-            self.account.cash += gross - fee - dividend_tax
+            self.account.cash += gross - transaction_fee - dividend_tax
             self.account.positions[order.symbol] = max(0.0, current - qty)
             self.account.available[order.symbol] = max(0.0, self.account.available.get(order.symbol, current) - qty)
             if dividend_tax > 0:
@@ -1458,25 +1451,24 @@ class FreeStrategyEngine:
         order.status = "filled"
         market_volume = float(bar.volume) if bar.volume > 0 else None
         self.account.fills.append(Fill(
-            order.id,
-            order.symbol,
-            side,
-            qty,
-            price,
-            gross,
-            fee,
-            timestamp.isoformat() if timestamp else "",
-            market_amount=float(bar.amount) if bar.amount > 0 else None,
-            market_volume=market_volume,
-            participation_pct=qty / market_volume * 100 if market_volume else None,
+            order_id=order.id,
+            symbol=order.symbol,
+            side=side,
+            quantity=qty,
+            price=price,
+            value=gross,
+            timestamp=timestamp.isoformat() if timestamp else "",
             commission=float(commission),
             stamp_tax=float(stamp_tax),
             transfer_fee=float(transfer_fee),
             dividend_tax=float(dividend_tax),
-            total_fee=fee + float(dividend_tax),
+            total_fee=transaction_fee + float(dividend_tax),
             status=order.status,
             reason=order.reason,
             submitted_at=order.submitted_at,
+            market_amount=float(bar.amount) if bar.amount > 0 else None,
+            market_volume=market_volume,
+            participation_pct=qty / market_volume * 100 if market_volume else None,
         ))
 
     @staticmethod
@@ -2194,7 +2186,6 @@ class FreeStrategyEngine:
                 "quantity": fill.quantity,
                 "price": fill.price,
                 "value": fill.value,
-                "fee": fill.fee,
                 "total_fee": fill.total_fee,
                 "cost_basis": cost_basis,
                 "realized_pnl": realized_pnl,
@@ -2229,11 +2220,7 @@ class FreeStrategyEngine:
                 stamp_tax=sum(fill.stamp_tax for fill in fills),
                 transfer_fee=sum(fill.transfer_fee for fill in fills),
                 dividend_tax=sum(fill.dividend_tax for fill in fills),
-                fee=sum(fill.fee for fill in fills),
                 total_fee=sum(fill.total_fee for fill in fills),
-                fee_components_complete=bool(fills) and all(
-                    fill.fee_components_complete for fill in fills
-                ),
                 status=order.status,
                 reason=order.reason,
             ))
@@ -2248,7 +2235,6 @@ class FreeStrategyEngine:
             fills = fills_by_order.get(order.id, [])
             filled_quantity = sum(fill.quantity for fill in fills)
             fill_value = sum(fill.value for fill in fills)
-            fee = sum(fill.fee for fill in fills)
             rows.append({
                 "transaction_id": order.id,
                 "order_id": order.id,
@@ -2266,15 +2252,11 @@ class FreeStrategyEngine:
                 "filled_quantity": filled_quantity,
                 "average_fill_price": fill_value / filled_quantity if filled_quantity else None,
                 "fill_value": fill_value,
-                "fee": fee,
                 "commission": sum(fill.commission for fill in fills),
                 "stamp_tax": sum(fill.stamp_tax for fill in fills),
                 "transfer_fee": sum(fill.transfer_fee for fill in fills),
                 "dividend_tax": sum(fill.dividend_tax for fill in fills),
                 "total_fee": sum(fill.total_fee for fill in fills),
-                "fee_components_complete": bool(fills) and all(
-                    fill.fee_components_complete for fill in fills
-                ),
                 "status": order.status,
                 "reason": order.reason,
             })

@@ -1500,8 +1500,15 @@ export interface PaperFill {
   quantity: number
   price: number
   value: number
-  fee: number
   timestamp: string
+  commission: number
+  stamp_tax: number
+  transfer_fee: number
+  dividend_tax: number
+  total_fee: number
+  status: string
+  reason: string
+  submitted_at: string
   market_amount?: number | null
   market_volume?: number | null
   participation_pct?: number | null

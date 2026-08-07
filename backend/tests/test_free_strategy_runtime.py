@@ -1202,7 +1202,7 @@ def on_bar(context, bars):
     ])
 
     assert result["fills"][1]["value"] == 27_975
-    assert result["fills"][1]["fee"] == 16.785
+    assert result["fills"][1]["total_fee"] == 16.785
 
 
 def test_fill_and_execution_record_expose_auditable_fee_components():
@@ -1236,9 +1236,9 @@ def on_bar(context, bars):
     assert sell["stamp_tax"] == pytest.approx(1.0)
     assert sell["transfer_fee"] == pytest.approx(0.02)
     assert sell["dividend_tax"] == 0
-    assert sell["fee"] == pytest.approx(2.02)
     assert sell["total_fee"] == pytest.approx(2.02)
     assert sell["status"] == "filled"
+    assert "fee" not in sell
 
     execution = result["executions"][1]
     assert execution == {
@@ -1255,15 +1255,14 @@ def on_bar(context, bars):
         "stamp_tax": pytest.approx(1.0),
         "transfer_fee": pytest.approx(0.02),
         "dividend_tax": 0,
-        "fee": pytest.approx(2.02),
         "total_fee": pytest.approx(2.02),
-        "fee_components_complete": True,
         "status": "filled",
         "reason": "exit",
     }
+    assert "fee_components_complete" not in execution
 
 
-def test_legacy_checkpoint_fill_without_fee_components_restores_as_incomplete():
+def test_legacy_checkpoint_fill_is_rejected_instead_of_migrated():
     source = """
 def on_bar(context, bars):
     context.buy('X', quantity=100)
@@ -1289,18 +1288,13 @@ def on_bar(context, bars):
         "status",
         "reason",
         "submitted_at",
-        "fee_components_complete",
     ):
         legacy_fill.pop(field, None)
+    legacy_fill["fee"] = 1.0
 
     restored = FreeStrategyEngine(source, config=config)
-    restored.restore_checkpoint(checkpoint)
-    fill = restored.result()["fills"][0]
-
-    assert fill["fee"] == 1.0
-    assert fill["total_fee"] == 1.0
-    assert fill["commission"] == 0
-    assert fill["fee_components_complete"] is False
+    with pytest.raises(TypeError, match="unexpected keyword argument 'fee'"):
+        restored.restore_checkpoint(checkpoint)
 
 
 def test_next_open_fill_and_t1_are_default():
@@ -1528,7 +1522,7 @@ def on_bar(context, bars):
         Bar("X", datetime(2024, 1, 20, 15), 9.8, 9.8, 9.8, 9.8, raw_close=9.8),
     ])
 
-    assert result["fills"][-1]["fee"] == 0
+    assert result["fills"][-1]["total_fee"] == 4
     assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_996)
     assert result["corporate_actions"][-1] == {
         "timestamp": "2024-01-20T15:00:00",
@@ -2122,7 +2116,7 @@ def on_bar(context, bars):
         Bar("Y", datetime(2024, 1, 1, 15), 1, 1, 1, 1),
     ])
 
-    assert [(fill["symbol"], fill["quantity"], fill["fee"]) for fill in result["fills"]] == [
+    assert [(fill["symbol"], fill["quantity"], fill["total_fee"]) for fill in result["fills"]] == [
         ("X", 900, 5),
         ("Y", 900, 5),
     ]
@@ -2250,7 +2244,7 @@ def on_bar(context, bars):
         Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
     ])
 
-    assert [fill["fee"] for fill in result["fills"]] == pytest.approx([1, 2])
+    assert [fill["total_fee"] for fill in result["fills"]] == pytest.approx([1, 2])
 
 
 def test_stale_fill_requires_current_day_trading_evidence():
