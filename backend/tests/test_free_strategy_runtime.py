@@ -529,6 +529,14 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
     assert engine.execution_mode == "scheduled"
     assert engine.scheduled_times == ["09:00", "09:30", "14:00"]
     assert engine.market_history_requirements == {("index", "1d"): 235}
+    conditions = {
+        (at, callback.__name__): condition.__name__
+        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+    }
+    assert conditions == {
+        ("09:30", "_monthly_adjustment"): "_monthly_adjustment_due",
+        ("14:00", "_check_limit_up_and_buy"): "_limit_up_check_due",
+    }
 
 
 def test_performance_small_cap_ema_ignores_leading_missing_values():
@@ -2152,6 +2160,12 @@ from datetime import time
 
 def initialize(context):
     context.schedule(lambda ctx: None, time(9, 30, 1))
+""")
+
+    with pytest.raises(ValueError, match="when"):
+        FreeStrategyEngine("""
+def initialize(context):
+    context.schedule(lambda ctx: None, '09:30', when=True)
 """)
 
     deduplicated = FreeStrategyEngine("""

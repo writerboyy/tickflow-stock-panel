@@ -1883,6 +1883,8 @@ def advance_scheduled_session(
     })
     for at in due_times:
         timestamp = datetime.combine(day, time.fromisoformat(at))
+        if not engine.prepare_scheduled_event(timestamp):
+            continue
         _process_scheduled_fills(
             repo, engine, market, timestamp, asset_type, timeframe,
             live_bars=live_bars, live_only=live_only,

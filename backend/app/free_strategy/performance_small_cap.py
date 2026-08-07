@@ -398,6 +398,17 @@ def _held_and_selection_symbols(context, timestamp: datetime) -> list[str]:
         return _held_symbols(context)
 
 
+def _monthly_adjustment_due(context, _timestamp: datetime) -> bool:
+    records = _instrument_records(context)
+    previous_date = _previous_trading_date(context, records)
+    return _should_monthly_adjust(context, previous_date)
+
+
+def _limit_up_check_due(context, _timestamp: datetime) -> bool:
+    state = _state(context)
+    return bool(state.get("high_limit_list")) and not state.get("risk_control_executed")
+
+
 def initialize(context) -> None:
     records = _instrument_records(context)
     symbols = [
@@ -429,8 +440,18 @@ def initialize(context) -> None:
     context.schedule(_analyze_smallcap_index, "09:30", symbols=[])
     context.schedule(_check_smallcap_timing, "09:30", symbols=_timing_scope)
     context.schedule(_dapan, "09:30", symbols=_held_scope)
-    context.schedule(_monthly_adjustment, "09:30", symbols=_held_and_selection_symbols)
-    context.schedule(_check_limit_up_and_buy, "14:00", symbols=_held_and_selection_symbols)
+    context.schedule(
+        _monthly_adjustment,
+        "09:30",
+        symbols=_held_and_selection_symbols,
+        when=_monthly_adjustment_due,
+    )
+    context.schedule(
+        _check_limit_up_and_buy,
+        "14:00",
+        symbols=_held_and_selection_symbols,
+        when=_limit_up_check_due,
+    )
     context.log("绩优小市值策略已初始化：高股息/绩优过滤，低价小市值月度调仓")
 
 

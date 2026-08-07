@@ -1197,6 +1197,59 @@ def scheduled_market(*symbols: str) -> MarketData:
     })
 
 
+def test_scheduled_condition_skips_snapshot_until_due_day():
+    source = """
+def due_on_tuesday(context, timestamp):
+    return timestamp.weekday() == 1
+
+def unavailable_scope(context, timestamp):
+    if timestamp.weekday() != 1:
+        raise RuntimeError('scope should not be evaluated')
+    return ['X']
+
+def run(context):
+    context.state.setdefault('executed', []).append(context.now.isoformat())
+
+def initialize(context):
+    context.schedule(run, '10:00', symbols=unavailable_scope, when=due_on_tuesday)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    advance_scheduled_session(
+        ScheduledRepository([]),
+        engine,
+        scheduled_market("X"),
+        date(2024, 1, 1),
+        datetime(2024, 1, 1, 10),
+        "stock",
+        "1m",
+        live_only=True,
+    )
+
+    assert "executed" not in engine.context.state
+    assert engine.callbacks_executed == 0
+    assert engine._last_timestamp == datetime(2024, 1, 1, 10)  # noqa: SLF001
+
+    advance_scheduled_session(
+        ScheduledRepository([]),
+        engine,
+        scheduled_market("X"),
+        date(2024, 1, 2),
+        datetime(2024, 1, 2, 10),
+        "stock",
+        "1m",
+        live_bars=[Bar("X", datetime(2024, 1, 2, 10), 10, 10, 10, 10)],
+        live_only=True,
+    )
+
+    assert engine.context.state["executed"] == ["2024-01-02T10:00:00"]
+    assert engine.callbacks_executed == 1
+
+
 def test_scheduled_open_callback_waits_for_first_continuous_minute_bar():
     source = """
 def initialize(context):

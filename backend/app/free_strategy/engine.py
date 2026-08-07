@@ -445,9 +445,12 @@ class Context:
         at: str | datetime_time,
         *,
         symbols: Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None = None,
+        when: Callable[["Context", datetime], bool] | None = None,
     ) -> None:
         if not callable(callback):
             raise ValueError("定时任务 callback 必须可调用")
+        if when is not None and not callable(when):
+            raise ValueError("定时任务 when 必须可调用")
         if isinstance(at, datetime_time) and (at.second or at.microsecond):
             raise ValueError("定时任务时间必须使用严格的 HH:MM 格式")
         value = at.strftime("%H:%M") if isinstance(at, datetime_time) else str(at)
@@ -458,6 +461,8 @@ class Context:
         self._scheduled.append((value, callback, False))
         if symbols is not None:
             self._engine._scheduled_symbol_scopes[(value, callback)] = symbols
+        if when is not None:
+            self._engine._scheduled_conditions[(value, callback)] = when
 
     schedule_function = schedule
 
@@ -629,6 +634,12 @@ class FreeStrategyEngine:
             tuple[str, Callable[..., Any]],
             Iterable[str] | Callable[[Context, datetime], Iterable[str]],
         ] = {}
+        self._scheduled_conditions: dict[
+            tuple[str, Callable[..., Any]], Callable[[Context, datetime], bool]
+        ] = {}
+        self._scheduled_condition_results: dict[
+            tuple[date, str, Callable[..., Any]], bool
+        ] = {}
         self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
         self._session_finished = False
@@ -739,7 +750,7 @@ class FreeStrategyEngine:
             return []
         result: list[str] = []
         for callback, done in due:
-            if done:
+            if done or not self._scheduled_condition_met(current_time, callback, timestamp):
                 continue
             scope = self._scheduled_symbol_scopes.get((current_time, callback))
             if scope is None:
@@ -753,6 +764,45 @@ class FreeStrategyEngine:
                 if symbol and symbol not in result:
                     result.append(symbol)
         return result
+
+    def _scheduled_condition_met(
+        self,
+        at: str,
+        callback: Callable[..., Any],
+        timestamp: datetime,
+    ) -> bool:
+        condition = self._scheduled_conditions.get((at, callback))
+        if condition is None:
+            return True
+        key = (timestamp.date(), at, callback)
+        if key not in self._scheduled_condition_results:
+            scheduled_timestamp = datetime.combine(
+                timestamp.date(), datetime_time.fromisoformat(at),
+            )
+            self._scheduled_condition_results[key] = bool(self._protected_call(
+                f"定时任务 {at} 执行条件",
+                condition,
+                self.context,
+                scheduled_timestamp,
+            ))
+        return self._scheduled_condition_results[key]
+
+    def prepare_scheduled_event(self, timestamp: datetime) -> bool:
+        """跳过当日不生效的定时回调，并在无任务时推进执行游标。"""
+        current_time = timestamp.strftime("%H:%M")
+        active = False
+        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
+            if done or at != current_time:
+                continue
+            if self._scheduled_condition_met(at, callback, timestamp):
+                active = True
+                continue
+            self.context._scheduled[slot_index] = (at, callback, True)
+        if not active:
+            self._next_timestamp = timestamp
+            self._last_timestamp = timestamp
+            self.context.now = timestamp
+        return active
 
     @property
     def pending_orders(self) -> list[tuple[Order, datetime]]:
@@ -1482,6 +1532,7 @@ class FreeStrategyEngine:
         self._active_session_date = timestamp.date()
         self._session_finished = False
         self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
+        self._scheduled_condition_results.clear()
         self.context.now = timestamp
         self._session_bars = dict(bars_now)
         self._session_daily_bars = {}
@@ -1500,8 +1551,12 @@ class FreeStrategyEngine:
         for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
             if done or at >= current:
                 continue
-            self.context.now = datetime.combine(timestamp.date(), datetime_time.fromisoformat(at))
-            self._run_scheduled_callback(callback, at)
+            scheduled_timestamp = datetime.combine(
+                timestamp.date(), datetime_time.fromisoformat(at),
+            )
+            self.context.now = scheduled_timestamp
+            if self._scheduled_condition_met(at, callback, scheduled_timestamp):
+                self._run_scheduled_callback(callback, at)
             self.context._scheduled[slot_index] = (at, callback, True)
 
     def _run_scheduled_at(self, timestamp: datetime) -> None:
@@ -1510,7 +1565,8 @@ class FreeStrategyEngine:
             if done or at != current:
                 continue
             self.context.now = timestamp
-            self._run_scheduled_callback(callback, at)
+            if self._scheduled_condition_met(at, callback, timestamp):
+                self._run_scheduled_callback(callback, at)
             self.context._scheduled[slot_index] = (at, callback, True)
 
     def _accumulate_session_daily_bars(self, bars_now: BarsView) -> None:
@@ -1661,10 +1717,10 @@ class FreeStrategyEngine:
         if callback is not None:
             self._protected_call("on_quote 回调", callback, self.context, quote_view)
             self.callbacks_executed += 1
-        current_time = timestamp.strftime("%H:%M")
         for slot_index, (at, scheduled, done) in enumerate(self.context._scheduled):
-            if not done and current_time >= at:
-                self._run_scheduled_callback(scheduled, at)
+            if not done and timestamp.strftime("%H:%M") >= at:
+                if self._scheduled_condition_met(at, scheduled, timestamp):
+                    self._run_scheduled_callback(scheduled, at)
                 self.context._scheduled[slot_index] = (at, scheduled, True)
         self._fill_immediate_orders(bars_now, timestamp)
         self.context._sync(self._current_close_prices)
@@ -1692,7 +1748,8 @@ class FreeStrategyEngine:
         current_time = scheduled_at or timestamp.strftime("%H:%M")
         for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
             if not done and at == current_time:
-                self._run_scheduled_callback(callback, at)
+                if self._scheduled_condition_met(at, callback, timestamp):
+                    self._run_scheduled_callback(callback, at)
                 self.context._scheduled[slot_index] = (at, callback, True)
         self._fill_immediate_orders(self._session_bars, timestamp)
         self.context._sync(self._current_close_prices)

@@ -48,6 +48,10 @@ def _held_symbols(context) -> list[str]:
     ]
 
 
+def _held_scope(context, _timestamp: datetime) -> list[str]:
+    return _held_symbols(context)
+
+
 def _available_quantity(context, symbol: str) -> float:
     available = getattr(context.portfolio, "available_positions", {})
     return float(available.get(symbol, context.portfolio.positions.get(symbol, 0.0)))
@@ -129,6 +133,22 @@ def _weekly_selection_symbols(context, timestamp: datetime) -> list[str]:
     return _held_symbols(context)
 
 
+def _weekly_rebalance_due(context, timestamp: datetime) -> bool:
+    return timestamp.month not in NO_TRADING_MONTHS and _is_weekly_rebalance_day(
+        context, timestamp,
+    )
+
+
+def _regular_trading_month(_context, timestamp: datetime) -> bool:
+    return timestamp.month not in NO_TRADING_MONTHS
+
+
+def _close_account_due(context, timestamp: datetime) -> bool:
+    return timestamp.month in NO_TRADING_MONTHS and not _state(context).get(
+        "no_trading_hold",
+    )
+
+
 def initialize(context) -> None:
     records = _instrument_records(context)
     symbols = [
@@ -157,12 +177,36 @@ def initialize(context) -> None:
         "decision": {},
     })
     context.schedule(_prepare_stock_list, "09:05", symbols=_held_and_candidates)
-    context.schedule(_sell_stocks, "10:00", symbols=_held_and_candidates)
-    context.schedule(_weekly_sell, "10:15", symbols=_weekly_selection_symbols)
-    context.schedule(_weekly_buy, "10:30", symbols=_held_and_candidates)
-    context.schedule(_trade_afternoon, "14:20", symbols=_afternoon_selection_symbols)
-    context.schedule(_close_account, "14:50", symbols=_held_and_candidates)
-    context.schedule(_trade_afternoon, "14:55", symbols=_afternoon_selection_symbols)
+    context.schedule(
+        _sell_stocks, "10:00", symbols=_held_scope, when=_regular_trading_month,
+    )
+    context.schedule(
+        _weekly_sell,
+        "10:15",
+        symbols=_weekly_selection_symbols,
+        when=_weekly_rebalance_due,
+    )
+    context.schedule(
+        _weekly_buy,
+        "10:30",
+        symbols=_held_and_candidates,
+        when=_weekly_rebalance_due,
+    )
+    context.schedule(
+        _trade_afternoon,
+        "14:20",
+        symbols=_afternoon_selection_symbols,
+        when=_regular_trading_month,
+    )
+    context.schedule(
+        _close_account, "14:50", symbols=_held_scope, when=_close_account_due,
+    )
+    context.schedule(
+        _trade_afternoon,
+        "14:55",
+        symbols=_afternoon_selection_symbols,
+        when=_regular_trading_month,
+    )
     context.log("涨停基因小市值策略已初始化：全市场日线选股，定时点按需读取分钟快照")
 
 

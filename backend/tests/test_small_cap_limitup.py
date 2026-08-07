@@ -17,6 +17,31 @@ from app.free_strategy.small_cap_limitup import (
     _turnover_sell_symbols,
 )
 from app.free_strategy import small_cap_limitup
+from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.templates import TEMPLATES
+
+
+def test_template_declares_weekly_and_monthly_trading_conditions():
+    engine = FreeStrategyEngine(
+        TEMPLATES["small_cap_limitup"]["source"],
+        timeframe="1m",
+        instruments=[{
+            "symbol": "000001.SZ", "asset_type": "stock", "has_minute": True,
+        }],
+    )
+    conditions = {
+        (at, callback.__name__): condition.__name__
+        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+    }
+
+    assert conditions == {
+        ("10:00", "_sell_stocks"): "_regular_trading_month",
+        ("10:15", "_weekly_sell"): "_weekly_rebalance_due",
+        ("10:30", "_weekly_buy"): "_weekly_rebalance_due",
+        ("14:20", "_trade_afternoon"): "_regular_trading_month",
+        ("14:50", "_close_account"): "_close_account_due",
+        ("14:55", "_trade_afternoon"): "_regular_trading_month",
+    }
 
 
 def test_known_limit_price_prevents_false_limit_up_inference():
