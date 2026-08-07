@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import builtins
+import calendar
 import copy
 import io
 import logging
@@ -15,13 +16,17 @@ from decimal import Decimal
 from itertools import groupby
 from statistics import mean, pstdev
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Literal
 
 from .bars import Bar
+from .readiness import ReadinessRequirement, make_requirement
+from .schedule import RegisteredSchedule, ScheduleRule, parse_time_expression
 from app.market_time import cn_naive_now
 from app.services.data_authority import normalize_reference_asset
 
 logger = logging.getLogger(__name__)
+
+EventType = Literal["bar", "quote", "scheduled", "fill", "market"]
 
 
 @dataclass(slots=True)
@@ -33,6 +38,7 @@ class FreeStrategyConfig:
     min_commission: float = 0.0
     reserve_buy_fees: bool = True
     stamp_tax_pct: float = 0.001
+    transfer_fee_pct: float = 0.0
     slippage_bps: float = 5.0
     price_tick: float | None = None
     lot_size: int = 100
@@ -76,6 +82,7 @@ class Order:
     id: str
     symbol: str
     side: str
+    requested_quantity: float | None
     quantity: float | None = None
     value: float | None = None
     cash_weight: float | None = None
@@ -95,11 +102,38 @@ class Fill:
     quantity: float
     price: float
     value: float
-    fee: float
     timestamp: str
+    commission: float
+    stamp_tax: float
+    transfer_fee: float
+    dividend_tax: float
+    total_fee: float
+    status: str
+    reason: str
+    submitted_at: str
     market_amount: float | None = None
     market_volume: float | None = None
     participation_pct: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    order_id: str
+    submitted_at: str
+    executed_at: str | None
+    symbol: str
+    side: str
+    requested_quantity: float | None
+    executed_quantity: float
+    price: float | None
+    amount: float
+    commission: float
+    stamp_tax: float
+    transfer_fee: float
+    dividend_tax: float
+    total_fee: float
+    status: str
+    reason: str
 
 
 class Account:
@@ -162,11 +196,12 @@ class Context:
         self.period = engine.timeframe
         self.portfolio = SimpleNamespace(cash=engine.account.cash, positions={}, available_positions={}, avg_cost={}, total_value=engine.account.cash)
         self.account = self.portfolio
-        self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
+        self._scheduled: list[RegisteredSchedule] = []
         self._universe: list[str] = []
         self._history_requirements: dict[str, int] = {}
         self._market_history_requirements: dict[tuple[str, str], int] = {}
         self._extra_history_requirements: set[str] = set()
+        self._readiness_requirements: list[ReadinessRequirement] = []
 
     @property
     def universe(self) -> list[str]:
@@ -250,6 +285,35 @@ class Context:
     def extra_history_requirements(self) -> set[str]:
         return set(self._extra_history_requirements)
 
+    @property
+    def readiness_requirements(self) -> tuple[ReadinessRequirement, ...]:
+        return tuple(self._readiness_requirements)
+
+    def require_data_readiness(
+        self,
+        *,
+        rebalance: str,
+        financials: dict[str, dict[str, Any]] | None = None,
+        valuation_fields: Iterable[str] = (),
+        industry_standard: str | None = None,
+        industry_level: str | int | None = None,
+        lifecycle: bool = False,
+        adjustment: str | None = None,
+        corporate_actions: bool = False,
+    ) -> None:
+        requirement = make_requirement(
+            rebalance=rebalance,
+            financials=financials,
+            valuation_fields=valuation_fields,
+            industry_standard=industry_standard,
+            industry_level=industry_level,
+            lifecycle=lifecycle,
+            adjustment=adjustment,
+            corporate_actions=corporate_actions,
+        )
+        if requirement not in self._readiness_requirements:
+            self._readiness_requirements.append(requirement)
+
     @staticmethod
     def _normalize_symbol(raw: Any) -> str:
         symbol = str(raw).strip().upper()
@@ -294,6 +358,31 @@ class Context:
         if self._engine._financial_snapshot_loader is None:
             return {}
         return self._engine._financial_snapshot_loader(normalized, cutoff)
+
+    def get_industry(
+        self,
+        symbols: Iterable[str],
+        as_of: date | datetime | str,
+        standard: str,
+        level: str | int | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        normalized = list(dict.fromkeys(
+            self._normalize_symbol(symbol)
+            for symbol in symbols
+            if str(symbol).strip()
+        ))
+        if isinstance(as_of, datetime):
+            cutoff = as_of.date()
+        elif isinstance(as_of, date):
+            cutoff = as_of
+        else:
+            cutoff = date.fromisoformat(str(as_of)[:10])
+        if self.now is not None and cutoff > self.now.date():
+            raise ValueError("PIT 行业查询日期不能晚于当前策略时间")
+        loader = self._engine._industry_history_loader
+        if loader is None:
+            raise ValueError("缺少 TickFlow PIT 行业历史加载器")
+        return loader(normalized, cutoff, standard, level)
 
     def dividend_ratio_ranked(
         self,
@@ -454,20 +543,83 @@ class Context:
             raise ValueError("定时任务 callback 必须可调用")
         if when is not None and not callable(when):
             raise ValueError("定时任务 when 必须可调用")
-        if isinstance(at, datetime_time) and (at.second or at.microsecond):
-            raise ValueError("定时任务时间必须使用严格的 HH:MM 格式")
-        value = at.strftime("%H:%M") if isinstance(at, datetime_time) else str(at)
-        if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is None:
-            raise ValueError("定时任务时间必须使用严格的 HH:MM 格式")
-        if any(existing_at == value and existing is callback for existing_at, existing, _ in self._scheduled):
+        self._register_schedule(
+            callback,
+            ScheduleRule("daily", parse_time_expression(at)),
+            symbols=symbols,
+            optional_symbols=optional_symbols,
+            when=when,
+        )
+
+    def _register_schedule(
+        self,
+        callback: Callable[..., Any],
+        rule: ScheduleRule,
+        *,
+        symbols: Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None = None,
+        optional_symbols: (
+            Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None
+        ) = None,
+        when: Callable[["Context", datetime], bool] | None = None,
+    ) -> None:
+        if any(task.callback is callback and task.rule == rule for task in self._scheduled):
             return
-        self._scheduled.append((value, callback, False))
-        if symbols is not None:
-            self._engine._scheduled_symbol_scopes[(value, callback)] = symbols
-        if optional_symbols is not None:
-            self._engine._scheduled_optional_symbol_scopes[(value, callback)] = optional_symbols
-        if when is not None:
-            self._engine._scheduled_conditions[(value, callback)] = when
+        self._scheduled.append(RegisteredSchedule(
+            callback=callback,
+            rule=rule,
+            condition=when,
+            symbols=symbols,
+            optional_symbols=optional_symbols,
+        ))
+
+    def run_daily(
+        self,
+        callback: Callable[..., Any],
+        time: str = "every_bar",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule("daily", parse_time_expression(time), reference_security=reference_security),
+        )
+
+    def run_weekly(
+        self,
+        callback: Callable[..., Any],
+        weekday: int,
+        time: str = "09:30",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule(
+                "weekly",
+                parse_time_expression(time),
+                ordinal=weekday,
+                reference_security=reference_security,
+            ),
+        )
+
+    def run_monthly(
+        self,
+        callback: Callable[..., Any],
+        monthday: int,
+        time: str = "09:30",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule(
+                "monthly",
+                parse_time_expression(time),
+                ordinal=monthday,
+                reference_security=reference_security,
+            ),
+        )
+
+    def unschedule_all(self) -> None:
+        self._scheduled.clear()
+        self._engine._scheduled_condition_results.clear()
 
     schedule_function = schedule
 
@@ -635,20 +787,10 @@ class FreeStrategyEngine:
         self._history_batch_loader: Callable[
             [list[str], int, str, datetime], dict[str, list[Bar]]
         ] | None = None
-        self._scheduled_symbol_scopes: dict[
-            tuple[str, Callable[..., Any]],
-            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
-        ] = {}
-        self._scheduled_optional_symbol_scopes: dict[
-            tuple[str, Callable[..., Any]],
-            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
-        ] = {}
-        self._scheduled_conditions: dict[
-            tuple[str, Callable[..., Any]], Callable[[Context, datetime], bool]
-        ] = {}
         self._scheduled_condition_results: dict[
-            tuple[date, str, Callable[..., Any]], bool
+            tuple[date, int], bool
         ] = {}
+        self._trading_dates: tuple[date, ...] = ()
         self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
         self._session_finished = False
@@ -685,10 +827,18 @@ class FreeStrategyEngine:
         self._valuation_market_cap_loader: Callable[[list[str], date], dict[str, float]] | None = None
         self._smallcap_index_loader: Callable[[list[str], date], float | None] | None = None
         self._style_liquidity_loader: Callable[[date], dict[str, Any] | None] | None = None
+        self._industry_history_loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
             "print": self._strategy_print,
+            "run_daily": self.context.run_daily,
+            "run_weekly": self.context.run_weekly,
+            "run_monthly": self.context.run_monthly,
+            "unschedule_all": self.context.unschedule_all,
         }
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
@@ -702,11 +852,24 @@ class FreeStrategyEngine:
             for name in callback_names
             if callable(namespace.get(name))
         }
-        self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
+        self.execution_mode = (
+            "quote"
+            if "on_quote" in self._callbacks
+            else "full_bar"
+            if "on_bar" in self._callbacks
+            else "scheduled"
+        )
         if instrument_loader is not None:
             self._instruments = [dict(item) for item in instrument_loader(self.execution_mode)]
         if "initialize" in self._callbacks:
             self._protected_call("initialize 回调", self._callbacks["initialize"], self.context)
+        every_bar = any(
+            task.resolved_time == "every_bar" for task in self.context._scheduled
+        )
+        if every_bar and self.execution_mode == "scheduled":
+            self.execution_mode = "full_bar"
+        if every_bar and timeframe == "1d":
+            raise ValueError("every_bar 必须使用分钟级回测周期")
         if "on_bar" not in self._callbacks and "on_quote" not in self._callbacks and not self.context._scheduled:
             raise ValueError("策略必须定义 on_bar(context, bars)、on_quote(context, quotes) 或通过 context.schedule 注册定时任务")
 
@@ -745,8 +908,15 @@ class FreeStrategyEngine:
         return self.context.extra_history_requirements
 
     @property
+    def readiness_requirements(self) -> tuple[ReadinessRequirement, ...]:
+        return self.context.readiness_requirements
+
+    @property
     def scheduled_times(self) -> list[str]:
-        return sorted({at for at, _, _ in self.context._scheduled})
+        return sorted({task.resolved_time for task in self.context._scheduled})
+
+    def set_trading_calendar(self, values: Iterable[date]) -> None:
+        self._trading_dates = tuple(sorted(set(values)))
 
     def scheduled_snapshot_symbols(self, timestamp: datetime) -> list[str] | None:
         return self._scheduled_scope_symbols(timestamp, include_optional=True)
@@ -762,23 +932,21 @@ class FreeStrategyEngine:
     ) -> list[str] | None:
         current_time = timestamp.strftime("%H:%M")
         due = [
-            (callback, done)
-            for at, callback, done in self.context._scheduled
-            if at == current_time
+            task
+            for task in self.context._scheduled
+            if task.resolved_time == current_time
         ]
         if not due:
             return []
         result: list[str] = []
-        for callback, done in due:
-            if done or not self._scheduled_condition_met(current_time, callback, timestamp):
+        for task in due:
+            if task.done or not self._scheduled_condition_met(task, timestamp):
                 continue
-            scope = self._scheduled_symbol_scopes.get((current_time, callback))
+            scope = task.symbols
             if scope is None:
                 return None
             scopes = [("定时任务必需标的范围", scope)]
-            optional_scope = self._scheduled_optional_symbol_scopes.get(
-                (current_time, callback),
-            )
+            optional_scope = task.optional_symbols
             if include_optional and optional_scope is not None:
                 scopes.append(("定时任务可选标的范围", optional_scope))
             for label, current_scope in scopes:
@@ -796,20 +964,24 @@ class FreeStrategyEngine:
 
     def _scheduled_condition_met(
         self,
-        at: str,
-        callback: Callable[..., Any],
+        task: RegisteredSchedule,
         timestamp: datetime,
     ) -> bool:
-        condition = self._scheduled_conditions.get((at, callback))
+        if not task.rule.matches_date(timestamp.date(), self._trading_dates):
+            return False
+        condition = task.condition
         if condition is None:
             return True
-        key = (timestamp.date(), at, callback)
+        key = (timestamp.date(), id(task))
         if key not in self._scheduled_condition_results:
-            scheduled_timestamp = datetime.combine(
-                timestamp.date(), datetime_time.fromisoformat(at),
+            resolved = task.resolved_time
+            scheduled_timestamp = (
+                timestamp
+                if resolved == "every_bar"
+                else datetime.combine(timestamp.date(), datetime_time.fromisoformat(resolved))
             )
             self._scheduled_condition_results[key] = bool(self._protected_call(
-                f"定时任务 {at} 执行条件",
+                f"定时任务 {resolved} 执行条件",
                 condition,
                 self.context,
                 scheduled_timestamp,
@@ -820,13 +992,13 @@ class FreeStrategyEngine:
         """跳过当日不生效的定时回调，并在无任务时推进执行游标。"""
         current_time = timestamp.strftime("%H:%M")
         active = False
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at != current_time:
+        for task in self.context._scheduled:
+            if task.done or task.resolved_time != current_time:
                 continue
-            if self._scheduled_condition_met(at, callback, timestamp):
+            if self._scheduled_condition_met(task, timestamp):
                 active = True
                 continue
-            self.context._scheduled[slot_index] = (at, callback, True)
+            task.done = True
         if not active:
             self._next_timestamp = timestamp
             self._last_timestamp = timestamp
@@ -913,6 +1085,15 @@ class FreeStrategyEngine:
     ) -> None:
         self._style_liquidity_loader = loader
 
+    def set_industry_history_loader(
+        self,
+        loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None,
+    ) -> None:
+        self._industry_history_loader = loader
+
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
         history = self._history_by_period.setdefault(timeframe, {})
@@ -964,7 +1145,14 @@ class FreeStrategyEngine:
 
     def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
         self._counter += 1
-        order = Order(id=f"o{self._counter}", symbol=symbol, side=side, submitted_at=self.context.now.isoformat() if self.context.now else "", **kwargs)
+        order = Order(
+            id=f"o{self._counter}",
+            symbol=symbol,
+            side=side,
+            requested_quantity=kwargs.get("quantity"),
+            submitted_at=self.context.now.isoformat() if self.context.now else "",
+            **kwargs,
+        )
         self.account.orders.append(order)
         if self._reject_for_risk(order):
             return
@@ -1130,6 +1318,16 @@ class FreeStrategyEngine:
             if qty is None and order.value is not None:
                 qty = order.value / raw_price
             qty = qty or 0
+        lot = max(1, self.config.lot_size)
+        liquidates_position = (
+            side == "sell"
+            and order.side == "target"
+            and target is not None
+            and target <= 0
+        )
+        if not liquidates_position:
+            qty = math.floor(qty / lot) * lot
+        order.requested_quantity = qty
         if bar.suspended or not bar.tradable:
             order.status = "rejected"
             order.reason = "证券停牌或不可交易"
@@ -1156,15 +1354,6 @@ class FreeStrategyEngine:
             if side == "sell" and self.config.sell_commission_pct is not None
             else buy_commission_rate
         )
-        lot = max(1, self.config.lot_size)
-        liquidates_position = (
-            side == "sell"
-            and order.side == "target"
-            and target is not None
-            and target <= 0
-        )
-        if not liquidates_position:
-            qty = math.floor(qty / lot) * lot
         if side == "sell":
             bought_today = (
                 self.config.settlement == "t1"
@@ -1188,6 +1377,7 @@ class FreeStrategyEngine:
                 available / (1 + commission_rate),
             )
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
+        order.requested_quantity = qty
         if qty <= 0:
             if order.side == "target":
                 order.status = "skipped"
@@ -1205,11 +1395,17 @@ class FreeStrategyEngine:
                 Decimal(str(self.config.min_commission)),
                 gross_decimal * Decimal(str(commission_rate)),
             )
-            fee_decimal = commission + (
+            stamp_tax = (
                 gross_decimal * Decimal(str(self.config.stamp_tax_pct))
                 if side == "sell" and self.config.asset_type == "stock"
                 else Decimal(0)
             )
+            transfer_fee = (
+                gross_decimal * Decimal(str(self.config.transfer_fee_pct))
+                if self.config.asset_type == "stock"
+                else Decimal(0)
+            )
+            fee_decimal = commission + stamp_tax + transfer_fee
             if side != "buy" or gross_decimal + fee_decimal <= Decimal(str(max(0.0, available))):
                 break
             qty -= lot
@@ -1222,11 +1418,16 @@ class FreeStrategyEngine:
                     order.reason = "数量不足、现金不足或 T+1 未结算"
                 return
         gross = float(gross_decimal)
-        fee = float(fee_decimal)
+        transaction_fee = float(fee_decimal)
+        dividend_tax = 0.0
         if side == "buy":
-            self.account.cash = max(0.0, self.account.cash - gross - fee)
+            self.account.cash = max(0.0, self.account.cash - gross - transaction_fee)
             old = self.account.positions.get(order.symbol, 0.0)
-            self.account.avg_cost[order.symbol] = ((old * self.account.avg_cost.get(order.symbol, price)) + gross + fee) / (old + qty)
+            self.account.avg_cost[order.symbol] = (
+                old * self.account.avg_cost.get(order.symbol, price)
+                + gross
+                + transaction_fee
+            ) / (old + qty)
             if old <= 0 and order.symbol in self.account.positions:
                 del self.account.positions[order.symbol]
             self.account.positions[order.symbol] = old + qty
@@ -1247,7 +1448,7 @@ class FreeStrategyEngine:
                 qty,
                 timestamp.date() if timestamp else self.context.now.date(),
             )
-            self.account.cash += gross - fee - dividend_tax
+            self.account.cash += gross - transaction_fee - dividend_tax
             self.account.positions[order.symbol] = max(0.0, current - qty)
             self.account.available[order.symbol] = max(0.0, self.account.available.get(order.symbol, current) - qty)
             if dividend_tax > 0:
@@ -1260,14 +1461,21 @@ class FreeStrategyEngine:
         order.status = "filled"
         market_volume = float(bar.volume) if bar.volume > 0 else None
         self.account.fills.append(Fill(
-            order.id,
-            order.symbol,
-            side,
-            qty,
-            price,
-            gross,
-            fee,
-            timestamp.isoformat() if timestamp else "",
+            order_id=order.id,
+            symbol=order.symbol,
+            side=side,
+            quantity=qty,
+            price=price,
+            value=gross,
+            timestamp=timestamp.isoformat() if timestamp else "",
+            commission=float(commission),
+            stamp_tax=float(stamp_tax),
+            transfer_fee=float(transfer_fee),
+            dividend_tax=float(dividend_tax),
+            total_fee=transaction_fee + float(dividend_tax),
+            status=order.status,
+            reason=order.reason,
+            submitted_at=order.submitted_at,
             market_amount=float(bar.amount) if bar.amount > 0 else None,
             market_volume=market_volume,
             participation_pct=qty / market_volume * 100 if market_volume else None,
@@ -1275,10 +1483,16 @@ class FreeStrategyEngine:
 
     @staticmethod
     def _dividend_tax_rate(acquired: date, sold: date) -> float:
-        held_days = (sold - acquired).days
-        if held_days <= 30:
+        def add_months(value: date, months: int) -> date:
+            month_index = value.month - 1 + months
+            year = value.year + month_index // 12
+            month = month_index % 12 + 1
+            day = min(value.day, calendar.monthrange(year, month)[1])
+            return date(year, month, day)
+
+        if sold <= add_months(acquired, 1):
             return 0.2
-        if held_days <= 365:
+        if sold <= add_months(acquired, 12):
             return 0.1
         return 0.0
 
@@ -1455,7 +1669,7 @@ class FreeStrategyEngine:
             "session_finished": self._session_finished,
             "last_timestamp": self._last_timestamp.isoformat() if self._last_timestamp else None,
             "context_time": self.context.now.isoformat() if self.context.now else None,
-            "scheduled_completed": [done for _, _, done in self.context._scheduled],
+            "scheduled_completed": [task.done for task in self.context._scheduled],
             "callbacks_executed": self.callbacks_executed,
             "market_rows_consumed": self.market_rows_consumed,
         }
@@ -1471,10 +1685,8 @@ class FreeStrategyEngine:
         self.context.now = datetime.fromisoformat(context_time) if context_time else None
         completed = list(raw.get("scheduled_completed", []))
         if completed:
-            self.context._scheduled = [
-                (at, callback, bool(completed[index]) if index < len(completed) else False)
-                for index, (at, callback, _) in enumerate(self.context._scheduled)
-            ]
+            for index, task in enumerate(self.context._scheduled):
+                task.done = bool(completed[index]) if index < len(completed) else False
         self.callbacks_executed = int(raw.get("callbacks_executed", self.callbacks_executed))
         self.market_rows_consumed = int(raw.get("market_rows_consumed", self.market_rows_consumed))
 
@@ -1560,7 +1772,8 @@ class FreeStrategyEngine:
     def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:
         self._active_session_date = timestamp.date()
         self._session_finished = False
-        self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
+        for task in self.context._scheduled:
+            task.done = False
         self._scheduled_condition_results.clear()
         self.context.now = timestamp
         self._session_bars = dict(bars_now)
@@ -1575,28 +1788,47 @@ class FreeStrategyEngine:
         self.context._sync(self._current_close_prices)
         self._run_callback("before_trading_start", bars_now)
 
-    def _run_scheduled_before(self, timestamp: datetime) -> None:
+    def _advance_scheduled_before(self, timestamp: datetime) -> None:
         current = timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at >= current:
-                continue
+        due_times = sorted({
+            task.resolved_time
+            for task in self.context._scheduled
+            if not task.done
+            and task.resolved_time != "every_bar"
+            and task.resolved_time < current
+        })
+        for at in due_times:
             scheduled_timestamp = datetime.combine(
                 timestamp.date(), datetime_time.fromisoformat(at),
             )
-            self.context.now = scheduled_timestamp
-            if self._scheduled_condition_met(at, callback, scheduled_timestamp):
-                self._run_scheduled_callback(callback, at)
-            self.context._scheduled[slot_index] = (at, callback, True)
+            self.advance_event(
+                scheduled_timestamp,
+                event_type="scheduled",
+                scheduled_at=at,
+                run_prior_schedules=False,
+            )
 
-    def _run_scheduled_at(self, timestamp: datetime) -> None:
-        current = timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at != current:
+    def _run_scheduled_at(
+        self,
+        timestamp: datetime,
+        *,
+        actual_bar: bool = False,
+        scheduled_at: str | None = None,
+    ) -> None:
+        current = scheduled_at or timestamp.strftime("%H:%M")
+        for task in self.context._scheduled:
+            at = task.resolved_time
+            if at == "every_bar":
+                if actual_bar and self._scheduled_condition_met(task, timestamp):
+                    self.context.now = timestamp
+                    self._run_scheduled_callback(task.callback, at)
+                continue
+            if task.done or at != current:
                 continue
             self.context.now = timestamp
-            if self._scheduled_condition_met(at, callback, timestamp):
-                self._run_scheduled_callback(callback, at)
-            self.context._scheduled[slot_index] = (at, callback, True)
+            if self._scheduled_condition_met(task, timestamp):
+                self._run_scheduled_callback(task.callback, at)
+            task.done = True
 
     def _accumulate_session_daily_bars(self, bars_now: BarsView) -> None:
         if self.timeframe == "1d":
@@ -1648,17 +1880,20 @@ class FreeStrategyEngine:
         self.finish_session()
         timestamp = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=29)
         self._start_session(timestamp, BarsView())
-        self._run_scheduled_before(timestamp)
 
     def finish_session(self, *, persist_state: bool = True) -> bool:
         """执行当日盘后任务；同一会话重复调用不会重复执行。"""
         if self._active_session_date is None or self._session_finished:
             return False
-        timestamp = self._last_timestamp or datetime.combine(self._active_session_date, datetime_time(15, 0))
+        timestamp = self._last_timestamp or datetime.combine(
+            self._active_session_date,
+            datetime_time(15, 0),
+        )
         if self.execution_mode != "scheduled":
-            self._run_scheduled_before(
+            self._advance_scheduled_before(
                 datetime.combine(self._active_session_date, datetime_time(23, 59)),
             )
+            timestamp = self._last_timestamp or timestamp
         self.context.now = timestamp
         self._run_callback("after_trading_end", self._last_bars)
         self._fill_immediate_orders(self._session_bars, timestamp)
@@ -1685,19 +1920,32 @@ class FreeStrategyEngine:
         self._session_finished = True
         return True
 
-    def _update_market(self, timestamp: datetime, bars_now: BarsView) -> None:
-        self._apply_splits(bars_now, timestamp)
-        self._current_prices.update({symbol: bar.execution_price("open") for symbol, bar in bars_now.items()})
+    def _publish_market(
+        self,
+        timestamp: datetime,
+        bars_now: BarsView,
+        *,
+        record_history: bool,
+    ) -> None:
         self._current_close_prices.update({symbol: bar.execution_price("close") for symbol, bar in bars_now.items()})
         self.context.now = timestamp
         self.context._sync(self._current_close_prices)
-        self._current_bar = next(iter(bars_now.values()), None)
+        current_bar = next(iter(bars_now.values()), None)
+        if current_bar is not None:
+            self._current_bar = current_bar
         benchmark = bars_now.get(self.config.benchmark_symbol)
         if benchmark is not None:
             self._session_benchmark_close = benchmark.close
-        self._last_bars = bars_now
-        self._session_bars.update(bars_now)
+        if bars_now:
+            self._last_bars = bars_now
+            self._session_bars.update(bars_now)
         self._last_timestamp = timestamp
+        if record_history:
+            self._accumulate_session_daily_bars(bars_now)
+            for symbol, bar in bars_now.items():
+                self.history.setdefault(symbol, []).append(bar)
+                if len(self.history[symbol]) > 5_000:
+                    del self.history[symbol][:-5_000]
         self._session_equity_snapshot = {
             "timestamp": timestamp.isoformat(),
             "equity": self.account.equity(self._current_close_prices),
@@ -1728,79 +1976,95 @@ class FreeStrategyEngine:
             limit_down=quote.limit_down,
         )
 
-    def process_quotes(self, quotes: Iterable[Quote]) -> None:
-        """处理一批实时报价；挂单先用本次报价成交，再执行策略回调。"""
-        values = list(quotes)
-        if not values:
-            return
-        timestamp = max(quote.timestamp for quote in values)
-        quote_view = QuotesView({quote.symbol: quote for quote in values})
-        bars_now = BarsView({quote.symbol: self._quote_bar(quote) for quote in values})
-        if self._active_session_date != timestamp.date():
-            self.finish_session()
-            premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
-            self._start_session(premarket, BarsView())
-        self._next_timestamp = timestamp
-        self._update_market(timestamp, bars_now)
-        due = [item for item in self.pending if item[0].symbol in bars_now]
-        self.pending = [item for item in self.pending if item[0].symbol not in bars_now]
-        self._fill_orders(due, bars_now, timestamp, "close")
-        callback = self._callbacks.get("on_quote")
-        if callback is not None:
-            self._protected_call("on_quote 回调", callback, self.context, quote_view)
-            self.callbacks_executed += 1
-        for slot_index, (at, scheduled, done) in enumerate(self.context._scheduled):
-            if not done and timestamp.strftime("%H:%M") >= at:
-                if self._scheduled_condition_met(at, scheduled, timestamp):
-                    self._run_scheduled_callback(scheduled, at)
-                self.context._scheduled[slot_index] = (at, scheduled, True)
-        self._fill_immediate_orders(bars_now, timestamp)
-        self.context._sync(self._current_close_prices)
-        self.state = copy.deepcopy(self.context.state)
-
-    def update_scheduled_market(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
-        values = list(bars)
-        bars_now = BarsView({bar.symbol: bar for bar in values})
-        if self._active_session_date != timestamp.date():
-            self.finish_session()
-            self._start_session(timestamp, BarsView())
-        self.market_rows_consumed += len(values)
-        self._next_timestamp = timestamp
-        self._update_market(timestamp, bars_now)
-
-    def run_scheduled_event(
+    def advance_event(
         self,
         timestamp: datetime,
-        bars: Iterable[Bar],
+        bars: Iterable[Bar] = (),
         *,
+        event_type: EventType,
+        quotes: Iterable[Quote] = (),
         scheduled_at: str | None = None,
+        run_prior_schedules: bool = True,
     ) -> None:
-        self.update_scheduled_market(timestamp, bars)
-        self._fill_immediate_orders(self._session_bars, timestamp)
-        current_time = scheduled_at or timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if not done and at == current_time:
-                if self._scheduled_condition_met(at, callback, timestamp):
-                    self._run_scheduled_callback(callback, at)
-                self.context._scheduled[slot_index] = (at, callback, True)
-        self._fill_immediate_orders(self._session_bars, timestamp)
-        self.context._sync(self._current_close_prices)
-
-    def process_fill_event(self, timestamp: datetime, bars: Iterable[Bar]) -> None:
+        """Advance one deterministic market event through the shared state machine."""
+        if event_type not in {"bar", "quote", "scheduled", "fill", "market"}:
+            raise ValueError(f"不支持的事件类型: {event_type}")
+        quote_values = list(quotes)
         values = list(bars)
+        if event_type == "quote":
+            if not quote_values:
+                return
+            values = [self._quote_bar(quote) for quote in quote_values]
+        elif quote_values:
+            raise ValueError("只有 quote 事件可以携带 quotes")
         bars_now = BarsView({bar.symbol: bar for bar in values})
+        quote_view = QuotesView({quote.symbol: quote for quote in quote_values})
+        if self._active_session_date != timestamp.date():
+            self.finish_session()
+            premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(
+                hour=9,
+                minute=29,
+            )
+            self._start_session(premarket, BarsView())
+        if run_prior_schedules and event_type in {"bar", "quote"}:
+            self._advance_scheduled_before(timestamp)
         self.market_rows_consumed += len(values)
         self._next_timestamp = timestamp
         self.context.now = timestamp
+
+        # 1. Settlement is completed by _start_session; corporate actions are first.
         self._apply_splits(bars_now, timestamp)
         self._current_prices.update({symbol: bar.execution_price("open") for symbol, bar in bars_now.items()})
-        due = [item for item in self.pending if item[1] < timestamp and item[0].symbol in bars_now]
+
+        # 2. Orders waiting for the next tradable open are matched before publication.
+        due = [
+            item
+            for item in self.pending
+            if item[1] < timestamp and item[0].symbol in bars_now
+        ]
         self.pending = [
             item for item in self.pending
             if item[1] >= timestamp or item[0].symbol not in bars_now
         ]
         self._fill_orders(due, bars_now, timestamp, "open")
+
+        # 3. Publish the market snapshot and history visible at this timestamp.
+        self._publish_market(
+            timestamp,
+            bars_now,
+            record_history=event_type == "bar",
+        )
+
+        # 4. Primary market callback.
+        if event_type == "bar":
+            self._run_callback("on_bar", bars_now)
+        elif event_type == "quote":
+            callback = self._callbacks.get("on_quote")
+            if callback is not None:
+                self._protected_call("on_quote 回调", callback, self.context, quote_view)
+                self.callbacks_executed += 1
+
+        # 5. Scheduled callbacks keep their registration order.
+        if event_type in {"bar", "quote", "scheduled"}:
+            self._run_scheduled_at(
+                timestamp,
+                actual_bar=event_type == "bar",
+                scheduled_at=scheduled_at,
+            )
+
+        # 6. Current-price orders are matched after every callback at this timestamp.
+        if bars_now:
+            self._fill_immediate_orders(bars_now, timestamp)
+
+        # 7. Record the complete post-event state used by checkpoints and paper mode.
         self.context._sync(self._current_close_prices)
+        self._session_equity_snapshot = {
+            "timestamp": timestamp.isoformat(),
+            "equity": self.account.equity(self._current_close_prices),
+            "cash": self.account.cash,
+            "positions": dict(self.account.positions),
+        }
+        self.state = self.context.state
 
     def run(
         self,
@@ -1823,6 +2087,8 @@ class FreeStrategyEngine:
                 for index in range(1, len(ordered))
             ):
                 ordered = sorted(ordered, key=lambda bar: (bar.timestamp, bar.symbol))
+            if not self._trading_dates:
+                self.set_trading_calendar(bar.timestamp.date() for bar in ordered)
             stream: Iterable[Bar] = ordered
         else:
             stream = bars
@@ -1831,41 +2097,7 @@ class FreeStrategyEngine:
         handled = False
         for timestamp, rows_at_time in groupby(stream, key=lambda bar: bar.timestamp):
             handled = True
-            self._next_timestamp = timestamp
-            bars_now = BarsView({bar.symbol: bar for bar in rows_at_time})
-            self.market_rows_consumed += len(bars_now)
-            if self._active_session_date != timestamp.date():
-                self.finish_session(persist_state=return_result)
-                self._apply_splits(bars_now, timestamp)
-                premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(hour=9, minute=29)
-                self._start_session(premarket, BarsView())
-            else:
-                self._apply_splits(bars_now, timestamp)
-            self._run_scheduled_before(timestamp)
-            # next-open orders created on the previous callback are filled before this bar.
-            self._current_prices.update({s: b.execution_price("open") for s, b in bars_now.items()})
-            due = [p for p in self.pending if p[1] <= timestamp and p[0].symbol in bars_now]
-            self.pending = [p for p in self.pending if p[1] > timestamp or p[0].symbol not in bars_now]
-            self._fill_orders(due, bars_now, timestamp, "open")
-            self.context.now = timestamp
-            self._current_close_prices.update({s: b.execution_price("close") for s, b in bars_now.items()})
-            self.context._sync(self._current_close_prices)
-            self._current_bar = next(iter(bars_now.values()), None)
-            benchmark = bars_now.get(self.config.benchmark_symbol)
-            if benchmark is not None:
-                self._session_benchmark_close = benchmark.close
-            self._last_bars = bars_now
-            self._session_bars.update(bars_now)
-            self._accumulate_session_daily_bars(bars_now)
-            self._last_timestamp = timestamp
-            for symbol, bar in bars_now.items():
-                self.history.setdefault(symbol, []).append(bar)
-                if len(self.history[symbol]) > 5_000:
-                    del self.history[symbol][:-5_000]
-            self._run_callback("on_bar", bars_now)
-            self._run_scheduled_at(timestamp)
-            self._fill_immediate_orders(bars_now, timestamp)
-            self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(self._current_close_prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
+            self.advance_event(timestamp, rows_at_time, event_type="bar")
         if handled and finalize_session:
             self.finish_session(persist_state=return_result)
         if return_result:
@@ -1940,11 +2172,18 @@ class FreeStrategyEngine:
             cost_basis = 0.0
             realized_pnl = 0.0
             if fill.side == "buy":
-                positions[fill.symbol] = (held + fill.quantity, cost + fill.value + fill.fee)
+                positions[fill.symbol] = (
+                    held + fill.quantity,
+                    cost + fill.value + fill.total_fee,
+                )
             elif held > 0:
                 sold = min(fill.quantity, held)
                 cost_basis = cost * sold / held
-                realized_pnl = fill.value * sold / fill.quantity - fill.fee * sold / fill.quantity - cost_basis
+                realized_pnl = (
+                    fill.value * sold / fill.quantity
+                    - fill.total_fee * sold / fill.quantity
+                    - cost_basis
+                )
                 remaining = held - sold
                 positions[fill.symbol] = (remaining, max(0.0, cost - cost_basis))
                 realized_trades.append(realized_pnl)
@@ -1957,13 +2196,42 @@ class FreeStrategyEngine:
                 "quantity": fill.quantity,
                 "price": fill.price,
                 "value": fill.value,
-                "fee": fill.fee,
+                "total_fee": fill.total_fee,
                 "cost_basis": cost_basis,
                 "realized_pnl": realized_pnl,
                 "cumulative_realized_pnl": cumulative_realized,
                 "realized_return_pct": realized_pnl / cost_basis * 100 if cost_basis else 0.0,
             })
         return rows, realized_trades
+
+    def _execution_records(self) -> list[ExecutionRecord]:
+        fills_by_order: dict[str, list[Fill]] = {}
+        for fill in self.account.fills:
+            fills_by_order.setdefault(fill.order_id, []).append(fill)
+        records = []
+        for order in self.account.orders:
+            fills = fills_by_order.get(order.id, [])
+            executed_quantity = sum(fill.quantity for fill in fills)
+            amount = sum(fill.value for fill in fills)
+            records.append(ExecutionRecord(
+                order_id=order.id,
+                submitted_at=order.submitted_at,
+                executed_at=fills[-1].timestamp if fills else None,
+                symbol=order.symbol,
+                side=fills[-1].side if fills else order.side,
+                requested_quantity=order.requested_quantity,
+                executed_quantity=executed_quantity,
+                price=amount / executed_quantity if executed_quantity else None,
+                amount=amount,
+                commission=sum(fill.commission for fill in fills),
+                stamp_tax=sum(fill.stamp_tax for fill in fills),
+                transfer_fee=sum(fill.transfer_fee for fill in fills),
+                dividend_tax=sum(fill.dividend_tax for fill in fills),
+                total_fee=sum(fill.total_fee for fill in fills),
+                status=order.status,
+                reason=order.reason,
+            ))
+        return records
 
     def _transaction_rows(self) -> list[dict[str, Any]]:
         fills_by_order: dict[str, list[Fill]] = {}
@@ -1974,7 +2242,6 @@ class FreeStrategyEngine:
             fills = fills_by_order.get(order.id, [])
             filled_quantity = sum(fill.quantity for fill in fills)
             fill_value = sum(fill.value for fill in fills)
-            fee = sum(fill.fee for fill in fills)
             rows.append({
                 "transaction_id": order.id,
                 "order_id": order.id,
@@ -1992,7 +2259,11 @@ class FreeStrategyEngine:
                 "filled_quantity": filled_quantity,
                 "average_fill_price": fill_value / filled_quantity if filled_quantity else None,
                 "fill_value": fill_value,
-                "fee": fee,
+                "commission": sum(fill.commission for fill in fills),
+                "stamp_tax": sum(fill.stamp_tax for fill in fills),
+                "transfer_fee": sum(fill.transfer_fee for fill in fills),
+                "dividend_tax": sum(fill.dividend_tax for fill in fills),
+                "total_fee": sum(fill.total_fee for fill in fills),
                 "status": order.status,
                 "reason": order.reason,
             })
@@ -2128,12 +2399,14 @@ class FreeStrategyEngine:
             "fills_over_5_pct": sum(value > 5 for value in participation),
             "fills_over_10_pct": sum(value > 10 for value in participation),
         }
+        executions = [asdict(value) for value in self._execution_records()]
         return {"initial_capital": self.config.initial_capital, "final_equity": values[-1] if values else self.config.initial_capital,
                 "return_pct": ((values[-1] / self.config.initial_capital) - 1) * 100 if values else 0.0,
                 "max_drawdown_pct": drawdown * 100, "equity_curve": curve,
                 "daily_equity_curve": daily_curve, "performance": performance,
                 "benchmark_symbol": self.config.benchmark_symbol,
                 "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
+                "executions": executions,
                 "strategy_signals": self.signals,
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
                 "capacity_analysis": capacity_analysis,

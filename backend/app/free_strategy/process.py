@@ -27,16 +27,18 @@ from app.services.security_dimensions import (
 
 from .bars import Bar, group_bars
 from .engine import FreeStrategyConfig, FreeStrategyEngine
+from .financial_pit import load_financial_periods
+from .industry import load_industry_history
+from .readiness import (
+    ReadinessUnavailable,
+    build_readiness_manifest,
+    persist_readiness_report,
+)
 
 logger = logging.getLogger(__name__)
 
 MARKET_METADATA_CALENDAR_DAYS = 30
 PERFORMANCE_SMALL_CAP_SOURCE_MARKER = 'STRATEGY_KIND = "performance_small_cap"'
-PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES = (
-    "income",
-    "metrics",
-    "balance_sheet",
-)
 STYLE_LIQUIDITY_ENTRY_QUANTILE = 0.97
 STYLE_LIQUIDITY_RECOVERY_QUANTILE = 0.70
 
@@ -370,15 +372,6 @@ def _instrument_records(
     return records
 
 
-def _date_column_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
-    dtype = frame.schema.get(column)
-    if dtype == pl.Date:
-        return pl.col(column)
-    if dtype == pl.Datetime:
-        return pl.col(column).dt.date()
-    return pl.col(column).cast(pl.Utf8).str.strptime(pl.Date, strict=False)
-
-
 def _one_year_before(day: date) -> date:
     try:
         return day.replace(year=day.year - 1)
@@ -392,40 +385,14 @@ def _latest_announced_records(
     symbols: list[str],
     cutoff: date,
 ) -> dict[str, dict[str, Any]]:
-    from app.services.financial_sync import get_financial_df
-
-    frame = get_financial_df(data_dir, table)
-    if frame.is_empty() or "symbol" not in frame.columns or not symbols:
-        return {}
-    date_column = "announce_date" if "announce_date" in frame.columns else "period_end"
-    if date_column not in frame.columns:
-        return {}
-    period_expr = (
-        _date_column_expr(frame, "period_end")
-        if "period_end" in frame.columns else pl.lit(None, dtype=pl.Date)
-    )
-    frame = (
-        frame
-        .filter(pl.col("symbol").is_in(symbols))
-        .with_columns([
-            _date_column_expr(frame, date_column).alias("_available_date"),
-            period_expr.alias("_period_date"),
-        ])
-        .filter(
-            pl.col("_available_date").is_not_null()
-            & (pl.col("_available_date") <= cutoff)
-        )
-        .sort(["symbol", "_available_date", "_period_date"], nulls_last=True)
-    )
-    if frame.is_empty():
-        return {}
     return {
-        str(row["symbol"]): {
-            key: value
-            for key, value in row.items()
-            if key not in {"_available_date", "_period_date"}
-        }
-        for row in frame.group_by("symbol", maintain_order=True).tail(1).iter_rows(named=True)
+        symbol: rows[0]
+        for symbol, rows in load_financial_periods(
+            data_dir,
+            table,
+            symbols,
+            cutoff,
+        ).items()
     }
 
 
@@ -624,97 +591,6 @@ def _load_smallcap_index_value(
         return None
     closes = latest.filter(pl.col("close") > 0)["close"]
     return round(float(closes.mean()), 4) if len(closes) else None
-
-
-def _financial_coverage(
-    data_dir: Path,
-    table: str,
-    cutoff: date,
-) -> dict[str, Any]:
-    from app.services.financial_sync import get_financial_df
-
-    frame = get_financial_df(data_dir, table)
-    if frame.is_empty() or "symbol" not in frame.columns:
-        return {
-            "table": table,
-            "rows": 0,
-            "symbols": 0,
-            "earliest_available": None,
-            "latest_available": None,
-            "rows_before_cutoff": 0,
-            "symbols_before_cutoff": 0,
-            "latest_before_cutoff": None,
-        }
-    date_column = "announce_date" if "announce_date" in frame.columns else "period_end"
-    if date_column not in frame.columns:
-        return {
-            "table": table,
-            "rows": frame.height,
-            "symbols": frame["symbol"].n_unique(),
-            "earliest_available": None,
-            "latest_available": None,
-            "rows_before_cutoff": 0,
-            "symbols_before_cutoff": 0,
-            "latest_before_cutoff": None,
-        }
-    dated = (
-        frame
-        .with_columns(_date_column_expr(frame, date_column).alias("_available_date"))
-        .filter(pl.col("_available_date").is_not_null())
-    )
-    if dated.is_empty():
-        return {
-            "table": table,
-            "rows": frame.height,
-            "symbols": frame["symbol"].n_unique(),
-            "earliest_available": None,
-            "latest_available": None,
-            "rows_before_cutoff": 0,
-            "symbols_before_cutoff": 0,
-            "latest_before_cutoff": None,
-        }
-    available = dated.filter(pl.col("_available_date") <= cutoff)
-    return {
-        "table": table,
-        "rows": frame.height,
-        "symbols": frame["symbol"].n_unique(),
-        "earliest_available": dated["_available_date"].min(),
-        "latest_available": dated["_available_date"].max(),
-        "rows_before_cutoff": available.height,
-        "symbols_before_cutoff": (
-            available["symbol"].n_unique() if not available.is_empty() else 0
-        ),
-        "latest_before_cutoff": (
-            available["_available_date"].max() if not available.is_empty() else None
-        ),
-    }
-
-
-def _assert_performance_small_cap_financial_coverage(
-    data_dir: Path,
-    start: date,
-) -> None:
-    coverage = [
-        _financial_coverage(data_dir, table, start)
-        for table in PERFORMANCE_SMALL_CAP_REQUIRED_FINANCIAL_TABLES
-    ]
-    missing = [item for item in coverage if int(item["rows_before_cutoff"]) <= 0]
-    if not missing:
-        return
-    details = []
-    for item in missing:
-        earliest = item["earliest_available"]
-        latest = item["latest_available"]
-        details.append(
-            f"{item['table']}(rows={item['rows']}, "
-            f"earliest={earliest.isoformat() if earliest else 'none'}, "
-            f"latest={latest.isoformat() if latest else 'none'})"
-        )
-    raise ValueError(
-        "绩优小市值回测需要首个回测日前已公告的历史财务数据；"
-        f"当前 start={start.isoformat()} 前缺少可用表: {', '.join(details)}。"
-        "请先同步完整历史 financial 数据或配置支持 latest=false 的自定义 financial provider。"
-    )
 
 
 def _is_performance_small_cap_source(source: str) -> bool:
@@ -1896,7 +1772,7 @@ def _process_scheduled_fills(
         for bar in candidates:
             by_time.setdefault(bar.timestamp, []).append(bar)
         for timestamp, bars in sorted(by_time.items()):
-            engine.process_fill_event(timestamp, bars)
+            engine.advance_event(timestamp, bars, event_type="fill")
 
 
 def advance_scheduled_session(
@@ -1915,8 +1791,13 @@ def advance_scheduled_session(
 ) -> None:
     engine.begin_session(day)
     due_times = sorted({
-        at for at, _, done in engine.context._scheduled
-        if not done and datetime.combine(day, time.fromisoformat(at)) <= cutoff
+        task.resolved_time
+        for task in engine.context._scheduled
+        if (
+            not task.done
+            and task.resolved_time != "every_bar"
+            and datetime.combine(day, time.fromisoformat(task.resolved_time)) <= cutoff
+        )
     })
     for at in due_times:
         timestamp = datetime.combine(day, time.fromisoformat(at))
@@ -2027,7 +1908,12 @@ def advance_scheduled_session(
                 live_bars=live_bars,
                 live_only=live_only,
             )
-        engine.run_scheduled_event(event_timestamp, snapshot, scheduled_at=at)
+        engine.advance_event(
+            event_timestamp,
+            snapshot,
+            event_type="scheduled",
+            scheduled_at=at,
+        )
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
         live_bars=live_bars, live_only=live_only,
@@ -2060,7 +1946,7 @@ def advance_scheduled_session(
             raise ValueError(
                 f"{day.isoformat()} 15:00 收盘任务缺少行情: {missing_text}"
             )
-        engine.update_scheduled_market(closing_time, snapshot)
+        engine.advance_event(closing_time, snapshot, event_type="market")
         engine.finish_session()
 
 
@@ -2083,11 +1969,6 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             source = snapshot
         repo = KlineRepository(DataStore(Path(payload["data_dir"])))
         start, end = date.fromisoformat(payload["start"]), date.fromisoformat(payload["end"])
-        if _is_performance_small_cap_source(source):
-            _assert_performance_small_cap_financial_coverage(repo.store.data_dir, start)
-            from app.services.daily_valuation import assert_daily_valuation_coverage
-
-            assert_daily_valuation_coverage(repo.store.data_dir, start, end)
         config = FreeStrategyConfig(**payload["config"])
         engine = FreeStrategyEngine(
             source,
@@ -2108,6 +1989,15 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 repo.store.data_dir,
                 symbols,
                 cutoff,
+            )
+        )
+        engine.set_industry_history_loader(
+            lambda symbols, cutoff, standard, level: load_industry_history(
+                repo.store.data_dir,
+                symbols,
+                cutoff,
+                standard,
+                level,
             )
         )
         engine.set_dividend_ratio_loader(
@@ -2156,6 +2046,61 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
             include_benchmark=True,
         )
+        engine.set_trading_calendar(
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and start <= day <= end
+        )
+        trading_dates = sorted({
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and start <= day <= end
+        })
+        calendar_dates = sorted({
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and day <= end
+        })
+        benchmark_dates = {
+            day
+            for symbol, day in market_data.daily
+            if symbol == config.benchmark_symbol and day <= end
+        }
+        daily_root = {
+            "stock": "kline_daily",
+            "etf": "kline_etf_daily",
+            "index": "kline_index_daily",
+        }.get(payload["asset_type"], "kline_daily")
+        minute_root = (
+            "kline_etf_minute"
+            if payload["asset_type"] == "etf"
+            else "kline_minute"
+        )
+        try:
+            readiness_manifest = build_readiness_manifest(
+                Path(payload["data_dir"]),
+                engine.readiness_requirements,
+                strategy_sha256=source_digest,
+                universe=engine.universe,
+                trading_dates=trading_dates,
+                calendar_dates=calendar_dates,
+                benchmark_symbol=config.benchmark_symbol,
+                benchmark_dates=benchmark_dates,
+                dataset_roots=[
+                    Path(daily_root),
+                    Path(minute_root) if payload["timeframe"] != "1d" else Path(daily_root),
+                ],
+            )
+        except ReadinessUnavailable as exc:
+            if payload.get("run_dir"):
+                persist_readiness_report(Path(payload["run_dir"]), exc.report)
+            raise
+        if payload.get("run_dir"):
+            readiness_path = Path(payload["run_dir"]) / "readiness-manifest.json"
+            readiness_path.write_text(
+                json.dumps(readiness_manifest, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
         replayed_rows = 0
         first_bar: datetime | None = None
         last_bar: datetime | None = None
@@ -2316,6 +2261,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,
+            "readiness": readiness_manifest,
             "fund_nav": fund_nav_data,
             "execution_mode": engine.execution_mode,
             "scheduled_times": engine.scheduled_times,

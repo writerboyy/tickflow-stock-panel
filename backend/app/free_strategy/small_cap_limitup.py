@@ -17,7 +17,8 @@ NO_TRADING_MONTHS = {1, 4}
 STOPLOSS_LIMIT = 0.91
 MARKET_STOPLOSS_LIMIT = 0.93
 TRADE_CAPITAL_LIMIT = 130_000.0
-INDUSTRY_DATA_ERROR = "涨停基因小市值策略缺少 EasyTDX 申万行业快照，无法执行行业去重"
+INDUSTRY_STANDARD = "申银万国行业分类标准"
+INDUSTRY_DATA_ERROR = "涨停基因小市值策略缺少 TickFlow PIT 申万行业历史，无法执行行业去重"
 
 
 class SelectionDataUnavailable(ValueError):
@@ -157,6 +158,12 @@ def initialize(context) -> None:
         if item.get("symbol") and bool(item.get("has_minute", True))
     ]
     context.set_universe(symbols)
+    context.require_data_readiness(
+        rebalance="weekly",
+        industry_standard=INDUSTRY_STANDARD,
+        lifecycle=True,
+        adjustment="pre",
+    )
     context.state.setdefault("small_cap_limitup", {
         "hold_list": [],
         "yesterday_high_limit": [],
@@ -614,17 +621,22 @@ def _rank_history_candidates(
 
 def _select_industries(
     ranked: list[str],
-    records: list[dict[str, Any]],
+    context,
+    as_of: date,
 ) -> list[str]:
+    if not ranked:
+        return []
+    loader = getattr(context, "get_industry", None)
+    if not callable(loader):
+        raise SelectionDataUnavailable(INDUSTRY_DATA_ERROR)
+    try:
+        records = loader(ranked, as_of, INDUSTRY_STANDARD, None)
+    except Exception as exc:  # noqa: BLE001
+        raise SelectionDataUnavailable(f"{INDUSTRY_DATA_ERROR}: {exc}") from exc
     industry_by_symbol = {
-        str(item.get("symbol")): str(item.get("industry_sw") or "").strip()
-        for item in records
+        symbol: str(row.get("industry_code") or "").strip()
+        for symbol, row in records.items()
     }
-    missing = [symbol for symbol in ranked if not industry_by_symbol.get(symbol)]
-    if missing:
-        raise SelectionDataUnavailable(
-            f"{INDUSTRY_DATA_ERROR}；缺失标的: {', '.join(missing[:3])}"
-        )
     selected: list[str] = []
     seen: set[str] = set()
     for symbol in ranked:
@@ -645,8 +657,6 @@ def _get_stock_list(context) -> list[str]:
     records = _instrument_records(context)
     if not records:
         raise SelectionDataUnavailable("股票标的维表为空")
-    if not any(str(item.get("industry_sw") or "").strip() for item in records):
-        raise SelectionDataUnavailable(INDUSTRY_DATA_ERROR)
     previous_date = _previous_trading_date(context, records)
     cache_date = previous_date.isoformat()
     cached = state.get("stock_list_cache", [])
@@ -665,7 +675,7 @@ def _get_stock_list(context) -> list[str]:
         if item.get("name_changes")
     }
     ranked = _rank_history_candidates(history, bars, reliable_limit_symbols)
-    final = _select_industries(ranked, initial)
+    final = _select_industries(ranked, context, previous_date)
     if final:
         state["stock_list_cache_date"] = cache_date
         state["stock_list_cache"] = list(final)

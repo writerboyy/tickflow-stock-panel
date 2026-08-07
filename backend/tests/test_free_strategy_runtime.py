@@ -530,16 +530,18 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
     assert engine.scheduled_times == ["09:00", "09:30", "14:00"]
     assert engine.market_history_requirements == {("index", "1d"): 235}
     conditions = {
-        (at, callback.__name__): condition.__name__
-        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.condition.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.condition is not None
     }
     assert conditions == {
         ("09:30", "_monthly_adjustment"): "_monthly_adjustment_due",
         ("14:00", "_check_limit_up_and_buy"): "_limit_up_check_due",
     }
     optional_scopes = {
-        (at, callback.__name__): scope.__name__
-        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.optional_symbols.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.optional_symbols is not None
     }
     assert optional_scopes == {
         ("09:30", "_monthly_adjustment"): "_held_and_selection_symbols",
@@ -1037,7 +1039,7 @@ def initialize(context):
     engine.account.available = {exit_symbol: 100}
     engine.account.avg_cost = {exit_symbol: 10}
 
-    engine.run_scheduled_event(now, [
+    engine.advance_event(now, [
         Bar(
             exit_symbol, now, 10, 10, 10, 10,
             raw_close=10, limit_up=11, limit_down=9,
@@ -1046,7 +1048,7 @@ def initialize(context):
             new_symbol, now, 10, 10, 10, 10,
             raw_close=10, limit_up=11, limit_down=9,
         ),
-    ])
+    ], event_type="scheduled")
 
     assert [(fill.symbol, fill.side, fill.quantity) for fill in engine.account.fills] == [
         (exit_symbol, "sell", 100),
@@ -1200,7 +1202,123 @@ def on_bar(context, bars):
     ])
 
     assert result["fills"][1]["value"] == 27_975
-    assert result["fills"][1]["fee"] == 16.785
+    assert result["fills"][1]["total_fee"] == 16.785
+
+
+def test_fill_and_execution_record_expose_auditable_fee_components():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100, reason='entry')
+    else:
+        context.sell('X', quantity=100, reason='exit')
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            commission_pct=0.001,
+            min_commission=0,
+            stamp_tax_pct=0.001,
+            transfer_fee_pct=0.00002,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+            settlement="t0",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, day, 15), 10, 10, 10, 10)
+        for day in (1, 2)
+    ])
+
+    sell = result["fills"][1]
+    assert sell["commission"] == pytest.approx(1.0)
+    assert sell["stamp_tax"] == pytest.approx(1.0)
+    assert sell["transfer_fee"] == pytest.approx(0.02)
+    assert sell["dividend_tax"] == 0
+    assert sell["total_fee"] == pytest.approx(2.02)
+    assert sell["status"] == "filled"
+    assert "fee" not in sell
+
+    execution = result["executions"][1]
+    assert execution == {
+        "order_id": "o2",
+        "submitted_at": "2024-01-02T15:00:00",
+        "executed_at": "2024-01-02T15:00:00",
+        "symbol": "X",
+        "side": "sell",
+        "requested_quantity": 100,
+        "executed_quantity": 100,
+        "price": 10,
+        "amount": 1_000,
+        "commission": pytest.approx(1.0),
+        "stamp_tax": pytest.approx(1.0),
+        "transfer_fee": pytest.approx(0.02),
+        "dividend_tax": 0,
+        "total_fee": pytest.approx(2.02),
+        "status": "filled",
+        "reason": "exit",
+    }
+    assert "fee_components_complete" not in execution
+
+
+def test_execution_record_uses_quantity_accepted_by_cash_limit():
+    source = """
+def on_bar(context, bars):
+    context.order_target_value('X', 2_000)
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=1_000,
+            fees_pct=0,
+            min_commission=0,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
+    ])
+
+    execution = result["executions"][0]
+    assert execution["requested_quantity"] == 100
+    assert execution["executed_quantity"] == 100
+
+
+def test_legacy_checkpoint_fill_is_rejected_instead_of_migrated():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000,
+        fees_pct=0.001,
+        stamp_tax_pct=0,
+        slippage_bps=0,
+        lot_size=100,
+        fill_policy="close",
+    )
+    original = FreeStrategyEngine(source, config=config)
+    original.run([Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10)])
+    checkpoint = original.checkpoint()
+    legacy_fill = checkpoint["account"]["fills"][0]
+    for field in (
+        "commission",
+        "stamp_tax",
+        "transfer_fee",
+        "dividend_tax",
+        "total_fee",
+        "status",
+        "reason",
+        "submitted_at",
+    ):
+        legacy_fill.pop(field, None)
+    legacy_fill["fee"] = 1.0
+
+    restored = FreeStrategyEngine(source, config=config)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'fee'"):
+        restored.restore_checkpoint(checkpoint)
 
 
 def test_next_open_fill_and_t1_are_default():
@@ -1428,7 +1546,7 @@ def on_bar(context, bars):
         Bar("X", datetime(2024, 1, 20, 15), 9.8, 9.8, 9.8, 9.8, raw_close=9.8),
     ])
 
-    assert result["fills"][-1]["fee"] == 0
+    assert result["fills"][-1]["total_fee"] == 4
     assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_996)
     assert result["corporate_actions"][-1] == {
         "timestamp": "2024-01-20T15:00:00",
@@ -1467,6 +1585,100 @@ def on_bar(context, bars):
 
     assert result["checkpoint"]["account"]["cash"] == pytest.approx(9_996)
     assert result["corporate_actions"][-1]["tax_withheld"] == 4.0
+
+
+@pytest.mark.parametrize(
+    ("acquired", "sold", "rate"),
+    [
+        (date(2024, 1, 31), date(2024, 2, 29), 0.2),
+        (date(2024, 1, 31), date(2024, 3, 1), 0.1),
+        (date(2024, 1, 31), date(2025, 1, 31), 0.1),
+        (date(2024, 1, 31), date(2025, 2, 1), 0.0),
+        (date(2024, 2, 29), date(2025, 2, 28), 0.1),
+        (date(2024, 2, 29), date(2025, 3, 1), 0.0),
+    ],
+)
+def test_dividend_tax_uses_calendar_month_and_year_boundaries(acquired, sold, rate):
+    assert FreeStrategyEngine._dividend_tax_rate(acquired, sold) == rate
+
+
+def test_dividend_tax_consumes_multiple_lots_fifo_with_partial_sale():
+    engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
+    engine._position_lots = {  # noqa: SLF001
+        "X": [
+            {"quantity": 100.0, "acquired": date(2024, 1, 1), "dividend_per_share": 0.2},
+            {"quantity": 100.0, "acquired": date(2024, 12, 1), "dividend_per_share": 0.4},
+        ],
+    }
+
+    tax = engine._consume_position_lots("X", 150, date(2025, 1, 20))  # noqa: SLF001
+
+    assert tax == 2.0
+    assert engine._position_lots["X"] == [{  # noqa: SLF001
+        "quantity": 50.0,
+        "acquired": date(2024, 12, 1),
+        "dividend_per_share": 0.4,
+    }]
+
+
+def test_split_dividend_lot_restores_without_repeating_tax_or_action():
+    source = """
+def on_bar(context, bars):
+    if context.now.date().isoformat() == '2024-01-31':
+        context.buy('X', quantity=100)
+    elif context.now.date().isoformat() == '2024-02-29':
+        context.sell('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000,
+        asset_type="stock",
+        fill_policy="close",
+        fees_pct=0,
+        min_commission=0,
+        stamp_tax_pct=0,
+        slippage_bps=0,
+    )
+    initial = FreeStrategyEngine(source, timeframe="1m", config=config)
+    initial.run([
+        Bar("X", datetime(2024, 1, 31, 15), 10, 10, 10, 10, raw_close=10),
+        Bar(
+            "X",
+            datetime(2024, 2, 1, 9, 31),
+            4.85,
+            4.85,
+            4.85,
+            4.85,
+            raw_close=4.85,
+            split_ratio=2,
+            cash_dividend=0.3,
+        ),
+    ], finalize_session=False, return_result=False)
+    resumed = FreeStrategyEngine(source, timeframe="1m", config=config)
+    resumed.restore_checkpoint(initial.checkpoint())
+
+    result = resumed.run([
+        Bar(
+            "X",
+            datetime(2024, 2, 29, 15),
+            4.85,
+            4.85,
+            4.85,
+            4.85,
+            raw_close=4.85,
+        ),
+    ])
+
+    sell = result["fills"][-1]
+    assert sell["quantity"] == 100
+    assert sell["dividend_tax"] == 3.0
+    assert [action["type"] for action in result["corporate_actions"]] == [
+        "cash_dividend", "split", "dividend_tax",
+    ]
+    assert result["checkpoint"]["position_lots"]["X"] == [{
+        "quantity": 100.0,
+        "acquired": "2024-01-31",
+        "dividend_per_share": 0.15,
+    }]
 
 
 def test_stock_sale_after_one_year_does_not_withhold_dividend_tax():
@@ -1928,7 +2140,7 @@ def on_bar(context, bars):
         Bar("Y", datetime(2024, 1, 1, 15), 1, 1, 1, 1),
     ])
 
-    assert [(fill["symbol"], fill["quantity"], fill["fee"]) for fill in result["fills"]] == [
+    assert [(fill["symbol"], fill["quantity"], fill["total_fee"]) for fill in result["fills"]] == [
         ("X", 900, 5),
         ("Y", 900, 5),
     ]
@@ -2056,7 +2268,7 @@ def on_bar(context, bars):
         Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10),
     ])
 
-    assert [fill["fee"] for fill in result["fills"]] == pytest.approx([1, 2])
+    assert [fill["total_fee"] for fill in result["fills"]] == pytest.approx([1, 2])
 
 
 def test_stale_fill_requires_current_day_trading_evidence():
@@ -2126,6 +2338,28 @@ def after_trading_end(context):
     assert result["state"]["scheduled_close"] == 2
 
 
+def test_advance_event_does_not_deepcopy_strategy_state(monkeypatch):
+    engine = FreeStrategyEngine("""
+def on_bar(context, bars):
+    context.state['events'].append(context.now.isoformat())
+""", state={"events": []})
+    strategy_state = engine.context.state
+
+    def reject_deepcopy(_value):
+        raise AssertionError("advance_event must not deepcopy strategy state")
+
+    monkeypatch.setattr("app.free_strategy.engine.copy.deepcopy", reject_deepcopy)
+    timestamp = datetime(2024, 1, 2, 9, 30)
+    engine.advance_event(
+        timestamp,
+        [Bar("X", timestamp, 10, 10, 10, 10)],
+        event_type="bar",
+    )
+
+    assert engine.state is strategy_state
+    assert engine.state["events"] == ["2024-01-02T09:30:00"]
+
+
 def test_schedule_only_strategy_detects_mode_and_runs_each_callback_once_per_day():
     source = """
 def initialize(context):
@@ -2140,8 +2374,8 @@ def initialize(context):
     for day in (2, 3):
         timestamp = datetime(2024, 1, day, 13, 10)
         bar = Bar("X", timestamp, 10, 10, 10, 10)
-        engine.run_scheduled_event(timestamp, [bar])
-        engine.run_scheduled_event(timestamp, [bar])
+        engine.advance_event(timestamp, [bar], event_type="scheduled")
+        engine.advance_event(timestamp, [bar], event_type="scheduled")
         engine.finish_session()
 
     assert engine.context.state["events"] == [
@@ -2217,9 +2451,10 @@ def run(context):
         ]
 
     engine.set_history_loader(load_history)
-    engine.run_scheduled_event(
+    engine.advance_event(
         datetime(2024, 1, 2, 13, 10),
         [Bar("X", datetime(2024, 1, 2, 13, 10), 10, 10, 10, 10)],
+        event_type="scheduled",
     )
 
     assert engine.context.state["history"] == [9]
@@ -2242,7 +2477,7 @@ def run(context):
         timeframe="1m",
         config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
     )
-    close_engine.run_scheduled_event(timestamp, [snapshot])
+    close_engine.advance_event(timestamp, [snapshot], event_type="scheduled")
     assert close_engine.account.fills[0].timestamp == timestamp.isoformat()
     assert close_engine.account.fills[0].price == 10
 
@@ -2251,11 +2486,12 @@ def run(context):
         timeframe="1m",
         config=FreeStrategyConfig(fill_policy="next_open", slippage_bps=0),
     )
-    next_engine.run_scheduled_event(timestamp, [snapshot])
+    next_engine.advance_event(timestamp, [snapshot], event_type="scheduled")
     assert next_engine.account.fills == []
-    next_engine.process_fill_event(
+    next_engine.advance_event(
         datetime(2024, 1, 2, 13, 11),
         [Bar("X", datetime(2024, 1, 2, 13, 11), 11, 11, 11, 11)],
+        event_type="fill",
     )
     assert next_engine.account.fills[0].timestamp == "2024-01-02T13:11:00"
     assert next_engine.account.fills[0].price == 11
@@ -2269,7 +2505,7 @@ def run(context):
             timeframe="1m",
             config=FreeStrategyConfig(fill_policy="close", slippage_bps=0),
         )
-        blocked_engine.run_scheduled_event(timestamp, [blocked])
+        blocked_engine.advance_event(timestamp, [blocked], event_type="scheduled")
         assert blocked_engine.account.fills == []
         assert blocked_engine.account.orders[0].status == "rejected"
 
@@ -2286,11 +2522,11 @@ def run(context):
     timestamp = datetime(2024, 1, 2, 13, 10)
     bar = Bar("X", timestamp, 10, 10, 10, 10)
     initial = FreeStrategyEngine(source, timeframe="1m")
-    initial.run_scheduled_event(timestamp, [bar])
+    initial.advance_event(timestamp, [bar], event_type="scheduled")
 
     resumed = FreeStrategyEngine(source, timeframe="1m")
     resumed.restore_checkpoint(initial.checkpoint())
-    resumed.run_scheduled_event(timestamp, [bar])
+    resumed.advance_event(timestamp, [bar], event_type="scheduled")
 
     assert resumed.context.state["runs"] == 1
     assert resumed.callbacks_executed == 1
@@ -2310,7 +2546,7 @@ def run(context):
 """
     timestamp = datetime(2026, 7, 30, 10, 30)
     initial = FreeStrategyEngine(source)
-    initial.update_scheduled_market(timestamp, [])
+    initial.advance_event(timestamp, event_type="market")
     resumed = FreeStrategyEngine(source)
 
     resumed.restore_checkpoint(initial.checkpoint())

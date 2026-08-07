@@ -18,6 +18,7 @@ from app.free_strategy.small_cap_limitup import (
 )
 from app.free_strategy import small_cap_limitup
 from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.readiness import make_requirement
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -29,9 +30,18 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
             "symbol": "000001.SZ", "asset_type": "stock", "has_minute": True,
         }],
     )
+    assert engine.context.readiness_requirements == (
+        make_requirement(
+            rebalance="weekly",
+            industry_standard=small_cap_limitup.INDUSTRY_STANDARD,
+            lifecycle=True,
+            adjustment="pre",
+        ),
+    )
     conditions = {
-        (at, callback.__name__): condition.__name__
-        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.condition.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.condition is not None
     }
 
     assert conditions == {
@@ -43,8 +53,9 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         ("14:55", "_trade_afternoon"): "_regular_trading_month",
     }
     optional_scopes = {
-        (at, callback.__name__): scope.__name__
-        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.optional_symbols.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.optional_symbols is not None
     }
     assert optional_scopes == {
         ("10:15", "_weekly_sell"): "_weekly_selection_symbols",
@@ -534,37 +545,33 @@ def test_afternoon_scope_uses_daily_market_cap_pool_instead_of_full_market_minut
     assert [count for _symbols, count in history_calls] == [1, ST_STATUS_DAYS]
 
 
-def test_select_industries_deduplicates_with_easy_tdx_sw_code():
-    records = [
-        {"symbol": "A", "industry_sw": "X480101"},
-        {"symbol": "B", "industry_sw": "X480101"},
-        {"symbol": "C", "industry_sw": "X490101"},
-    ]
+def test_select_industries_deduplicates_with_tickflow_pit_industry():
+    context = SimpleNamespace(get_industry=lambda *_args: {
+        "A": {"industry_code": "X480101"},
+        "B": {"industry_code": "X480101"},
+        "C": {"industry_code": "X490101"},
+    })
 
-    assert _select_industries(["A", "B", "C"], records) == ["A", "C"]
-
-
-def test_select_industries_fails_closed_when_ranked_symbol_has_no_sw_industry():
-    records = [
-        {"symbol": "A", "industry_sw": "X480101"},
-        {"symbol": "B", "industry_sw": ""},
-    ]
-
-    with pytest.raises(ValueError, match="EasyTDX 申万行业"):
-        _select_industries(["A", "B"], records)
+    assert _select_industries(["A", "B", "C"], context, date(2026, 8, 3)) == ["A", "C"]
 
 
-def test_stock_selection_is_not_computable_without_industry_snapshot():
-    context = SimpleNamespace(
-        state={"small_cap_limitup": {
-            "stock_list_cache_date": None,
-            "stock_list_cache": [],
-        }},
-        instruments=lambda _asset: [{"symbol": "000001.SZ"}],
-    )
+def test_select_industries_fails_closed_when_pit_industry_has_gap():
+    def unavailable(*_args):
+        raise ValueError("PIT 行业区间缺口: B")
 
-    with pytest.raises(ValueError, match="EasyTDX 申万行业快照"):
-        _get_stock_list(context)
+    with pytest.raises(ValueError, match="TickFlow PIT 申万行业.*区间缺口"):
+        _select_industries(
+            ["A", "B"],
+            SimpleNamespace(get_industry=unavailable),
+            date(2026, 8, 3),
+        )
+
+
+def test_stock_selection_is_not_computable_without_pit_industry_history():
+    context = SimpleNamespace()
+
+    with pytest.raises(ValueError, match="TickFlow PIT 申万行业历史"):
+        _select_industries(["000001.SZ"], context, date(2026, 8, 3))
 
 
 def test_empty_stock_list_cache_is_recomputed_for_same_trading_date(monkeypatch):
@@ -574,7 +581,7 @@ def test_empty_stock_list_cache_is_recomputed_for_same_trading_date(monkeypatch)
             "stock_list_cache_date": "2026-08-03",
             "stock_list_cache": [],
         }},
-        instruments=lambda _asset: [{"symbol": "A", "industry_sw": "I"}],
+        instruments=lambda _asset: [{"symbol": "A"}],
         history_batch=lambda *_args, **_kwargs: {"A": [SimpleNamespace()]},
         log=lambda _message: None,
     )
@@ -584,7 +591,7 @@ def test_empty_stock_list_cache_is_recomputed_for_same_trading_date(monkeypatch)
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._eligible_market_records",
-        lambda _context: ([{"symbol": "A", "industry_sw": "I"}], {"A": object()}),
+        lambda _context: ([{"symbol": "A"}], {"A": object()}),
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._rank_history_candidates",
@@ -592,7 +599,7 @@ def test_empty_stock_list_cache_is_recomputed_for_same_trading_date(monkeypatch)
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._select_industries",
-        lambda _ranked, _records: ["A"],
+        lambda _ranked, _context, _as_of: ["A"],
     )
 
     assert _get_stock_list(context) == ["A"]
@@ -606,7 +613,7 @@ def test_empty_selection_is_not_cached(monkeypatch):
             "stock_list_cache_date": None,
             "stock_list_cache": [],
         }},
-        instruments=lambda _asset: [{"symbol": "A", "industry_sw": "I"}],
+        instruments=lambda _asset: [{"symbol": "A"}],
         history_batch=lambda *_args, **_kwargs: {"A": [SimpleNamespace()]},
         log=lambda _message: None,
     )
@@ -616,7 +623,7 @@ def test_empty_selection_is_not_cached(monkeypatch):
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._eligible_market_records",
-        lambda _context: ([{"symbol": "A", "industry_sw": "I"}], {"A": object()}),
+        lambda _context: ([{"symbol": "A"}], {"A": object()}),
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._rank_history_candidates",
@@ -624,7 +631,7 @@ def test_empty_selection_is_not_cached(monkeypatch):
     )
     monkeypatch.setattr(
         "app.free_strategy.small_cap_limitup._select_industries",
-        lambda _ranked, _records: [],
+        lambda _ranked, _context, _as_of: [],
     )
 
     assert _get_stock_list(context) == []

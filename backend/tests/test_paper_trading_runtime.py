@@ -18,7 +18,6 @@ from app.free_strategy.paper import (
     _Subscription,
     _append_engine_events,
     _append_strategy_logs,
-    _apply_legacy_builtin_schedule_contracts,
     _catch_up_bars,
     _catch_up_scheduled,
     _compatible_checkpoint,
@@ -42,6 +41,14 @@ def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
 
 
+def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:
+    engine.advance_event(
+        max(value.timestamp for value in values),
+        event_type="quote",
+        quotes=values,
+    )
+
+
 def test_session_final_quote_is_clamped_to_closed_market_boundary():
     final_quote = Quote(
         "399303.SZ",
@@ -58,101 +65,6 @@ def test_session_final_quote_is_clamped_to_closed_market_boundary():
         active_quote,
         cutoff=datetime(2026, 8, 7, 10, 5),
     ).timestamp == datetime(2026, 8, 7, 10, 6)
-
-
-def test_legacy_small_cap_schedule_gets_current_runtime_contracts():
-    source = """
-NO_TRADING_MONTHS = {1, 4}
-
-def _state(context):
-    return context.state['small_cap_limitup']
-
-def _is_weekly_rebalance_day(context, timestamp):
-    return timestamp.weekday() == 1
-
-def _held_and_candidates(context, timestamp):
-    return [*context.portfolio.positions, 'Y']
-
-def _weekly_buy(context):
-    context.state['executed'] = True
-
-def initialize(context):
-    context.state['small_cap_limitup'] = {}
-    context.set_universe(['X', 'Y'])
-    context.schedule(_weekly_buy, '10:30', symbols=_held_and_candidates)
-"""
-    engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    engine.account.positions = {"X": 100.0}
-    engine.context.portfolio.positions = {"X": 100.0}
-
-    _apply_legacy_builtin_schedule_contracts(engine, "small_cap_limitup")
-
-    tuesday = datetime(2024, 2, 6, 10, 30)
-    assert engine.scheduled_snapshot_symbols(tuesday) == ["X", "Y"]
-    assert engine.scheduled_required_snapshot_symbols(tuesday) == ["X"]
-    assert engine.prepare_scheduled_event(tuesday) is True
-
-    friday_engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    _apply_legacy_builtin_schedule_contracts(friday_engine, "small_cap_limitup")
-    assert friday_engine.prepare_scheduled_event(datetime(2024, 2, 9, 10, 30)) is False
-
-
-def test_legacy_performance_schedule_skips_non_monthly_snapshot():
-    source = """
-def _instrument_records(context):
-    return []
-
-def _previous_trading_date(context, records):
-    return context.now.date()
-
-def _should_monthly_adjust(context, previous_date):
-    return context.state['due']
-
-def _held_and_selection_symbols(context, timestamp):
-    return [*context.portfolio.positions, 'Y']
-
-def _monthly_adjustment(context):
-    context.state['executed'] = True
-
-def initialize(context):
-    context.state['due'] = False
-    context.set_universe(['X', 'Y'])
-    context.schedule(_monthly_adjustment, '09:30', symbols=_held_and_selection_symbols)
-"""
-    engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    engine.account.positions = {"X": 100.0}
-    engine.context.portfolio.positions = {"X": 100.0}
-    _apply_legacy_builtin_schedule_contracts(engine, "performance_small_cap")
-
-    timestamp = datetime(2024, 2, 9, 9, 30)
-    engine.context.now = timestamp
-    assert engine.prepare_scheduled_event(timestamp) is False
-
-    due_engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    due_engine.account.positions = {"X": 100.0}
-    due_engine.context.portfolio.positions = {"X": 100.0}
-    due_engine.context.state["due"] = True
-    due_engine.context.now = timestamp
-    _apply_legacy_builtin_schedule_contracts(due_engine, "performance_small_cap")
-
-    assert due_engine.scheduled_snapshot_symbols(timestamp) == ["X", "Y"]
-    assert due_engine.scheduled_required_snapshot_symbols(timestamp) == ["X"]
 
 
 def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):
@@ -221,7 +133,8 @@ def test_disabled_paper_notification_sends_nothing(monkeypatch):
     )
 
 
-def test_full_bar_wait_does_not_survive_market_close():
+def test_full_bar_wait_does_not_survive_market_close(monkeypatch):
+    monkeypatch.setattr("app.free_strategy.paper.cn_today", lambda: date(2026, 8, 6))
     state = {
         "execution_mode": "full_bar",
         "market_mode": "bar_1m",
@@ -628,6 +541,7 @@ def test_supervisor_keeps_subscription_and_clears_stale_wait_reason(tmp_path, mo
     initialize_supervisor_runtime(supervisor)
     current_time = [datetime(2026, 8, 6, 14, 51)]
     monkeypatch.setattr("app.free_strategy.paper.cn_naive_now", lambda: current_time[0])
+    monkeypatch.setattr("app.free_strategy.paper.cn_today", lambda: date(2026, 8, 6))
 
     supervisor._monitor_once()  # noqa: SLF001
     supervisor._monitor_once()  # noqa: SLF001
@@ -747,7 +661,7 @@ def on_quote(context, quotes):
         timeframe="1m",
         config=FreeStrategyConfig(initial_capital=1_000, lot_size=1, fees_pct=0, slippage_bps=0, fill_policy="close", settlement="t0"),
     )
-    current.process_quotes([quote(0, 10)])
+    advance_quotes(current, quote(0, 10))
     assert current.account.fills[0].price == 10
 
     following = FreeStrategyEngine(
@@ -755,9 +669,9 @@ def on_quote(context, quotes):
         timeframe="1m",
         config=FreeStrategyConfig(initial_capital=1_000, lot_size=1, fees_pct=0, slippage_bps=0, fill_policy="next_open"),
     )
-    following.process_quotes([quote(0, 10)])
+    advance_quotes(following, quote(0, 10))
     assert following.account.fills == []
-    following.process_quotes([quote(3, 11)])
+    advance_quotes(following, quote(3, 11))
     assert following.account.fills[0].price == 11
 
 
@@ -801,7 +715,7 @@ def on_quote(context, quotes):
     monkeypatch.setattr("app.services.webhook_adapter.send_wecom", lambda *args: sent.append(args) or True)
 
     before_risk = dict(engine.risk_status)
-    engine.process_quotes([quote(0, 10)])
+    advance_quotes(engine, quote(0, 10))
     _append_engine_events(
         store,
         "paper",
@@ -833,7 +747,7 @@ def on_quote(context, quotes):
         context.state['value_readonly'] = True
 """
     engine = FreeStrategyEngine(source)
-    engine.process_quotes([quote(0, 10)])
+    advance_quotes(engine, quote(0, 10))
     assert engine.state == {"mapping_readonly": True, "value_readonly": True}
 
 
@@ -871,8 +785,8 @@ def on_quote(context, quotes):
         ),
         risk_config=RiskConfig(daily_loss_pct=0.1, max_drawdown_pct=0.3),
     )
-    engine.process_quotes([quote(0, 10)])
-    engine.process_quotes([quote(3, 5)])
+    advance_quotes(engine, quote(0, 10))
+    advance_quotes(engine, quote(3, 5))
 
     assert engine.risk_status["daily_loss_locked"] is True
     assert engine.account.orders[-2].status == "rejected"
@@ -897,8 +811,8 @@ def on_quote(context, quotes):
         ),
         risk_config=RiskConfig(max_orders_per_minute=1),
     )
-    engine.process_quotes([quote(0, 10)])
-    engine.process_quotes([quote(3, 10)])
+    advance_quotes(engine, quote(0, 10))
+    advance_quotes(engine, quote(3, 10))
 
     assert engine.account.orders[-1].status == "filled"
     assert engine.account.positions["X"] == 9
@@ -1512,6 +1426,7 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
         id="o1",
         symbol="159920.SZ",
         side="buy",
+        requested_quantity=100,
         cash_weight=1.0,
         submitted_at="2026-07-28T13:11:00",
         status="filled",
@@ -1523,8 +1438,15 @@ def test_order_event_uses_strategy_timestamp_and_executed_side(tmp_path):
         quantity=100,
         price=1.49,
         value=149,
-        fee=0.01,
         timestamp="2026-07-28T13:11:00",
+        commission=0.01,
+        stamp_tax=0,
+        transfer_fee=0,
+        dividend_tax=0,
+        total_fee=0.01,
+        status="filled",
+        reason="",
+        submitted_at="2026-07-28T13:11:00",
     )
     engine = SimpleNamespace(
         account=SimpleNamespace(orders=[order], fills=[fill]),

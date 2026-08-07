@@ -418,6 +418,21 @@ def initialize(context) -> None:
     ]
     context.set_universe(symbols)
     context.require_market_history(asset_type="index", timeframe="1d", bars=INDEX_HISTORY_BARS)
+    context.require_data_readiness(
+        rebalance="monthly",
+        financials={
+            "income": {
+                "fields": ["revenue", "net_income", "net_income_attributable"],
+                "periods": 1,
+            },
+            "metrics": {"fields": ["roe"], "periods": 1},
+            "balance_sheet": {"fields": ["total_assets"], "periods": 1},
+        },
+        valuation_fields=["market_cap"],
+        lifecycle=True,
+        adjustment="pre",
+        corporate_actions=True,
+    )
     context.state.setdefault("performance_small_cap", {
         "sorted_stocks": [],
         "just_sold": [],
