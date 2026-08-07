@@ -1,14 +1,8 @@
-"""PIT reference status and snapshot maintenance.
-
-The data page and daily pipeline use BaoStock candidate snapshots and lifecycle
-events. Historical PIT builders and the optional HiThink collector remain
-available as explicit offline/manual tools.
-"""
+"""PIT reference status and canonical index-membership maintenance."""
 from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -17,15 +11,10 @@ import polars as pl
 
 from app.plugins.hithink.client import HiThinkAuthError, HiThinkClient
 from app.plugins.hithink.collector import HiThinkSnapshotCollector
-from app.plugins.hithink.storage import (
-    INDEX_CONSTITUENTS_TABLE,
-    INSTRUMENT_LIFECYCLE_TABLE,
-    THS_SECTOR_CONSTITUENTS_TABLE,
-)
 from app.plugins.baostock.index_candidates import (
-    BaoStockIndexCandidateCollector,
-    INDEX_CONSTITUENT_CANDIDATES_TABLE,
+    BaoStockIndexMembershipCollector,
     SOURCE as BAOSTOCK_SOURCE,
+    derive_csi800,
 )
 from app.plugins.baostock.instrument_lifecycle import (
     DEFAULT_LOOKBACK_YEARS as BAOSTOCK_LIFECYCLE_LOOKBACK_YEARS,
@@ -35,6 +24,7 @@ from app.plugins.pit_history.storage import (
     INDEX_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     SOURCE as PIT_HISTORY_SOURCE,
+    merge_index_membership_history,
     summarize_lifecycle_completeness,
     table_path,
     validate_index_membership_history,
@@ -42,8 +32,13 @@ from app.plugins.pit_history.storage import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INDEX_NAMES = {"000300.SH": "沪深300"}
-DEFAULT_SECTOR_TAGS = ("industry",)
+DEFAULT_INDEX_NAMES = {
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000906.SH": "中证800",
+    "000852.SH": "中证1000",
+}
+BAOSTOCK_CROSSCHECK_INDICES = ("000300.SH", "000905.SH")
 
 _HISTORY_TABLES: dict[str, dict[str, Any]] = {
     INDEX_MEMBERSHIP_HISTORY_TABLE: {
@@ -61,15 +56,6 @@ _HISTORY_TABLES: dict[str, dict[str, Any]] = {
         "source": BAOSTOCK_SOURCE,
     },
 }
-
-_SNAPSHOT_TABLES: dict[str, dict[str, Any]] = {
-    INDEX_CONSTITUENT_CANDIDATES_TABLE: {
-        "label": "BaoStock 沪深300候选快照",
-        "symbol_col": "member_symbol",
-        "source": BAOSTOCK_SOURCE,
-    },
-}
-
 
 def _date_text(value: object) -> str | None:
     if value is None:
@@ -180,69 +166,13 @@ def _history_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> d
     }, frame)
 
 
-def _snapshot_root(data_dir: Path, table: str, source: str) -> Path:
-    return Path(data_dir) / "pit_reference" / source / table
-
-
-def _snapshot_table_status(data_dir: Path, table: str, meta: dict[str, Any]) -> dict[str, Any]:
-    source = str(meta.get("source") or BAOSTOCK_SOURCE)
-    root = _snapshot_root(data_dir, table, source)
-    partitions = sorted(root.glob("snapshot_date=*/part.parquet"))
-    if not partitions:
-        return {
-            "label": meta["label"],
-            "source": source,
-            "rows": 0,
-            "latest_snapshot_date": None,
-            "earliest_snapshot_date": None,
-            "snapshots": 0,
-            "symbols_covered": 0,
-            "manifest": _latest_manifest(data_dir, source, table),
-            **_snapshot_quality(table),
-        }
-
-    latest = partitions[-1]
-    frame = pl.read_parquet(latest)
-    snapshot_dates = [path.parent.name.split("=", 1)[1] for path in partitions]
-    symbol_col = str(meta["symbol_col"])
-    return {
-        "label": meta["label"],
-        "source": source,
-        "rows": frame.height,
-        "latest_snapshot_date": snapshot_dates[-1],
-        "earliest_snapshot_date": snapshot_dates[0],
-        "snapshots": len(partitions),
-        "symbols_covered": int(frame[symbol_col].n_unique()) if symbol_col in frame.columns else 0,
-        "provenance_counts": _provenance_counts(frame),
-        "manifest": _latest_manifest(data_dir, source, table),
-        **_snapshot_quality(table),
-    }
-
-
-def _snapshot_quality(table: str) -> dict[str, Any]:
-    if table != INDEX_CONSTITUENT_CANDIDATES_TABLE:
-        return {}
-    return {
-        "candidate_source": {
-            "strict_backtest_usable": False,
-            "message": (
-                "BaoStock dated constituents are candidate snapshots; do not use them "
-                "as strict PIT intervals without separate effective-from/to evidence"
-            ),
-        }
-    }
-
-
 def get_status(data_dir: Path) -> dict[str, Any]:
     data_dir = Path(data_dir)
     history = {
         table: _history_table_status(data_dir, table, meta)
         for table, meta in _HISTORY_TABLES.items()
     }
-    snapshots = {
-        table: _snapshot_table_status(data_dir, table, meta)
-        for table, meta in _SNAPSHOT_TABLES.items()
-    }
+    snapshots: dict[str, Any] = {}
     history_rows = sum(int(item["rows"]) for item in history.values())
     snapshot_rows = sum(int(item["rows"]) for item in snapshots.values())
     history_dates = [
@@ -251,168 +181,215 @@ def get_status(data_dir: Path) -> dict[str, Any]:
         for value in (item.get("earliest_date"), item.get("latest_date"))
         if value
     ]
-    latest_snapshots = [
-        item["latest_snapshot_date"]
-        for item in snapshots.values()
-        if item.get("latest_snapshot_date")
-    ]
     index_history = history.get(INDEX_MEMBERSHIP_HISTORY_TABLE, {})
     membership_validation = index_history.get("membership_validation") or {}
     return {
         "history": history,
         "snapshots": snapshots,
         "summary": {
-            "source": BAOSTOCK_SOURCE,
+            "source": "canonical",
+            "historical_default_source": "baostock",
+            "daily_snapshot_primary_source": "hithink",
             "history_rows": history_rows,
             "snapshot_rows": snapshot_rows,
             "rows": history_rows + snapshot_rows,
             "earliest_date": min(history_dates) if history_dates else None,
             "latest_date": max(history_dates) if history_dates else None,
-            "latest_snapshot_date": max(latest_snapshots) if latest_snapshots else None,
+            "latest_snapshot_date": index_history.get("latest_date"),
             "strict_index_membership_usable": bool(membership_validation.get("usable")),
         },
     }
 
 
-def _daily_rows(data_dir: Path) -> pl.DataFrame:
-    root = Path(data_dir) / "kline_daily"
-    files = sorted(root.glob("**/*.parquet"))
-    if not files:
-        return pl.DataFrame(schema={"symbol": pl.String, "date": pl.Date})
-    return pl.scan_parquet([str(path) for path in files]).select(["symbol", "date"]).collect()
+def _compare_membership_sources(primary: pl.DataFrame, crosscheck: pl.DataFrame) -> int:
+    checked = 0
+    for snapshot in crosscheck.partition_by(
+        ["index_symbol", "snapshot_date"], maintain_order=True
+    ):
+        index_symbol = str(snapshot["index_symbol"][0])
+        snapshot_date = snapshot["snapshot_date"][0]
+        primary_snapshot = primary.filter(
+            (pl.col("index_symbol") == index_symbol)
+            & (pl.col("snapshot_date") == snapshot_date)
+        )
+        primary_members = set(primary_snapshot["member_symbol"].to_list())
+        crosscheck_members = set(snapshot["member_symbol"].to_list())
+        if primary_members != crosscheck_members:
+            raise ValueError(
+                f"provider conflict for {index_symbol} on {snapshot_date}: "
+                f"hithink_only={sorted(primary_members - crosscheck_members)[:20]} "
+                f"baostock_only={sorted(crosscheck_members - primary_members)[:20]}"
+            )
+        checked += 1
+    return checked
 
 
-def sync_hithink_snapshots(
+def sync_index_membership_snapshots(
     data_dir: Path,
     *,
     snapshot_date: date | None = None,
-    collector: HiThinkSnapshotCollector | None = None,
-    sector_limit: int | None = None,
+    hithink_collector: HiThinkSnapshotCollector | None = None,
+    baostock_collector: BaoStockIndexMembershipCollector | None = None,
 ) -> dict[str, Any]:
     snapshot_date = snapshot_date or date.today()
     data_dir = Path(data_dir)
-    if collector is None:
+    hithink_error: str | None = None
+    baostock_error: str | None = None
+    hithink_frame = pl.DataFrame()
+    baostock_frame = pl.DataFrame()
+
+    if hithink_collector is None:
         client = HiThinkClient()
         try:
             client._api_key()
         except HiThinkAuthError as exc:
-            return {
-                "status": "skipped",
-                "reason": "missing_hithink_api_key",
-                "message": str(exc),
-                "snapshot_date": snapshot_date.isoformat(),
-                "tables": {},
-                "published_rows": 0,
-            }
-        collector = HiThinkSnapshotCollector(data_dir, client=client)
+            hithink_error = str(exc)
+        else:
+            hithink_collector = HiThinkSnapshotCollector(data_dir, client=client)
+    if hithink_collector is not None:
+        try:
+            hithink_frame = hithink_collector.fetch_index_constituents(
+                DEFAULT_INDEX_NAMES,
+                snapshot_date=snapshot_date,
+                index_names=DEFAULT_INDEX_NAMES,
+            )
+        except Exception as exc:  # noqa: BLE001
+            hithink_error = str(exc)
 
-    tables: dict[str, int] = {}
-    errors: list[str] = []
-
+    baostock_collector = baostock_collector or BaoStockIndexMembershipCollector(data_dir)
     try:
-        tables[INDEX_CONSTITUENTS_TABLE] = collector.collect_index_constituents(
-            DEFAULT_INDEX_NAMES.keys(),
-            snapshot_date=snapshot_date,
+        baostock_frame = baostock_collector.fetch_index_snapshots(
+            BAOSTOCK_CROSSCHECK_INDICES,
+            snapshot_dates=(snapshot_date,),
             index_names=DEFAULT_INDEX_NAMES,
         )
     except Exception as exc:  # noqa: BLE001
-        errors.append(f"{INDEX_CONSTITUENTS_TABLE}: {exc}")
+        baostock_error = str(exc)
+
+    crosschecked_snapshots = 0
+    source = "hithink"
+    if not hithink_frame.is_empty():
+        if not baostock_frame.is_empty():
+            try:
+                crosschecked_snapshots = _compare_membership_sources(
+                    hithink_frame, baostock_frame
+                )
+            except ValueError as exc:
+                return {
+                    "status": "failed",
+                    "source": "hithink",
+                    "snapshot_date": snapshot_date.isoformat(),
+                    "tables": {},
+                    "published_rows": 0,
+                    "index_membership_rows": 0,
+                    "crosschecked_snapshots": 0,
+                    "errors": [str(exc)],
+                }
+        incoming = hithink_frame
+    elif not baostock_frame.is_empty():
+        source = "baostock_fallback"
+        incoming = baostock_frame
+        if set(incoming["index_symbol"].unique().to_list()) == set(
+            BAOSTOCK_CROSSCHECK_INDICES
+        ):
+            incoming = pl.concat(
+                [incoming, derive_csi800(incoming)], how="diagonal_relaxed"
+            )
+    else:
+        errors = [
+            item
+            for item in (
+                f"hithink: {hithink_error}" if hithink_error else None,
+                f"baostock: {baostock_error}" if baostock_error else None,
+            )
+            if item
+        ]
+        return {
+            "status": "failed",
+            "source": "unavailable",
+            "snapshot_date": snapshot_date.isoformat(),
+            "tables": {},
+            "published_rows": 0,
+            "index_membership_rows": 0,
+            "crosschecked_snapshots": 0,
+            "errors": errors or ["no index membership source returned data"],
+        }
 
     try:
-        tables[THS_SECTOR_CONSTITUENTS_TABLE] = collector.collect_sector_constituents(
-            DEFAULT_SECTOR_TAGS,
-            snapshot_date=snapshot_date,
-            sector_limit=sector_limit,
-        )
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"{THS_SECTOR_CONSTITUENTS_TABLE}: {exc}")
-
-    try:
-        tables[INSTRUMENT_LIFECYCLE_TABLE] = collector.collect_lifecycle_observed(
-            observed_as_of=snapshot_date,
-            daily_rows=_daily_rows(data_dir),
-        )
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"{INSTRUMENT_LIFECYCLE_TABLE}: {exc}")
-
-    status = "failed" if errors else "published"
-    return {
-        "status": status,
-        "snapshot_date": snapshot_date.isoformat(),
-        "tables": tables,
-        "published_rows": sum(tables.values()),
-        "errors": errors,
-    }
-
-
-def sync_baostock_index_candidates(
-    data_dir: Path,
-    *,
-    snapshot_dates: Iterable[date] | None = None,
-    collector: BaoStockIndexCandidateCollector | None = None,
-) -> dict[str, Any]:
-    dates = tuple(snapshot_dates or (date.today(),))
-    data_dir = Path(data_dir)
-    collector = collector or BaoStockIndexCandidateCollector(data_dir)
-    try:
-        rows = collector.collect_hs300_snapshots(dates)
+        result = merge_index_membership_history(data_dir, incoming)
     except Exception as exc:  # noqa: BLE001
         return {
             "status": "failed",
-            "source": BAOSTOCK_SOURCE,
+            "source": source,
+            "snapshot_date": snapshot_date.isoformat(),
             "tables": {},
             "published_rows": 0,
-            "errors": [f"{INDEX_CONSTITUENT_CANDIDATES_TABLE}: {exc}"],
+            "index_membership_rows": 0,
+            "crosschecked_snapshots": crosschecked_snapshots,
+            "errors": [str(exc)],
         }
+    warnings = [
+        item
+        for item in (
+            f"hithink: {hithink_error}" if hithink_error else None,
+            f"baostock crosscheck: {baostock_error}" if baostock_error else None,
+        )
+        if item
+    ]
+    added_rows = int(result["added_rows"])
     return {
         "status": "published",
-        "source": BAOSTOCK_SOURCE,
-        "snapshot_dates": [item.isoformat() for item in dates],
-        "tables": {INDEX_CONSTITUENT_CANDIDATES_TABLE: rows},
-        "published_rows": rows,
+        "source": source,
+        "snapshot_date": snapshot_date.isoformat(),
+        "tables": {INDEX_MEMBERSHIP_HISTORY_TABLE: added_rows},
+        "published_rows": added_rows,
+        "index_membership_rows": added_rows,
+        "crosschecked_snapshots": crosschecked_snapshots,
+        "warnings": warnings,
         "errors": [],
     }
 
 
-def sync_baostock_reference(
+def sync_pit_reference(
     data_dir: Path,
     *,
     snapshot_date: date | None = None,
     years: int = BAOSTOCK_LIFECYCLE_LOOKBACK_YEARS,
 ) -> dict[str, Any]:
-    """Sync the BaoStock-only reference datasets used by the data page."""
     snapshot_date = snapshot_date or date.today()
-    candidate_result = sync_baostock_index_candidates(
+    membership_result = sync_index_membership_snapshots(
         data_dir,
-        snapshot_dates=(snapshot_date,),
+        snapshot_date=snapshot_date,
     )
     lifecycle_result = sync_baostock_lifecycle(
         data_dir,
         end_date=snapshot_date,
         years=years,
     )
-
     errors = [
-        *(f"index candidates: {item}" for item in candidate_result.get("errors") or []),
+        *(f"index membership: {item}" for item in membership_result.get("errors") or []),
         *(f"lifecycle: {item}" for item in lifecycle_result.get("errors") or []),
     ]
-    tables = {
-        **(candidate_result.get("tables") or {}),
-        **(lifecycle_result.get("tables") or {}),
-    }
-    candidate_rows = int(candidate_result.get("published_rows") or 0)
+    membership_rows = int(membership_result.get("published_rows") or 0)
     lifecycle_rows = int(lifecycle_result.get("published_rows") or 0)
     return {
         "status": "failed" if errors else "published",
-        "source": BAOSTOCK_SOURCE,
+        "source": str(membership_result.get("source") or "unavailable"),
         "snapshot_date": snapshot_date.isoformat(),
-        "tables": tables,
-        "published_rows": candidate_rows + lifecycle_rows,
-        "index_candidate_rows": candidate_rows,
+        "tables": {
+            **(membership_result.get("tables") or {}),
+            **(lifecycle_result.get("tables") or {}),
+        },
+        "published_rows": membership_rows + lifecycle_rows,
+        "index_membership_rows": membership_rows,
+        "crosschecked_snapshots": int(
+            membership_result.get("crosschecked_snapshots") or 0
+        ),
         "lifecycle_rows": lifecycle_rows,
         "instrument_appended_symbols": int(
             lifecycle_result.get("instrument_appended_symbols") or 0
         ),
+        "warnings": membership_result.get("warnings") or [],
         "errors": errors,
     }
 

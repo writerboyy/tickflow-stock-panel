@@ -6,11 +6,10 @@ import polars as pl
 import pytest
 
 from app.plugins.baostock.index_candidates import (
-    INDEX_CONSTITUENT_CANDIDATES_TABLE,
-    BaoStockIndexCandidateCollector,
+    BaoStockIndexMembershipCollector,
     _SocketWithTimeout,
-    normalize_index_constituent_candidates,
-    partition_path,
+    derive_csi800,
+    normalize_index_membership_snapshot,
 )
 from app.plugins.baostock.instrument_lifecycle import (
     BaoStockInstrumentLifecycleCollector,
@@ -29,8 +28,7 @@ from app.plugins.pit_history.storage import (
     read_history_table,
     table_path,
 )
-from app.services import pit_reference
-from scripts.collect_baostock_hs300_candidates import candidate_dates, main, query_dates
+from scripts.backfill_index_membership_history import local_trading_dates, main
 
 
 class _LoginResult:
@@ -41,7 +39,7 @@ class _LoginResult:
 class _BaoStockResult:
     error_code = "0"
     error_msg = ""
-    fields = ["date", "code", "code_name"]
+    fields = ["updateDate", "code", "code_name"]
 
     def __init__(self, rows: list[list[str]]) -> None:
         self._rows = rows
@@ -56,9 +54,9 @@ class _BaoStockResult:
 
 
 class _FakeBaoStock:
-    def __init__(self, by_date: dict[str, list[list[str]]] | None = None) -> None:
-        self.by_date = by_date or {}
-        self.queries: list[str] = []
+    def __init__(self, by_query: dict[tuple[str, str], list[list[str]]] | None = None) -> None:
+        self.by_query = by_query or {}
+        self.queries: list[tuple[str, str]] = []
         self.logout_count = 0
 
     def login(self) -> _LoginResult:
@@ -68,8 +66,12 @@ class _FakeBaoStock:
         self.logout_count += 1
 
     def query_hs300_stocks(self, date: str = "") -> _BaoStockResult:
-        self.queries.append(date)
-        return _BaoStockResult(self.by_date.get(date, []))
+        self.queries.append(("000300.SH", date))
+        return _BaoStockResult(self.by_query.get(("000300.SH", date), []))
+
+    def query_zz500_stocks(self, date: str = "") -> _BaoStockResult:
+        self.queries.append(("000905.SH", date))
+        return _BaoStockResult(self.by_query.get(("000905.SH", date), []))
 
 
 class _StockBasicResult:
@@ -102,11 +104,6 @@ class _FakeBaoStockBasic:
 
     def query_stock_basic(self) -> _StockBasicResult:
         return _StockBasicResult(self.rows)
-
-
-class _FailingCollector:
-    def collect_hs300_snapshots(self, snapshot_dates):
-        raise RuntimeError("offline")
 
 
 class _BlacklistedLoginResult:
@@ -164,8 +161,8 @@ def _write_daily_dates(data_dir, dates: list[date]) -> None:
     }).write_parquet(root / "part.parquet")
 
 
-def test_normalize_baostock_hs300_candidates_keeps_snapshot_provenance():
-    frame = normalize_index_constituent_candidates(
+def test_normalize_baostock_index_membership_keeps_source_update_date():
+    frame = normalize_index_membership_snapshot(
         [
             {"date": "2020-01-03", "code": "sh.600000", "code_name": "浦发银行"},
             {"date": "2020-01-03", "code": "sz.000001", "code_name": "平安银行"},
@@ -194,7 +191,7 @@ def test_normalize_baostock_hs300_candidates_keeps_snapshot_provenance():
             "snapshot_date": date(2020, 1, 3),
             "source_update_date": date(2020, 1, 3),
             "source": "baostock",
-            "provenance": "candidate_snapshot",
+            "provenance": "source_dated_snapshot",
         },
         {
             "index_symbol": "000300.SH",
@@ -204,38 +201,39 @@ def test_normalize_baostock_hs300_candidates_keeps_snapshot_provenance():
             "snapshot_date": date(2020, 1, 3),
             "source_update_date": date(2020, 1, 3),
             "source": "baostock",
-            "provenance": "candidate_snapshot",
+            "provenance": "source_dated_snapshot",
         },
     ]
 
 
-def test_baostock_collector_publishes_candidate_snapshots_and_manifest(tmp_path):
+def test_baostock_collector_fetches_complete_snapshots_without_provider_table(tmp_path):
+    hs300 = [["2020-01-03", f"sh.{600000 + index}", f"h{index}"] for index in range(300)]
+    zz500 = [["2020-01-03", f"sz.{index + 1:06d}", f"z{index}"] for index in range(500)]
     fake = _FakeBaoStock({
-        "2020-01-03": [["2020-01-03", "sh.600000", "浦发银行"]],
-        "2020-01-06": [["2020-01-06", "sz.000001", "平安银行"]],
+        ("000300.SH", "2020-01-03"): hs300,
+        ("000905.SH", "2020-01-03"): zz500,
     })
-    collector = BaoStockIndexCandidateCollector(tmp_path, bs_module=fake)
+    collector = BaoStockIndexMembershipCollector(tmp_path, bs_module=fake)
 
-    rows = collector.collect_hs300_snapshots([date(2020, 1, 6), date(2020, 1, 3)])
-
-    assert rows == 2
-    assert fake.queries == ["2020-01-03", "2020-01-06"]
-    assert fake.logout_count == 1
-    first = pl.read_parquet(
-        partition_path(tmp_path, INDEX_CONSTITUENT_CANDIDATES_TABLE, date(2020, 1, 3))
+    frame = collector.fetch_index_snapshots(
+        ["000300.SH", "000905.SH"], snapshot_dates=[date(2020, 1, 3)]
     )
-    assert first.select("member_symbol", "provenance").to_dicts() == [
-        {"member_symbol": "600000.SH", "provenance": "candidate_snapshot"}
+
+    assert frame.height == 800
+    assert fake.queries == [
+        ("000300.SH", "2020-01-03"),
+        ("000905.SH", "2020-01-03"),
     ]
+    assert fake.logout_count == 1
     manifest = (
         tmp_path
         / "ext_data"
         / "_ingestion"
         / "baostock"
-        / INDEX_CONSTITUENT_CANDIDATES_TABLE
-        / "000300.SH_2020-01-03_2020-01-06.json"
+        / INDEX_MEMBERSHIP_HISTORY_TABLE
+        / "2020-01-03_2020-01-03.json"
     )
-    assert manifest.exists()
+    assert not manifest.exists()
     assert not table_path(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE).exists()
 
 
@@ -309,36 +307,102 @@ def test_baostock_lifecycle_lookback_handles_leap_day():
     assert lookback_start(date(2024, 2, 29), years=5) == date(2019, 2, 28)
 
 
-def test_pit_reference_status_reports_baostock_candidate_as_non_strict(tmp_path):
-    collector = BaoStockIndexCandidateCollector(
-        tmp_path,
-        bs_module=_FakeBaoStock({
-            "2020-01-03": [["2020-01-03", "sh.600000", "浦发银行"]],
-        }),
-    )
-    collector.collect_hs300_snapshots([date(2020, 1, 3)])
+def test_historical_fetch_expands_only_from_source_update_date(tmp_path):
+    rows = [["2020-01-06", f"sh.{600000 + index}", f"h{index}"] for index in range(300)]
+    fake = _FakeBaoStock({
+        ("000300.SH", "2020-01-08"): rows,
+        ("000300.SH", "2020-01-03"): [
+            ["2020-01-02", f"sh.{600300 + index}", f"o{index}"] for index in range(300)
+        ],
+    })
+    collector = BaoStockIndexMembershipCollector(tmp_path, bs_module=fake)
 
-    status = pit_reference.get_status(tmp_path)
-    candidate = status["snapshots"][INDEX_CONSTITUENT_CANDIDATES_TABLE]
-
-    assert candidate["source"] == "baostock"
-    assert candidate["rows"] == 1
-    assert candidate["latest_snapshot_date"] == "2020-01-03"
-    assert candidate["provenance_counts"] == {"candidate_snapshot": 1}
-    assert candidate["candidate_source"]["strict_backtest_usable"] is False
-    assert status["summary"]["strict_index_membership_usable"] is False
-
-
-def test_sync_baostock_candidates_returns_failed_without_partial_claim(tmp_path):
-    result = pit_reference.sync_baostock_index_candidates(
-        tmp_path,
-        snapshot_dates=[date(2020, 1, 3)],
-        collector=_FailingCollector(),
+    frame = collector.fetch_historical_membership(
+        "000300.SH",
+        trading_dates=[
+            date(2020, 1, 2),
+            date(2020, 1, 3),
+            date(2020, 1, 6),
+            date(2020, 1, 7),
+            date(2020, 1, 8),
+        ],
     )
 
-    assert result["status"] == "failed"
-    assert result["published_rows"] == 0
-    assert result["errors"] == ["index_constituent_candidates: offline"]
+    assert fake.queries == [
+        ("000300.SH", "2020-01-08"),
+        ("000300.SH", "2020-01-03"),
+    ]
+    assert frame["snapshot_date"].n_unique() == 5
+    assert frame.filter(pl.col("snapshot_date") == date(2020, 1, 3)).height == 300
+    assert frame.filter(pl.col("snapshot_date") == date(2020, 1, 6)).height == 300
+    assert set(frame["provenance"].unique().to_list()) == {"source_effective_snapshot"}
+
+
+def test_historical_fetch_skips_incomplete_source_interval_when_allowed(tmp_path):
+    complete = [
+        ["2020-01-02", f"sh.{600000 + index}", f"h{index}"]
+        for index in range(300)
+    ]
+    incomplete = [
+        ["2020-01-06", f"sh.{600300 + index}", f"i{index}"]
+        for index in range(299)
+    ]
+    fake = _FakeBaoStock({
+        ("000300.SH", "2020-01-08"): incomplete,
+        ("000300.SH", "2020-01-03"): complete,
+    })
+    collector = BaoStockIndexMembershipCollector(tmp_path, bs_module=fake)
+
+    frame = collector.fetch_historical_membership(
+        "000300.SH",
+        trading_dates=[
+            date(2020, 1, 2),
+            date(2020, 1, 3),
+            date(2020, 1, 6),
+            date(2020, 1, 7),
+            date(2020, 1, 8),
+        ],
+        allow_incomplete_snapshots=True,
+    )
+
+    assert frame["snapshot_date"].unique().sort().to_list() == [
+        date(2020, 1, 2),
+        date(2020, 1, 3),
+    ]
+    assert collector._historical_gaps["000300.SH"] == [
+        {
+            "index_symbol": "000300.SH",
+            "query_date": "2020-01-08",
+            "source_update_date": "2020-01-06",
+            "returned_members": 299,
+            "expected_members": 300,
+            "missing_date_start": "2020-01-06",
+            "missing_date_end": "2020-01-08",
+            "missing_snapshot_dates": 3,
+        }
+    ]
+
+
+def test_derive_csi800_requires_exact_disjoint_union():
+    snapshot_date = date(2020, 1, 3)
+    hs300 = normalize_index_membership_snapshot(
+        [{"updateDate": "2020-01-03", "code": f"sh.{600000 + index}"} for index in range(300)],
+        index_symbol="000300.SH",
+        index_name="沪深300",
+        snapshot_date=snapshot_date,
+    )
+    zz500 = normalize_index_membership_snapshot(
+        [{"updateDate": "2020-01-03", "code": f"sz.{index + 1:06d}"} for index in range(500)],
+        index_symbol="000905.SH",
+        index_name="中证500",
+        snapshot_date=snapshot_date,
+    )
+
+    derived = derive_csi800(pl.concat([hs300, zz500]))
+
+    assert derived.height == 800
+    assert derived["index_symbol"].unique().to_list() == ["000906.SH"]
+    assert derived["provenance"].unique().to_list() == ["derived_union_csi300_csi500"]
 
 
 def test_baostock_socket_wrapper_fails_fast_on_closed_connection():
@@ -396,16 +460,18 @@ def test_baostock_proxy_env_helpers():
 
 
 def test_baostock_collector_reports_blacklisted_login_code(tmp_path):
-    collector = BaoStockIndexCandidateCollector(tmp_path, bs_module=_BlacklistedBaoStock())
+    collector = BaoStockIndexMembershipCollector(tmp_path, bs_module=_BlacklistedBaoStock())
 
     with pytest.raises(RuntimeError) as exc:
-        collector.collect_hs300_snapshots([date(2020, 1, 3)])
+        collector.fetch_index_snapshots(
+            ["000300.SH"], snapshot_dates=[date(2020, 1, 3)]
+        )
 
     assert "error_code=10001011" in str(exc.value)
     assert "blacklist" in str(exc.value)
 
 
-def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):
+def test_backfill_uses_local_trading_dates(tmp_path):
     _write_daily_dates(
         tmp_path,
         [
@@ -416,18 +482,16 @@ def test_baostock_candidate_dates_use_local_trading_dates(tmp_path):
         ],
     )
 
-    dates, source = candidate_dates(
+    dates = local_trading_dates(
         tmp_path,
         start_date=date(2021, 1, 1),
         end_date=date(2021, 1, 6),
-        weekday_fallback=False,
     )
 
     assert dates == [date(2021, 1, 4), date(2021, 1, 6)]
-    assert source == "local_trading_dates"
 
 
-def test_baostock_candidate_dates_ignore_extra_daily_columns(tmp_path):
+def test_backfill_trading_dates_ignore_extra_daily_columns(tmp_path):
     root = tmp_path / "kline_daily"
     first = root / "date=2021-01-04"
     second = root / "date=2021-01-05"
@@ -443,40 +507,16 @@ def test_baostock_candidate_dates_ignore_extra_daily_columns(tmp_path):
         "quote_ts": ["2021-01-05T15:00:00+08:00"],
     }).write_parquet(second / "part.parquet")
 
-    dates, source = candidate_dates(
+    dates = local_trading_dates(
         tmp_path,
         start_date=date(2021, 1, 1),
         end_date=date(2021, 1, 6),
-        weekday_fallback=False,
     )
 
     assert dates == [date(2021, 1, 4), date(2021, 1, 5)]
-    assert source == "local_trading_dates"
 
 
-def test_baostock_candidate_dates_require_explicit_weekday_fallback(tmp_path):
-    dates, source = candidate_dates(
-        tmp_path,
-        start_date=date(2021, 1, 1),
-        end_date=date(2021, 1, 5),
-        weekday_fallback=False,
-    )
-
-    assert dates == []
-    assert source == "none"
-
-    fallback_dates, fallback_source = candidate_dates(
-        tmp_path,
-        start_date=date(2021, 1, 1),
-        end_date=date(2021, 1, 5),
-        weekday_fallback=True,
-    )
-
-    assert fallback_dates == [date(2021, 1, 1), date(2021, 1, 4), date(2021, 1, 5)]
-    assert fallback_source == "weekday_fallback"
-
-
-def test_collect_baostock_candidates_dry_run_does_not_publish(tmp_path, capsys):
+def test_backfill_dry_run_does_not_publish(tmp_path, capsys):
     _write_daily_dates(tmp_path, [date(2021, 1, 4), date(2021, 1, 5)])
 
     result = main([
@@ -491,47 +531,6 @@ def test_collect_baostock_candidates_dry_run_does_not_publish(tmp_path, capsys):
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "candidate_dates=2" in output
-    assert "query_dates=2" in output
-    assert "source=local_trading_dates" in output
+    assert '"trading_dates": 2' in output
+    assert '"derive_csi800": true' in output
     assert not (tmp_path / "pit_reference" / "baostock").exists()
-
-
-def test_collect_baostock_candidates_dry_run_skips_existing_and_caps_dates(tmp_path, capsys):
-    _write_daily_dates(
-        tmp_path,
-        [date(2021, 1, 4), date(2021, 1, 5), date(2021, 1, 6)],
-    )
-    existing = partition_path(
-        tmp_path,
-        INDEX_CONSTITUENT_CANDIDATES_TABLE,
-        date(2021, 1, 4),
-    )
-    existing.parent.mkdir(parents=True)
-    pl.DataFrame({"member_symbol": ["000001.SZ"]}).write_parquet(existing)
-
-    selected = query_dates(
-        tmp_path,
-        [date(2021, 1, 4), date(2021, 1, 5), date(2021, 1, 6)],
-        refresh_existing=False,
-    )
-    assert selected == [date(2021, 1, 5), date(2021, 1, 6)]
-
-    result = main([
-        "--data-dir",
-        str(tmp_path),
-        "--start-date",
-        "2021-01-01",
-        "--end-date",
-        "2021-01-06",
-        "--max-dates",
-        "1",
-        "--dry-run",
-    ])
-
-    assert result == 0
-    output = capsys.readouterr().out
-    assert "candidate_dates=3" in output
-    assert "query_dates=1" in output
-    assert "skipped_existing=1" in output
-    assert "range=2021-01-05..2021-01-05" in output

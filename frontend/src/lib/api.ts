@@ -3141,7 +3141,8 @@ export interface PipelineJob {
     index_count?: number
     index_daily_rows?: number
     pit_reference_rows?: number
-    pit_reference_baostock_candidate_rows?: number
+    pit_reference_index_membership_rows?: number
+    pit_reference_crosschecked_snapshots?: number
     pit_reference_baostock_lifecycle_rows?: number
     minute_rows: number
     skipped_stages?: string[]
@@ -3270,16 +3271,18 @@ export interface PitReferenceTableStatus {
   latest_snapshot_date?: string | null
   earliest_snapshot_date?: string | null
   snapshots?: number
-  strict_backtest?: {
-    index_symbol: string
-    status: 'usable' | 'incomplete'
+  membership_validation?: {
+    index_symbol: string | null
+    status: 'usable' | 'incomplete' | 'invalid'
     usable: boolean
-    expected_min_members: number
-    coverage_checks: Array<{
-      date: string
+    rows: number
+    snapshot_dates: number
+    duplicate_keys: number
+    invalid_snapshot_dates: Array<{
+      index_symbol: string
+      snapshot_date: string
       members: number
-      expected_min_members: number
-      ok: boolean
+      expected_members: number | null
     }>
     message: string
   }
@@ -3306,10 +3309,6 @@ export interface PitReferenceTableStatus {
     reason_event_rows: number
     message: string
   }
-  candidate_source?: {
-    strict_backtest_usable: boolean
-    message: string
-  }
   manifest?: {
     logical_snapshot?: string | null
     status?: string | null
@@ -3323,7 +3322,9 @@ export interface PitReferenceStatus {
   history: Record<string, PitReferenceTableStatus>
   snapshots: Record<string, PitReferenceTableStatus>
   summary: {
-    source: 'baostock'
+    source: 'canonical'
+    historical_default_source: 'baostock'
+    daily_snapshot_primary_source: 'hithink'
     history_rows: number
     snapshot_rows: number
     rows: number
@@ -3336,14 +3337,16 @@ export interface PitReferenceStatus {
 
 export interface PitReferenceSyncResult {
   status: 'published' | 'skipped' | 'failed'
-  source?: 'baostock'
+  source?: 'hithink' | 'baostock_fallback' | 'unavailable'
   reason?: string
   message?: string
   snapshot_date: string
   tables: Record<string, number>
   published_rows: number
-  index_candidate_rows?: number
+  index_membership_rows?: number
+  crosschecked_snapshots?: number
   lifecycle_rows?: number
+  warnings?: string[]
   errors?: string[]
 }
 

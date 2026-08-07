@@ -20,6 +20,7 @@ from app.plugins.pit_history.storage import (
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     INDEX_MEMBERSHIP_HISTORY_TABLE,
+    merge_index_membership_frames,
     normalize_index_membership_history,
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
@@ -1022,16 +1023,10 @@ class TushareDatasetIngestion:
             / "part.parquet"
         )
         existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
-        if not existing.is_empty() and "source" in existing.columns:
-            existing = existing.filter(pl.col("source") != SOURCE)
-        merged, report = _merge_existing_wins(
-            existing,
-            incoming,
-            key=["index_symbol", "snapshot_date", "member_symbol"],
-            compare_columns=[],
-            label=INDEX_MEMBERSHIP_HISTORY_TABLE,
-            compare_overlap=False,
-        )
+        try:
+            merged, report = merge_index_membership_frames(existing, incoming)
+        except ValueError as exc:
+            raise TushareIngestionBlocked(str(exc)) from exc
         return (target, merged), report["added_rows"]
 
     def _has_valid_empty_publication(self, spec: TushareDatasetSpec) -> bool:
@@ -1204,15 +1199,31 @@ class TushareDatasetIngestion:
                     "PIT index dataset cannot publish incomplete daily membership snapshots: "
                     f"{validation['invalid_snapshot_dates'][:5]}"
                 )
-            table = INDEX_MEMBERSHIP_HISTORY_TABLE
-            key = ["index_symbol", "snapshot_date", "member_symbol"]
-        else:
-            incoming = normalize_industry_membership_history(
-                frame.to_dicts(),
-                source=SOURCE,
+            target = (
+                self.config.data_dir
+                / "pit_reference"
+                / "history"
+                / INDEX_MEMBERSHIP_HISTORY_TABLE
+                / "part.parquet"
             )
-            table = INDUSTRY_MEMBERSHIP_HISTORY_TABLE
-            key = ["member_symbol", "industry_standard", "effective_from"]
+            existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
+            try:
+                merged, report = merge_index_membership_frames(existing, incoming)
+            except ValueError as exc:
+                raise TushareIngestionBlocked(str(exc)) from exc
+            self._publish_files([(target, merged)])
+            return {
+                "status": "published",
+                "published_rows": report["added_rows"],
+                "policy": "complete new dates append; same-date conflicts reject",
+            }
+
+        incoming = normalize_industry_membership_history(
+            frame.to_dicts(),
+            source=SOURCE,
+        )
+        table = INDUSTRY_MEMBERSHIP_HISTORY_TABLE
+        key = ["member_symbol", "industry_standard", "effective_from"]
         if not incoming.is_empty() and spec.kind == "pit_industry":
             incoming = incoming.with_columns(pl.lit(self.config.end).alias("source_snapshot_date"))
         target = self.config.data_dir / "pit_reference" / "history" / table / "part.parquet"

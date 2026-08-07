@@ -17,10 +17,11 @@ from uuid import uuid4
 import polars as pl
 
 from app.services.ingestion_manifest import stable_content_hash
+from app.plugins.pit_history.storage import INDEX_MEMBERSHIP_HISTORY_TABLE
 
 
 SOURCE = "hithink"
-INDEX_CONSTITUENTS_TABLE = "index_constituents_snapshots"
+INDEX_CONSTITUENTS_TABLE = INDEX_MEMBERSHIP_HISTORY_TABLE
 THS_SECTOR_CONSTITUENTS_TABLE = "ths_sector_constituents_snapshots"
 INSTRUMENT_LIFECYCLE_TABLE = "instrument_lifecycle_observed"
 PARSER_VERSION = "hithink_snapshot_v1"
@@ -88,7 +89,7 @@ def normalize_index_constituents(
             "member_code": _text(item.get("ticker")),
             "member_name": _text(item.get("name")),
             "snapshot_date": snapshot_date,
-            "source_timestamp": source_timestamp,
+            "source_update_date": None,
             "source": SOURCE,
             "provenance": "snapshot_frozen",
             "snapshot_hash": snapshot_hash,
@@ -102,7 +103,7 @@ def normalize_index_constituents(
         pl.col("member_code").cast(pl.String),
         pl.col("member_name").cast(pl.String),
         pl.col("snapshot_date").cast(pl.Date),
-        pl.col("source_timestamp").cast(pl.Int64, strict=False),
+        pl.col("source_update_date").cast(pl.Date),
         pl.col("source").cast(pl.String),
         pl.col("provenance").cast(pl.String),
         pl.col("snapshot_hash").cast(pl.String),
@@ -260,4 +261,3 @@ def read_latest_snapshot(data_dir: Path, table: str) -> pl.DataFrame:
     if not partitions:
         return pl.DataFrame()
     return pl.read_parquet(partitions[-1])
-

@@ -26,8 +26,8 @@ def main() -> None:
     parser.add_argument("--snapshot-date", default=date.today().isoformat())
     parser.add_argument(
         "--indices",
-        default="000300.SH",
-        help="Comma-separated standard index thscodes, e.g. 000300.SH,000905.SH",
+        default="000300.SH,000905.SH,000906.SH,000852.SH",
+        help="Comma-separated standard index thscodes",
     )
     parser.add_argument(
         "--sector-tags",
