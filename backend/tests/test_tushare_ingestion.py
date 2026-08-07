@@ -349,14 +349,21 @@ def test_reference_publish_keeps_existing_instrument_and_adds_gap(tmp_path):
     assert lifecycle.exists()
 
 
-def test_pit_index_publish_creates_effective_interval_table(tmp_path):
-    client = _Client({
-        "index_weight": [{
+def _index_weight_rows(snapshot: str, *, start: int = 600000) -> list[dict]:
+    return [
+        {
             "index_code": "000300.SH",
-            "con_code": "000001.SZ",
-            "trade_date": "20250102",
-            "weight": 0.5,
-        }]
+            "con_code": f"{start + index}.SH",
+            "trade_date": snapshot,
+            "weight": 100 / 300,
+        }
+        for index in range(300)
+    ]
+
+
+def test_pit_index_publish_creates_daily_snapshot_table(tmp_path):
+    client = _Client({
+        "index_weight": _index_weight_rows("20250102")
     })
     engine = TushareDatasetIngestion(
         IngestionConfig(tmp_path, "pit", start=date(2025, 1, 1), end=date(2025, 12, 31), publish=True),
@@ -367,50 +374,67 @@ def test_pit_index_publish_creates_effective_interval_table(tmp_path):
     engine.collect((spec,), indexes=["000300.SH"])
     engine.publish((spec,))
 
-    target = tmp_path / "pit_reference/history/index_membership_events/part.parquet"
+    target = tmp_path / "pit_reference/history/index_membership_history/part.parquet"
     row = pl.read_parquet(target).row(0, named=True)
     assert row["index_symbol"] == "000300.SH"
-    assert row["effective_from"] == date(2025, 1, 2)
-    assert row["source_snapshot_date"] == date(2025, 1, 2)
+    assert row["snapshot_date"] == date(2025, 1, 2)
+    assert row["source"] == "tushare_proxy"
 
 
-def test_index_weight_incremental_rebuilds_intervals_without_open_overlap(tmp_path):
+def test_index_weight_rejects_incomplete_daily_snapshot(tmp_path):
+    engine = TushareDatasetIngestion(
+        IngestionConfig(
+            tmp_path,
+            "incomplete-index",
+            start=date(2025, 1, 2),
+            end=date(2025, 1, 2),
+            publish=True,
+        ),
+        _Client({"index_weight": _index_weight_rows("20250102")[:299]}),
+    )
+    spec = DATASET_SPECS["index_weight"]
+
+    engine.collect((spec,), indexes=["000300.SH"])
+
+    with pytest.raises(TushareIngestionBlocked, match="incomplete daily membership"):
+        engine.publish((spec,))
+    assert not (
+        tmp_path / "pit_reference/history/index_membership_history/part.parquet"
+    ).exists()
+
+
+def test_index_weight_incremental_retains_each_complete_daily_snapshot(tmp_path):
     first = TushareDatasetIngestion(
         IngestionConfig(tmp_path, "weights-1", start=date(2025, 1, 2), end=date(2025, 1, 2), publish=True),
-        _Client({
-            "index_weight": [
-                {"index_code": "000300.SH", "con_code": "000001.SZ", "trade_date": "20250102", "weight": 1},
-                {"index_code": "000300.SH", "con_code": "000002.SZ", "trade_date": "20250102", "weight": 1},
-            ]
-        }),
+        _Client({"index_weight": _index_weight_rows("20250102")}),
     )
     spec = DATASET_SPECS["index_weight"]
     first.collect((spec,), indexes=["000300.SH"])
     first.publish((spec,))
     second = TushareDatasetIngestion(
         IngestionConfig(tmp_path, "weights-2", start=date(2025, 2, 3), end=date(2025, 2, 3), publish=True),
-        _Client({
-            "index_weight": [
-                {"index_code": "000300.SH", "con_code": "000001.SZ", "trade_date": "20250203", "weight": 1},
-            ]
-        }),
+        _Client({"index_weight": _index_weight_rows("20250203", start=600001)}),
     )
     second.collect((spec,), indexes=["000300.SH"])
     second.publish((spec,))
 
     memberships = pl.read_parquet(
-        tmp_path / "pit_reference/history/index_membership_events/part.parquet"
-    ).sort("member_symbol")
-    assert memberships.height == 2
-    assert memberships.filter(pl.col("member_symbol") == "000001.SZ").select(
-        "effective_from", "effective_to"
-    ).row(0) == (date(2025, 1, 2), None)
-    assert memberships.filter(pl.col("member_symbol") == "000002.SZ").select(
-        "effective_from", "effective_to"
-    ).row(0) == (date(2025, 1, 2), date(2025, 2, 3))
+        tmp_path / "pit_reference/history/index_membership_history/part.parquet"
+    ).sort(["snapshot_date", "member_symbol"])
+    assert memberships.height == 600
+    assert memberships.group_by("snapshot_date").len().sort("snapshot_date").to_dicts() == [
+        {"snapshot_date": date(2025, 1, 2), "len": 300},
+        {"snapshot_date": date(2025, 2, 3), "len": 300},
+    ]
+    assert memberships.filter(pl.col("member_symbol") == "600000.SH")[
+        "snapshot_date"
+    ].to_list() == [date(2025, 1, 2)]
+    assert memberships.filter(pl.col("member_symbol") == "600300.SH")[
+        "snapshot_date"
+    ].to_list() == [date(2025, 2, 3)]
     audit = second.audit((spec,))
     assert audit["status"] == "healthy"
-    assert audit["datasets"]["index_weight"]["pit_overlap_intervals"] == 0
+    assert audit["datasets"]["index_weight"]["pit_membership_validation"]["usable"] is True
 
 
 def test_weekly_audit_detects_financial_and_valuation_lookahead(tmp_path):

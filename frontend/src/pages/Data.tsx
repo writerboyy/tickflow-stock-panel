@@ -560,11 +560,11 @@ export function Data() {
             localBadgeSuffix={pitBadgeSuffix}
             subLabel={pitSubLabel}
             fieldTabs={[
-              { label: '指数成分', table: 'pit_index_membership_events' },
+              { label: '指数成分', table: 'pit_index_membership_history' },
               { label: '行业历史', table: 'pit_industry_membership_history' },
               { label: '生命周期', table: 'pit_instrument_lifecycle_events' },
             ] as FieldTab[]}
-            onShowFields={(t) => setSchemaTable(t ?? 'pit_index_membership_events')}
+            onShowFields={(t) => setSchemaTable(t ?? 'pit_index_membership_history')}
             onSettings={() => setOpenSettings(v => v === 'pit-reference' ? null : 'pit-reference')}
             settingsOpen={openSettings === 'pit-reference'}
           />

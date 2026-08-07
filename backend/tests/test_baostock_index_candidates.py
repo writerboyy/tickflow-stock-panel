@@ -22,7 +22,7 @@ from app.plugins.baostock.socket_proxy import (
     parse_http_proxy_url,
 )
 from app.plugins.pit_history.storage import (
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     normalize_instrument_lifecycle_events,
     publish_history_table,
@@ -236,7 +236,7 @@ def test_baostock_collector_publishes_candidate_snapshots_and_manifest(tmp_path)
         / "000300.SH_2020-01-03_2020-01-06.json"
     )
     assert manifest.exists()
-    assert not table_path(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE).exists()
+    assert not table_path(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE).exists()
 
 
 def test_baostock_lifecycle_collector_publishes_recent_overlap_and_keeps_existing(tmp_path):

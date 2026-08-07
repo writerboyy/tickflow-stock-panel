@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 
 from app.plugins.pit_history.storage import (
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
-    normalize_index_membership_events,
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
+    normalize_index_membership_history,
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
     publish_history_table,
@@ -15,100 +15,95 @@ from app.plugins.pit_history.storage import (
     summarize_industry_standards,
     validate_industry_history_coverage,
     summarize_lifecycle_completeness,
-    validate_index_membership_coverage,
+    validate_index_membership_history,
 )
 from scripts.build_pit_history_from_raw import build_index_history, read_raw_rows
 
 
-def test_index_history_rows_become_pit_intervals():
-    frame = normalize_index_membership_events(
+def test_index_history_rows_become_daily_snapshots():
+    frame = normalize_index_membership_history(
         [
             {
                 "品种代码": "600519",
                 "品种名称": "贵州茅台",
-                "纳入日期": "2005-04-08",
-                "剔除日期": "",
+                "快照日期": "2025-04-25",
             },
             {
                 "品种代码": "000001",
                 "品种名称": "平安银行",
-                "纳入日期": "2012/01/04",
-                "剔除日期": "2014/06/16",
+                "快照日期": "2025/04/25",
             },
         ],
         index_symbol="000300.SH",
         source="fixture",
     )
 
-    rows = frame.select([
-        "index_symbol",
-        "member_symbol",
-        "effective_from",
-        "effective_to",
-        "provenance",
-    ]).to_dicts()
+    rows = frame.select(
+        [
+            "index_symbol",
+            "member_symbol",
+            "snapshot_date",
+            "provenance",
+        ]
+    ).to_dicts()
     assert rows == [
         {
             "index_symbol": "000300.SH",
-            "member_symbol": "600519.SH",
-            "effective_from": date(2005, 4, 8),
-            "effective_to": None,
-            "provenance": "historical_event",
+            "member_symbol": "000001.SZ",
+            "snapshot_date": date(2025, 4, 25),
+            "provenance": "dated_snapshot",
         },
         {
             "index_symbol": "000300.SH",
-            "member_symbol": "000001.SZ",
-            "effective_from": date(2012, 1, 4),
-            "effective_to": date(2014, 6, 16),
-            "provenance": "historical_event",
+            "member_symbol": "600519.SH",
+            "snapshot_date": date(2025, 4, 25),
+            "provenance": "dated_snapshot",
         },
     ]
 
 
 def test_index_history_strict_coverage_fails_incomplete_hs300():
-    frame = normalize_index_membership_events(
+    frame = normalize_index_membership_history(
         [
-            {"品种代码": "600519", "纳入日期": "2005-04-08"},
-            {"品种代码": "000001", "纳入日期": "2005-04-08"},
+            {"品种代码": "600519", "快照日期": "2025-04-25"},
+            {"品种代码": "000001", "快照日期": "2025-04-25"},
         ],
         index_symbol="000300.SH",
         source="fixture",
     )
 
-    coverage = validate_index_membership_coverage(frame, index_symbol="000300.SH")
+    coverage = validate_index_membership_history(frame, index_symbol="000300.SH")
 
     assert coverage["usable"] is False
     assert coverage["status"] == "incomplete"
-    assert coverage["coverage_checks"][0] == {
-        "date": "2021-08-02",
+    assert coverage["invalid_snapshot_dates"][0] == {
+        "index_symbol": "000300.SH",
+        "snapshot_date": "2025-04-25",
         "members": 2,
-        "expected_min_members": 250,
-        "ok": False,
+        "expected_members": 300,
     }
 
 
-def test_index_history_strict_coverage_passes_complete_hs300_intervals():
-    raw_rows = [
-        {"品种代码": f"{600000 + index}", "纳入日期": "2020-01-01"}
-        for index in range(300)
-    ]
-    frame = normalize_index_membership_events(
+def test_index_history_strict_coverage_passes_complete_hs300_snapshot():
+    raw_rows = [{"品种代码": f"{600000 + index}", "快照日期": "2025-04-25"} for index in range(300)]
+    frame = normalize_index_membership_history(
         raw_rows,
         index_symbol="000300.SH",
         source="fixture",
     )
 
-    coverage = validate_index_membership_coverage(frame, index_symbol="000300.SH")
+    coverage = validate_index_membership_history(frame, index_symbol="000300.SH")
 
     assert coverage["usable"] is True
-    assert [item["members"] for item in coverage["coverage_checks"]] == [300, 300, 300]
+    assert coverage["snapshot_dates"] == 1
+    assert coverage["invalid_snapshot_dates"] == []
 
 
 def test_build_index_history_rejects_incomplete_strict_hs300(tmp_path):
     with pytest.raises(ValueError, match="incomplete strict index history"):
         build_index_history(
             data_dir=tmp_path,
-            raw_rows=[{"品种代码": "600519", "纳入日期": "2005-04-08"}],
+            raw_rows=[{"品种代码": "600519", "快照日期": "2025-04-25"}],
             index_symbol="000300.SH",
             source="fixture",
             logical_snapshot="2026-08-02",
@@ -140,12 +135,14 @@ def test_industry_history_derives_effective_to_from_next_change():
         source="fixture",
     )
 
-    rows = frame.select([
-        "member_symbol",
-        "industry_code",
-        "effective_from",
-        "effective_to",
-    ]).to_dicts()
+    rows = frame.select(
+        [
+            "member_symbol",
+            "industry_code",
+            "effective_from",
+            "effective_to",
+        ]
+    ).to_dicts()
     assert rows == [
         {
             "member_symbol": "600519.SH",
@@ -186,7 +183,10 @@ def test_industry_summary_requires_one_standard_before_joining():
     summary = summarize_industry_standards(frame)
 
     assert summary["requires_industry_standard"] is True
-    assert [item["industry_standard"] for item in summary["standards"]] == ["申万行业", "证监会行业"]
+    assert [item["industry_standard"] for item in summary["standards"]] == [
+        "申万行业",
+        "证监会行业",
+    ]
 
 
 def test_industry_history_accepts_public_raw_columns():
@@ -205,12 +205,14 @@ def test_industry_history_accepts_public_raw_columns():
         source="fixture",
     )
 
-    assert frame.select([
-        "member_symbol",
-        "member_name",
-        "industry_name",
-        "effective_from",
-    ]).to_dicts() == [
+    assert frame.select(
+        [
+            "member_symbol",
+            "member_name",
+            "industry_name",
+            "effective_from",
+        ]
+    ).to_dicts() == [
         {
             "member_symbol": "600519.SH",
             "member_name": "贵州茅台",
@@ -303,20 +305,17 @@ def test_industry_history_coverage_passes_single_standard_without_overlap():
 
 
 def test_strict_index_thresholds_are_specific_to_index_family():
-    frame = normalize_index_membership_events(
-        [
-            {"品种代码": f"600{index:03d}", "纳入日期": "2020-01-01"}
-            for index in range(300)
-        ],
+    frame = normalize_index_membership_history(
+        [{"品种代码": f"600{index:03d}", "快照日期": "2025-04-25"} for index in range(300)],
         index_symbol="000905.SH",
         source="fixture",
     )
 
-    coverage = validate_index_membership_coverage(frame, index_symbol="000905.SH")
+    coverage = validate_index_membership_history(frame, index_symbol="000905.SH")
 
     assert coverage["usable"] is False
-    assert coverage["coverage_checks"][0]["expected_min_members"] == 450
-    assert coverage["coverage_checks"][0]["members"] == 300
+    assert coverage["invalid_snapshot_dates"][0]["expected_members"] == 500
+    assert coverage["invalid_snapshot_dates"][0]["members"] == 300
 
 
 def test_lifecycle_summary_marks_partial_without_decision_period():
@@ -414,22 +413,24 @@ def test_lifecycle_accepts_exchange_delist_columns():
 
 
 def test_publish_history_table_round_trips(tmp_path):
-    frame = normalize_index_membership_events(
-        [{"品种代码": "600519", "纳入日期": "2005-04-08"}],
+    frame = normalize_index_membership_history(
+        [{"品种代码": "600519", "快照日期": "2025-04-25"}],
         index_symbol="000300.SH",
         source="fixture",
     )
 
-    count = publish_history_table(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE, frame)
+    count = publish_history_table(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE, frame)
 
     assert count == 1
-    assert read_history_table(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE).to_dicts() == frame.to_dicts()
+    assert (
+        read_history_table(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE).to_dicts() == frame.to_dicts()
+    )
 
 
 def test_build_index_history_records_manifest_and_published_table(tmp_path):
     count = build_index_history(
         data_dir=tmp_path,
-        raw_rows=[{"品种代码": "600519", "纳入日期": "2005-04-08"}],
+        raw_rows=[{"品种代码": "600519", "快照日期": "2025-04-25"}],
         index_symbol="000300.SH",
         source="fixture",
         logical_snapshot="2026-08-02",
@@ -437,14 +438,14 @@ def test_build_index_history_records_manifest_and_published_table(tmp_path):
     )
 
     assert count == 1
-    frame = read_history_table(tmp_path, INDEX_MEMBERSHIP_EVENTS_TABLE)
+    frame = read_history_table(tmp_path, INDEX_MEMBERSHIP_HISTORY_TABLE)
     assert frame.select("member_symbol").to_series().to_list() == ["600519.SH"]
     manifest = (
         tmp_path
         / "ext_data"
         / "_ingestion"
         / "pit_history"
-        / INDEX_MEMBERSHIP_EVENTS_TABLE
+        / INDEX_MEMBERSHIP_HISTORY_TABLE
         / "2026-08-02.json"
     )
     assert manifest.exists()

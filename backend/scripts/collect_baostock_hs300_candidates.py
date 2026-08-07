@@ -1,8 +1,8 @@
 """Collect BaoStock HS300 constituent candidate snapshots.
 
 This script publishes dated candidate snapshots under
-pit_reference/baostock/index_constituent_candidates. It never writes the strict
-pit_reference/history/index_membership_events table.
+pit_reference/baostock/index_constituent_candidates. It never writes the
+canonical pit_reference/history/index_membership_history table.
 """
 
 from __future__ import annotations

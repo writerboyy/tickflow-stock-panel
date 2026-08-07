@@ -903,16 +903,17 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "asset_type": "资产类型(etf)",
         "source": "数据源",
     },
-    "pit_index_membership_events": {
+    "pit_index_membership_history": {
         "index_symbol": "指数代码",
+        "index_name": "指数名称",
         "member_symbol": "成分证券代码",
         "member_code": "成分证券纯数字代码",
         "member_name": "成分证券名称",
-        "effective_from": "PIT 生效开始日期(含)",
-        "effective_to": "PIT 生效结束日期(不含,为空表示仍有效或来源未给出)",
+        "snapshot_date": "成分快照交易日",
+        "source_update_date": "来源更新时间",
         "source": "原始来源",
-        "provenance": "来源口径,历史事件为 historical_event",
-        "raw_hash": "原始行哈希",
+        "provenance": "来源口径,逐日历史为 dated_snapshot",
+        "snapshot_hash": "来源快照哈希",
     },
     "pit_industry_membership_history": {
         "member_symbol": "证券代码",
@@ -955,7 +956,7 @@ _SCHEMA_VIEWS: dict[str, str] = {
     "minute": "kline_minute",
     "adj_factor": "adj_factor",
     "instruments": "instruments",
-    "pit_index_membership_events": "pit_index_membership_events",
+    "pit_index_membership_history": "pit_index_membership_history",
     "pit_industry_membership_history": "pit_industry_membership_history",
     "pit_instrument_lifecycle_events": "pit_instrument_lifecycle_events",
 }

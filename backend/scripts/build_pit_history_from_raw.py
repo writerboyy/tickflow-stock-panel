@@ -1,7 +1,8 @@
 """Build canonical PIT history tables from cached raw public-data files.
 
 The script is a one-shot/offline normalizer. It does not install or register a
-runtime data provider, and it never uses current snapshots to backfill history.
+runtime data provider, and it never expands dated snapshots into inferred
+history.
 """
 
 from __future__ import annotations
@@ -19,16 +20,16 @@ import polars as pl
 
 from app.config import settings
 from app.plugins.pit_history.storage import (
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     PARSER_VERSION,
     SOURCE,
-    normalize_index_membership_events,
+    normalize_index_membership_history,
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
     publish_history_table,
-    validate_index_membership_coverage,
+    validate_index_membership_history,
 )
 from app.services.ingestion_manifest import (
     archive_source_payload,
@@ -47,6 +48,7 @@ _HISTORY_HEADERS = {
     "剔除日期",
     "变更日期",
     "终止上市日期",
+    "快照日期",
 }
 
 
@@ -132,7 +134,9 @@ def _clean_frame(frame: pd.DataFrame) -> list[dict]:
     frame = frame.dropna(how="all")
     frame.columns = [str(col).strip() for col in frame.columns]
     return json.loads(
-        frame.astype(object).where(pd.notnull(frame), None).to_json(
+        frame.astype(object)
+        .where(pd.notnull(frame), None)
+        .to_json(
             orient="records",
             force_ascii=False,
             date_format="iso",
@@ -204,7 +208,9 @@ def _publish(
         source_content_hash=source_hash,
         content_hash=stable_content_hash(frame.to_dicts()) if count else None,
         published_rows=count,
-        provenance="historical_event",
+        provenance=(
+            "dated_snapshot" if table == INDEX_MEMBERSHIP_HISTORY_TABLE else "historical_event"
+        ),
         upstream_source=source,
         empty_reason=None if count else "source_empty",
     )
@@ -221,26 +227,22 @@ def build_index_history(
     raw_label: str,
     validate_strict: bool = False,
 ) -> int:
-    frame = normalize_index_membership_events(
+    frame = normalize_index_membership_history(
         raw_rows,
         index_symbol=index_symbol,
         source=source,
     )
     if validate_strict:
-        coverage = validate_index_membership_coverage(frame, index_symbol=index_symbol)
+        coverage = validate_index_membership_history(frame, index_symbol=index_symbol)
         if not coverage["usable"]:
-            failed = ", ".join(
-                f"{item['date']}={item['members']}/{item['expected_min_members']}"
-                for item in coverage["coverage_checks"]
-                if not item["ok"]
-            )
             raise ValueError(
-                f"incomplete strict index history for {index_symbol.upper()}: {failed}; "
-                "pass --allow-incomplete-index only for archived non-backtest reference data"
+                f"incomplete strict index history for {index_symbol.upper()}: "
+                f"{coverage['message']}; pass --allow-incomplete-index only for "
+                "archived non-backtest reference data"
             )
     return _publish(
         data_dir=data_dir,
-        table=INDEX_MEMBERSHIP_EVENTS_TABLE,
+        table=INDEX_MEMBERSHIP_HISTORY_TABLE,
         source=source,
         logical_snapshot=logical_snapshot,
         raw_label=raw_label,
@@ -298,13 +300,17 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser.add_argument("--data-dir", type=Path, default=settings.data_dir)
     parser.add_argument("--logical-snapshot", default=date.today().isoformat())
     parser.add_argument("--encoding", default="utf-8")
-    parser.add_argument("--index-history-file", type=Path)
+    parser.add_argument(
+        "--index-history-file",
+        type=Path,
+        help="Cached dated index-constituent snapshots; each row needs a snapshot date",
+    )
     parser.add_argument("--index-symbol", default="000300.SH")
     parser.add_argument("--index-source", default="raw")
     parser.add_argument(
         "--allow-incomplete-index",
         action="store_true",
-        help="Archive/publish incomplete index history instead of failing strict PIT coverage checks",
+        help="Archive/publish incomplete index snapshots instead of failing exact-count checks",
     )
     parser.add_argument("--industry-history-file", type=Path)
     parser.add_argument("--industry-source", default="raw")
@@ -320,7 +326,7 @@ def main(argv: Iterable[str] | None = None) -> None:
     published: dict[str, int] = {}
     if args.index_history_file:
         rows = read_raw_rows(args.index_history_file, encoding=args.encoding)
-        published[INDEX_MEMBERSHIP_EVENTS_TABLE] = build_index_history(
+        published[INDEX_MEMBERSHIP_HISTORY_TABLE] = build_index_history(
             data_dir=args.data_dir,
             raw_rows=rows,
             index_symbol=args.index_symbol,

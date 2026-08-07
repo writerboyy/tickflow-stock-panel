@@ -19,10 +19,11 @@ import polars as pl
 from app.plugins.pit_history.storage import (
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
-    normalize_index_membership_events,
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
+    normalize_index_membership_history,
     normalize_industry_membership_history,
     normalize_instrument_lifecycle_events,
+    validate_index_membership_history,
 )
 from app.services.ext_data import ExtConfig, ExtConfigStore, ExtField
 from app.services.ingestion_manifest import (
@@ -196,7 +197,7 @@ def _normalize_symbol(value: object) -> str | None:
         return None
     for source, target in {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}.items():
         if symbol.endswith(source):
-            return f"{symbol[:-len(source)]}{target}"
+            return f"{symbol[: -len(source)]}{target}"
     if "." in symbol:
         return symbol
     if len(symbol) == 6 and symbol.isdigit():
@@ -276,11 +277,13 @@ def _empty_frame(spec: TushareDatasetSpec) -> pl.DataFrame:
     schema: dict[str, pl.DataType] = {}
     for field in spec.fields:
         schema[field.name] = _NUMERIC_DTYPES.get(field.dtype, pl.String)
-    schema.update({
-        "source": pl.String,
-        "collected_at": pl.String,
-        "source_revision_hash": pl.String,
-    })
+    schema.update(
+        {
+            "source": pl.String,
+            "collected_at": pl.String,
+            "source_revision_hash": pl.String,
+        }
+    )
     if spec.revisioned:
         schema["provider_revision_flag"] = pl.String
     return pl.DataFrame(schema=schema)
@@ -386,7 +389,9 @@ def normalize_dataset_rows(
         "rows": frame.height,
         "rejected_rows": rejected,
         "duplicate_keys": 0,
-        "symbols": int(frame["symbol"].n_unique()) if frame.height and "symbol" in frame.columns else 0,
+        "symbols": int(frame["symbol"].n_unique())
+        if frame.height and "symbol" in frame.columns
+        else 0,
         "min_date": min(valid_dates).isoformat() if valid_dates else None,
         "max_date": max(valid_dates).isoformat() if valid_dates else None,
         "null_rates": null_rates,
@@ -401,11 +406,13 @@ def extension_config(
     factor_ready: bool = False,
 ) -> ExtConfig:
     fields = [ExtField(field.name, field.dtype, field.label) for field in spec.fields]
-    fields.extend([
-        ExtField("source", "string", "数据来源"),
-        ExtField("collected_at", "string", "采集时间"),
-        ExtField("source_revision_hash", "string", "供应商修订哈希"),
-    ])
+    fields.extend(
+        [
+            ExtField("source", "string", "数据来源"),
+            ExtField("collected_at", "string", "采集时间"),
+            ExtField("source_revision_hash", "string", "供应商修订哈希"),
+        ]
+    )
     if spec.revisioned:
         fields.append(ExtField("provider_revision_flag", "string", "供应商修订标记"))
     return ExtConfig(
@@ -417,8 +424,12 @@ def extension_config(
             f"Tushare Proxy {spec.api_name} 规范历史；主键="
             f"{','.join(spec.normalized_primary_key)}；逻辑日期={spec.logical_date}"
         ),
-        symbol_map={"type": "mapped", "col": "symbol"} if any(field.name == "symbol" for field in spec.fields) else {},
-        code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"} if any(field.name == "symbol" for field in spec.fields) else {},
+        symbol_map={"type": "mapped", "col": "symbol"}
+        if any(field.name == "symbol" for field in spec.fields)
+        else {},
+        code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"}
+        if any(field.name == "symbol" for field in spec.fields)
+        else {},
         schema_version=1,
         allowed_usage=[
             "display",
@@ -442,9 +453,7 @@ def ensure_extension_configs(
     for spec in specs:
         if spec.kind == "extension":
             existing = store.get(spec.table_id)
-            ready = factor_ready or bool(
-                existing and "factor-input" in existing.allowed_usage
-            )
+            ready = factor_ready or bool(existing and "factor-input" in existing.allowed_usage)
             store.upsert(extension_config(spec, factor_ready=ready))
 
 
@@ -495,9 +504,7 @@ def _batch_requests(
     incremental_param = _INCREMENTAL_DATE_PARAMS.get(spec.api_name)
     if config.incremental and incremental_param:
         dates = (
-            sorted(set(trade_dates))
-            if incremental_param == "trade_date" and trade_dates
-            else []
+            sorted(set(trade_dates)) if incremental_param == "trade_date" and trade_dates else []
         )
         if not dates:
             current = config.start
@@ -651,8 +658,10 @@ class TushareDatasetIngestion:
                     self.config.run_id,
                 )
                 prior = (state.get("batches") or {}).get(batch_id) or {}
-                if staging_compatible and prior.get("status") in {"completed", "valid_empty"} and (
-                    prior.get("status") == "valid_empty" or path.exists()
+                if (
+                    staging_compatible
+                    and prior.get("status") in {"completed", "valid_empty"}
+                    and (prior.get("status") == "valid_empty" or path.exists())
                 ):
                     rows += int(prior.get("row_count") or 0)
                     continue
@@ -731,13 +740,7 @@ class TushareDatasetIngestion:
                     batch["empty_reason"] = "endpoint_confirmed_by_nonempty_batch"
                     batches[batch_id] = batch
                 empty_unconfirmed = []
-            status = (
-                "failed"
-                if failures
-                else "blocked"
-                if empty_unconfirmed
-                else "completed"
-            )
+            status = "failed" if failures else "blocked" if empty_unconfirmed else "completed"
             manifest = update_ingestion_manifest(
                 self.config.data_dir,
                 SOURCE,
@@ -834,9 +837,7 @@ class TushareDatasetIngestion:
         logical_dates = [_parse_date(item) for item in frame[spec.logical_date].to_list()]
         if any(item is None for item in logical_dates):
             raise TushareIngestionBlocked(f"{spec.api_name} contains invalid logical dates")
-        frame = frame.with_columns(
-            pl.Series("_partition_date", logical_dates, dtype=pl.Date)
-        )
+        frame = frame.with_columns(pl.Series("_partition_date", logical_dates, dtype=pl.Date))
         pending: list[tuple[Path, pl.DataFrame]] = []
         key = list(spec.normalized_primary_key)
         added = 0
@@ -856,7 +857,9 @@ class TushareDatasetIngestion:
                 existing,
                 incoming,
                 key=key,
-                compare_columns=[field.name for field in spec.fields if field.name not in spec.overlap_fields],
+                compare_columns=[
+                    field.name for field in spec.fields if field.name not in spec.overlap_fields
+                ],
                 label=spec.table_id,
                 allow_revisions=spec.revisioned,
             )
@@ -891,18 +894,17 @@ class TushareDatasetIngestion:
         pending: list[tuple[Path, pl.DataFrame]] = []
         report: dict[str, Any] = {}
 
-        shares = (
-            frame.select(
-                "symbol",
-                pl.col("trade_date").alias("period_end"),
-                pl.col("trade_date").alias("announce_date"),
-                (pl.col("total_share") * 10_000.0).alias("total_shares"),
-                (pl.col("float_share") * 10_000.0).alias("float_shares"),
-            )
-            .filter(pl.col("total_shares").is_not_null() | pl.col("float_shares").is_not_null())
-        )
+        shares = frame.select(
+            "symbol",
+            pl.col("trade_date").alias("period_end"),
+            pl.col("trade_date").alias("announce_date"),
+            (pl.col("total_share") * 10_000.0).alias("total_shares"),
+            (pl.col("float_share") * 10_000.0).alias("float_shares"),
+        ).filter(pl.col("total_shares").is_not_null() | pl.col("float_shares").is_not_null())
         shares_target = self.config.data_dir / "financials" / "shares" / "part.parquet"
-        shares_existing = pl.read_parquet(shares_target) if shares_target.exists() else pl.DataFrame()
+        shares_existing = (
+            pl.read_parquet(shares_target) if shares_target.exists() else pl.DataFrame()
+        )
         shares_merged, shares_report = _merge_existing_wins(
             shares_existing,
             shares,
@@ -952,17 +954,21 @@ class TushareDatasetIngestion:
                 / "part.parquet"
             )
             valuation_existing = (
-                pl.read_parquet(valuation_target)
-                if valuation_target.exists()
-                else pl.DataFrame()
+                pl.read_parquet(valuation_target) if valuation_target.exists() else pl.DataFrame()
             )
             valuation_merged, valuation_report = _merge_existing_wins(
                 valuation_existing,
                 day_frame,
                 key=["symbol", "date"],
                 compare_columns=[
-                    "raw_close", "total_shares", "float_shares", "market_cap",
-                    "float_market_cap", "pe_ttm", "pb", "ps_ttm",
+                    "raw_close",
+                    "total_shares",
+                    "float_shares",
+                    "market_cap",
+                    "float_market_cap",
+                    "pe_ttm",
+                    "pb",
+                    "ps_ttm",
                 ],
                 label="valuation_daily",
             )
@@ -998,69 +1004,21 @@ class TushareDatasetIngestion:
             )
             .sort(["index_symbol", "trade_date", "member_symbol"])
         )
-        frames: list[pl.DataFrame] = []
-        for index_symbol in sorted(frame["index_symbol"].drop_nulls().unique().to_list()):
-            index_frame = frame.filter(pl.col("index_symbol") == index_symbol)
-            events: list[dict[str, Any]] = []
-            snapshot_dates = sorted(
-                value
-                for value in (_parse_date(item) for item in index_frame["trade_date"].to_list())
-                if value is not None
-            )
-            snapshot_dates = sorted(set(snapshot_dates))
-            for member_symbol in sorted(index_frame["member_symbol"].drop_nulls().unique().to_list()):
-                member_dates = {
-                    value
-                    for value in (
-                        _parse_date(item)
-                        for item in index_frame.filter(
-                            pl.col("member_symbol") == member_symbol
-                        )["trade_date"].to_list()
-                    )
-                    if value is not None
-                }
-                effective_from: date | None = None
-                for snapshot_date in snapshot_dates:
-                    if snapshot_date in member_dates and effective_from is None:
-                        effective_from = snapshot_date
-                    elif snapshot_date not in member_dates and effective_from is not None:
-                        events.append({
-                            "member_symbol": member_symbol,
-                            "effective_from": effective_from,
-                            "effective_to": snapshot_date,
-                        })
-                        effective_from = None
-                if effective_from is not None:
-                    events.append({
-                        "member_symbol": member_symbol,
-                        "effective_from": effective_from,
-                        "effective_to": None,
-                    })
-
-            normalized = normalize_index_membership_events(
-                events,
-                index_symbol=index_symbol,
-                source=SOURCE,
-            )
-            if not normalized.is_empty():
-                normalized = normalized.with_columns(
-                    pl.col("effective_from").alias("source_snapshot_date")
-                )
-                events_frame = normalized
-            else:
-                events_frame = pl.DataFrame()
-            if not events_frame.is_empty():
-                frames.append(events_frame)
-        incoming = (
-            pl.concat(frames, how="diagonal_relaxed")
-            if frames
-            else pl.DataFrame()
+        incoming = normalize_index_membership_history(
+            frame.to_dicts(),
+            source=SOURCE,
         )
+        validation = validate_index_membership_history(incoming)
+        if not validation["usable"]:
+            raise TushareIngestionBlocked(
+                "index_weight cannot publish incomplete daily membership snapshots: "
+                f"{validation['invalid_snapshot_dates'][:5]}"
+            )
         target = (
             self.config.data_dir
             / "pit_reference"
             / "history"
-            / INDEX_MEMBERSHIP_EVENTS_TABLE
+            / INDEX_MEMBERSHIP_HISTORY_TABLE
             / "part.parquet"
         )
         existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
@@ -1069,21 +1027,15 @@ class TushareDatasetIngestion:
         merged, report = _merge_existing_wins(
             existing,
             incoming,
-            key=["index_symbol", "member_symbol", "effective_from"],
+            key=["index_symbol", "snapshot_date", "member_symbol"],
             compare_columns=[],
-            label=INDEX_MEMBERSHIP_EVENTS_TABLE,
+            label=INDEX_MEMBERSHIP_HISTORY_TABLE,
             compare_overlap=False,
         )
         return (target, merged), report["added_rows"]
 
     def _has_valid_empty_publication(self, spec: TushareDatasetSpec) -> bool:
-        root = (
-            self.config.data_dir
-            / "ext_data"
-            / "_ingestion"
-            / SOURCE
-            / spec.api_name
-        )
+        root = self.config.data_dir / "ext_data" / "_ingestion" / SOURCE / spec.api_name
         for path in sorted(root.glob("*.json"), reverse=True):
             try:
                 manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -1150,7 +1102,8 @@ class TushareDatasetIngestion:
         canonical_columns = [field.name for field in spec.fields]
         incoming = frame.select(canonical_columns)
         metadata_columns = [
-            column for column in ("provider_revision_flag", "source_revision_hash")
+            column
+            for column in ("provider_revision_flag", "source_revision_hash")
             if column in frame.columns
         ]
         if metadata_columns:
@@ -1187,8 +1140,7 @@ class TushareDatasetIngestion:
         # Select the highest provider revision deterministically. Every raw
         # version remains queryable in the revision archive by content hash.
         incoming = (
-            top_ranked
-            .sort([*spec.primary_key, "_provider_revision_rank", "source_revision_hash"])
+            top_ranked.sort([*spec.primary_key, "_provider_revision_rank", "source_revision_hash"])
             .unique(subset=list(spec.primary_key), keep="last")
             .select(canonical_columns)
             .sort(list(spec.primary_key))
@@ -1206,7 +1158,9 @@ class TushareDatasetIngestion:
             existing,
             incoming,
             key=list(spec.primary_key),
-            compare_columns=[column for column in incoming.columns if column not in spec.primary_key],
+            compare_columns=[
+                column for column in incoming.columns if column not in spec.primary_key
+            ],
             label=str(spec.canonical_target),
         )
         if report["conflicts"]:
@@ -1214,11 +1168,7 @@ class TushareDatasetIngestion:
                 f"{spec.api_name} canonical overlap conflicts: {report['conflicts'][:5]}"
             )
         revision_target = (
-            self.config.data_dir
-            / "financials"
-            / "_revisions"
-            / spec.api_name
-            / "part.parquet"
+            self.config.data_dir / "financials" / "_revisions" / spec.api_name / "part.parquet"
         )
         revision_existing = (
             pl.read_parquet(revision_target) if revision_target.exists() else pl.DataFrame()
@@ -1247,22 +1197,15 @@ class TushareDatasetIngestion:
         if frame.is_empty():
             return {"status": "valid_empty", "published_rows": 0}
         if spec.kind == "pit_index":
-            normalized_frames: list[pl.DataFrame] = []
-            for index_symbol in sorted(frame["index_symbol"].drop_nulls().unique().to_list()):
-                rows = frame.filter(pl.col("index_symbol") == index_symbol).to_dicts()
-                normalized_frames.append(
-                    normalize_index_membership_events(
-                        rows,
-                        index_symbol=index_symbol,
-                        source=SOURCE,
-                    )
+            incoming = normalize_index_membership_history(frame.to_dicts(), source=SOURCE)
+            validation = validate_index_membership_history(incoming)
+            if not validation["usable"]:
+                raise TushareIngestionBlocked(
+                    "PIT index dataset cannot publish incomplete daily membership snapshots: "
+                    f"{validation['invalid_snapshot_dates'][:5]}"
                 )
-            incoming = pl.concat(
-                [item for item in normalized_frames if not item.is_empty()],
-                how="diagonal_relaxed",
-            ) if any(not item.is_empty() for item in normalized_frames) else pl.DataFrame()
-            table = INDEX_MEMBERSHIP_EVENTS_TABLE
-            key = ["index_symbol", "member_symbol", "effective_from"]
+            table = INDEX_MEMBERSHIP_HISTORY_TABLE
+            key = ["index_symbol", "snapshot_date", "member_symbol"]
         else:
             incoming = normalize_industry_membership_history(
                 frame.to_dicts(),
@@ -1270,10 +1213,8 @@ class TushareDatasetIngestion:
             )
             table = INDUSTRY_MEMBERSHIP_HISTORY_TABLE
             key = ["member_symbol", "industry_standard", "effective_from"]
-        if not incoming.is_empty():
-            incoming = incoming.with_columns(
-                pl.lit(self.config.end).alias("source_snapshot_date")
-            )
+        if not incoming.is_empty() and spec.kind == "pit_industry":
+            incoming = incoming.with_columns(pl.lit(self.config.end).alias("source_snapshot_date"))
         target = self.config.data_dir / "pit_reference" / "history" / table / "part.parquet"
         existing = pl.read_parquet(target) if target.exists() else pl.DataFrame()
         merged, report = _merge_existing_wins(
@@ -1382,13 +1323,15 @@ class TushareDatasetIngestion:
             if asset_type == "stock":
                 lifecycle_rows = []
                 for row in frame.to_dicts():
-                    lifecycle_rows.append({
-                        "symbol": row.get("symbol"),
-                        "name": row.get("name"),
-                        "exchange": row.get("exchange"),
-                        "listed_date": row.get("list_date"),
-                        "delisted_date": row.get("delist_date"),
-                    })
+                    lifecycle_rows.append(
+                        {
+                            "symbol": row.get("symbol"),
+                            "name": row.get("name"),
+                            "exchange": row.get("exchange"),
+                            "listed_date": row.get("list_date"),
+                            "delisted_date": row.get("delist_date"),
+                        }
+                    )
                 lifecycle = normalize_instrument_lifecycle_events(
                     lifecycle_rows,
                     source=SOURCE,
@@ -1433,7 +1376,11 @@ class TushareDatasetIngestion:
                     pl.lit(snapshot_date).alias("source_snapshot_date"),
                 )
                 .select(
-                    "symbol", "change_date", "before_name", "after_name", "source",
+                    "symbol",
+                    "change_date",
+                    "before_name",
+                    "after_name",
+                    "source",
                     "source_snapshot_date",
                 )
             )
@@ -1446,7 +1393,11 @@ class TushareDatasetIngestion:
         key = list(spec.primary_key)
         if spec.api_name == "namechange":
             key = ["symbol", "change_date"]
-        common = [column for column in incoming.columns if column in existing.columns and column not in key]
+        common = [
+            column
+            for column in incoming.columns
+            if column in existing.columns and column not in key
+        ]
         merged, report = _merge_existing_wins(
             existing,
             incoming,
@@ -1508,11 +1459,7 @@ class TushareDatasetIngestion:
         datasets: dict[str, Any] = {}
         issues: list[dict[str, Any]] = []
         calendar_path = (
-            self.config.data_dir
-            / "pit_reference"
-            / "history"
-            / "trade_calendar"
-            / "part.parquet"
+            self.config.data_dir / "pit_reference" / "history" / "trade_calendar" / "part.parquet"
         )
         open_dates: set[date] = set()
         if calendar_path.exists():
@@ -1521,8 +1468,7 @@ class TushareDatasetIngestion:
                 open_dates = {
                     parsed
                     for row in calendar.select("cal_date", "is_open").to_dicts()
-                    if bool(row["is_open"])
-                    and (parsed := _parse_date(row["cal_date"])) is not None
+                    if bool(row["is_open"]) and (parsed := _parse_date(row["cal_date"])) is not None
                 }
         for spec in specs:
             if spec.kind == "extension":
@@ -1540,7 +1486,7 @@ class TushareDatasetIngestion:
                 paths = [target] if target.exists() else []
             elif spec.kind in {"pit_index", "pit_industry"}:
                 table = (
-                    INDEX_MEMBERSHIP_EVENTS_TABLE
+                    INDEX_MEMBERSHIP_HISTORY_TABLE
                     if spec.kind == "pit_index"
                     else INDUSTRY_MEMBERSHIP_HISTORY_TABLE
                 )
@@ -1562,7 +1508,9 @@ class TushareDatasetIngestion:
                 issues.append({"dataset": spec.api_name, **item})
                 continue
             frame = pl.concat([pl.read_parquet(path) for path in paths], how="diagonal_relaxed")
-            key = list(spec.normalized_primary_key if spec.kind == "extension" else spec.primary_key)
+            key = list(
+                spec.normalized_primary_key if spec.kind == "extension" else spec.primary_key
+            )
             if spec.api_name == "namechange":
                 key = ["symbol", "change_date"]
             elif spec.kind == "corporate_action":
@@ -1571,13 +1519,17 @@ class TushareDatasetIngestion:
             duplicate_keys = 0
             null_keys = 0
             if not missing_keys:
-                duplicate_keys = int(
-                    frame.group_by(key).len().filter(pl.col("len") > 1).height
-                )
+                duplicate_keys = int(frame.group_by(key).len().filter(pl.col("len") > 1).height)
                 null_keys = int(
-                    frame.filter(pl.any_horizontal(pl.col(column).is_null() for column in key)).height
+                    frame.filter(
+                        pl.any_horizontal(pl.col(column).is_null() for column in key)
+                    ).height
                 )
-            status = "healthy" if not missing_keys and not duplicate_keys and not null_keys else "unhealthy"
+            status = (
+                "healthy"
+                if not missing_keys and not duplicate_keys and not null_keys
+                else "unhealthy"
+            )
             item = {
                 "status": status,
                 "rows": frame.height,
@@ -1604,9 +1556,7 @@ class TushareDatasetIngestion:
                     item["missing_open_dates"] = [day.isoformat() for day in missing_dates[:20]]
                     if missing_dates:
                         item["status"] = "unhealthy"
-            if spec.kind == "financial" and {
-                "period_end", "announce_date"
-            } <= set(frame.columns):
+            if spec.kind == "financial" and {"period_end", "announce_date"} <= set(frame.columns):
                 front_look_rows = sum(
                     1
                     for period_value, announce_value in zip(
@@ -1621,15 +1571,15 @@ class TushareDatasetIngestion:
                 item["pit_front_look_rows"] = front_look_rows
                 if front_look_rows:
                     item["status"] = "unhealthy"
-            if spec.kind in {"pit_index", "pit_industry"}:
-                group_columns = (
-                    ("index_symbol", "member_symbol")
-                    if spec.kind == "pit_index"
-                    else ("member_symbol", "industry_standard")
-                )
+            if spec.kind == "pit_index":
+                membership_validation = validate_index_membership_history(frame)
+                item["membership_validation"] = membership_validation
+                if not membership_validation["usable"]:
+                    item["status"] = "unhealthy"
+            elif spec.kind == "pit_industry":
                 invalid_intervals, overlap_intervals = _interval_defects(
                     frame,
-                    group_columns,
+                    ("member_symbol", "industry_standard"),
                 )
                 item["invalid_intervals"] = invalid_intervals
                 item["overlap_intervals"] = overlap_intervals
@@ -1640,21 +1590,15 @@ class TushareDatasetIngestion:
                     self.config.data_dir
                     / "pit_reference"
                     / "history"
-                    / INDEX_MEMBERSHIP_EVENTS_TABLE
+                    / INDEX_MEMBERSHIP_HISTORY_TABLE
                     / "part.parquet"
                 )
                 memberships = (
-                    pl.read_parquet(membership_path)
-                    if membership_path.exists()
-                    else pl.DataFrame()
+                    pl.read_parquet(membership_path) if membership_path.exists() else pl.DataFrame()
                 )
-                invalid_intervals, overlap_intervals = _interval_defects(
-                    memberships,
-                    ("index_symbol", "member_symbol"),
-                )
-                item["pit_invalid_intervals"] = invalid_intervals
-                item["pit_overlap_intervals"] = overlap_intervals
-                if invalid_intervals or overlap_intervals:
+                membership_validation = validate_index_membership_history(memberships)
+                item["pit_membership_validation"] = membership_validation
+                if not membership_validation["usable"]:
                     item["status"] = "unhealthy"
             datasets[spec.api_name] = item
             if item["status"] != "healthy":
@@ -1670,9 +1614,7 @@ class TushareDatasetIngestion:
                 if "date" not in valuation.columns:
                     continue
                 announcement_columns = [
-                    column
-                    for column in valuation.columns
-                    if column.endswith("_announce_date")
+                    column for column in valuation.columns if column.endswith("_announce_date")
                 ]
                 for row in valuation.select("date", *announcement_columns).to_dicts():
                     visible_date = _parse_date(row["date"])
@@ -1686,11 +1628,13 @@ class TushareDatasetIngestion:
                         lookahead_rows += 1
             pit_checks["valuation_lookahead_rows"] = lookahead_rows
             if lookahead_rows:
-                issues.append({
-                    "dataset": "valuation_daily",
-                    "status": "unhealthy",
-                    "pit_front_look_rows": lookahead_rows,
-                })
+                issues.append(
+                    {
+                        "dataset": "valuation_daily",
+                        "status": "unhealthy",
+                        "pit_front_look_rows": lookahead_rows,
+                    }
+                )
         report = {
             "status": "healthy" if not issues else "unhealthy",
             "generated_at": _utc_now(),
@@ -1732,12 +1676,12 @@ class TushareDatasetIngestion:
                 "published_rows": int(manifest.get("published_rows") or 0),
                 "batches": len(batches),
                 "failed_batches": list(manifest.get("failed_batches") or []),
-                "empty_unconfirmed_batches": list(
-                    manifest.get("empty_unconfirmed_batches") or []
-                ),
+                "empty_unconfirmed_batches": list(manifest.get("empty_unconfirmed_batches") or []),
                 "logical_date": spec.logical_date,
                 "primary_key": list(spec.normalized_primary_key),
-                "symbols": int(frame["symbol"].n_unique()) if frame.height and "symbol" in frame.columns else 0,
+                "symbols": int(frame["symbol"].n_unique())
+                if frame.height and "symbol" in frame.columns
+                else 0,
                 "min_date": min(valid_dates).isoformat() if valid_dates else None,
                 "max_date": max(valid_dates).isoformat() if valid_dates else None,
                 "field_non_null_rate": non_null,
@@ -1794,7 +1738,11 @@ def _merge_existing_wins(
                 f"{label} {frame_name} has duplicate keys: {duplicates.head(5).to_dicts()}"
             )
     if existing.is_empty():
-        return incoming.sort(key), {"added_rows": incoming.height, "overlap_rows": 0, "conflicts": []}
+        return incoming.sort(key), {
+            "added_rows": incoming.height,
+            "overlap_rows": 0,
+            "conflicts": [],
+        }
     if incoming.is_empty():
         return existing.sort(key), {"added_rows": 0, "overlap_rows": 0, "conflicts": []}
     overlap = existing.join(incoming, on=key, how="inner", suffix="_incoming")
@@ -1827,7 +1775,11 @@ def _merge_daily_existing_wins(
 ) -> tuple[pl.DataFrame, dict[str, Any]]:
     key = ["symbol", "date"]
     if existing.is_empty():
-        return incoming.sort(key), {"added_rows": incoming.height, "overlap_rows": 0, "conflicts": []}
+        return incoming.sort(key), {
+            "added_rows": incoming.height,
+            "overlap_rows": 0,
+            "conflicts": [],
+        }
     overlap = existing.join(incoming, on=key, how="inner", suffix="_incoming")
     conflicts: list[dict[str, Any]] = []
     for row in overlap.to_dicts():
@@ -1841,7 +1793,9 @@ def _merge_daily_existing_wins(
             )
         ]
         if changed:
-            conflicts.append({"symbol": row["symbol"], "date": str(row["date"]), "columns": changed})
+            conflicts.append(
+                {"symbol": row["symbol"], "date": str(row["date"]), "columns": changed}
+            )
             if len(conflicts) >= 100:
                 break
     missing = incoming.join(existing.select(key), on=key, how="anti")

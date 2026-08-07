@@ -15,7 +15,7 @@ from app.plugins.hithink.storage import (
     publish_snapshot,
 )
 from app.plugins.pit_history.storage import (
-    INDEX_MEMBERSHIP_EVENTS_TABLE,
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     publish_history_table,
@@ -38,18 +38,19 @@ def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
 
     publish_history_table(
         tmp_path,
-        INDEX_MEMBERSHIP_EVENTS_TABLE,
+        INDEX_MEMBERSHIP_HISTORY_TABLE,
         pl.DataFrame(
             {
-                "index_symbol": ["000300.SH", "000300.SH"],
-                "member_symbol": ["600519.SH", "000001.SZ"],
-                "member_code": ["600519", "000001"],
-                "member_name": ["贵州茅台", "平安银行"],
-                "effective_from": [date(2005, 4, 8), date(2006, 1, 1)],
-                "effective_to": [date(2010, 7, 1), None],
-                "source": ["fixture", "fixture"],
-                "provenance": ["historical_event", "historical_event"],
-                "raw_hash": ["a", "b"],
+                "index_symbol": ["000300.SH"] * 300,
+                "index_name": ["沪深300"] * 300,
+                "member_symbol": [f"{600000 + index}.SH" for index in range(300)],
+                "member_code": [str(600000 + index) for index in range(300)],
+                "member_name": [f"member-{index}" for index in range(300)],
+                "snapshot_date": [date(2026, 8, 1)] * 300,
+                "source_update_date": [date(2026, 8, 1)] * 300,
+                "source": ["joinquant"] * 300,
+                "provenance": ["dated_snapshot"] * 300,
+                "snapshot_hash": [f"hash-{index}" for index in range(300)],
             }
         ),
     )
@@ -124,14 +125,18 @@ def test_pit_reference_status_summarizes_only_baostock(monkeypatch, tmp_path):
     status = pit_reference.get_status(tmp_path)
 
     assert status["summary"]["source"] == "baostock"
-    assert status["summary"]["history_rows"] == 1
+    assert status["summary"]["history_rows"] == 301
     assert status["summary"]["snapshot_rows"] == 1
     assert status["summary"]["earliest_date"] == "2001-08-27"
     assert status["summary"]["latest_snapshot_date"] == "2026-08-02"
-    assert status["summary"]["strict_index_membership_usable"] is False
-    assert set(status["history"]) == {INSTRUMENT_LIFECYCLE_EVENTS_TABLE}
+    assert status["summary"]["strict_index_membership_usable"] is True
+    assert set(status["history"]) == {
+        INDEX_MEMBERSHIP_HISTORY_TABLE,
+        INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
+    }
     assert set(status["snapshots"]) == {INDEX_CONSTITUENT_CANDIDATES_TABLE}
     assert status["history"][INSTRUMENT_LIFECYCLE_EVENTS_TABLE]["sources"] == ["baostock"]
+    assert status["history"][INDEX_MEMBERSHIP_HISTORY_TABLE]["sources"] == ["joinquant"]
     assert status["snapshots"][INDEX_CONSTITUENT_CANDIDATES_TABLE]["provenance_counts"] == {
         "candidate_snapshot": 1
     }
@@ -245,40 +250,44 @@ def test_pit_reference_syncs_baostock_only(monkeypatch, tmp_path):
 def test_pit_reference_sync_baostock_lifecycle_updates_instruments(tmp_path):
     inst_path = tmp_path / "instruments" / "instruments.parquet"
     inst_path.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "name": ["浦发银行"],
-        "code": ["600000"],
-        "exchange": ["SH"],
-    }).write_parquet(inst_path)
+    pl.DataFrame(
+        {
+            "symbol": ["600000.SH"],
+            "name": ["浦发银行"],
+            "code": ["600000"],
+            "exchange": ["SH"],
+        }
+    ).write_parquet(inst_path)
 
     class Collector:
         def collect_stock_lifecycle(self, *, start_date, end_date, years):
             assert start_date is None
             assert end_date == date(2026, 8, 3)
             assert years == 5
-            frame = pl.DataFrame({
-                "symbol": ["600000.SH", "600001.SH", "600001.SH", "600003.SH"],
-                "name": ["浦发银行", "邯郸钢铁", "邯郸钢铁", "仅上市事件"],
-                "exchange": ["SH", "SH", "SH", "SH"],
-                "event_date": [
-                    date(1999, 11, 10),
-                    date(1998, 1, 22),
-                    date(2024, 1, 3),
-                    date(2022, 1, 4),
-                ],
-                "event_type": ["listed", "listed", "delisted", "listed"],
-                "event_status": ["listed", "listed", "delisted", "listed"],
-                "reason": ["", "", "", ""],
-                "source": ["baostock", "baostock", "baostock", "baostock"],
-                "provenance": [
-                    "historical_event",
-                    "historical_event",
-                    "historical_event",
-                    "historical_event",
-                ],
-                "raw_hash": ["a", "b", "c", "d"],
-            })
+            frame = pl.DataFrame(
+                {
+                    "symbol": ["600000.SH", "600001.SH", "600001.SH", "600003.SH"],
+                    "name": ["浦发银行", "邯郸钢铁", "邯郸钢铁", "仅上市事件"],
+                    "exchange": ["SH", "SH", "SH", "SH"],
+                    "event_date": [
+                        date(1999, 11, 10),
+                        date(1998, 1, 22),
+                        date(2024, 1, 3),
+                        date(2022, 1, 4),
+                    ],
+                    "event_type": ["listed", "listed", "delisted", "listed"],
+                    "event_status": ["listed", "listed", "delisted", "listed"],
+                    "reason": ["", "", "", ""],
+                    "source": ["baostock", "baostock", "baostock", "baostock"],
+                    "provenance": [
+                        "historical_event",
+                        "historical_event",
+                        "historical_event",
+                        "historical_event",
+                    ],
+                    "raw_hash": ["a", "b", "c", "d"],
+                }
+            )
             publish_history_table(tmp_path, INSTRUMENT_LIFECYCLE_EVENTS_TABLE, frame)
             return {
                 "source_rows": 2,
@@ -301,7 +310,9 @@ def test_pit_reference_sync_baostock_lifecycle_updates_instruments(tmp_path):
     assert result["instrument_appended_symbols"] == 1
     stored = pl.read_parquet(inst_path).sort("symbol")
     assert stored["symbol"].to_list() == ["600000.SH", "600001.SH"]
-    assert stored.select(["symbol", "listing_date", "list_date", "delist_date", "status"]).to_dicts() == [
+    assert stored.select(
+        ["symbol", "listing_date", "list_date", "delist_date", "status"]
+    ).to_dicts() == [
         {
             "symbol": "600000.SH",
             "listing_date": date(1999, 11, 10),

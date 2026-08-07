@@ -32,10 +32,12 @@ from app.plugins.baostock.instrument_lifecycle import (
     BaoStockInstrumentLifecycleCollector,
 )
 from app.plugins.pit_history.storage import (
+    INDEX_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     SOURCE as PIT_HISTORY_SOURCE,
     summarize_lifecycle_completeness,
     table_path,
+    validate_index_membership_history,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,13 @@ DEFAULT_INDEX_NAMES = {"000300.SH": "沪深300"}
 DEFAULT_SECTOR_TAGS = ("industry",)
 
 _HISTORY_TABLES: dict[str, dict[str, Any]] = {
+    INDEX_MEMBERSHIP_HISTORY_TABLE: {
+        "label": "指数逐日成分历史",
+        "symbol_col": "member_symbol",
+        "start_col": "snapshot_date",
+        "end_col": None,
+        "source": None,
+    },
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE: {
         "label": "BaoStock 股票生命周期",
         "symbol_col": "symbol",
@@ -107,6 +116,8 @@ def _decorate_history_status(
     frame = frame if frame is not None else pl.DataFrame()
     if table == INSTRUMENT_LIFECYCLE_EVENTS_TABLE:
         status["lifecycle_completeness"] = summarize_lifecycle_completeness(frame)
+    elif table == INDEX_MEMBERSHIP_HISTORY_TABLE:
+        status["membership_validation"] = validate_index_membership_history(frame)
     return status
 
 
@@ -245,6 +256,8 @@ def get_status(data_dir: Path) -> dict[str, Any]:
         for item in snapshots.values()
         if item.get("latest_snapshot_date")
     ]
+    index_history = history.get(INDEX_MEMBERSHIP_HISTORY_TABLE, {})
+    membership_validation = index_history.get("membership_validation") or {}
     return {
         "history": history,
         "snapshots": snapshots,
@@ -256,7 +269,7 @@ def get_status(data_dir: Path) -> dict[str, Any]:
             "earliest_date": min(history_dates) if history_dates else None,
             "latest_date": max(history_dates) if history_dates else None,
             "latest_snapshot_date": max(latest_snapshots) if latest_snapshots else None,
-            "strict_index_membership_usable": False,
+            "strict_index_membership_usable": bool(membership_validation.get("usable")),
         },
     }
 

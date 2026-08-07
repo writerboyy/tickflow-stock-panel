@@ -1,9 +1,9 @@
-"""Normalize raw historical reference files into PIT interval/event tables.
+"""Normalize raw historical reference files into PIT reference tables.
 
-This module is intentionally source-agnostic. It accepts rows exported from
-public pages, AKShare one-shot pulls, or manually cached CSV/XLSX files and
-publishes only auditable historical/event facts. Current snapshots remain in
-their own source-specific tables and must not be used to backfill history.
+This module is intentionally source-agnostic. It accepts dated index snapshots
+and auditable historical/event facts exported from public pages, one-shot
+pulls, or manually cached CSV/XLSX files. A snapshot proves membership only on
+its own date and must never be expanded into inferred effective intervals.
 """
 
 from __future__ import annotations
@@ -24,11 +24,10 @@ from app.services.ingestion_manifest import stable_content_hash
 
 
 SOURCE = "pit_history"
-INDEX_MEMBERSHIP_EVENTS_TABLE = "index_membership_events"
+INDEX_MEMBERSHIP_HISTORY_TABLE = "index_membership_history"
 INDUSTRY_MEMBERSHIP_HISTORY_TABLE = "industry_membership_history"
 INSTRUMENT_LIFECYCLE_EVENTS_TABLE = "instrument_lifecycle_events"
 PARSER_VERSION = "pit_history_v1"
-DEFAULT_STRICT_INDEX_MIN_MEMBERS = 250
 DEFAULT_CSI300_COVERAGE_DATES = (
     date(2021, 8, 2),
     date(2024, 1, 2),
@@ -36,19 +35,19 @@ DEFAULT_CSI300_COVERAGE_DATES = (
 )
 STRICT_INDEX_EXPECTATIONS: dict[str, dict[str, Any]] = {
     "000300.SH": {
-        "expected_min_members": DEFAULT_STRICT_INDEX_MIN_MEMBERS,
+        "expected_members": 300,
         "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
     },
     "000905.SH": {
-        "expected_min_members": 450,
+        "expected_members": 500,
         "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
     },
     "000906.SH": {
-        "expected_min_members": 750,
+        "expected_members": 800,
         "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
     },
     "000852.SH": {
-        "expected_min_members": 950,
+        "expected_members": 1000,
         "sample_dates": DEFAULT_CSI300_COVERAGE_DATES,
     },
 }
@@ -187,57 +186,75 @@ def read_history_table(data_dir: Path, table: str) -> pl.DataFrame:
     return pl.read_parquet(path)
 
 
-def index_members_on_date(frame: pl.DataFrame, *, index_symbol: str, as_of: date) -> int:
-    if frame.is_empty() or not {"index_symbol", "member_symbol", "effective_from"}.issubset(
-        frame.columns
-    ):
-        return 0
-    normalized_index = index_symbol.upper()
-    active = frame.filter(
-        (pl.col("index_symbol") == normalized_index)
-        & (pl.col("effective_from") <= pl.lit(as_of))
-        & (
-            ~pl.col("effective_to").is_not_null()
-            | (pl.col("effective_to") > pl.lit(as_of))
-        )
-    )
-    return int(active["member_symbol"].n_unique()) if "member_symbol" in active.columns else 0
-
-
-def validate_index_membership_coverage(
+def validate_index_membership_history(
     frame: pl.DataFrame,
     *,
-    index_symbol: str,
-    sample_dates: Iterable[date] | None = None,
-    expected_min_members: int | None = None,
+    index_symbol: str | None = None,
 ) -> dict[str, Any]:
-    normalized_index = index_symbol.upper()
-    expectation = STRICT_INDEX_EXPECTATIONS.get(normalized_index, {})
-    dates = tuple(sample_dates or expectation.get("sample_dates") or ())
-    minimum = int(expected_min_members or expectation.get("expected_min_members") or 0)
-    checks = [
-        {
-            "date": item.isoformat(),
-            "members": index_members_on_date(frame, index_symbol=normalized_index, as_of=item),
-            "expected_min_members": minimum,
+    required = {"index_symbol", "snapshot_date", "member_symbol"}
+    missing_columns = sorted(required - set(frame.columns))
+    if missing_columns:
+        return {
+            "status": "invalid",
+            "usable": False,
+            "missing_columns": missing_columns,
+            "message": "index membership history is missing required snapshot columns",
         }
-        for item in dates
-    ]
-    for item in checks:
-        item["ok"] = bool(minimum and item["members"] >= minimum)
-    usable = bool(checks) and all(bool(item["ok"]) for item in checks)
-    message = (
-        "representative PIT membership counts satisfy strict backtest minimum"
-        if usable
-        else "historical membership is incomplete; do not use this index as a strict PIT pool"
+
+    selected = frame
+    normalized_index = index_symbol.upper() if index_symbol else None
+    if normalized_index:
+        selected = selected.filter(pl.col("index_symbol") == normalized_index)
+    if selected.is_empty():
+        return {
+            "index_symbol": normalized_index,
+            "status": "incomplete",
+            "usable": False,
+            "rows": 0,
+            "snapshot_dates": 0,
+            "invalid_snapshot_dates": [],
+            "message": "no rows for the requested index",
+        }
+
+    duplicate_keys = (
+        selected.group_by(["index_symbol", "snapshot_date", "member_symbol"])
+        .len()
+        .filter(pl.col("len") > 1)
+        .height
     )
+    counts = (
+        selected.group_by(["index_symbol", "snapshot_date"])
+        .agg(pl.col("member_symbol").n_unique().alias("members"))
+        .sort(["index_symbol", "snapshot_date"])
+    )
+    invalid: list[dict[str, Any]] = []
+    for row in counts.iter_rows(named=True):
+        expected = int(
+            STRICT_INDEX_EXPECTATIONS.get(str(row["index_symbol"]), {}).get("expected_members", 0)
+        )
+        if expected <= 0 or int(row["members"]) != expected:
+            invalid.append(
+                {
+                    "index_symbol": str(row["index_symbol"]),
+                    "snapshot_date": str(row["snapshot_date"]),
+                    "members": int(row["members"]),
+                    "expected_members": expected or None,
+                }
+            )
+    usable = duplicate_keys == 0 and not invalid
     return {
         "index_symbol": normalized_index,
         "status": "usable" if usable else "incomplete",
         "usable": usable,
-        "expected_min_members": minimum,
-        "coverage_checks": checks,
-        "message": message,
+        "rows": selected.height,
+        "snapshot_dates": counts.height,
+        "duplicate_keys": duplicate_keys,
+        "invalid_snapshot_dates": invalid[:20],
+        "message": (
+            "every stored snapshot has the exact expected constituent count"
+            if usable
+            else "index membership snapshots are incomplete or duplicated; fail closed"
+        ),
     }
 
 
@@ -319,8 +336,7 @@ def validate_industry_history_coverage(
         }
 
     invalid_intervals = selected.filter(
-        pl.col("effective_to").is_not_null()
-        & (pl.col("effective_to") <= pl.col("effective_from"))
+        pl.col("effective_to").is_not_null() & (pl.col("effective_to") <= pl.col("effective_from"))
     ).height
     duplicate_keys = (
         selected.group_by(["member_symbol", "industry_standard", "effective_from"])
@@ -330,8 +346,7 @@ def validate_industry_history_coverage(
     )
     ordered = selected.sort(["member_symbol", "effective_from"])
     overlap_count = (
-        ordered
-        .with_columns(
+        ordered.with_columns(
             pl.col("effective_to").shift(1).over("member_symbol").alias("_previous_to"),
         )
         .filter(
@@ -348,10 +363,7 @@ def validate_industry_history_coverage(
     for sample_date in sample_dates:
         active = selected.filter(
             (pl.col("effective_from") <= pl.lit(sample_date))
-            & (
-                pl.col("effective_to").is_null()
-                | (pl.col("effective_to") > pl.lit(sample_date))
-            )
+            & (pl.col("effective_to").is_null() | (pl.col("effective_to") > pl.lit(sample_date)))
         )
         active_symbols = set(active["member_symbol"].to_list())
         expected_members: int | None = None
@@ -363,19 +375,23 @@ def validate_industry_history_coverage(
             expected_members = len(expected_symbols)
             covered_members = len(expected_symbols & active_symbols)
             coverage = covered_members / expected_members if expected_members else 0.0
-        sample_checks.append({
-            "date": sample_date.isoformat(),
-            "active_members": len(active_symbols),
-            "expected_members": expected_members,
-            "covered_members": covered_members,
-            "coverage": coverage,
-            "ok": (
-                coverage is not None
-                and expected_members is not None
-                and expected_members > 0
-                and coverage >= min_coverage
-            ) if expected_frame is not None else None,
-        })
+        sample_checks.append(
+            {
+                "date": sample_date.isoformat(),
+                "active_members": len(active_symbols),
+                "expected_members": expected_members,
+                "covered_members": covered_members,
+                "coverage": coverage,
+                "ok": (
+                    coverage is not None
+                    and expected_members is not None
+                    and expected_members > 0
+                    and coverage >= min_coverage
+                )
+                if expected_frame is not None
+                else None,
+            }
+        )
 
     sample_failures = [item for item in sample_checks if item["ok"] is False]
     usable = bool(
@@ -448,60 +464,84 @@ def summarize_lifecycle_completeness(frame: pl.DataFrame) -> dict[str, Any]:
     }
 
 
-def normalize_index_membership_events(
+def _normalize_index_symbol(value: object) -> str:
+    text = _text(value).upper()
+    return text.replace(".XSHG", ".SH").replace(".XSHE", ".SZ").replace(".XBEI", ".BJ")
+
+
+def normalize_index_membership_history(
     rows: Iterable[dict[str, Any]],
     *,
-    index_symbol: str,
     source: str,
+    index_symbol: str | None = None,
 ) -> pl.DataFrame:
     output: list[dict[str, Any]] = []
-    normalized_index = index_symbol.upper()
     for row in rows:
+        normalized_index = _normalize_index_symbol(
+            index_symbol or _pick(row, ["index_symbol", "index_code", "指数代码", "指数编码"])
+        )
+        if not normalized_index:
+            raise ValueError(f"index membership row missing index_symbol: {row!r}")
         symbol = normalize_symbol(
-            _pick(row, ["member_symbol", "stock_code", "证券代码", "股票代码", "品种代码", "成分券代码"])
+            _pick(
+                row,
+                ["member_symbol", "stock_code", "证券代码", "股票代码", "品种代码", "成分券代码"],
+            )
         )
         if not symbol:
             continue
-        effective_from = _parse_date(
-            _pick(row, ["effective_from", "in_date", "纳入日期", "入选日期", "生效日期", "起始日期"])
+        snapshot_date = _parse_date(
+            _pick(row, ["snapshot_date", "trade_date", "as_of", "日期", "快照日期"])
         )
-        if effective_from is None:
-            raise ValueError(f"index membership row missing effective_from: {row!r}")
-        effective_to = _parse_date(
-            _pick(row, ["effective_to", "out_date", "剔除日期", "调出日期", "失效日期", "终止日期"])
+        if snapshot_date is None:
+            raise ValueError(f"index membership row missing snapshot_date: {row!r}")
+        source_update_date = _parse_date(
+            _pick(row, ["source_update_date", "update_date", "source_timestamp"])
         )
-        if effective_to is not None and effective_to <= effective_from:
-            raise ValueError(f"index membership effective_to must be after effective_from: {row!r}")
-        output.append({
-            "index_symbol": normalized_index,
-            "member_symbol": symbol,
-            "member_code": _member_code(symbol),
-            "member_name": _text(
-                _pick(row, ["member_name", "stock_name", "证券简称", "股票简称", "品种名称", "name"])
-            ),
-            "effective_from": effective_from,
-            "effective_to": effective_to,
-            "source": source,
-            "provenance": "historical_event",
-            "raw_hash": _source_hash(row),
-        })
+        output.append(
+            {
+                "index_symbol": normalized_index,
+                "index_name": _text(_pick(row, ["index_name", "指数名称"])),
+                "member_symbol": symbol,
+                "member_code": _member_code(symbol),
+                "member_name": _text(
+                    _pick(
+                        row,
+                        ["member_name", "stock_name", "证券简称", "股票简称", "品种名称", "name"],
+                    )
+                ),
+                "snapshot_date": snapshot_date,
+                "source_update_date": source_update_date,
+                "source": source,
+                "provenance": _text(_pick(row, ["provenance"])) or "dated_snapshot",
+                "snapshot_hash": _text(_pick(row, ["snapshot_hash"])) or _source_hash(row),
+            }
+        )
 
     if not output:
         return pl.DataFrame()
-    return pl.DataFrame(output).select([
-        pl.col("index_symbol").cast(pl.String),
-        pl.col("member_symbol").cast(pl.String),
-        pl.col("member_code").cast(pl.String),
-        pl.col("member_name").cast(pl.String),
-        pl.col("effective_from").cast(pl.Date),
-        pl.col("effective_to").cast(pl.Date),
-        pl.col("source").cast(pl.String),
-        pl.col("provenance").cast(pl.String),
-        pl.col("raw_hash").cast(pl.String),
-    ]).unique(
-        subset=["index_symbol", "member_symbol", "effective_from"],
-        keep="last",
-    ).sort(["index_symbol", "effective_from", "member_symbol"])
+    return (
+        pl.DataFrame(output)
+        .select(
+            [
+                pl.col("index_symbol").cast(pl.String),
+                pl.col("index_name").cast(pl.String),
+                pl.col("member_symbol").cast(pl.String),
+                pl.col("member_code").cast(pl.String),
+                pl.col("member_name").cast(pl.String),
+                pl.col("snapshot_date").cast(pl.Date),
+                pl.col("source_update_date").cast(pl.Date),
+                pl.col("source").cast(pl.String),
+                pl.col("provenance").cast(pl.String),
+                pl.col("snapshot_hash").cast(pl.String),
+            ]
+        )
+        .unique(
+            subset=["index_symbol", "snapshot_date", "member_symbol"],
+            keep="last",
+        )
+        .sort(["index_symbol", "snapshot_date", "member_symbol"])
+    )
 
 
 def normalize_industry_membership_history(
@@ -530,7 +570,9 @@ def normalize_industry_membership_history(
             "member_symbol": symbol,
             "member_code": _member_code(symbol),
             "member_name": _text(
-                _pick(row, ["member_name", "证券简称", "股票简称", "新证券简称", "name", "股票名称"])
+                _pick(
+                    row, ["member_name", "证券简称", "股票简称", "新证券简称", "name", "股票名称"]
+                )
             ),
             "industry_standard": industry_standard,
             "industry_code": _text(_pick(row, ["industry_code", "行业编码", "行业代码"])),
@@ -572,25 +614,35 @@ def normalize_industry_membership_history(
 
     if not output:
         return pl.DataFrame()
-    return pl.DataFrame(output).select([
-        pl.col("member_symbol").cast(pl.String),
-        pl.col("member_code").cast(pl.String),
-        pl.col("member_name").cast(pl.String),
-        pl.col("industry_standard").cast(pl.String),
-        pl.col("industry_code").cast(pl.String),
-        pl.col("industry_name").cast(pl.String),
-        pl.col("effective_from").cast(pl.Date),
-        pl.col("effective_to").cast(pl.Date),
-        pl.col("source").cast(pl.String),
-        pl.col("provenance").cast(pl.String),
-        pl.col("raw_hash").cast(pl.String),
-    ]).sort(["member_symbol", "industry_standard", "effective_from"])
+    return (
+        pl.DataFrame(output)
+        .select(
+            [
+                pl.col("member_symbol").cast(pl.String),
+                pl.col("member_code").cast(pl.String),
+                pl.col("member_name").cast(pl.String),
+                pl.col("industry_standard").cast(pl.String),
+                pl.col("industry_code").cast(pl.String),
+                pl.col("industry_name").cast(pl.String),
+                pl.col("effective_from").cast(pl.Date),
+                pl.col("effective_to").cast(pl.Date),
+                pl.col("source").cast(pl.String),
+                pl.col("provenance").cast(pl.String),
+                pl.col("raw_hash").cast(pl.String),
+            ]
+        )
+        .sort(["member_symbol", "industry_standard", "effective_from"])
+    )
 
 
 _LIFECYCLE_DATE_ALIASES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ("listed", ("listed_date", "上市日期", "挂牌日期"), "listed"),
     ("suspended", ("suspend_date", "暂停上市日期", "暂停交易日期"), "suspended"),
-    ("delist_decision", ("delist_decision_date", "终止上市决定日期", "退市决定日期"), "delist_decision"),
+    (
+        "delist_decision",
+        ("delist_decision_date", "终止上市决定日期", "退市决定日期"),
+        "delist_decision",
+    ),
     (
         "delist_period_start",
         ("delist_period_start", "退市整理期开始日期", "退市整理起始日"),
@@ -615,13 +667,17 @@ def normalize_instrument_lifecycle_events(
     seen: set[tuple[str, str, date]] = set()
     for row in rows:
         symbol = normalize_symbol(
-            _pick(row, ["symbol", "证券代码", "股票代码", "A股代码", "公司代码", "代码", "stock_code"])
+            _pick(
+                row, ["symbol", "证券代码", "股票代码", "A股代码", "公司代码", "代码", "stock_code"]
+            )
         )
         if not symbol:
             continue
         base = {
             "symbol": symbol,
-            "name": _text(_pick(row, ["name", "证券简称", "股票简称", "公司简称", "公司名称", "名称"])),
+            "name": _text(
+                _pick(row, ["name", "证券简称", "股票简称", "公司简称", "公司名称", "名称"])
+            ),
             "exchange": _text(_pick(row, ["exchange", "交易所", "上市地点", "市场"])),
             "reason": _text(_pick(row, ["reason", "终止上市原因", "退市原因", "摘牌原因"])),
             "source": source,
@@ -636,27 +692,35 @@ def normalize_instrument_lifecycle_events(
             if key in seen:
                 continue
             seen.add(key)
-            output.append({
-                **base,
-                "event_date": event_date,
-                "event_type": event_type,
-                "event_status": event_status,
-            })
+            output.append(
+                {
+                    **base,
+                    "event_date": event_date,
+                    "event_type": event_type,
+                    "event_status": event_status,
+                }
+            )
 
     if not output:
         return pl.DataFrame()
-    return pl.DataFrame(output).select([
-        pl.col("symbol").cast(pl.String),
-        pl.col("name").cast(pl.String),
-        pl.col("exchange").cast(pl.String),
-        pl.col("event_date").cast(pl.Date),
-        pl.col("event_type").cast(pl.String),
-        pl.col("event_status").cast(pl.String),
-        pl.col("reason").cast(pl.String),
-        pl.col("source").cast(pl.String),
-        pl.col("provenance").cast(pl.String),
-        pl.col("raw_hash").cast(pl.String),
-    ]).sort(["symbol", "event_date", "event_type"])
+    return (
+        pl.DataFrame(output)
+        .select(
+            [
+                pl.col("symbol").cast(pl.String),
+                pl.col("name").cast(pl.String),
+                pl.col("exchange").cast(pl.String),
+                pl.col("event_date").cast(pl.Date),
+                pl.col("event_type").cast(pl.String),
+                pl.col("event_status").cast(pl.String),
+                pl.col("reason").cast(pl.String),
+                pl.col("source").cast(pl.String),
+                pl.col("provenance").cast(pl.String),
+                pl.col("raw_hash").cast(pl.String),
+            ]
+        )
+        .sort(["symbol", "event_date", "event_type"])
+    )
 
 
 def source_payload_hash(path: Path, rows: list[dict[str, Any]]) -> str:
