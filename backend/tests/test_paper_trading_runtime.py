@@ -29,6 +29,7 @@ from app.free_strategy.paper import (
     _queue_delay_seconds,
     _queued_payload,
     _process_bar_rows,
+    _quote_to_live_bar,
 )
 from app.free_strategy.process import MarketData
 from app.free_strategy.store import PaperAccountStore
@@ -39,6 +40,24 @@ from app.services.quote_service import QuoteService
 
 def quote(second: int, price: float) -> Quote:
     return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
+
+
+def test_session_final_quote_is_clamped_to_closed_market_boundary():
+    final_quote = Quote(
+        "399303.SZ",
+        datetime(2026, 8, 7, 11, 30, 6),
+        9890.197,
+    )
+    active_quote = Quote("X", datetime(2026, 8, 7, 10, 5, 6), 10.0)
+
+    assert _quote_to_live_bar(
+        final_quote,
+        cutoff=datetime(2026, 8, 7, 11, 30),
+    ).timestamp == datetime(2026, 8, 7, 11, 30)
+    assert _quote_to_live_bar(
+        active_quote,
+        cutoff=datetime(2026, 8, 7, 10, 5),
+    ).timestamp == datetime(2026, 8, 7, 10, 6)
 
 
 def test_legacy_small_cap_schedule_gets_current_runtime_contracts():

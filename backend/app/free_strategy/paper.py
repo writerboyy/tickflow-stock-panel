@@ -201,11 +201,19 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
     return quotes
 
 
-def _quote_to_live_bar(quote: Quote) -> Bar:
+def _quote_to_live_bar(quote: Quote, *, cutoff: datetime | None = None) -> Bar:
     """将一个实时快照转换为当前可见价格 Bar，不引入历史 OHLC。"""
     timestamp = quote.timestamp.replace(second=0, microsecond=0)
     if quote.timestamp.second:
         timestamp += timedelta(minutes=1)
+    if (
+        cutoff is not None
+        and timestamp > cutoff
+        and cutoff.time() in {clock_time(11, 30), clock_time(15, 0)}
+        and quote.timestamp.date() == cutoff.date()
+        and quote.timestamp.time() >= cutoff.time()
+    ):
+        timestamp = cutoff
     price = float(quote.last_price)
     return Bar(
         symbol=quote.symbol,
@@ -2220,7 +2228,7 @@ def _paper_worker(
                 cutoff = datetime.fromisoformat(str(message["cutoff"]))
                 asset_type = str(current.get("config", {}).get("asset_type", "stock"))
                 quote_bars = [
-                    _quote_to_live_bar(quote)
+                    _quote_to_live_bar(quote, cutoff=cutoff)
                     for quote in _quotes_from_records(message.get("quotes", []))
                 ]
                 streamed_bars = rows_to_bars(message.get("live_bars", []))
