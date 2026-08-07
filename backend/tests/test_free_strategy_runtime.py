@@ -2314,6 +2314,28 @@ def after_trading_end(context):
     assert result["state"]["scheduled_close"] == 2
 
 
+def test_advance_event_does_not_deepcopy_strategy_state(monkeypatch):
+    engine = FreeStrategyEngine("""
+def on_bar(context, bars):
+    context.state['events'].append(context.now.isoformat())
+""", state={"events": []})
+    strategy_state = engine.context.state
+
+    def reject_deepcopy(_value):
+        raise AssertionError("advance_event must not deepcopy strategy state")
+
+    monkeypatch.setattr("app.free_strategy.engine.copy.deepcopy", reject_deepcopy)
+    timestamp = datetime(2024, 1, 2, 9, 30)
+    engine.advance_event(
+        timestamp,
+        [Bar("X", timestamp, 10, 10, 10, 10)],
+        event_type="bar",
+    )
+
+    assert engine.state is strategy_state
+    assert engine.state["events"] == ["2024-01-02T09:30:00"]
+
+
 def test_schedule_only_strategy_detects_mode_and_runs_each_callback_once_per_day():
     source = """
 def initialize(context):

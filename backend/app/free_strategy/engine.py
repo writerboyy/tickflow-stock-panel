@@ -2054,7 +2054,7 @@ class FreeStrategyEngine:
             "cash": self.account.cash,
             "positions": dict(self.account.positions),
         }
-        self.state = copy.deepcopy(self.context.state)
+        self.state = self.context.state
 
     def run(
         self,
