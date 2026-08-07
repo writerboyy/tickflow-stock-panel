@@ -2469,7 +2469,8 @@ class PaperTradingSupervisor:
             symbols.add(str(state.get("config", {}).get("benchmark_symbol", "510300.SH")))
             try:
                 sync_phase = str(state.get("sync", {}).get("phase") or "live")
-                wait_reason = _full_bar_wait_reason(state, cn_naive_now())
+                current_time = cn_naive_now()
+                wait_reason = _full_bar_wait_reason(state, current_time)
                 sync = dict(state.get("sync", {}))
                 if wait_reason:
                     updates = {
@@ -2487,7 +2488,10 @@ class PaperTradingSupervisor:
                         sync_phase == "waiting_market"
                         or (sync.get("source") == "realtime" and sync.get("reason"))
                     )
-                    and str(state.get("execution_mode") or "full_bar") == "full_bar"
+                    and (
+                        str(state.get("execution_mode") or "full_bar") == "full_bar"
+                        or current_time.time() >= clock_time(15, 1)
+                    )
                 ):
                     sync.update({"phase": "live", "reason": None, "updated_at": now_iso()})
                     state = self.store.update_fields(account_id, {"sync": sync})

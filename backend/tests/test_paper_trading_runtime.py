@@ -649,6 +649,47 @@ def test_supervisor_keeps_subscription_and_clears_stale_wait_reason(tmp_path, mo
     assert settled_sync["reason"] is None
 
 
+def test_supervisor_clears_scheduled_close_wait_reason(tmp_path, monkeypatch):
+    class SubscribedHub:
+        def has_subscription(self, _account_id):
+            return True
+
+        @staticmethod
+        def update_symbols(*_args, **_kwargs):
+            pass
+
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "status": "running",
+        "execution_mode": "scheduled",
+        "last_bar": "2026-08-07T14:57:00",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+        "sync": {
+            "phase": "waiting_market",
+            "source": "realtime",
+            "reason": "2026-08-07 15:00 收盘任务缺少实时行情: 399101.SZ，等待下一次行情同步",
+        },
+    })
+    supervisor = PaperTradingSupervisor.__new__(PaperTradingSupervisor)
+    supervisor.store = store
+    supervisor.hub = SubscribedHub()
+    supervisor._lock = threading.RLock()  # noqa: SLF001
+    supervisor._processes = {"paper": FakePaperProcess(alive=True)}  # noqa: SLF001
+    supervisor._queues = {"paper": queue.Queue(maxsize=2)}  # noqa: SLF001
+    initialize_supervisor_runtime(supervisor)
+    monkeypatch.setattr(
+        "app.free_strategy.paper.cn_naive_now",
+        lambda: datetime(2026, 8, 7, 15, 1),
+    )
+
+    supervisor._monitor_once()  # noqa: SLF001
+
+    settled_sync = store.get("paper")["sync"]
+    assert settled_sync["phase"] == "live"
+    assert settled_sync["reason"] is None
+
+
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):
     calls = []
 
