@@ -30,8 +30,9 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         }],
     )
     conditions = {
-        (at, callback.__name__): condition.__name__
-        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.condition.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.condition is not None
     }
 
     assert conditions == {
@@ -43,8 +44,9 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         ("14:55", "_trade_afternoon"): "_regular_trading_month",
     }
     optional_scopes = {
-        (at, callback.__name__): scope.__name__
-        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.optional_symbols.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.optional_symbols is not None
     }
     assert optional_scopes == {
         ("10:15", "_weekly_sell"): "_weekly_selection_symbols",

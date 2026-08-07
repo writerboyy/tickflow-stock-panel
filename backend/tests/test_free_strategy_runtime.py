@@ -530,16 +530,18 @@ def test_performance_small_cap_template_runs_as_scheduled_strategy():
     assert engine.scheduled_times == ["09:00", "09:30", "14:00"]
     assert engine.market_history_requirements == {("index", "1d"): 235}
     conditions = {
-        (at, callback.__name__): condition.__name__
-        for (at, callback), condition in engine._scheduled_conditions.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.condition.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.condition is not None
     }
     assert conditions == {
         ("09:30", "_monthly_adjustment"): "_monthly_adjustment_due",
         ("14:00", "_check_limit_up_and_buy"): "_limit_up_check_due",
     }
     optional_scopes = {
-        (at, callback.__name__): scope.__name__
-        for (at, callback), scope in engine._scheduled_optional_symbol_scopes.items()  # noqa: SLF001
+        (task.resolved_time, task.callback.__name__): task.optional_symbols.__name__
+        for task in engine.context._scheduled  # noqa: SLF001
+        if task.optional_symbols is not None
     }
     assert optional_scopes == {
         ("09:30", "_monthly_adjustment"): "_held_and_selection_symbols",

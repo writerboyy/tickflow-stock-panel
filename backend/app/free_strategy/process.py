@@ -1915,8 +1915,13 @@ def advance_scheduled_session(
 ) -> None:
     engine.begin_session(day)
     due_times = sorted({
-        at for at, _, done in engine.context._scheduled
-        if not done and datetime.combine(day, time.fromisoformat(at)) <= cutoff
+        task.resolved_time
+        for task in engine.context._scheduled
+        if (
+            not task.done
+            and task.resolved_time != "every_bar"
+            and datetime.combine(day, time.fromisoformat(task.resolved_time)) <= cutoff
+        )
     })
     for at in due_times:
         timestamp = datetime.combine(day, time.fromisoformat(at))
@@ -2155,6 +2160,11 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         market_data, warmup_metadata = _prepare_market_data(
             repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
             include_benchmark=True,
+        )
+        engine.set_trading_calendar(
+            day
+            for symbol, day in market_data.daily
+            if symbol in market_symbols and start <= day <= end
         )
         replayed_rows = 0
         first_bar: datetime | None = None

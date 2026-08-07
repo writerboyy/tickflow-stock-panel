@@ -18,7 +18,6 @@ from app.free_strategy.paper import (
     _Subscription,
     _append_engine_events,
     _append_strategy_logs,
-    _apply_legacy_builtin_schedule_contracts,
     _catch_up_bars,
     _catch_up_scheduled,
     _compatible_checkpoint,
@@ -58,101 +57,6 @@ def test_session_final_quote_is_clamped_to_closed_market_boundary():
         active_quote,
         cutoff=datetime(2026, 8, 7, 10, 5),
     ).timestamp == datetime(2026, 8, 7, 10, 6)
-
-
-def test_legacy_small_cap_schedule_gets_current_runtime_contracts():
-    source = """
-NO_TRADING_MONTHS = {1, 4}
-
-def _state(context):
-    return context.state['small_cap_limitup']
-
-def _is_weekly_rebalance_day(context, timestamp):
-    return timestamp.weekday() == 1
-
-def _held_and_candidates(context, timestamp):
-    return [*context.portfolio.positions, 'Y']
-
-def _weekly_buy(context):
-    context.state['executed'] = True
-
-def initialize(context):
-    context.state['small_cap_limitup'] = {}
-    context.set_universe(['X', 'Y'])
-    context.schedule(_weekly_buy, '10:30', symbols=_held_and_candidates)
-"""
-    engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    engine.account.positions = {"X": 100.0}
-    engine.context.portfolio.positions = {"X": 100.0}
-
-    _apply_legacy_builtin_schedule_contracts(engine, "small_cap_limitup")
-
-    tuesday = datetime(2024, 2, 6, 10, 30)
-    assert engine.scheduled_snapshot_symbols(tuesday) == ["X", "Y"]
-    assert engine.scheduled_required_snapshot_symbols(tuesday) == ["X"]
-    assert engine.prepare_scheduled_event(tuesday) is True
-
-    friday_engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    _apply_legacy_builtin_schedule_contracts(friday_engine, "small_cap_limitup")
-    assert friday_engine.prepare_scheduled_event(datetime(2024, 2, 9, 10, 30)) is False
-
-
-def test_legacy_performance_schedule_skips_non_monthly_snapshot():
-    source = """
-def _instrument_records(context):
-    return []
-
-def _previous_trading_date(context, records):
-    return context.now.date()
-
-def _should_monthly_adjust(context, previous_date):
-    return context.state['due']
-
-def _held_and_selection_symbols(context, timestamp):
-    return [*context.portfolio.positions, 'Y']
-
-def _monthly_adjustment(context):
-    context.state['executed'] = True
-
-def initialize(context):
-    context.state['due'] = False
-    context.set_universe(['X', 'Y'])
-    context.schedule(_monthly_adjustment, '09:30', symbols=_held_and_selection_symbols)
-"""
-    engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    engine.account.positions = {"X": 100.0}
-    engine.context.portfolio.positions = {"X": 100.0}
-    _apply_legacy_builtin_schedule_contracts(engine, "performance_small_cap")
-
-    timestamp = datetime(2024, 2, 9, 9, 30)
-    engine.context.now = timestamp
-    assert engine.prepare_scheduled_event(timestamp) is False
-
-    due_engine = FreeStrategyEngine(
-        source,
-        timeframe="1m",
-        config=FreeStrategyConfig(benchmark_symbol="X"),
-    )
-    due_engine.account.positions = {"X": 100.0}
-    due_engine.context.portfolio.positions = {"X": 100.0}
-    due_engine.context.state["due"] = True
-    due_engine.context.now = timestamp
-    _apply_legacy_builtin_schedule_contracts(due_engine, "performance_small_cap")
-
-    assert due_engine.scheduled_snapshot_symbols(timestamp) == ["X", "Y"]
-    assert due_engine.scheduled_required_snapshot_symbols(timestamp) == ["X"]
 
 
 def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):

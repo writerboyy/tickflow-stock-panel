@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable
 
 from .bars import Bar
+from .schedule import RegisteredSchedule, ScheduleRule, parse_time_expression
 from app.market_time import cn_naive_now
 from app.services.data_authority import normalize_reference_asset
 
@@ -201,7 +202,7 @@ class Context:
         self.period = engine.timeframe
         self.portfolio = SimpleNamespace(cash=engine.account.cash, positions={}, available_positions={}, avg_cost={}, total_value=engine.account.cash)
         self.account = self.portfolio
-        self._scheduled: list[tuple[str, Callable[..., Any], bool]] = []
+        self._scheduled: list[RegisteredSchedule] = []
         self._universe: list[str] = []
         self._history_requirements: dict[str, int] = {}
         self._market_history_requirements: dict[tuple[str, str], int] = {}
@@ -493,20 +494,83 @@ class Context:
             raise ValueError("定时任务 callback 必须可调用")
         if when is not None and not callable(when):
             raise ValueError("定时任务 when 必须可调用")
-        if isinstance(at, datetime_time) and (at.second or at.microsecond):
-            raise ValueError("定时任务时间必须使用严格的 HH:MM 格式")
-        value = at.strftime("%H:%M") if isinstance(at, datetime_time) else str(at)
-        if re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value) is None:
-            raise ValueError("定时任务时间必须使用严格的 HH:MM 格式")
-        if any(existing_at == value and existing is callback for existing_at, existing, _ in self._scheduled):
+        self._register_schedule(
+            callback,
+            ScheduleRule("daily", parse_time_expression(at)),
+            symbols=symbols,
+            optional_symbols=optional_symbols,
+            when=when,
+        )
+
+    def _register_schedule(
+        self,
+        callback: Callable[..., Any],
+        rule: ScheduleRule,
+        *,
+        symbols: Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None = None,
+        optional_symbols: (
+            Iterable[str] | Callable[["Context", datetime], Iterable[str]] | None
+        ) = None,
+        when: Callable[["Context", datetime], bool] | None = None,
+    ) -> None:
+        if any(task.callback is callback and task.rule == rule for task in self._scheduled):
             return
-        self._scheduled.append((value, callback, False))
-        if symbols is not None:
-            self._engine._scheduled_symbol_scopes[(value, callback)] = symbols
-        if optional_symbols is not None:
-            self._engine._scheduled_optional_symbol_scopes[(value, callback)] = optional_symbols
-        if when is not None:
-            self._engine._scheduled_conditions[(value, callback)] = when
+        self._scheduled.append(RegisteredSchedule(
+            callback=callback,
+            rule=rule,
+            condition=when,
+            symbols=symbols,
+            optional_symbols=optional_symbols,
+        ))
+
+    def run_daily(
+        self,
+        callback: Callable[..., Any],
+        time: str = "every_bar",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule("daily", parse_time_expression(time), reference_security=reference_security),
+        )
+
+    def run_weekly(
+        self,
+        callback: Callable[..., Any],
+        weekday: int,
+        time: str = "09:30",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule(
+                "weekly",
+                parse_time_expression(time),
+                ordinal=weekday,
+                reference_security=reference_security,
+            ),
+        )
+
+    def run_monthly(
+        self,
+        callback: Callable[..., Any],
+        monthday: int,
+        time: str = "09:30",
+        reference_security: str | None = None,
+    ) -> None:
+        self._register_schedule(
+            callback,
+            ScheduleRule(
+                "monthly",
+                parse_time_expression(time),
+                ordinal=monthday,
+                reference_security=reference_security,
+            ),
+        )
+
+    def unschedule_all(self) -> None:
+        self._scheduled.clear()
+        self._engine._scheduled_condition_results.clear()
 
     schedule_function = schedule
 
@@ -674,20 +738,10 @@ class FreeStrategyEngine:
         self._history_batch_loader: Callable[
             [list[str], int, str, datetime], dict[str, list[Bar]]
         ] | None = None
-        self._scheduled_symbol_scopes: dict[
-            tuple[str, Callable[..., Any]],
-            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
-        ] = {}
-        self._scheduled_optional_symbol_scopes: dict[
-            tuple[str, Callable[..., Any]],
-            Iterable[str] | Callable[[Context, datetime], Iterable[str]],
-        ] = {}
-        self._scheduled_conditions: dict[
-            tuple[str, Callable[..., Any]], Callable[[Context, datetime], bool]
-        ] = {}
         self._scheduled_condition_results: dict[
-            tuple[date, str, Callable[..., Any]], bool
+            tuple[date, int], bool
         ] = {}
+        self._trading_dates: tuple[date, ...] = ()
         self._market_history_loader: Callable[[datetime], None] | None = None
         self._active_session_date: date | None = None
         self._session_finished = False
@@ -728,6 +782,10 @@ class FreeStrategyEngine:
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
             "print": self._strategy_print,
+            "run_daily": self.context.run_daily,
+            "run_weekly": self.context.run_weekly,
+            "run_monthly": self.context.run_monthly,
+            "unschedule_all": self.context.unschedule_all,
         }
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
@@ -741,11 +799,24 @@ class FreeStrategyEngine:
             for name in callback_names
             if callable(namespace.get(name))
         }
-        self.execution_mode = "quote" if "on_quote" in self._callbacks else ("full_bar" if "on_bar" in self._callbacks else "scheduled")
+        self.execution_mode = (
+            "quote"
+            if "on_quote" in self._callbacks
+            else "full_bar"
+            if "on_bar" in self._callbacks
+            else "scheduled"
+        )
         if instrument_loader is not None:
             self._instruments = [dict(item) for item in instrument_loader(self.execution_mode)]
         if "initialize" in self._callbacks:
             self._protected_call("initialize 回调", self._callbacks["initialize"], self.context)
+        every_bar = any(
+            task.resolved_time == "every_bar" for task in self.context._scheduled
+        )
+        if every_bar and self.execution_mode == "scheduled":
+            self.execution_mode = "full_bar"
+        if every_bar and timeframe == "1d":
+            raise ValueError("every_bar 必须使用分钟级回测周期")
         if "on_bar" not in self._callbacks and "on_quote" not in self._callbacks and not self.context._scheduled:
             raise ValueError("策略必须定义 on_bar(context, bars)、on_quote(context, quotes) 或通过 context.schedule 注册定时任务")
 
@@ -785,7 +856,10 @@ class FreeStrategyEngine:
 
     @property
     def scheduled_times(self) -> list[str]:
-        return sorted({at for at, _, _ in self.context._scheduled})
+        return sorted({task.resolved_time for task in self.context._scheduled})
+
+    def set_trading_calendar(self, values: Iterable[date]) -> None:
+        self._trading_dates = tuple(sorted(set(values)))
 
     def scheduled_snapshot_symbols(self, timestamp: datetime) -> list[str] | None:
         return self._scheduled_scope_symbols(timestamp, include_optional=True)
@@ -801,23 +875,21 @@ class FreeStrategyEngine:
     ) -> list[str] | None:
         current_time = timestamp.strftime("%H:%M")
         due = [
-            (callback, done)
-            for at, callback, done in self.context._scheduled
-            if at == current_time
+            task
+            for task in self.context._scheduled
+            if task.resolved_time == current_time
         ]
         if not due:
             return []
         result: list[str] = []
-        for callback, done in due:
-            if done or not self._scheduled_condition_met(current_time, callback, timestamp):
+        for task in due:
+            if task.done or not self._scheduled_condition_met(task, timestamp):
                 continue
-            scope = self._scheduled_symbol_scopes.get((current_time, callback))
+            scope = task.symbols
             if scope is None:
                 return None
             scopes = [("定时任务必需标的范围", scope)]
-            optional_scope = self._scheduled_optional_symbol_scopes.get(
-                (current_time, callback),
-            )
+            optional_scope = task.optional_symbols
             if include_optional and optional_scope is not None:
                 scopes.append(("定时任务可选标的范围", optional_scope))
             for label, current_scope in scopes:
@@ -835,20 +907,24 @@ class FreeStrategyEngine:
 
     def _scheduled_condition_met(
         self,
-        at: str,
-        callback: Callable[..., Any],
+        task: RegisteredSchedule,
         timestamp: datetime,
     ) -> bool:
-        condition = self._scheduled_conditions.get((at, callback))
+        if not task.rule.matches_date(timestamp.date(), self._trading_dates):
+            return False
+        condition = task.condition
         if condition is None:
             return True
-        key = (timestamp.date(), at, callback)
+        key = (timestamp.date(), id(task))
         if key not in self._scheduled_condition_results:
-            scheduled_timestamp = datetime.combine(
-                timestamp.date(), datetime_time.fromisoformat(at),
+            resolved = task.resolved_time
+            scheduled_timestamp = (
+                timestamp
+                if resolved == "every_bar"
+                else datetime.combine(timestamp.date(), datetime_time.fromisoformat(resolved))
             )
             self._scheduled_condition_results[key] = bool(self._protected_call(
-                f"定时任务 {at} 执行条件",
+                f"定时任务 {resolved} 执行条件",
                 condition,
                 self.context,
                 scheduled_timestamp,
@@ -859,13 +935,13 @@ class FreeStrategyEngine:
         """跳过当日不生效的定时回调，并在无任务时推进执行游标。"""
         current_time = timestamp.strftime("%H:%M")
         active = False
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at != current_time:
+        for task in self.context._scheduled:
+            if task.done or task.resolved_time != current_time:
                 continue
-            if self._scheduled_condition_met(at, callback, timestamp):
+            if self._scheduled_condition_met(task, timestamp):
                 active = True
                 continue
-            self.context._scheduled[slot_index] = (at, callback, True)
+            task.done = True
         if not active:
             self._next_timestamp = timestamp
             self._last_timestamp = timestamp
@@ -1509,7 +1585,7 @@ class FreeStrategyEngine:
             "session_finished": self._session_finished,
             "last_timestamp": self._last_timestamp.isoformat() if self._last_timestamp else None,
             "context_time": self.context.now.isoformat() if self.context.now else None,
-            "scheduled_completed": [done for _, _, done in self.context._scheduled],
+            "scheduled_completed": [task.done for task in self.context._scheduled],
             "callbacks_executed": self.callbacks_executed,
             "market_rows_consumed": self.market_rows_consumed,
         }
@@ -1525,10 +1601,8 @@ class FreeStrategyEngine:
         self.context.now = datetime.fromisoformat(context_time) if context_time else None
         completed = list(raw.get("scheduled_completed", []))
         if completed:
-            self.context._scheduled = [
-                (at, callback, bool(completed[index]) if index < len(completed) else False)
-                for index, (at, callback, _) in enumerate(self.context._scheduled)
-            ]
+            for index, task in enumerate(self.context._scheduled):
+                task.done = bool(completed[index]) if index < len(completed) else False
         self.callbacks_executed = int(raw.get("callbacks_executed", self.callbacks_executed))
         self.market_rows_consumed = int(raw.get("market_rows_consumed", self.market_rows_consumed))
 
@@ -1614,7 +1688,8 @@ class FreeStrategyEngine:
     def _start_session(self, timestamp: datetime, bars_now: BarsView) -> None:
         self._active_session_date = timestamp.date()
         self._session_finished = False
-        self.context._scheduled = [(at, callback, False) for at, callback, _ in self.context._scheduled]
+        for task in self.context._scheduled:
+            task.done = False
         self._scheduled_condition_results.clear()
         self.context.now = timestamp
         self._session_bars = dict(bars_now)
@@ -1631,26 +1706,39 @@ class FreeStrategyEngine:
 
     def _run_scheduled_before(self, timestamp: datetime) -> None:
         current = timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at >= current:
+        for task in self.context._scheduled:
+            at = task.resolved_time
+            if task.done or at == "every_bar" or at >= current:
                 continue
             scheduled_timestamp = datetime.combine(
                 timestamp.date(), datetime_time.fromisoformat(at),
             )
             self.context.now = scheduled_timestamp
-            if self._scheduled_condition_met(at, callback, scheduled_timestamp):
-                self._run_scheduled_callback(callback, at)
-            self.context._scheduled[slot_index] = (at, callback, True)
+            if self._scheduled_condition_met(task, scheduled_timestamp):
+                self._run_scheduled_callback(task.callback, at)
+            task.done = True
 
-    def _run_scheduled_at(self, timestamp: datetime) -> None:
-        current = timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if done or at != current:
+    def _run_scheduled_at(
+        self,
+        timestamp: datetime,
+        *,
+        actual_bar: bool = False,
+        scheduled_at: str | None = None,
+    ) -> None:
+        current = scheduled_at or timestamp.strftime("%H:%M")
+        for task in self.context._scheduled:
+            at = task.resolved_time
+            if at == "every_bar":
+                if actual_bar and self._scheduled_condition_met(task, timestamp):
+                    self.context.now = timestamp
+                    self._run_scheduled_callback(task.callback, at)
+                continue
+            if task.done or at != current:
                 continue
             self.context.now = timestamp
-            if self._scheduled_condition_met(at, callback, timestamp):
-                self._run_scheduled_callback(callback, at)
-            self.context._scheduled[slot_index] = (at, callback, True)
+            if self._scheduled_condition_met(task, timestamp):
+                self._run_scheduled_callback(task.callback, at)
+            task.done = True
 
     def _accumulate_session_daily_bars(self, bars_now: BarsView) -> None:
         if self.timeframe == "1d":
@@ -1803,11 +1891,8 @@ class FreeStrategyEngine:
         if callback is not None:
             self._protected_call("on_quote 回调", callback, self.context, quote_view)
             self.callbacks_executed += 1
-        for slot_index, (at, scheduled, done) in enumerate(self.context._scheduled):
-            if not done and timestamp.strftime("%H:%M") >= at:
-                if self._scheduled_condition_met(at, scheduled, timestamp):
-                    self._run_scheduled_callback(scheduled, at)
-                self.context._scheduled[slot_index] = (at, scheduled, True)
+        self._run_scheduled_before(timestamp)
+        self._run_scheduled_at(timestamp)
         self._fill_immediate_orders(bars_now, timestamp)
         self.context._sync(self._current_close_prices)
         self.state = copy.deepcopy(self.context.state)
@@ -1831,12 +1916,7 @@ class FreeStrategyEngine:
     ) -> None:
         self.update_scheduled_market(timestamp, bars)
         self._fill_immediate_orders(self._session_bars, timestamp)
-        current_time = scheduled_at or timestamp.strftime("%H:%M")
-        for slot_index, (at, callback, done) in enumerate(self.context._scheduled):
-            if not done and at == current_time:
-                if self._scheduled_condition_met(at, callback, timestamp):
-                    self._run_scheduled_callback(callback, at)
-                self.context._scheduled[slot_index] = (at, callback, True)
+        self._run_scheduled_at(timestamp, scheduled_at=scheduled_at)
         self._fill_immediate_orders(self._session_bars, timestamp)
         self.context._sync(self._current_close_prices)
 
@@ -1877,6 +1957,8 @@ class FreeStrategyEngine:
                 for index in range(1, len(ordered))
             ):
                 ordered = sorted(ordered, key=lambda bar: (bar.timestamp, bar.symbol))
+            if not self._trading_dates:
+                self.set_trading_calendar(bar.timestamp.date() for bar in ordered)
             stream: Iterable[Bar] = ordered
         else:
             stream = bars
@@ -1917,7 +1999,7 @@ class FreeStrategyEngine:
                 if len(self.history[symbol]) > 5_000:
                     del self.history[symbol][:-5_000]
             self._run_callback("on_bar", bars_now)
-            self._run_scheduled_at(timestamp)
+            self._run_scheduled_at(timestamp, actual_bar=True)
             self._fill_immediate_orders(bars_now, timestamp)
             self._session_equity_snapshot = {"timestamp": timestamp.isoformat(), "equity": self.account.equity(self._current_close_prices), "cash": self.account.cash, "positions": dict(self.account.positions)}
         if handled and finalize_session:
