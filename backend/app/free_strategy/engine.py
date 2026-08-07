@@ -1377,6 +1377,7 @@ class FreeStrategyEngine:
                 available / (1 + commission_rate),
             )
             qty = min(qty, math.floor(max(0.0, min(cash_gross, max_gross, symbol_gross)) / price / lot) * lot)
+        order.requested_quantity = qty
         if qty <= 0:
             if order.side == "target":
                 order.status = "skipped"

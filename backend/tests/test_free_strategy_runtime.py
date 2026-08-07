@@ -1262,7 +1262,7 @@ def on_bar(context, bars):
     assert "fee_components_complete" not in execution
 
 
-def test_execution_record_preserves_requested_quantity_before_cash_limit():
+def test_execution_record_uses_quantity_accepted_by_cash_limit():
     source = """
 def on_bar(context, bars):
     context.order_target_value('X', 2_000)
@@ -1282,7 +1282,7 @@ def on_bar(context, bars):
     ])
 
     execution = result["executions"][0]
-    assert execution["requested_quantity"] == 200
+    assert execution["requested_quantity"] == 100
     assert execution["executed_quantity"] == 100
 
 
