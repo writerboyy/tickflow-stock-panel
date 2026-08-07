@@ -18,6 +18,7 @@ from app.free_strategy.small_cap_limitup import (
 )
 from app.free_strategy import small_cap_limitup
 from app.free_strategy.engine import FreeStrategyEngine
+from app.free_strategy.readiness import make_requirement
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -28,6 +29,14 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         instruments=[{
             "symbol": "000001.SZ", "asset_type": "stock", "has_minute": True,
         }],
+    )
+    assert engine.context.readiness_requirements == (
+        make_requirement(
+            rebalance="weekly",
+            industry_standard=small_cap_limitup.INDUSTRY_STANDARD,
+            lifecycle=True,
+            adjustment="pre",
+        ),
     )
     conditions = {
         (task.resolved_time, task.callback.__name__): task.condition.__name__

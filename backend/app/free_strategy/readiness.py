@@ -105,11 +105,25 @@ def _rebalance_dates(cadence: str, trading_dates: Iterable[date]) -> list[date]:
     return result
 
 
+def _active_parquet_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return [
+        path
+        for path in sorted(root.rglob("*.parquet"))
+        if not any(part.startswith(".") for part in path.relative_to(root).parts)
+    ]
+
+
 def _file_manifest(data_dir: Path, roots: Iterable[Path]) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for root in sorted(set(Path(value) for value in roots), key=str):
         target = data_dir / root
-        candidates = [target] if target.is_file() else sorted(target.rglob("*.parquet")) if target.exists() else []
+        candidates = (
+            [target]
+            if target.is_file()
+            else _active_parquet_files(target)
+        )
         if not candidates:
             files.append({"path": root.as_posix(), "missing": True})
             continue
@@ -226,9 +240,7 @@ def build_readiness_manifest(
                 for path in (
                     [data_dir / root]
                     if (data_dir / root).is_file()
-                    else sorted((data_dir / root).rglob("*.parquet"))[:1]
-                    if (data_dir / root).exists()
-                    else []
+                    else _active_parquet_files(data_dir / root)[:1]
                 )
             ]
             if not candidates:

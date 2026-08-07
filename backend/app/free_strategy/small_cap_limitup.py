@@ -158,6 +158,12 @@ def initialize(context) -> None:
         if item.get("symbol") and bool(item.get("has_minute", True))
     ]
     context.set_universe(symbols)
+    context.require_data_readiness(
+        rebalance="weekly",
+        industry_standard=INDUSTRY_STANDARD,
+        lifecycle=True,
+        adjustment="pre",
+    )
     context.state.setdefault("small_cap_limitup", {
         "hold_list": [],
         "yesterday_high_limit": [],

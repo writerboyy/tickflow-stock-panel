@@ -65,6 +65,10 @@ def requirement():
 
 def test_readiness_manifest_checks_full_declared_universe(tmp_path):
     prepare_complete_data(tmp_path)
+    write_table(tmp_path, "kline_daily/.part.pre-repair.parquet", {
+        "symbol": ["X"],
+        "date": [date(2024, 1, 1)],
+    })
 
     report = build_readiness_manifest(
         tmp_path,
@@ -86,6 +90,10 @@ def test_readiness_manifest_checks_full_declared_universe(tmp_path):
     }]
     assert len(report["tickflow_data_manifest_sha256"]) == 64
     assert len(report["trading_calendar_sha256"]) == 64
+    assert all(
+        ".part.pre-repair.parquet" not in item["path"]
+        for item in report["source_proof"]["files"]
+    )
 
 
 def test_readiness_has_no_percentage_threshold_for_missing_symbol(tmp_path):
