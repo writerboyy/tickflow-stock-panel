@@ -1384,6 +1384,7 @@ export interface FreeBacktestConfig {
   min_commission: number
   reserve_buy_fees?: boolean
   stamp_tax_pct: number
+  transfer_fee_pct: number
   slippage_bps: number
   price_tick: number | null
   callback_timeout_seconds?: number

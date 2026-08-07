@@ -21,6 +21,7 @@ _EXECUTION_CONFIG_KEYS = (
     "min_commission",
     "reserve_buy_fees",
     "stamp_tax_pct",
+    "transfer_fee_pct",
     "slippage_bps",
     "price_tick",
     "lot_size",

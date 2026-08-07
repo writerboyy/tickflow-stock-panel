@@ -33,6 +33,7 @@ class FreeStrategyConfig:
     min_commission: float = 0.0
     reserve_buy_fees: bool = True
     stamp_tax_pct: float = 0.001
+    transfer_fee_pct: float = 0.0
     slippage_bps: float = 5.0
     price_tick: float | None = None
     lot_size: int = 100
@@ -100,6 +101,37 @@ class Fill:
     market_amount: float | None = None
     market_volume: float | None = None
     participation_pct: float | None = None
+    commission: float = 0.0
+    stamp_tax: float = 0.0
+    transfer_fee: float = 0.0
+    dividend_tax: float = 0.0
+    total_fee: float = 0.0
+    status: str = "filled"
+    reason: str = ""
+    submitted_at: str = ""
+    fee_components_complete: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    order_id: str
+    submitted_at: str
+    executed_at: str | None
+    symbol: str
+    side: str
+    requested_quantity: float | None
+    executed_quantity: float
+    price: float | None
+    amount: float
+    commission: float
+    stamp_tax: float
+    transfer_fee: float
+    dividend_tax: float
+    fee: float
+    total_fee: float
+    fee_components_complete: bool
+    status: str
+    reason: str
 
 
 class Account:
@@ -126,7 +158,14 @@ class Account:
         self.available = {k: float(v) for k, v in raw.get("available", {}).items()}
         self.avg_cost = {k: float(v) for k, v in raw.get("avg_cost", {}).items()}
         self.orders = [Order(**item) for item in raw.get("orders", [])]
-        self.fills = [Fill(**item) for item in raw.get("fills", [])]
+        self.fills = []
+        for item in raw.get("fills", []):
+            migrated = dict(item)
+            if "total_fee" not in migrated:
+                migrated["total_fee"] = float(migrated.get("fee", 0.0))
+            if "fee_components_complete" not in migrated:
+                migrated["fee_components_complete"] = False
+            self.fills.append(Fill(**migrated))
         self.corporate_actions = list(raw.get("corporate_actions", []))
         self.equity_curve = list(raw.get("equity_curve", []))
 
@@ -1205,11 +1244,17 @@ class FreeStrategyEngine:
                 Decimal(str(self.config.min_commission)),
                 gross_decimal * Decimal(str(commission_rate)),
             )
-            fee_decimal = commission + (
+            stamp_tax = (
                 gross_decimal * Decimal(str(self.config.stamp_tax_pct))
                 if side == "sell" and self.config.asset_type == "stock"
                 else Decimal(0)
             )
+            transfer_fee = (
+                gross_decimal * Decimal(str(self.config.transfer_fee_pct))
+                if self.config.asset_type == "stock"
+                else Decimal(0)
+            )
+            fee_decimal = commission + stamp_tax + transfer_fee
             if side != "buy" or gross_decimal + fee_decimal <= Decimal(str(max(0.0, available))):
                 break
             qty -= lot
@@ -1223,6 +1268,7 @@ class FreeStrategyEngine:
                 return
         gross = float(gross_decimal)
         fee = float(fee_decimal)
+        dividend_tax = 0.0
         if side == "buy":
             self.account.cash = max(0.0, self.account.cash - gross - fee)
             old = self.account.positions.get(order.symbol, 0.0)
@@ -1271,6 +1317,14 @@ class FreeStrategyEngine:
             market_amount=float(bar.amount) if bar.amount > 0 else None,
             market_volume=market_volume,
             participation_pct=qty / market_volume * 100 if market_volume else None,
+            commission=float(commission),
+            stamp_tax=float(stamp_tax),
+            transfer_fee=float(transfer_fee),
+            dividend_tax=float(dividend_tax),
+            total_fee=fee + float(dividend_tax),
+            status=order.status,
+            reason=order.reason,
+            submitted_at=order.submitted_at,
         ))
 
     @staticmethod
@@ -1940,11 +1994,18 @@ class FreeStrategyEngine:
             cost_basis = 0.0
             realized_pnl = 0.0
             if fill.side == "buy":
-                positions[fill.symbol] = (held + fill.quantity, cost + fill.value + fill.fee)
+                positions[fill.symbol] = (
+                    held + fill.quantity,
+                    cost + fill.value + fill.total_fee,
+                )
             elif held > 0:
                 sold = min(fill.quantity, held)
                 cost_basis = cost * sold / held
-                realized_pnl = fill.value * sold / fill.quantity - fill.fee * sold / fill.quantity - cost_basis
+                realized_pnl = (
+                    fill.value * sold / fill.quantity
+                    - fill.total_fee * sold / fill.quantity
+                    - cost_basis
+                )
                 remaining = held - sold
                 positions[fill.symbol] = (remaining, max(0.0, cost - cost_basis))
                 realized_trades.append(realized_pnl)
@@ -1958,12 +2019,49 @@ class FreeStrategyEngine:
                 "price": fill.price,
                 "value": fill.value,
                 "fee": fill.fee,
+                "total_fee": fill.total_fee,
                 "cost_basis": cost_basis,
                 "realized_pnl": realized_pnl,
                 "cumulative_realized_pnl": cumulative_realized,
                 "realized_return_pct": realized_pnl / cost_basis * 100 if cost_basis else 0.0,
             })
         return rows, realized_trades
+
+    def _execution_records(self) -> list[ExecutionRecord]:
+        fills_by_order: dict[str, list[Fill]] = {}
+        for fill in self.account.fills:
+            fills_by_order.setdefault(fill.order_id, []).append(fill)
+        records = []
+        for order in self.account.orders:
+            fills = fills_by_order.get(order.id, [])
+            executed_quantity = sum(fill.quantity for fill in fills)
+            amount = sum(fill.value for fill in fills)
+            requested_quantity = order.quantity
+            if requested_quantity is None and order.target_quantity is not None:
+                requested_quantity = order.target_quantity
+            records.append(ExecutionRecord(
+                order_id=order.id,
+                submitted_at=order.submitted_at,
+                executed_at=fills[-1].timestamp if fills else None,
+                symbol=order.symbol,
+                side=fills[-1].side if fills else order.side,
+                requested_quantity=requested_quantity,
+                executed_quantity=executed_quantity,
+                price=amount / executed_quantity if executed_quantity else None,
+                amount=amount,
+                commission=sum(fill.commission for fill in fills),
+                stamp_tax=sum(fill.stamp_tax for fill in fills),
+                transfer_fee=sum(fill.transfer_fee for fill in fills),
+                dividend_tax=sum(fill.dividend_tax for fill in fills),
+                fee=sum(fill.fee for fill in fills),
+                total_fee=sum(fill.total_fee for fill in fills),
+                fee_components_complete=bool(fills) and all(
+                    fill.fee_components_complete for fill in fills
+                ),
+                status=order.status,
+                reason=order.reason,
+            ))
+        return records
 
     def _transaction_rows(self) -> list[dict[str, Any]]:
         fills_by_order: dict[str, list[Fill]] = {}
@@ -1993,6 +2091,14 @@ class FreeStrategyEngine:
                 "average_fill_price": fill_value / filled_quantity if filled_quantity else None,
                 "fill_value": fill_value,
                 "fee": fee,
+                "commission": sum(fill.commission for fill in fills),
+                "stamp_tax": sum(fill.stamp_tax for fill in fills),
+                "transfer_fee": sum(fill.transfer_fee for fill in fills),
+                "dividend_tax": sum(fill.dividend_tax for fill in fills),
+                "total_fee": sum(fill.total_fee for fill in fills),
+                "fee_components_complete": bool(fills) and all(
+                    fill.fee_components_complete for fill in fills
+                ),
                 "status": order.status,
                 "reason": order.reason,
             })
@@ -2128,12 +2234,14 @@ class FreeStrategyEngine:
             "fills_over_5_pct": sum(value > 5 for value in participation),
             "fills_over_10_pct": sum(value > 10 for value in participation),
         }
+        executions = [asdict(value) for value in self._execution_records()]
         return {"initial_capital": self.config.initial_capital, "final_equity": values[-1] if values else self.config.initial_capital,
                 "return_pct": ((values[-1] / self.config.initial_capital) - 1) * 100 if values else 0.0,
                 "max_drawdown_pct": drawdown * 100, "equity_curve": curve,
                 "daily_equity_curve": daily_curve, "performance": performance,
                 "benchmark_symbol": self.config.benchmark_symbol,
                 "orders": orders, "signals": orders, "transactions": self._transaction_rows(),
+                "executions": executions,
                 "strategy_signals": self.signals,
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
                 "capacity_analysis": capacity_analysis,

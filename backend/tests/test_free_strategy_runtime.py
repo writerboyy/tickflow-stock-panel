@@ -1203,6 +1203,104 @@ def on_bar(context, bars):
     assert result["fills"][1]["fee"] == 16.785
 
 
+def test_fill_and_execution_record_expose_auditable_fee_components():
+    source = """
+def on_bar(context, bars):
+    if context.now.day == 1:
+        context.buy('X', quantity=100, reason='entry')
+    else:
+        context.sell('X', quantity=100, reason='exit')
+"""
+    result = FreeStrategyEngine(
+        source,
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            commission_pct=0.001,
+            min_commission=0,
+            stamp_tax_pct=0.001,
+            transfer_fee_pct=0.00002,
+            slippage_bps=0,
+            lot_size=100,
+            fill_policy="close",
+            settlement="t0",
+        ),
+    ).run([
+        Bar("X", datetime(2024, 1, day, 15), 10, 10, 10, 10)
+        for day in (1, 2)
+    ])
+
+    sell = result["fills"][1]
+    assert sell["commission"] == pytest.approx(1.0)
+    assert sell["stamp_tax"] == pytest.approx(1.0)
+    assert sell["transfer_fee"] == pytest.approx(0.02)
+    assert sell["dividend_tax"] == 0
+    assert sell["fee"] == pytest.approx(2.02)
+    assert sell["total_fee"] == pytest.approx(2.02)
+    assert sell["status"] == "filled"
+
+    execution = result["executions"][1]
+    assert execution == {
+        "order_id": "o2",
+        "submitted_at": "2024-01-02T15:00:00",
+        "executed_at": "2024-01-02T15:00:00",
+        "symbol": "X",
+        "side": "sell",
+        "requested_quantity": 100,
+        "executed_quantity": 100,
+        "price": 10,
+        "amount": 1_000,
+        "commission": pytest.approx(1.0),
+        "stamp_tax": pytest.approx(1.0),
+        "transfer_fee": pytest.approx(0.02),
+        "dividend_tax": 0,
+        "fee": pytest.approx(2.02),
+        "total_fee": pytest.approx(2.02),
+        "fee_components_complete": True,
+        "status": "filled",
+        "reason": "exit",
+    }
+
+
+def test_legacy_checkpoint_fill_without_fee_components_restores_as_incomplete():
+    source = """
+def on_bar(context, bars):
+    context.buy('X', quantity=100)
+"""
+    config = FreeStrategyConfig(
+        initial_capital=10_000,
+        fees_pct=0.001,
+        stamp_tax_pct=0,
+        slippage_bps=0,
+        lot_size=100,
+        fill_policy="close",
+    )
+    original = FreeStrategyEngine(source, config=config)
+    original.run([Bar("X", datetime(2024, 1, 2, 15), 10, 10, 10, 10)])
+    checkpoint = original.checkpoint()
+    legacy_fill = checkpoint["account"]["fills"][0]
+    for field in (
+        "commission",
+        "stamp_tax",
+        "transfer_fee",
+        "dividend_tax",
+        "total_fee",
+        "status",
+        "reason",
+        "submitted_at",
+        "fee_components_complete",
+    ):
+        legacy_fill.pop(field, None)
+
+    restored = FreeStrategyEngine(source, config=config)
+    restored.restore_checkpoint(checkpoint)
+    fill = restored.result()["fills"][0]
+
+    assert fill["fee"] == 1.0
+    assert fill["total_fee"] == 1.0
+    assert fill["commission"] == 0
+    assert fill["fee_components_complete"] is False
+
+
 def test_next_open_fill_and_t1_are_default():
     source = """
 def on_bar(context, bars):

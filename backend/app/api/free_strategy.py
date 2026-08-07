@@ -312,6 +312,7 @@ _LEGACY_FIVE_FORTUNES_CONFIG = {
     "commission_pct": None,
     "min_commission": 0,
     "stamp_tax_pct": 0.001,
+    "transfer_fee_pct": 0,
     "slippage_bps": 5,
     "price_tick": None,
     "lot_size": 100,
@@ -387,6 +388,7 @@ class BacktestWrite(BaseModel):
     min_commission: float = Field(default=0, ge=0)
     reserve_buy_fees: bool = True
     stamp_tax_pct: float = Field(default=0.001, ge=0)
+    transfer_fee_pct: float = Field(default=0, ge=0)
     slippage_bps: float = Field(default=5, ge=0)
     price_tick: float | None = Field(default=None, gt=0)
     callback_timeout_seconds: float = Field(default=30, ge=0.1, le=120)

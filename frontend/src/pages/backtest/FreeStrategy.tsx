@@ -59,7 +59,7 @@ function executionModeLabel(value: unknown) {
 const DEFAULT_CONFIG: FreeBacktestConfig = {
   strategy_id: '', timeframe: '1d', asset_type: 'etf',
   start: `${new Date().getFullYear() - 3}-01-01`, end: new Date().toISOString().slice(0, 10),
-  initial_capital: 1_000_000, fees_pct: 0.0002, commission_pct: null, min_commission: 0, stamp_tax_pct: 0.001,
+  initial_capital: 1_000_000, fees_pct: 0.0002, commission_pct: null, min_commission: 0, stamp_tax_pct: 0.001, transfer_fee_pct: 0,
   slippage_bps: 5, price_tick: null, lot_size: 100, max_exposure_pct: 1, settlement: 't1', fill_policy: 'next_open',
   benchmark_symbol: '510300.SH',
 }
