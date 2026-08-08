@@ -249,6 +249,35 @@ def test_normalize_and_forward_adjustment_preserve_volume_and_amount():
     assert events["ex_factor"].to_list() == [1.0, 2.0]
 
 
+def test_adjustment_normalization_accepts_compact_tushare_dates():
+    factors = pl.DataFrame({
+        "ts_code": ["000001.SZ", "000001.SZ"],
+        "trade_date": ["20260802", "20260807"],
+        "adj_factor": [1.0, 2.0],
+    })
+
+    events = th.normalize_adjustment_rows(factors)
+
+    assert events["trade_date"].to_list() == [date(2026, 8, 2), date(2026, 8, 7)]
+    assert events["ex_factor"].to_list() == [1.0, 2.0]
+
+
+def test_forward_adjustment_uses_compact_tushare_dates():
+    raw = th.normalize_rows([
+        {"ts_code": "000001.SZ", "trade_time": "2026-08-02 09:31:00", "open": 10, "high": 10, "low": 10, "close": 10, "vol": 100, "amount": 1000},
+    ])
+    factors = pl.DataFrame({
+        "ts_code": ["000001.SZ", "000001.SZ"],
+        "trade_date": ["20260802", "20260807"],
+        "adj_factor": [1.0, 2.0],
+    })
+
+    adjusted = th.forward_adjust_minutes(raw, factors)
+
+    assert adjusted["close"].to_list() == [5.0]
+    assert adjusted["volume"].to_list() == [100.0]
+
+
 def test_invalid_ohlc_and_conflicting_overlap_fail_closed():
     frame = th.normalize_rows([{"ts_code": "000001.SZ", "trade_time": "2025-01-02 09:31:00", "open": 10, "high": 8, "low": 9, "close": 10, "vol": 1, "amount": 1}])
     valid, audit = th.validate_minute_frame(frame)
