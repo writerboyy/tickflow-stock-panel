@@ -16,6 +16,7 @@ import polars as pl
 from app.indicators.pipeline import compute_enriched
 from app.services import kline_sync, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
+from app.tickflow.catalog import DEFAULT_CN_EXCHANGES, list_cn_exchanges
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, min_batch, resolve_limit, sleep_between_batches
 from app.tickflow.repository import KlineRepository
@@ -23,7 +24,7 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 # exchanges.get_instruments 查询的交易所(沪深京)
-_EXCHANGES = ["SH", "SZ", "BJ"]
+_EXCHANGES = list(DEFAULT_CN_EXCHANGES)
 _MAX_REASONABLE_INDEX_AMOUNT = 1e15
 _CONSENSUS_REPAIRABLE_FIELDS = frozenset({"volume", "amount"})
 
@@ -207,7 +208,7 @@ def _fetch_instruments_by_type(instrument_type: str, asset_type_label: str) -> p
     """
     tf = get_client()
     rows: list[dict] = []
-    for ex in _EXCHANGES:
+    for ex in list_cn_exchanges(tf, tuple(_EXCHANGES)):
         try:
             items = tf.exchanges.get_instruments(ex, instrument_type=instrument_type)
             for it in items or []:

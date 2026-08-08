@@ -1,7 +1,7 @@
 """标的维表同步服务。
 
-盘前 9:10 调用 tf.exchanges.get_instruments("SH"/"SZ"/"BJ", type="stock")
-获取全量标的元数据，flatten ext 字段，写入 instruments.parquet。
+盘前 9:10 先通过 exchanges.list + universes.get/instruments.batch 获取
+全量标的元数据，失败时降级到 exchanges.get_instruments("SH"/"SZ"/"BJ")。
 
 Starter+ 盘后可用 quotes.get(universes) 顺便补充 name。
 """
@@ -14,11 +14,12 @@ from pathlib import Path
 import polars as pl
 
 from app.plugins.pit_history.storage import INSTRUMENT_LIFECYCLE_EVENTS_TABLE, read_history_table
+from app.tickflow.catalog import DEFAULT_CN_EXCHANGES, fetch_instrument_details, list_cn_exchanges
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
 
-_EXCHANGES = ["SH", "SZ", "BJ"]
+_EXCHANGES = list(DEFAULT_CN_EXCHANGES)
 
 
 def _flatten_instruments(items: list[dict]) -> list[dict]:
@@ -42,6 +43,50 @@ def _flatten_instruments(items: list[dict]) -> list[dict]:
         row["limit_down"] = ext.get("limit_down")
         rows.append(row)
     return rows
+
+
+def _universe_symbols(tf: object, universe_id: str = "CN_Equity_A") -> list[str]:
+    universes = getattr(tf, "universes", None)
+    get = getattr(universes, "get", None)
+    if not callable(get):
+        return []
+    try:
+        detail = get(universe_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("universes.get(%s) failed: %s", universe_id, exc)
+        return []
+    raw_symbols = detail.get("symbols") if isinstance(detail, dict) else getattr(detail, "symbols", None)
+    symbols: list[str] = []
+    for raw in raw_symbols or []:
+        if isinstance(raw, str):
+            symbol = raw
+        elif isinstance(raw, dict):
+            symbol = raw.get("symbol")
+        else:
+            symbol = getattr(raw, "symbol", None)
+        normalized = str(symbol or "").strip().upper()
+        if normalized:
+            symbols.append(normalized)
+    return list(dict.fromkeys(symbols))
+
+
+def _fetch_instruments_via_catalog(tf: object) -> list[dict]:
+    symbols = _universe_symbols(tf)
+    if not symbols:
+        return []
+    items = fetch_instrument_details(tf, symbols)
+    found = {
+        str(item.get("symbol") or "").strip().upper()
+        for item in items
+        if item.get("symbol")
+    }
+    if not set(symbols).issubset(found):
+        logger.warning(
+            "instruments.batch returned incomplete CN_Equity_A catalog (%d/%d), using exchange fallback",
+            len(found), len(symbols),
+        )
+        return []
+    return items
 
 
 def _fetch_instruments_via_provider() -> list[dict] | None:
@@ -81,15 +126,20 @@ def sync_instruments(data_dir: Path) -> int:
     if all_rows is None:
         # 未命中非 tickflow provider → 走 tickflow 直连
         tf = get_client()
-        all_rows = []
-        for ex in _EXCHANGES:
-            try:
-                items = tf.exchanges.get_instruments(ex, instrument_type="stock")
-                if items:
-                    all_rows.extend(_flatten_instruments(items))
-                    logger.info("instruments %s: %d stocks", ex, len(items))
-            except Exception as e:
-                logger.warning("get_instruments(%s) failed: %s", ex, e)
+        # Always discover the available CN exchanges first; the result is also
+        # used by the compatibility path below.
+        exchanges = list_cn_exchanges(tf)
+        all_rows = _flatten_instruments(_fetch_instruments_via_catalog(tf))
+        if not all_rows:
+            all_rows = []
+            for ex in exchanges:
+                try:
+                    items = tf.exchanges.get_instruments(ex, instrument_type="stock")
+                    if items:
+                        all_rows.extend(_flatten_instruments(items))
+                        logger.info("instruments %s: %d stocks", ex, len(items))
+                except Exception as e:
+                    logger.warning("get_instruments(%s) failed: %s", ex, e)
 
     if not all_rows:
         return 0

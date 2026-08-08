@@ -9,11 +9,12 @@ import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily, normalize_instruments
+from app.tickflow.catalog import DEFAULT_CN_EXCHANGES, list_cn_exchanges
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
 
-_EXCHANGES = ["SH", "SZ", "BJ"]
+_EXCHANGES = list(DEFAULT_CN_EXCHANGES)
 
 
 class TickFlowProvider:
@@ -31,7 +32,7 @@ class TickFlowProvider:
         tf = get_client()
         instrument_type = "stock" if asset_type == "stock" else asset_type
         rows: list[dict] = []
-        for ex in _EXCHANGES:
+        for ex in list_cn_exchanges(tf, tuple(_EXCHANGES)):
             try:
                 items = tf.exchanges.get_instruments(ex, instrument_type=instrument_type)
                 rows.extend([it for it in (items or []) if isinstance(it, dict)])
