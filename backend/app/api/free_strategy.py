@@ -1068,7 +1068,7 @@ def paper_status(request: Request):
         "running_accounts": 0,
         "mode_counts": {},
         "poll_3s": {"active": False, "available": False, "min_interval_s": None, "interval_s": None, "actual_fetch_ms": None},
-        "websocket": {"status": "disconnected", "symbols": 0, "capacity": 100, "last_error": None},
+        "websocket": {"status": "disconnected", "symbols": 0, "capacity": 200, "last_error": None},
         "last_quote_at": None,
     }
 

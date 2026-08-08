@@ -750,7 +750,7 @@ export function PaperTrading() {
           {account.sync?.phase === 'waiting_market' && account.sync.reason ? <span className="min-w-0 truncate text-warning" title={account.sync.reason}>{account.sync.reason}</span> : null}
           {(account.sync?.queue_delay_seconds ?? 0) > 0.05 ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />队列等待 {Number(account.sync?.queue_delay_seconds).toFixed(1)} 秒</span> : null}
           {account.market_mode === 'poll_3s' ? <span className="inline-flex items-center gap-1.5"><Gauge className="h-3.5 w-3.5" />{status?.poll_3s.actual_fetch_ms != null ? `${status.poll_3s.actual_fetch_ms} ms` : '—'}</span> : null}
-          {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 100}</span> : null}
+          {account.market_mode === 'websocket' ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3.5 w-3.5" />{status?.websocket.status ?? 'disconnected'} · {status?.websocket.symbols ?? 0}/{status?.websocket.capacity ?? 200}</span> : null}
         </section> : null}
 
         <div className="flex border-b border-border px-3 pt-2">

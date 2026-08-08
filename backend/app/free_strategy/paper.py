@@ -30,7 +30,7 @@ _PAPER_WEBHOOK_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="
 MARKET_MODES = {"bar_1m", "bar_1d", "poll_3s", "websocket"}
 LEGACY_MARKET_MODES = {"bar_5m", "bar_30m"}
 QUOTE_MODES = {"poll_3s", "websocket"}
-WS_SYMBOL_LIMIT = 100
+WS_SYMBOL_LIMIT = 200
 PAPER_DEFAULT_CALLBACK_TIMEOUT_SECONDS = 120.0
 PAPER_CATCH_UP_CONCURRENCY = 2
 PAPER_BAR_CHECKPOINT_GROUPS = 30
@@ -480,7 +480,7 @@ class MarketDataHub:
                 return
             cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
             if subscription.mode == "websocket" and len(cleaned | self._websocket_symbols(exclude=account_id)) > WS_SYMBOL_LIMIT:
-                raise ValueError("运行时股票池扩容超过 WebSocket 100 只上限")
+                raise ValueError(f"运行时股票池扩容超过 WebSocket {WS_SYMBOL_LIMIT} 只上限")
             subscription.symbols = cleaned
             if valuation_symbols is not None:
                 subscription.valuation_symbols = {

@@ -944,8 +944,8 @@ def test_scheduled_bar_account_receives_clock_without_reading_minute_ranges():
 
 def test_websocket_account_is_rejected_above_deduplicated_limit():
     hub = MarketDataHub(FakeQuoteService(), repo=None)
-    with pytest.raises(ValueError, match="最多 100"):
-        hub.register("too-many", "websocket", {f"S{index}" for index in range(101)}, "stock", queue.Queue())
+    with pytest.raises(ValueError, match="最多 200"):
+        hub.register("too-many", "websocket", {f"S{index}" for index in range(201)}, "stock", queue.Queue())
 
 
 def test_websocket_registration_failure_rolls_back_subscription(monkeypatch):
