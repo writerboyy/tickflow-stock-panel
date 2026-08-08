@@ -544,6 +544,21 @@ def validate_minute_frame(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[dict[
     return valid.sort(["symbol", "datetime"]), audit
 
 
+def _parse_date_column(frame: pl.DataFrame, column: str) -> pl.DataFrame:
+    """Parse provider date strings, including Tushare's compact YYYYMMDD form."""
+    if column not in frame.columns or frame.schema[column] == pl.Date:
+        return frame
+    if frame.schema[column] == pl.String:
+        return frame.with_columns(
+            pl.coalesce(
+                pl.col(column).str.strptime(pl.Date, "%Y%m%d", strict=False),
+                pl.col(column).str.strptime(pl.Date, "%Y-%m-%d", strict=False),
+                pl.col(column).str.strptime(pl.Date, "%Y/%m/%d", strict=False),
+            ).alias(column)
+        )
+    return frame.with_columns(pl.col(column).cast(pl.Date, strict=False).alias(column))
+
+
 def forward_adjust_minutes(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
     """Apply Tushare cumulative adjustment factors while preserving volume/amount."""
     if raw.is_empty() or factors.is_empty():
@@ -556,8 +571,8 @@ def forward_adjust_minutes(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataF
     factors = factors.rename(rename_map)
     if "date" not in factors.columns or "factor" not in factors.columns:
         raise BackfillBlocked("adjustment response missing trade_date/adj_factor")
-    factors = factors.with_columns(
-        pl.col("symbol").cast(pl.String), pl.col("date").cast(pl.Date, strict=False), pl.col("factor").cast(pl.Float64, strict=False)
+    factors = _parse_date_column(factors, "date").with_columns(
+        pl.col("symbol").cast(pl.String), pl.col("factor").cast(pl.Float64, strict=False)
     ).drop_nulls(["symbol", "date", "factor"]).sort(["date", "symbol"])
     latest = factors.group_by("symbol").agg(pl.col("factor").last().alias("latest_factor"))
     bars = raw.with_columns(pl.col("datetime").dt.date().alias("date")).sort(["date", "symbol"])
@@ -578,16 +593,14 @@ def normalize_adjustment_rows(frame: pl.DataFrame) -> pl.DataFrame:
     }
     frame = frame.rename(rename_map)
     if {"symbol", "trade_date", "ex_factor"} <= set(frame.columns) and "factor" not in frame.columns:
-        return frame.with_columns(
+        return _parse_date_column(frame, "trade_date").with_columns(
             pl.col("symbol").cast(pl.String),
-            pl.col("trade_date").cast(pl.Date, strict=False),
             pl.col("ex_factor").cast(pl.Float64, strict=False),
         ).drop_nulls(["symbol", "trade_date", "ex_factor"]).select("symbol", "trade_date", "ex_factor")
     if not {"symbol", "trade_date", "factor"} <= set(frame.columns):
         raise BackfillBlocked("adjustment response missing symbol/trade_date/adj_factor")
-    frame = frame.with_columns(
+    frame = _parse_date_column(frame, "trade_date").with_columns(
         pl.col("symbol").cast(pl.String),
-        pl.col("trade_date").cast(pl.Date, strict=False),
         pl.col("factor").cast(pl.Float64, strict=False),
     ).drop_nulls(["symbol", "trade_date", "factor"]).sort(["symbol", "trade_date"])
     frame = frame.unique(subset=["symbol", "trade_date"], keep="last").sort(["symbol", "trade_date"])
