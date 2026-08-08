@@ -11,6 +11,7 @@ from typing import Any
 
 import polars as pl
 
+from app.parquet import scan_daily_parquet, scan_parquet_compat
 from app.services import kline_sync
 from app.services.kline_sync import _write_minute_partition
 from app.tickflow.repository import KlineRepository
@@ -28,7 +29,11 @@ def _load_factors(data_dir: Path) -> pl.DataFrame:
 
 def _scan_rows(path: Path, symbols: list[str], start: date, end: date, *, minute: bool) -> pl.DataFrame:
     try:
-        scan = pl.scan_parquet(str(path / "**" / "*.parquet"))
+        scan = (
+            scan_parquet_compat(str(path / "**" / "*.parquet"))
+            if minute
+            else scan_daily_parquet(str(path / "**" / "*.parquet"))
+        )
         day_expr = pl.col("datetime").dt.date() if minute else pl.col("date")
         return (
             scan.filter(pl.col("symbol").is_in(symbols) & (day_expr >= start) & (day_expr <= end))

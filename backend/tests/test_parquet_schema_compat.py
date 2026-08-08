@@ -122,6 +122,46 @@ def test_etf_daily_batch_tolerates_added_quote_ts(tmp_path):
     assert frame["quote_ts"].to_list() == [None, 1785295800000]
 
 
+def test_etf_minute_range_tolerates_added_quote_ts(tmp_path):
+    store = DataStore(tmp_path)
+    base = tmp_path / "kline_etf_minute"
+    old_part = base / "date=2026-07-28" / "part.parquet"
+    new_part = base / "date=2026-07-29" / "part.parquet"
+    old_part.parent.mkdir(parents=True)
+    new_part.parent.mkdir(parents=True)
+
+    common = {
+        "symbol": ["159920.SZ"],
+        "datetime": [date(2026, 7, 28)],
+        "open": [1.50],
+        "high": [1.53],
+        "low": [1.49],
+        "close": [1.52],
+        "volume": [1000.0],
+        "amount": [1520.0],
+    }
+    pl.DataFrame(common).with_columns(
+        pl.col("datetime").cast(pl.Datetime),
+    ).write_parquet(old_part)
+    pl.DataFrame({
+        **common,
+        "datetime": [date(2026, 7, 29)],
+        "quote_ts": [1785295800000],
+    }).with_columns(
+        pl.col("datetime").cast(pl.Datetime),
+    ).write_parquet(new_part)
+
+    frame = KlineRepository(store).get_minute_range(
+        ["159920.SZ"],
+        date(2026, 7, 28),
+        date(2026, 7, 29),
+        asset_type="etf",
+    )
+
+    assert frame.height == 2
+    assert frame["datetime"].dt.date().to_list() == [date(2026, 7, 28), date(2026, 7, 29)]
+
+
 def test_stock_daily_queries_read_only_requested_date_partitions(tmp_path, monkeypatch):
     base = tmp_path / "kline_daily_enriched"
     first = base / "date=2026-07-28" / "part.parquet"

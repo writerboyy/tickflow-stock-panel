@@ -73,6 +73,33 @@ def test_inspection_marks_only_minute_gap_as_repairable(tmp_path):
     assert (tmp_path / "etf_data_repairs" / "scans" / f"{result['scan_id']}.json").exists()
 
 
+def test_inspection_tolerates_added_daily_quote_timestamp(tmp_path):
+    repo = _repo(tmp_path)
+    extra = tmp_path / "kline_etf_daily" / "date=2026-07-22" / "part.parquet"
+    extra.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["510300.SH"],
+        "date": [date(2026, 7, 22)],
+        "open": [4.2],
+        "high": [4.3],
+        "low": [4.1],
+        "close": [4.25],
+        "volume": [1200.0],
+        "amount": [5100.0],
+        "quote_ts": [1784683800000],
+    }).write_parquet(extra)
+
+    result = repair.inspect_etf_data(
+        repo,
+        ["510300.SH"],
+        date(2026, 7, 20),
+        date(2026, 7, 22),
+        require_minute=False,
+    )
+
+    assert not any(issue["type"] == "daily_missing" for issue in result["issues"])
+
+
 def test_repair_uses_configured_minute_source_without_overwriting_existing(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
     scan = _scan(repo)
