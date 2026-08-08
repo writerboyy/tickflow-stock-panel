@@ -2070,10 +2070,10 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             if symbol == config.benchmark_symbol and day <= end
         }
         daily_root = {
-            "stock": "kline_daily",
-            "etf": "kline_etf_daily",
-            "index": "kline_index_daily",
-        }.get(payload["asset_type"], "kline_daily")
+            "stock": "kline_daily_enriched",
+            "etf": "kline_etf_enriched",
+            "index": "kline_index_enriched",
+        }.get(payload["asset_type"], "kline_daily_enriched")
         minute_root = (
             "kline_etf_minute"
             if payload["asset_type"] == "etf"

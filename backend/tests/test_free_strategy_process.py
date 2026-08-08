@@ -728,6 +728,15 @@ def test_minute_backtest_records_exact_data_coverage(monkeypatch, tmp_path):
     assert event["result"]["metadata"]["strategy_source_sha256"] == sha256(
         b"def on_bar(context, bars):\n    pass\n"
     ).hexdigest()
+    readiness_files = {
+        item["path"]
+        for item in event["result"]["metadata"]["readiness"]["source_proof"]["files"]
+    }
+    assert readiness_files == {
+        "kline_etf_enriched",
+        "kline_etf_minute",
+        "pit_reference/history/instrument_lifecycle_events/part.parquet",
+    }
 
 
 def test_backtest_reads_universe_from_strategy_source(monkeypatch, tmp_path):
