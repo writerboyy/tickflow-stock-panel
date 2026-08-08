@@ -1541,9 +1541,9 @@ class TushareHistoryBackfill:
         phase["status"] = "running"
         report: dict[str, Any] = {"partitions": 0, "added_rows": 0, "conflicts": []}
         pending: list[tuple[Path, Path, pl.DataFrame, dict[str, Any], dict[str, Any]]] = []
+        incoming_by_partition: dict[tuple[str, date], list[tuple[str, pl.DataFrame, list[dict[str, Any]]]]] = {}
         for kind in kinds:
             raw_root = self._minute_raw_root(kind)
-            target_root = self.config.data_dir / ("kline_minute" if kind == "stock" else "kline_etf_minute")
             for raw_path in sorted(raw_root.glob("symbol=*/part.parquet")):
                 symbol = raw_path.parent.name.removeprefix("symbol=")
                 raw = pl.read_parquet(raw_path)
@@ -1552,19 +1552,31 @@ class TushareHistoryBackfill:
                 )
                 adjusted, audit = validate_minute_frame(adjusted)
                 for day in sorted(set(adjusted["datetime"].dt.date().to_list())) if adjusted.height else ():
-                    assert_disk_reserve(self.config.data_dir)
                     incoming = adjusted.filter(pl.col("datetime").dt.date() == day).select(_MINUTE_FIELDS)
-                    out = target_root / f"date={day.isoformat()}" / "part.parquet"
-                    existing = pl.read_parquet(out) if out.exists() else pl.DataFrame(schema=incoming.schema)
-                    merged, overlap_report = overlap_merge(existing, incoming)
-                    coverage = minute_coverage_manifest(merged)
-                    coverage.update({"trade_date": day.isoformat(), "source": "tushare_proxy", "ownership": "tickflow_overlap_priority"})
-                    pending.append((out, target_root / "_coverage" / f"date={day.isoformat()}.json", merged, coverage, overlap_report))
-                    report["partitions"] += 1
-                    report["added_rows"] += overlap_report.get("added_rows", 0)
-                    if overlap_report.get("conflicts"):
-                        report["conflicts"].extend(overlap_report["conflicts"])
-                    self._record("publish_minute", f"{kind}/{day.isoformat()}", status="staged", rows=merged.height, audit=audit, overlap=overlap_report)
+                    incoming_by_partition.setdefault((kind, day), []).append((symbol, incoming, audit))
+
+        for (kind, day), sources in sorted(incoming_by_partition.items()):
+            assert_disk_reserve(self.config.data_dir)
+            target_root = self.config.data_dir / ("kline_minute" if kind == "stock" else "kline_etf_minute")
+            incoming = pl.concat([frame for _symbol, frame, _audit in sources], how="vertical_relaxed").select(_MINUTE_FIELDS)
+            out = target_root / f"date={day.isoformat()}" / "part.parquet"
+            existing = pl.read_parquet(out) if out.exists() else pl.DataFrame(schema=incoming.schema)
+            merged, overlap_report = overlap_merge(existing, incoming)
+            coverage = minute_coverage_manifest(merged)
+            coverage.update({"trade_date": day.isoformat(), "source": "tushare_proxy", "ownership": "tickflow_overlap_priority"})
+            pending.append((out, target_root / "_coverage" / f"date={day.isoformat()}.json", merged, coverage, overlap_report))
+            report["partitions"] += 1
+            report["added_rows"] += overlap_report.get("added_rows", 0)
+            if overlap_report.get("conflicts"):
+                report["conflicts"].extend(overlap_report["conflicts"])
+            self._record(
+                "publish_minute",
+                f"{kind}/{day.isoformat()}",
+                status="staged",
+                rows=merged.height,
+                sources=[{"symbol": symbol, "audit": audit} for symbol, _incoming, audit in sources],
+                overlap=overlap_report,
+            )
         if report["conflicts"]:
             phase["status"] = "blocked"
             self._save(publish={"status": "blocked", "conflicts": report["conflicts"]})

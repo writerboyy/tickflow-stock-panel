@@ -893,3 +893,90 @@ def test_minute_publish_rolls_back_all_partitions_on_replace_failure(tmp_path, m
 
     assert pl.read_parquet(first_target).height == 1
     assert pl.read_parquet(second_target).height == 1
+
+
+def test_minute_publish_groups_symbols_sharing_a_partition(tmp_path):
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="minute-grouped", phases=("publish_minute",)),
+        _FakeClient(),
+    )
+    raw_root = tmp_path / "tushare_archive/minute_stock_raw"
+    for symbol, close in (("000001.SZ", 10), ("000002.SZ", 20)):
+        symbol_root = raw_root / f"symbol={symbol}"
+        symbol_root.mkdir(parents=True)
+        th.normalize_rows([
+            {
+                "ts_code": symbol,
+                "trade_time": "2025-01-02 09:31:00",
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "vol": 1,
+                "amount": close,
+            }
+        ]).write_parquet(symbol_root / "part.parquet")
+
+    report = run.publish_minutes(("stock",))
+
+    target = tmp_path / "kline_minute/date=2025-01-02/part.parquet"
+    published = pl.read_parquet(target).sort("symbol")
+    assert report["partitions"] == 1
+    assert report["added_rows"] == 2
+    assert published.select("symbol", "close").to_dicts() == [
+        {"symbol": "000001.SZ", "close": 10.0},
+        {"symbol": "000002.SZ", "close": 20.0},
+    ]
+
+
+def test_minute_publish_grouped_partition_failure_restores_original(tmp_path, monkeypatch):
+    run = th.TushareHistoryBackfill(
+        th.BackfillConfig(tmp_path, run_id="minute-grouped-rollback", phases=("publish_minute",)),
+        _FakeClient(),
+    )
+    raw_root = tmp_path / "tushare_archive/minute_stock_raw"
+    for symbol, close in (("000001.SZ", 10), ("000002.SZ", 20)):
+        symbol_root = raw_root / f"symbol={symbol}"
+        symbol_root.mkdir(parents=True)
+        th.normalize_rows([
+            {
+                "ts_code": symbol,
+                "trade_time": "2025-01-02 09:31:00",
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "vol": 1,
+                "amount": close,
+            }
+        ]).write_parquet(symbol_root / "part.parquet")
+    target = tmp_path / "kline_minute/date=2025-01-02/part.parquet"
+    target.parent.mkdir(parents=True)
+    original = th.normalize_rows([
+        {
+            "ts_code": "000003.SZ",
+            "trade_time": "2025-01-02 09:31:00",
+            "open": 30,
+            "high": 30,
+            "low": 30,
+            "close": 30,
+            "vol": 1,
+            "amount": 30,
+        }
+    ])
+    th.canonicalize_minute_units(original).write_parquet(target)
+    replace = th.os.replace
+
+    def fail_publish(source, destination):
+        if Path(destination) == target and "publish_staging/minute" in str(source):
+            raise OSError("injected grouped replace failure")
+        return replace(source, destination)
+
+    monkeypatch.setattr(th.os, "replace", fail_publish)
+
+    with pytest.raises(OSError, match="injected grouped"):
+        run.publish_minutes(("stock",))
+
+    assert pl.read_parquet(target).select("symbol", "close").to_dicts() == [
+        {"symbol": "000003.SZ", "close": 30.0}
+    ]
