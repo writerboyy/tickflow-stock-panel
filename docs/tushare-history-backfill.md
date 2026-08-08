@@ -108,7 +108,8 @@ uv run python scripts/backfill_tushare_history.py --data-dir /path/to/data \
 ```
 
 只请求和保存 1 分钟数据；5/15/30/60 分钟由本地读取层聚合。股票与 ETF 分别发布
-到 `kline_minute` 和 `kline_etf_minute`，价格按复权因子处理，成交量和成交额不复权。
+到 `kline_minute` 和 `kline_etf_minute`，价格按复权因子处理，成交量和成交额不复权；
+Tushare 分钟成交量从股转换为系统的手口径后再审计和发布。
 
 `teajoin.com` 文档声明绝对上限为每分钟 450 次请求，批量任务建议至少间隔 0.2 秒。
 `--rate-interval` 是所有 worker 共享的全局请求启动间隔，程序拒绝低于

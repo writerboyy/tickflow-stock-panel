@@ -469,7 +469,7 @@ def assert_disk_reserve(path: Path, *, minimum: int = MIN_FREE_BYTES) -> None:
 
 
 def normalize_rows(rows: Iterable[Mapping[str, Any]], *, asset_type: str | None = None) -> pl.DataFrame:
-    """Normalize Tushare rows to the project's canonical minute schema."""
+    """Normalize Tushare rows to the minute schema while retaining source units."""
     frame = pl.DataFrame([dict(row) for row in rows])
     if frame.is_empty():
         return pl.DataFrame(schema={
@@ -502,6 +502,13 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]], *, asset_type: str | None 
     if asset_type:
         frame = frame.with_columns(pl.lit(asset_type).alias("asset_type"))
     return frame.select([*(_MINUTE_FIELDS), *(["asset_type"] if asset_type else [])])
+
+
+def canonicalize_minute_units(frame: pl.DataFrame) -> pl.DataFrame:
+    """Convert Tushare minute volume from shares to canonical lots."""
+    if frame.is_empty() or "volume" not in frame.columns:
+        return frame
+    return frame.with_columns((pl.col("volume") / 100.0).alias("volume"))
 
 
 def validate_minute_frame(frame: pl.DataFrame) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
@@ -1540,7 +1547,9 @@ class TushareHistoryBackfill:
             for raw_path in sorted(raw_root.glob("symbol=*/part.parquet")):
                 symbol = raw_path.parent.name.removeprefix("symbol=")
                 raw = pl.read_parquet(raw_path)
-                adjusted = forward_adjust_minutes(raw, self._adjustment_frame(kind, symbol))
+                adjusted = canonicalize_minute_units(
+                    forward_adjust_minutes(raw, self._adjustment_frame(kind, symbol))
+                )
                 adjusted, audit = validate_minute_frame(adjusted)
                 for day in sorted(set(adjusted["datetime"].dt.date().to_list())) if adjusted.height else ():
                     assert_disk_reserve(self.config.data_dir)

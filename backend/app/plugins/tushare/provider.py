@@ -17,6 +17,7 @@ from app.services.tushare_history import (
     GlobalRateLimiter,
     TusharePermissionError,
     TushareProxyClient,
+    canonicalize_minute_units,
     forward_adjust_minutes,
     load_tushare_key,
     normalize_adjustment_rows,
@@ -176,9 +177,7 @@ class TushareProvider:
             frame = pl.DataFrame(response.rows) if response.rows else pl.DataFrame()
             if not frame.is_empty():
                 frame = _parse_date_column(frame, "trade_date")
-                # Tushare daily-family endpoints use hands and thousand yuan.
-                if "vol" in frame.columns:
-                    frame = frame.with_columns((pl.col("vol").cast(pl.Float64) * 100).alias("vol"))
+                # Tushare daily-family endpoints use lots and thousand yuan.
                 if "amount" in frame.columns:
                     frame = frame.with_columns((pl.col("amount").cast(pl.Float64) * 1000).alias("amount"))
                 normalized = normalize_daily(frame, source=self.name)
@@ -295,7 +294,7 @@ class TushareProvider:
                         on_chunk_done(index, total)
                     continue
                 factors = self._minute_factors(client, symbol, asset_type, start_time)
-                adjusted = forward_adjust_minutes(raw, factors)
+                adjusted = canonicalize_minute_units(forward_adjust_minutes(raw, factors))
                 adjusted, _audit = validate_minute_frame(adjusted)
                 if not adjusted.is_empty():
                     frames.append(adjusted.select(_MINUTE_FIELDS))

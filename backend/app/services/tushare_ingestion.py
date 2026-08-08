@@ -43,7 +43,7 @@ from app.services.tushare_datasets import (
 
 SOURCE = "tushare_proxy"
 INGESTION_SCHEMA_VERSION = 2
-PARSER_VERSION = "tushare_ingestion_v3"
+PARSER_VERSION = "tushare_ingestion_v4"
 DEFAULT_HISTORY_START = date(2010, 1, 1)
 _NUMERIC_DTYPES = {"float": pl.Float64, "int": pl.Int64, "bool": pl.Boolean}
 _DATE_FORMATS = ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d")
@@ -350,11 +350,10 @@ def normalize_dataset_rows(
                 expressions.append(pl.col(field.name).cast(pl.String, strict=False))
         frame = frame.with_columns(expressions)
 
-        # Tushare daily volume is in lots and amount in thousand yuan. TickFlow
-        # canonical bars use shares and yuan.
+        # Tushare and canonical daily volume are both in lots; amount is converted
+        # from thousand yuan to yuan.
         if spec.kind == "daily":
             frame = frame.with_columns(
-                (pl.col("volume") * 100.0).alias("volume"),
                 (pl.col("amount") * 1_000.0).alias("amount"),
             )
 

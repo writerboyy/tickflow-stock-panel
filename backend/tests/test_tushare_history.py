@@ -249,6 +249,16 @@ def test_normalize_and_forward_adjustment_preserve_volume_and_amount():
     assert events["ex_factor"].to_list() == [1.0, 2.0]
 
 
+def test_tushare_minute_volume_converts_shares_to_canonical_lots():
+    raw = th.normalize_rows([
+        {"ts_code": "000001.SZ", "trade_time": "2025-01-02 09:31:00", "open": 10, "high": 10, "low": 10, "close": 10, "vol": 12_345, "amount": 123_450},
+    ])
+
+    canonical = th.canonicalize_minute_units(raw)
+
+    assert canonical.select("volume", "amount").row(0) == (123.45, 123_450.0)
+
+
 def test_adjustment_normalization_accepts_compact_tushare_dates():
     factors = pl.DataFrame({
         "ts_code": ["000001.SZ", "000001.SZ"],
@@ -827,8 +837,8 @@ def test_publish_checks_all_partitions_before_replacing_any(tmp_path):
     pl.concat([first, second]).write_parquet(raw_root / "symbol=000001.SZ" / "part.parquet")
     first_target = tmp_path / "kline_minute" / "date=2025-01-02" / "part.parquet"
     second_target = tmp_path / "kline_minute" / "date=2025-01-03" / "part.parquet"
-    original_first = first.with_columns(pl.lit(10.0).alias("close"))
-    original_second = second.with_columns(pl.lit(19.0).alias("close"))
+    original_first = th.canonicalize_minute_units(first).with_columns(pl.lit(10.0).alias("close"))
+    original_second = th.canonicalize_minute_units(second).with_columns(pl.lit(19.0).alias("close"))
     first_target.parent.mkdir(parents=True)
     second_target.parent.mkdir(parents=True)
     original_first.write_parquet(first_target)
@@ -862,10 +872,11 @@ def test_minute_publish_rolls_back_all_partitions_on_replace_failure(tmp_path, m
     second_target = tmp_path / "kline_minute/date=2025-01-03/part.parquet"
     first_target.parent.mkdir(parents=True)
     second_target.parent.mkdir(parents=True)
-    raw.filter(pl.col("datetime").dt.date() == date(2025, 1, 2)).head(1).select(
+    canonical = th.canonicalize_minute_units(raw)
+    canonical.filter(pl.col("datetime").dt.date() == date(2025, 1, 2)).head(1).select(
         th._MINUTE_FIELDS
     ).write_parquet(first_target)
-    raw.filter(pl.col("datetime").dt.date() == date(2025, 1, 3)).head(1).select(
+    canonical.filter(pl.col("datetime").dt.date() == date(2025, 1, 3)).head(1).select(
         th._MINUTE_FIELDS
     ).write_parquet(second_target)
     replace = th.os.replace

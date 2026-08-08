@@ -38,7 +38,7 @@ def _sample_minute_df(symbol: str = "000001.SZ") -> pl.DataFrame:
         "low": [9.9, 10.4, 10.7, 10.5],
         "close": [10.2, 10.6, 10.85, 10.65],
         "volume": [100, 200, 150, 120],
-        "amount": [1020.0, 2120.0, 1627.0, 1278.0],
+        "amount": [102_000.0, 212_000.0, 162_700.0, 127_800.0],
     })
 
 
@@ -75,12 +75,12 @@ def test_resolve_minute_fill_sell_cross_below_ref():
     assert BacktestEngine._resolve_minute_fill(arr, 10.5, "sell") == 10.0
 
 
-def test_resolve_minute_fill_vwap():
-    """无参考线 → VWAP = 总成交额 / 总成交量。"""
+def test_resolve_minute_fill_vwap_converts_lots_to_shares():
+    """无参考线 → VWAP = 总成交额 / (总成交量手数 * 100)。"""
     arr = _to_compact_arr(_sample_minute_df())
-    total_amt = 1020.0 + 2120.0 + 1627.0 + 1278.0
+    total_amt = 102_000.0 + 212_000.0 + 162_700.0 + 127_800.0
     total_vol = 100 + 200 + 150 + 120
-    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == total_amt / total_vol
+    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == total_amt / (total_vol * 100)
 
 
 def test_resolve_minute_fill_empty_returns_none():

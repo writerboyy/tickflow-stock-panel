@@ -42,7 +42,7 @@ def test_tushare_provider_reads_key_lazily_and_normalizes_daily_units(monkeypatc
 
     assert keys == ["lazy-key"]
     assert frame.select("date", "volume", "amount").to_dicts() == [
-        {"date": datetime(2025, 1, 2).date(), "volume": 10_000.0, "amount": 200_000.0}
+        {"date": datetime(2025, 1, 2).date(), "volume": 100.0, "amount": 200_000.0}
     ]
 
 
@@ -79,7 +79,7 @@ def test_tushare_provider_routes_etf_adjustment_and_minute_qfq(monkeypatch):
     assert minute["open"].to_list() == pytest.approx([20 / 3])
     assert minute["close"].to_list() == pytest.approx([20 / 3])
     assert minute.select("volume", "amount").to_dicts() == [
-        {"volume": 100.0, "amount": 1_000.0}
+        {"volume": 1.0, "amount": 1_000.0}
     ]
     assert [name for name, _params in calls] == ["fund_adj", "etf_mins", "fund_adj"]
 

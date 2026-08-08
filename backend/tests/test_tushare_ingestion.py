@@ -60,7 +60,7 @@ def test_overlapping_market_fields_are_not_factor_inputs():
         assert_extension_field_usage("ext_tushare_top_list", "close", FACTOR_USAGE)
 
 
-def test_daily_normalization_converts_lots_and_thousand_yuan():
+def test_daily_normalization_keeps_lots_and_converts_thousand_yuan():
     frame, audit = normalize_dataset_rows(
         DATASET_SPECS["daily"],
         [{
@@ -77,7 +77,7 @@ def test_daily_normalization_converts_lots_and_thousand_yuan():
     )
 
     assert frame["date"].to_list() == ["2025-01-02"]
-    assert frame["volume"].to_list() == [1200.0]
+    assert frame["volume"].to_list() == [12.0]
     assert frame["amount"].to_list() == [34000.0]
     assert audit["rejected_rows"] == 0
 

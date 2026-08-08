@@ -113,7 +113,7 @@ class MyConfig:
   - 通过固定的 HTTPS 代理调用标准 Tushare HTTP 协议,不安装 Tushare SDK。
   - 在「设置 -> 数据源」卡片中配置并验证 Key,可选择股票/ETF/指数日K、股票/ETF
     复权因子及股票/ETF 1分钟K；实时行情继续使用 TickFlow。
-  - 日线成交量从手转换为股、成交额从千元转换为元；分钟接口保持供应商返回的股/元单位。
+  - 日线保持系统的手口径、成交额从千元转换为元；分钟原始归档保留供应商的股口径，进入 provider 或 canonical 发布前转换为手，成交额保持元。
   - 分钟价格在写入 canonical 表前按累计复权因子转换为前复权价格。Key 只保存在本机
     `data/user_data/secrets.json`；清除 Key 后未来拉取回到 TickFlow,已落盘 Parquet 不受影响。
 

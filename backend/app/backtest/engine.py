@@ -1502,12 +1502,12 @@ class BacktestEngine:
             # 参考线存在但当日分钟K未穿越 → 用收盘 (信号确认)
             return float(closes[-1]) if np.isfinite(closes[-1]) else None
 
-        # 无参考线 → VWAP (成交额/成交量), 退化到收盘价
+        # 无参考线 → VWAP (成交额/成交量股数), 退化到收盘价
         if volumes is not None and amounts is not None:
             total_vol = float(np.nansum(volumes))
             total_amt = float(np.nansum(amounts))
             if total_vol > 0 and total_amt > 0:
-                return total_amt / total_vol
+                return total_amt / (total_vol * 100.0)
 
         return float(closes[-1]) if np.isfinite(closes[-1]) else None
 
