@@ -12,6 +12,8 @@ from app.free_strategy.store import PaperAccountStore
 
 CONFIG = {
     "asset_type": "etf",
+    "timeframe": "1m",
+    "market_mode": "bar_1m",
     "initial_capital": 100_000,
     "fees_pct": 0.0001,
     "commission_pct": 0.0001,
@@ -92,6 +94,8 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "initial_capital": 100_000,
         "final_equity": 110_000,
         "max_drawdown_pct": 17.5,
+        "execution_mode": "full_bar",
+        "scheduled_times": [],
         "daily_equity_curve": [
             {"date": "2025-07-20", "timestamp": "2025-07-20T15:00:00",
              "equity": 90_000, "cash": 90_000, "strategy_nav": 0.9,
@@ -121,6 +125,8 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
     assert "runtime" not in saved
     assert saved["last_bar"] == "2026-07-24T15:00:00"
     assert saved["max_drawdown_pct"] == 17.5
+    assert saved["execution_mode"] == "full_bar"
+    assert saved["scheduled_times"] == []
     assert store.equity_curve("paper") == [{
         "timestamp": "2026-07-24T15:00:00",
         "equity": 110_000.0,
@@ -171,6 +177,43 @@ def test_continue_account_rejects_mismatched_sell_commission(tmp_path):
         continue_account_from_backtest(tmp_path, "paper", "run")
 
 
+def test_continue_account_rejects_mismatched_timeframe_and_market_mode(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "strategy_id": "five",
+        "source_hash": "source-hash",
+        "status": "paused",
+        "config": CONFIG,
+    })
+    run = tmp_path / "free_strategy_runs" / "run"
+    write_json(run / "manifest.json", {
+        "strategy_id": "five",
+        "strategy_source_sha256": "source-hash",
+        "payload": {"timeframe": "1d", "asset_type": "etf", "config": CONFIG},
+    })
+    write_json(run / "result.json", {
+        "execution_mode": "full_bar",
+        "scheduled_times": [],
+    })
+
+    with pytest.raises(ValueError, match="timeframe"):
+        continue_account_from_backtest(tmp_path, "paper", "run")
+
+    write_json(run / "manifest.json", {
+        "strategy_id": "five",
+        "strategy_source_sha256": "source-hash",
+        "payload": {"timeframe": "1m", "asset_type": "etf", "config": CONFIG},
+    })
+    write_json(run / "result.json", {
+        "execution_mode": "quote",
+        "scheduled_times": [],
+    })
+
+    with pytest.raises(ValueError, match="market_mode"):
+        continue_account_from_backtest(tmp_path, "paper", "run")
+
+
 def test_continue_account_compacts_performance_small_cap_state(tmp_path):
     config = {**CONFIG, "asset_type": "stock", "benchmark_symbol": "399303.SZ"}
     store = PaperAccountStore(tmp_path)
@@ -214,6 +257,8 @@ def test_continue_account_compacts_performance_small_cap_state(tmp_path):
         "initial_capital": 100_000,
         "final_equity": 101_000,
         "max_drawdown_pct": 2.5,
+        "execution_mode": "scheduled",
+        "scheduled_times": ["09:30"],
         "daily_equity_curve": [
             {"date": "2026-07-24", "timestamp": "2026-07-24T15:00:00",
              "equity": 101_000, "cash": 10, "strategy_nav": 1.01,
@@ -238,3 +283,5 @@ def test_continue_account_compacts_performance_small_cap_state(tmp_path):
     compacted = saved["checkpoint"]["state"]["performance_small_cap"]["daily_reports"]
     assert len(compacted) == 30
     assert compacted[0]["date"] == "2026-06-06"
+    assert saved["execution_mode"] == "scheduled"
+    assert saved["scheduled_times"] == ["09:30"]

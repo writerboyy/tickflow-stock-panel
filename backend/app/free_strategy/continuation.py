@@ -33,6 +33,14 @@ _EXECUTION_CONFIG_KEYS = (
     "benchmark_symbol",
 )
 
+_BAR_TIMEFRAMES = {
+    "bar_1m": "1m",
+    "bar_5m": "5m",
+    "bar_30m": "30m",
+    "bar_1d": "1d",
+}
+_QUOTE_MODES = {"poll_3s", "websocket"}
+
 
 def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -59,6 +67,69 @@ def _validate_compatibility(
     ]
     if mismatches:
         raise ValueError(f"回测与模拟账户执行参数不一致: {', '.join(mismatches)}")
+
+
+def _validate_execution_compatibility(
+    account: dict[str, Any],
+    manifest: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    """Keep the historical checkpoint on the same execution contract."""
+    payload = manifest.get("payload") if isinstance(manifest.get("payload"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    backtest_config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    backtest_timeframe = str(
+        payload.get("timeframe")
+        or metadata.get("timeframe")
+        or backtest_config.get("timeframe")
+        or ""
+    ).strip()
+    backtest_asset_type = str(
+        payload.get("asset_type")
+        or metadata.get("asset_type")
+        or backtest_config.get("asset_type")
+        or ""
+    ).strip()
+    paper_config = account.get("config") if isinstance(account.get("config"), dict) else {}
+    paper_timeframe = str(paper_config.get("timeframe") or "").strip()
+    paper_asset_type = str(paper_config.get("asset_type") or account.get("asset_type") or "").strip()
+    mismatches: list[str] = []
+    if not backtest_timeframe:
+        mismatches.append("timeframe(回测缺少执行周期)")
+    elif paper_timeframe != backtest_timeframe:
+        mismatches.append("timeframe")
+    if backtest_asset_type and paper_asset_type != backtest_asset_type:
+        mismatches.append("asset_type")
+
+    execution_mode = str(result.get("execution_mode") or metadata.get("execution_mode") or "").strip()
+    scheduled_times = tuple(str(value) for value in (result.get("scheduled_times") or metadata.get("scheduled_times") or ()))
+    if execution_mode not in {"full_bar", "scheduled", "quote"}:
+        mismatches.append("execution_mode(回测缺少执行模式)")
+    if execution_mode == "scheduled" and not scheduled_times:
+        mismatches.append("scheduled_times(回测缺少定时点)")
+
+    market_mode = str(account.get("market_mode") or paper_config.get("market_mode") or "").strip()
+    if not market_mode:
+        market_mode = next(
+            (mode for mode, timeframe in _BAR_TIMEFRAMES.items() if timeframe == paper_timeframe),
+            "",
+        )
+    expected_bar_timeframe = _BAR_TIMEFRAMES.get(market_mode)
+    if expected_bar_timeframe and paper_timeframe != expected_bar_timeframe:
+        mismatches.append("market_mode/timeframe")
+    if execution_mode == "quote" and market_mode not in _QUOTE_MODES:
+        mismatches.append("market_mode(需要实时行情模式)")
+    elif execution_mode in {"full_bar", "scheduled"} and market_mode in _QUOTE_MODES:
+        mismatches.append("market_mode(需要K线模式)")
+
+    saved_execution_mode = str(account.get("execution_mode") or "").strip()
+    if saved_execution_mode and execution_mode and saved_execution_mode != execution_mode:
+        mismatches.append("execution_mode")
+    saved_schedule = tuple(str(value) for value in (account.get("scheduled_times") or ()))
+    if saved_schedule and scheduled_times and saved_schedule != scheduled_times:
+        mismatches.append("scheduled_times")
+    if mismatches:
+        raise ValueError(f"回测与模拟账户执行参数不一致: {', '.join(dict.fromkeys(mismatches))}")
 
 
 def compact_paper_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +164,9 @@ def continue_account_from_backtest(
     run_root = data_dir / "free_strategy_runs" / job_id
     manifest = _load_json(run_root / "manifest.json")
     result = _load_json(run_root / "result.json")
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     _validate_compatibility(state, manifest)
+    _validate_execution_compatibility(state, manifest, result)
 
     checkpoint = copy.deepcopy(result.get("checkpoint"))
     if not checkpoint or not checkpoint.get("account") or not checkpoint.get("runtime"):
@@ -196,6 +269,15 @@ def continue_account_from_backtest(
         "risk_status": checkpoint["risk"]["status"],
         "last_bar": checkpoint["runtime"].get("last_timestamp"),
         "last_error": None,
+        "execution_mode": str(
+            result.get("execution_mode")
+            or result_metadata.get("execution_mode")
+        ),
+        "scheduled_times": list(
+            result.get("scheduled_times")
+            or result_metadata.get("scheduled_times")
+            or ()
+        ),
         "continuation": {
             "job_id": job_id,
             "source_end": checkpoint["runtime"].get("last_timestamp"),
