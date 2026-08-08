@@ -150,15 +150,20 @@ def _lifecycle_pool(
     required = {"symbol", "event_date", "event_type"}
     if not required <= set(frame.columns):
         return [], list(symbols), []
-    rows = frame.filter(
-        pl.col("symbol").is_in(symbols) & (pl.col("event_date") <= as_of)
-    )
+    rows = frame.filter(pl.col("symbol").is_in(symbols))
     active: list[str] = []
     missing: list[str] = []
     delisted: list[str] = []
     for symbol in symbols:
         events = rows.filter(pl.col("symbol") == symbol).sort("event_date")
-        types = [str(value).lower() for value in events["event_type"].to_list()]
+        historical = events.filter(pl.col("event_date") <= as_of)
+        types = [str(value).lower() for value in historical["event_type"].to_list()]
+        future_types = [
+            str(value).lower()
+            for value in events.filter(pl.col("event_date") > as_of)["event_type"].to_list()
+        ]
+        if "listed" not in types and "listed" in future_types:
+            continue
         if "listed" not in types:
             missing.append(symbol)
         elif "delisted" in types:

@@ -119,6 +119,32 @@ def test_readiness_has_no_percentage_threshold_for_missing_symbol(tmp_path):
     assert "85%" not in str(report)
 
 
+def test_readiness_excludes_symbol_listed_after_as_of(tmp_path):
+    write_table(
+        tmp_path,
+        "pit_reference/history/instrument_lifecycle_events/part.parquet",
+        {
+            "symbol": ["FUTURE"],
+            "event_date": [date(2024, 1, 3)],
+            "event_type": ["listed"],
+        },
+    )
+
+    report = build_readiness_manifest(
+        tmp_path,
+        [make_requirement(rebalance="daily", lifecycle=True)],
+        strategy_sha256="strategy-hash",
+        universe=["FUTURE"],
+        trading_dates=[date(2024, 1, 2)],
+        calendar_dates=[date(2024, 1, 1), date(2024, 1, 2)],
+        benchmark_symbol="BENCH",
+        benchmark_dates=[date(2024, 1, 1)],
+    )
+
+    assert report["status"] == "passed"
+    assert report["checks"][0]["universe_size"] == 0
+
+
 def test_readiness_blocks_future_only_financial_period(tmp_path):
     prepare_complete_data(tmp_path)
     write_table(tmp_path, "financials/income/part.parquet", {
