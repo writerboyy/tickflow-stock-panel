@@ -992,7 +992,7 @@ def test_backtest_rejects_a_tampered_source_snapshot(tmp_path):
 
 
 def test_scheduled_backtest_queries_events_without_full_minute_replay(monkeypatch, tmp_path):
-    calls = {"range": 0, "snapshot": 0, "next": 0}
+    calls = {"metadata": 0, "range": 0, "snapshot": 0, "next": 0}
 
     class FakeRepository:
         def __init__(self, _store):
@@ -1002,7 +1002,8 @@ def test_scheduled_backtest_queries_events_without_full_minute_replay(monkeypatc
             return pl.DataFrame({"symbol": ["X"]})
 
         def get_minute_symbols(self, *_args):
-            raise AssertionError("scheduled mode must not scan interval minute coverage")
+            calls["metadata"] += 1
+            return {"X"}
 
         def get_daily_asset(self, _asset_type, symbol, start, end, _columns):
             if symbol != "X":
@@ -1073,6 +1074,7 @@ def run(context):
     assert metadata["scheduled_times"] == ["13:10"]
     assert metadata["callbacks_executed"] == 2
     assert metadata["market_rows_consumed"] < 20
+    assert calls["metadata"] == 1
     assert calls["range"] == 0
     assert calls["snapshot"] > 0
     assert any("执行定时任务" in message for message in progress_messages)

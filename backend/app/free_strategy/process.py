@@ -1977,10 +1977,10 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             source,
             payload["timeframe"],
             config,
-            instrument_loader=lambda mode: _instrument_records(
+            instrument_loader=lambda _mode: _instrument_records(
                 repo,
                 payload["asset_type"],
-                "1d" if mode == "scheduled" else payload["timeframe"],
+                payload["timeframe"],
                 start,
                 end,
             ),

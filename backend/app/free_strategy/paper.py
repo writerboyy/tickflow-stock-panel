@@ -1135,10 +1135,10 @@ def _engine_from_state(
         timeframe=timeframe,
         config=config,
         state=initial_state,
-        instrument_loader=lambda execution_mode: _instrument_records(
+        instrument_loader=lambda _execution_mode: _instrument_records(
             repo,
             asset_type,
-            "1d" if execution_mode == "scheduled" else timeframe,
+            timeframe,
         ),
         risk_config=risk,
         callback_deadline=callback_deadline,

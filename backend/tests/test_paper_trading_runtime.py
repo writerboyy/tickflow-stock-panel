@@ -237,7 +237,7 @@ def initialize_supervisor_runtime(supervisor):
     supervisor._catch_up_slots = threading.BoundedSemaphore(2)  # noqa: SLF001
 
 
-def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp_path):
+def test_small_cap_paper_engine_loads_minute_instrument_universe(monkeypatch, tmp_path):
     requested_timeframes = []
 
     def instrument_records(_repo, _asset_type, timeframe):
@@ -245,7 +245,7 @@ def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp
         return [{
             "symbol": "X",
             "asset_type": "stock",
-            "has_minute": timeframe == "1d",
+            "has_minute": timeframe == "1m",
         }]
 
     monkeypatch.setattr("app.free_strategy.process._instrument_records", instrument_records)
@@ -273,7 +273,7 @@ def test_small_cap_paper_engine_loads_daily_instrument_universe(monkeypatch, tmp
     assert engine.scheduled_times == [
         "09:05", "10:00", "10:15", "10:30", "14:20", "14:50", "14:55",
     ]
-    assert requested_timeframes == ["1d"]
+    assert requested_timeframes == ["1m"]
 
 
 def test_paper_engine_defaults_missing_callback_timeout_to_two_minutes(tmp_path):
