@@ -353,6 +353,9 @@ def _instrument_records(
     records = []
     for raw in frame.iter_rows(named=True):
         item = dict(raw)
+        listing_date = item.get("list_date") or item.get("listing_date")
+        if isinstance(listing_date, date) and listing_date <= date(1970, 1, 1):
+            continue
         item["symbol"] = str(item["symbol"])
         item["asset_type"] = str(item.get("asset_type") or asset_type).lower()
         item["has_minute"] = minute_symbols is None or item["symbol"] in minute_symbols

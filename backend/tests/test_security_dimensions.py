@@ -64,3 +64,18 @@ def test_instrument_records_use_standard_easy_tdx_snapshot_and_authoritative_nam
         "industry_sw": "X480101",
         "industry_tdx": "T01",
     }]
+
+
+def test_instrument_records_exclude_placeholder_listing_date(tmp_path):
+    repo = Repository(
+        tmp_path,
+        pl.DataFrame({
+            "symbol": ["301717.SZ", "600000.SH"],
+            "name": ["待上市", "浦发银行"],
+            "listing_date": [date(1970, 1, 1), date(1999, 11, 10)],
+        }),
+    )
+
+    records = _instrument_records(repo, "stock", "1d")
+
+    assert [record["symbol"] for record in records] == ["600000.SH"]
