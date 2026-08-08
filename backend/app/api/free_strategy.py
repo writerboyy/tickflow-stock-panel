@@ -535,6 +535,21 @@ def _active_backtest(job_id: str) -> bool:
         return True
 
 
+def _paper_backtest_links(job_id: str, request: Request) -> list[dict[str, str]]:
+    """Find paper accounts whose historical state still depends on a run."""
+    links: list[dict[str, str]] = []
+    for account in _paper_store(request).list():
+        continuation = account.get("continuation")
+        if not isinstance(continuation, dict) or str(continuation.get("job_id") or "") != job_id:
+            continue
+        account_id = str(account.get("id") or "")
+        links.append({
+            "id": account_id,
+            "name": str(account.get("name") or account_id),
+        })
+    return links
+
+
 @router.get("/backtest/{job_id}")
 def get_backtest_result(job_id: str, request: Request):
     path = _run_path(request, job_id) / "result.json"
@@ -566,6 +581,13 @@ def delete_backtest(job_id: str, request: Request):
     path = _run_path(request, job_id)
     if not path.is_dir():
         raise HTTPException(status_code=404, detail="回测结果不存在")
+    links = _paper_backtest_links(job_id, request)
+    if links:
+        labels = ", ".join(f"{item['name']}({item['id']})" for item in links)
+        raise HTTPException(
+            status_code=409,
+            detail=f"回测仍被模拟账户引用，请先停止并删除或迁移账户: {labels}",
+        )
     shutil.rmtree(path)
     return {"ok": True}
 

@@ -479,6 +479,7 @@ def test_strategy_delete_is_blocked_until_links_are_removed(tmp_path):
     )
     PaperAccountStore(tmp_path).save({
         "id": "linked-paper", "name": "关联账户", "strategy_id": strategy["id"], "status": "stopped",
+        "continuation": {"job_id": "linked-run"},
     })
     app = FastAPI()
     app.state.datastore = SimpleNamespace(data_dir=tmp_path)
@@ -490,8 +491,11 @@ def test_strategy_delete_is_blocked_until_links_are_removed(tmp_path):
     assert "1 条回测记录" in blocked.json()["detail"]
     assert "1 个模拟盘账户" in blocked.json()["detail"]
 
-    assert client.delete("/api/free-strategies/backtest/linked-run").status_code == 200
+    linked_backtest = client.delete("/api/free-strategies/backtest/linked-run")
+    assert linked_backtest.status_code == 409
+    assert "关联账户(linked-paper)" in linked_backtest.json()["detail"]
     assert client.delete("/api/free-strategies/paper/accounts/linked-paper").status_code == 200
+    assert client.delete("/api/free-strategies/backtest/linked-run").status_code == 200
     assert client.delete(f"/api/free-strategies/{strategy['id']}").status_code == 200
 
 
