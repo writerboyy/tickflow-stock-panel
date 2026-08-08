@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -153,6 +155,152 @@ def test_statement_sync_fetches_complete_history_for_backtests(tmp_path, monkeyp
         ("balance_sheet", ["600000.SH"], False),
         ("cash_flow", ["600000.SH"], False),
     ]
+
+
+def test_statement_sync_rejects_conflicting_pit_rows_without_replacing_existing(
+    tmp_path, monkeypatch
+):
+    _write_instruments(tmp_path, ["600000.SH"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2023-12-31"],
+        "announce_date": ["2024-03-30"],
+        "revenue": [100.0],
+    }).write_parquet(path)
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600000.SH"],
+            "period_end": ["2023-12-31", "2023-12-31"],
+            "announce_date": ["2024-03-30", "2024-03-30"],
+            "revenue": [100.0, 101.0],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    with pytest.raises(financial_sync.FinancialSyncError, match="PIT conflicts"):
+        financial_sync.sync_income(tmp_path, CapabilitySet())
+
+    assert pl.read_parquet(path)["revenue"].to_list() == [100.0]
+    assert not list((tmp_path / "financials_sync_backups").glob("**/*.parquet"))
+
+
+def test_statement_sync_rejects_partial_batches_before_publish(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH", "000001.SZ"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["600000.SH"], "value": [1.0]}).write_parquet(path)
+
+    monkeypatch.setattr(financial_sync, "_BATCH_SIZE", 1)
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: False)
+
+    class Financials:
+        metrics = None
+        balance_sheet = None
+        cash_flow = None
+        shares = None
+
+        def income(self, symbols, latest=True):
+            if symbols == ["600000.SH"]:
+                return {
+                    "600000.SH": [{
+                        "period_end": "2024-03-31",
+                        "announce_date": "2024-04-30",
+                        "revenue": 10.0,
+                    }]
+                }
+            raise RuntimeError("upstream timeout")
+
+    financials = Financials()
+    financials.metrics = financials.income
+    financials.balance_sheet = financials.income
+    financials.cash_flow = financials.income
+    financials.shares = financials.income
+
+    monkeypatch.setattr(
+        "app.tickflow.client.get_client",
+        lambda: SimpleNamespace(financials=financials),
+    )
+
+    with pytest.raises(financial_sync.FinancialSyncError):
+        financial_sync.sync_income(
+            tmp_path,
+            CapabilitySet({Cap.FINANCIAL: CapabilityLimits()}),
+        )
+
+    assert pl.read_parquet(path)["value"].to_list() == [1.0]
+
+
+def test_statement_sync_publishes_atomic_backup_and_manifest(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["600000.SH"], "value": [1.0]}).write_parquet(path)
+
+    monkeypatch.setattr(
+        financial_sync,
+        "_fetch_table",
+        lambda *args, **kwargs: pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-03-31"],
+            "announce_date": ["2024-04-30"],
+            "value": [2.0],
+        }),
+    )
+
+    assert financial_sync.sync_income(tmp_path, CapabilitySet()) == 1
+
+    assert pl.read_parquet(path)["value"].to_list() == [2.0]
+    manifests = sorted((tmp_path / "financials").glob("sync-manifest-*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    backup = Path(manifest["tables"][0]["backup_path"])
+    assert pl.read_parquet(backup)["value"].to_list() == [1.0]
+
+
+def test_all_sync_rolls_back_prior_tables_when_later_table_is_rejected(
+    tmp_path, monkeypatch
+):
+    _write_instruments(tmp_path, ["600000.SH"])
+    metrics_path = tmp_path / "financials" / "metrics" / "part.parquet"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2023-12-31"],
+        "announce_date": ["2024-03-30"],
+        "value": [1.0],
+    }).write_parquet(metrics_path)
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        if table == "metrics":
+            return pl.DataFrame({
+                "symbol": ["600000.SH"],
+                "period_end": ["2024-03-31"],
+                "announce_date": ["2024-04-30"],
+                "value": [2.0],
+            })
+        if table == "income":
+            return pl.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "period_end": ["2024-03-31", "2024-03-31"],
+                "announce_date": ["2024-04-30", "2024-04-30"],
+                "value": [3.0, 4.0],
+            })
+        raise AssertionError(f"unexpected table: {table}")
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+    capset = CapabilitySet({Cap.FINANCIAL: CapabilityLimits()})
+
+    with pytest.raises(financial_sync.FinancialSyncError, match="PIT conflicts"):
+        financial_sync.sync_all(tmp_path, capset)
+
+    assert pl.read_parquet(metrics_path)["value"].to_list() == [1.0]
+    manifests = sorted((tmp_path / "financials").glob("sync-manifest-*.json"))
+    assert len(manifests) == 1
+    assert json.loads(manifests[0].read_text(encoding="utf-8"))["status"] == "rolled_back"
 
 
 def test_sync_all_fetches_statement_history_not_latest_only(tmp_path, monkeypatch):

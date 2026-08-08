@@ -165,6 +165,18 @@ def test_source_snapshot_is_content_addressed_and_order_independent(tmp_path) ->
     assert before["financials/income"]["sha256"] != after_change["financials/income"]["sha256"]
 
 
+def test_source_snapshot_ignores_hidden_backup_files(tmp_path) -> None:
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    backup = tmp_path / "financials" / "income" / ".part.pre-repair.parquet"
+    path.parent.mkdir(parents=True)
+    pl.DataFrame({"value": [1]}).write_parquet(path)
+    pl.DataFrame({"value": [2]}).write_parquet(backup)
+
+    snapshot = capture_source_snapshot(tmp_path, ["financials/income"])
+
+    assert snapshot["financials/income"]["files"] == 1
+
+
 def test_source_snapshot_reuses_unchanged_file_hashes(tmp_path, monkeypatch) -> None:
     path = tmp_path / "financials" / "income" / "part.parquet"
     path.parent.mkdir(parents=True)

@@ -22,7 +22,15 @@ def capture_source_snapshot(
         files = (
             [source_path]
             if source_path.is_file()
-            else sorted(path for path in source_path.rglob("*.parquet") if path.is_file())
+            else sorted(
+                path
+                for path in source_path.rglob("*.parquet")
+                if path.is_file()
+                and not any(
+                    part.startswith(".")
+                    for part in path.relative_to(source_path).parts
+                )
+            )
             if source_path.exists()
             else []
         )
