@@ -78,6 +78,11 @@ def _instrument_records(context) -> list[dict[str, Any]]:
     return list(getattr(context, "instruments", lambda _asset=None: [])("stock"))
 
 
+def _is_kcbj(symbol: str) -> bool:
+    code = symbol.split(".", 1)[0]
+    return code.startswith(("4", "8", "68")) or symbol.endswith(".BJ")
+
+
 def _name_on(item: dict[str, Any], day: date) -> str:
     name = str(item.get("name") or "")
     for change in item.get("name_changes") or []:
@@ -155,7 +160,11 @@ def initialize(context) -> None:
     symbols = [
         str(item["symbol"])
         for item in records
-        if item.get("symbol") and bool(item.get("has_minute", True))
+        if (
+            item.get("symbol")
+            and bool(item.get("has_minute", True))
+            and not _is_kcbj(str(item["symbol"]))
+        )
     ]
     context.set_universe(symbols)
     context.require_data_readiness(
@@ -348,11 +357,10 @@ def _selection_pool_symbols(context) -> list[str]:
     eligible_records = []
     for item in records:
         symbol = str(item.get("symbol") or "")
-        code = symbol.split(".", 1)[0]
         listing_date = _parse_date(item.get("listing_date"))
         if not symbol or listing_date is None or listing_date > cutoff:
             continue
-        if code.startswith(("4", "8", "68")) or symbol.endswith(".BJ"):
+        if _is_kcbj(symbol):
             continue
         name = _name_on(item, previous_date)
         if "ST" in name.upper() or "*" in name or "退" in name:
@@ -440,13 +448,12 @@ def _eligible_market_records(context) -> tuple[list[dict[str, Any]], dict[str, A
         symbol = str(item.get("symbol") or "")
         if selection_scope_ready and symbol not in selection_scope:
             continue
-        code = symbol.split(".", 1)[0]
         name = _name_on(item, previous_date)
         listing_date = _parse_date(item.get("listing_date"))
         bar = bars.get(symbol)
         if not symbol or bar is None or listing_date is None or listing_date > cutoff:
             continue
-        if code.startswith(("4", "8", "68")) or symbol.endswith(".BJ"):
+        if _is_kcbj(symbol):
             continue
         if "ST" in name.upper() or "*" in name or "退" in name:
             continue

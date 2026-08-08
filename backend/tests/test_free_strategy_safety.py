@@ -72,7 +72,7 @@ def test_backtest_watchdog_terminates_strategy_initialization_timeout(tmp_path, 
     assert not process.is_alive()
 
 
-def test_capacity_analysis_is_diagnostic_only_and_does_not_cap_fill():
+def test_capacity_analysis_converts_canonical_lots_to_order_shares():
     engine = FreeStrategyEngine(
         "def on_bar(context, bars):\n    context.buy('X', quantity=500)\n",
         config=FreeStrategyConfig(
@@ -93,23 +93,23 @@ def test_capacity_analysis_is_diagnostic_only_and_does_not_cap_fill():
             10,
             10,
             volume=1_000,
-            amount=10_000,
+            amount=1_000_000,
         ),
     ])
 
     assert result["fills"][0]["quantity"] == 500
     assert result["fills"][0]["price"] == 10
-    assert result["fills"][0]["participation_pct"] == 50
+    assert result["fills"][0]["participation_pct"] == 0.5
     assert result["capacity_analysis"] == {
         "model": "bar_volume_participation",
         "diagnostic_only": True,
         "total_fills": 1,
         "covered_fills": 1,
-        "max_participation_pct": 50,
-        "p95_participation_pct": 50,
-        "fills_over_1_pct": 1,
-        "fills_over_5_pct": 1,
-        "fills_over_10_pct": 1,
+        "max_participation_pct": 0.5,
+        "p95_participation_pct": 0.5,
+        "fills_over_1_pct": 0,
+        "fills_over_5_pct": 0,
+        "fills_over_10_pct": 0,
     }
 
 

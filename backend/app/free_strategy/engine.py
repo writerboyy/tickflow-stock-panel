@@ -1478,7 +1478,8 @@ class FreeStrategyEngine:
             submitted_at=order.submitted_at,
             market_amount=float(bar.amount) if bar.amount > 0 else None,
             market_volume=market_volume,
-            participation_pct=qty / market_volume * 100 if market_volume else None,
+            # Canonical market volume is stored in lots while orders use shares.
+            participation_pct=qty / market_volume if market_volume else None,
         ))
 
     @staticmethod

@@ -414,7 +414,11 @@ def initialize(context) -> None:
     symbols = [
         str(item["symbol"])
         for item in records
-        if item.get("symbol") and bool(item.get("has_minute", True))
+        if (
+            item.get("symbol")
+            and bool(item.get("has_minute", True))
+            and not _is_kcbj(str(item["symbol"]))
+        )
     ]
     context.set_universe(symbols)
     context.require_market_history(asset_type="index", timeframe="1d", bars=INDEX_HISTORY_BARS)

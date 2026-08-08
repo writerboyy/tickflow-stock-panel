@@ -21,6 +21,25 @@ from app.free_strategy.five_fortunes import (
 from app.free_strategy.templates import TEMPLATES
 
 
+@pytest.mark.parametrize("template_id", ["performance_small_cap", "small_cap_limitup"])
+def test_stock_strategy_readiness_universe_matches_supported_boards(template_id):
+    instruments = [
+        {"symbol": "000001.SZ", "asset_type": "stock", "has_minute": True},
+        {"symbol": "688001.SH", "asset_type": "stock", "has_minute": True},
+        {"symbol": "430001.BJ", "asset_type": "stock", "has_minute": True},
+        {"symbol": "830001.BJ", "asset_type": "stock", "has_minute": True},
+        {"symbol": "000002.SZ", "asset_type": "stock", "has_minute": False},
+    ]
+
+    engine = FreeStrategyEngine(
+        TEMPLATES[template_id]["source"],
+        timeframe="1m",
+        instruments=instruments,
+    )
+
+    assert engine.universe == ["000001.SZ"]
+
+
 def test_minute_aggregation_respects_lunch_boundary():
     rows = [
         Bar("510300.SH", datetime(2024, 1, 2, 11, 28), 1, 2, 1, 2, 1, 1),
