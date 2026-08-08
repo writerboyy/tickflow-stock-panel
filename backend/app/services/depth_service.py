@@ -120,6 +120,72 @@ class DepthService:
             return {key: value for key, value in cache.items() if key in requested}
         return cache
 
+    @staticmethod
+    def _normalise_snapshot(symbol: object, value: object, now_ms: int) -> dict | None:
+        """Convert one TickFlow depth response into the shared orderbook shape."""
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            return None
+
+        def field(name: str) -> object:
+            if isinstance(value, dict):
+                return value.get(name)
+            return getattr(value, name, None)
+
+        try:
+            bids = [float(item) for item in (field("bid_volumes") or [])[:5]]
+            asks = [float(item) for item in (field("ask_volumes") or [])[:5]]
+            bid_prices = [float(item) for item in (field("bid_prices") or [])[:5]]
+            ask_prices = [float(item) for item in (field("ask_prices") or [])[:5]]
+        except (TypeError, ValueError):
+            return None
+        bid_total = sum(bids)
+        ask_total = sum(asks)
+        total = bid_total + ask_total
+        if total <= 0:
+            return None
+        try:
+            raw_timestamp = float(field("timestamp") or 0)
+        except (TypeError, ValueError):
+            raw_timestamp = 0
+        fetched_ms = int(raw_timestamp * (1000 if raw_timestamp < 10_000_000_000 else 1))
+        if fetched_ms <= 0:
+            fetched_ms = now_ms
+        return {
+            "symbol": normalized_symbol,
+            "bid_prices": bid_prices,
+            "bid_volumes": bids,
+            "ask_prices": ask_prices,
+            "ask_volumes": asks,
+            "book_imbalance": (bid_total - ask_total) / total,
+            "ofi": bid_total - ask_total,
+            "fetched_at_ms": fetched_ms,
+            "freshness_ms": max(0, now_ms - fetched_ms),
+        }
+
+    def ingest_stream_snapshots(self, records: list[dict]) -> int:
+        """Update the live orderbook cache from the unified WS depth channel."""
+        now_ms = int(time.time() * 1000)
+        snapshots = []
+        for record in records or []:
+            if isinstance(record, dict):
+                symbol = record.get("symbol")
+            else:
+                symbol = getattr(record, "symbol", None)
+            snapshot = self._normalise_snapshot(symbol, record, now_ms)
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        if not snapshots:
+            return 0
+        with self._lock:
+            self._orderbook_cache.update({row["symbol"]: row for row in snapshots})
+        if self._snapshot_sink is not None:
+            try:
+                self._snapshot_sink(snapshots)
+            except Exception:  # noqa: BLE001
+                logger.exception("depth WS 快照 sink 失败")
+        return len(snapshots)
+
     def _fetch_target_depths(self) -> None:
         try:
             with self._target_lock:
@@ -140,28 +206,9 @@ class DepthService:
             now_ms = int(time.time() * 1000)
             snapshots = []
             for symbol, value in payload.items():
-                bids = [float(v) for v in (value.get("bid_volumes") or [])[:5]]
-                asks = [float(v) for v in (value.get("ask_volumes") or [])[:5]]
-                bid_prices = [float(v) for v in (value.get("bid_prices") or [])[:5]]
-                ask_prices = [float(v) for v in (value.get("ask_prices") or [])[:5]]
-                bid_total = sum(bids)
-                ask_total = sum(asks)
-                total = bid_total + ask_total
-                if total <= 0:
-                    continue
-                fetched_ms = int((value.get("timestamp") or now_ms / 1000) * (1000 if value.get("timestamp", 0) < 10_000_000_000 else 1))
-                snapshot = {
-                    "symbol": str(symbol).strip().upper(),
-                    "bid_prices": bid_prices,
-                    "bid_volumes": bids,
-                    "ask_prices": ask_prices,
-                    "ask_volumes": asks,
-                    "book_imbalance": (bid_total - ask_total) / total,
-                    "ofi": bid_total - ask_total,
-                    "fetched_at_ms": fetched_ms,
-                    "freshness_ms": max(0, now_ms - fetched_ms),
-                }
-                snapshots.append(snapshot)
+                snapshot = self._normalise_snapshot(symbol, value, now_ms)
+                if snapshot is not None:
+                    snapshots.append(snapshot)
             with self._lock:
                 self._orderbook_cache.update({row["symbol"]: row for row in snapshots})
             if snapshots and self._snapshot_sink is not None:

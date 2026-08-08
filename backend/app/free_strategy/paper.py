@@ -363,10 +363,13 @@ class MarketDataHub:
         self._bar_thread: threading.Thread | None = None
         self._stream = None
         self._ws_symbols: set[str] = set()
+        self._ws_depth_symbols: set[str] = set()
+        self._ws_depth_supported = False
         self._ws_state = "disconnected"
         self._ws_error: str | None = None
         self._ws_disconnected_at: datetime | None = None
         self._last_quote_at: str | None = None
+        self._last_depth_at: str | None = None
         self._bar_attempts: dict[tuple[str, str], tuple[datetime, float]] = {}
 
     def register(
@@ -907,18 +910,37 @@ class MarketDataHub:
             if sub.mode == "websocket" and sub.account_id != exclude
         )) if any(sub.mode == "websocket" and sub.account_id != exclude for sub in self._subscriptions.values()) else set()
 
+    def _depth_stream_enabled(self) -> bool:
+        app_state = getattr(self.quote_service, "_app_state", None)
+        capset = getattr(app_state, "capabilities", None)
+        if capset is None:
+            return False
+        from app.tickflow.capabilities import Cap
+
+        if hasattr(capset, "has"):
+            return bool(capset.has(Cap.DEPTH5) or capset.has(Cap.DEPTH5_BATCH))
+        if isinstance(capset, dict):
+            return str(Cap.DEPTH5) in capset or str(Cap.DEPTH5_BATCH) in capset
+        return False
+
     def _sync_websocket(self) -> None:
         desired = self._websocket_symbols()
         if len(desired) > WS_SYMBOL_LIMIT:
             raise ValueError(f"WebSocket 去重订阅最多 {WS_SYMBOL_LIMIT} 只")
         if not desired:
-            if self._stream is not None and self._ws_symbols:
-                self._stream.unsubscribe("quotes", sorted(self._ws_symbols))
+            if self._stream is not None:
+                if self._ws_symbols:
+                    self._stream.unsubscribe("quotes", sorted(self._ws_symbols))
+                if self._ws_depth_symbols:
+                    self._stream.unsubscribe("depth", sorted(self._ws_depth_symbols))
                 self._stream.close()
                 self._stream = None
             self._ws_symbols.clear()
+            self._ws_depth_symbols.clear()
+            self._ws_depth_supported = False
             self._ws_state = "disconnected"
             return
+        depth_desired = desired if self._depth_stream_enabled() else set()
         if self._stream is None:
             from app.tickflow.client import get_paid_realtime_client
 
@@ -930,7 +952,14 @@ class MarketDataHub:
             self._stream = MarketStream(client._client)  # SDK 公共客户端只缓存一个不可重启的 stream 实例。
             self._stream.on_quotes(self._on_websocket_quotes)
             self._stream.on_error(self._on_websocket_error)
+            on_depth = getattr(self._stream, "on_depth", None)
+            self._ws_depth_supported = callable(on_depth)
+            if self._ws_depth_supported:
+                on_depth(self._on_websocket_depth)
             self._stream.subscribe("quotes", sorted(desired))
+            if depth_desired and self._ws_depth_supported:
+                self._stream.subscribe("depth", sorted(depth_desired))
+                self._ws_depth_symbols = set(depth_desired)
             self._ws_symbols = set(desired)
             self._ws_state = "connecting"
             self._stream.connect(block=False)
@@ -942,6 +971,14 @@ class MarketDataHub:
         if removed:
             self._stream.unsubscribe("quotes", sorted(removed))
         self._ws_symbols = set(desired)
+        if self._ws_depth_supported:
+            depth_added = depth_desired - self._ws_depth_symbols
+            depth_removed = self._ws_depth_symbols - depth_desired
+            if depth_added:
+                self._stream.subscribe("depth", sorted(depth_added))
+            if depth_removed:
+                self._stream.unsubscribe("depth", sorted(depth_removed))
+            self._ws_depth_symbols = set(depth_desired)
 
     def _on_websocket_quotes(self, records: list[dict[str, Any]]) -> None:
         self.quote_service.record_quotes(records)
@@ -951,6 +988,18 @@ class MarketDataHub:
         if recovering:
             self._dispatch_recovery_snapshot()
         self._dispatch_quotes("websocket", records)
+
+    def _on_websocket_depth(self, records: list[dict[str, Any]]) -> None:
+        app_state = getattr(self.quote_service, "_app_state", None)
+        depth_service = getattr(app_state, "depth_service", None)
+        ingest = getattr(depth_service, "ingest_stream_snapshots", None)
+        if not callable(ingest):
+            return
+        try:
+            if ingest(records):
+                self._last_depth_at = cn_naive_now().isoformat()
+        except Exception:  # noqa: BLE001
+            logger.exception("WebSocket 深度快照处理失败")
 
     def _on_websocket_error(self, message: str) -> None:
         self._ws_state = "reconnecting"
@@ -1012,10 +1061,13 @@ class MarketDataHub:
             "websocket": {
                 "status": self._ws_state,
                 "symbols": len(self._ws_symbols),
+                "depth_symbols": len(self._ws_depth_symbols),
+                "depth_supported": self._ws_depth_supported,
                 "capacity": WS_SYMBOL_LIMIT,
                 "last_error": self._ws_error,
             },
             "last_quote_at": self._last_quote_at,
+            "last_depth_at": self._last_depth_at,
             "quote_service": quote_status,
         }
 
@@ -1029,6 +1081,8 @@ class MarketDataHub:
             self._bar_thread.join(timeout=3)
         if self._stream is not None:
             self._stream.close()
+        self._ws_depth_symbols.clear()
+        self._ws_depth_supported = False
         self._ws_state = "disconnected"
 
 

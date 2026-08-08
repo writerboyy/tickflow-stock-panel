@@ -1556,8 +1556,9 @@ export interface PaperStatus {
   running_accounts: number
   mode_counts: Record<string, number>
   poll_3s: { active: boolean; available: boolean; min_interval_s: number | null; interval_s: number | null; actual_fetch_ms: number | null }
-  websocket: { status: string; symbols: number; capacity: number; last_error: string | null }
+  websocket: { status: string; symbols: number; depth_symbols: number; depth_supported: boolean; capacity: number; last_error: string | null }
   last_quote_at: string | null
+  last_depth_at: string | null
 }
 
 export type CreatePaperAccount = FreeBacktestConfig & {
