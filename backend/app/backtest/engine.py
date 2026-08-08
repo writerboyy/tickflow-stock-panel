@@ -1507,7 +1507,15 @@ class BacktestEngine:
             total_vol = float(np.nansum(volumes))
             total_amt = float(np.nansum(amounts))
             if total_vol > 0 and total_amt > 0:
-                return total_amt / (total_vol * 100.0)
+                vwap = total_amt / (total_vol * 100.0)
+                finite_lows = lows[np.isfinite(lows)]
+                finite_highs = highs[np.isfinite(highs)]
+                if (
+                    finite_lows.size
+                    and finite_highs.size
+                    and float(np.min(finite_lows)) <= vwap <= float(np.max(finite_highs))
+                ):
+                    return vwap
 
         return float(closes[-1]) if np.isfinite(closes[-1]) else None
 

@@ -4,10 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from app.free_strategy.bars import Bar
+from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.continuation import continue_account_from_backtest
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.store import PaperAccountStore
+
+
+def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
+    if len(args) < 7:
+        kwargs.setdefault("volume", 100.0)
+    return _Bar(*args, **kwargs)
 
 
 CONFIG = {

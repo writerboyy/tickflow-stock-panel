@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.free_strategy.bars import Bar
+from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.engine import Fill, FreeStrategyConfig, FreeStrategyEngine, Order, Quote, RiskConfig
 from app.free_strategy.paper import (
     MarketDataHub,
@@ -37,8 +37,23 @@ from app.market_time import cn_now
 from app.services.quote_service import QuoteService
 
 
+def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
+    if len(args) < 7:
+        kwargs.setdefault("volume", 100.0)
+    return _Bar(*args, **kwargs)
+
+
 def quote(second: int, price: float) -> Quote:
-    return Quote("X", datetime(2024, 1, 2, 9, 30, second), price, prev_close=10, open=10, high=max(10, price), low=min(10, price))
+    return Quote(
+        "X",
+        datetime(2024, 1, 2, 9, 30, second),
+        price,
+        prev_close=10,
+        open=10,
+        high=max(10, price),
+        low=min(10, price),
+        volume=100,
+    )
 
 
 def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:

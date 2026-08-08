@@ -7,7 +7,7 @@ from hashlib import sha256
 import polars as pl
 import pytest
 
-from app.free_strategy.bars import Bar
+from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
@@ -32,6 +32,12 @@ from app.services.stock_dividends import (
     load_record_date_cash_dividends,
 )
 from app.free_strategy.templates import TEMPLATES
+
+
+def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
+    if len(args) < 7:
+        kwargs.setdefault("volume", 100.0)
+    return _Bar(*args, **kwargs)
 
 
 class DailyRepository:

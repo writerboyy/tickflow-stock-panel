@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.free_strategy.bars import Bar, aggregate_minute_bars
+from app.free_strategy.bars import Bar as _Bar, aggregate_minute_bars
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy import (
     five_fortunes,
@@ -19,6 +19,12 @@ from app.free_strategy.five_fortunes import (
     REGIME_PROXIES,
 )
 from app.free_strategy.templates import TEMPLATES
+
+
+def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
+    if len(args) < 7:
+        kwargs.setdefault("volume", 100.0)
+    return _Bar(*args, **kwargs)
 
 
 @pytest.mark.parametrize("template_id", ["performance_small_cap", "small_cap_limitup"])

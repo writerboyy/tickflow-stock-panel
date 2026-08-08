@@ -1679,7 +1679,7 @@ class KlineRepository:
         until: datetime,
         asset_type: str = "stock",
     ) -> pl.DataFrame:
-        """读取每个标的在 ``after`` 之后、``until`` 之前的第一根分钟K。"""
+        """读取每个标的在 ``after`` 之后、``until`` 之前的第一根有成交分钟K。"""
         if not symbols or until <= after:
             return pl.DataFrame()
         parts = self._minute_parts(asset_type, after.date(), until.date())
@@ -1699,6 +1699,7 @@ class KlineRepository:
                     pl.col("symbol").is_in(symbols)
                     & (pl.col("datetime") > after)
                     & (pl.col("datetime") <= until)
+                    & (pl.col("volume") > 0)
                 )
                 .sort(["symbol", "datetime"])
                 .group_by("symbol", maintain_order=True)

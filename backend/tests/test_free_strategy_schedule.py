@@ -2,9 +2,15 @@ from datetime import date, datetime
 
 import pytest
 
-from app.free_strategy.bars import Bar
+from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
 from app.free_strategy.schedule import ScheduleRule, parse_time_expression
+
+
+def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
+    if len(args) < 7:
+        kwargs.setdefault("volume", 100.0)
+    return _Bar(*args, **kwargs)
 
 
 def test_time_expression_supports_market_offsets_and_rejects_false_precision():
@@ -179,7 +185,7 @@ def scheduled(context):
     quote_engine.advance_event(
         timestamp,
         event_type="quote",
-        quotes=[Quote("X", timestamp, 10, open=10, high=10, low=10)],
+        quotes=[Quote("X", timestamp, 10, open=10, high=10, low=10, volume=100)],
     )
 
     assert quote_engine.context.state["events"] == bar_engine.context.state["events"]

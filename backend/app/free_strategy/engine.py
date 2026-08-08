@@ -1288,11 +1288,13 @@ class FreeStrategyEngine:
         timestamp: datetime | None,
         field: str,
     ) -> None:
+        stale_fill = False
         if bar is None and self.config.allow_stale_fills and timestamp is not None:
             trades_today = (order.symbol, timestamp.date()) in self._tradable_dates
             price = self._current_close_prices.get(order.symbol, 0.0)
             if trades_today and price > 0:
                 bar = Bar(order.symbol, timestamp, price, price, price, price)
+                stale_fill = True
         if bar is None:
             order.status = "rejected"
             order.reason = "证券停牌或无可交易行情"
@@ -1301,6 +1303,10 @@ class FreeStrategyEngine:
         if raw_price <= 0:
             order.status = "rejected"
             order.reason = "缺少可成交价格"
+            return
+        if not stale_fill and (not math.isfinite(bar.volume) or bar.volume <= 0):
+            order.status = "rejected"
+            order.reason = "当前行情无成交量"
             return
         current = self.account.positions.get(order.symbol, 0.0)
         target = None
@@ -2018,15 +2024,21 @@ class FreeStrategyEngine:
         self._current_prices.update({symbol: bar.execution_price("open") for symbol, bar in bars_now.items()})
 
         # 2. Orders waiting for the next tradable open are matched before publication.
-        due = [
-            item
-            for item in self.pending
-            if item[1] < timestamp and item[0].symbol in bars_now
-        ]
-        self.pending = [
-            item for item in self.pending
-            if item[1] >= timestamp or item[0].symbol not in bars_now
-        ]
+        due: list[tuple[Order, datetime]] = []
+        remaining: list[tuple[Order, datetime]] = []
+        for item in self.pending:
+            order, submitted_at = item
+            bar = bars_now.get(order.symbol)
+            if (
+                submitted_at < timestamp
+                and bar is not None
+                and math.isfinite(bar.volume)
+                and bar.volume > 0
+            ):
+                due.append(item)
+            else:
+                remaining.append(item)
+        self.pending = remaining
         self._fill_orders(due, bars_now, timestamp, "open")
 
         # 3. Publish the market snapshot and history visible at this timestamp.

@@ -113,6 +113,53 @@ def test_capacity_analysis_converts_canonical_lots_to_order_shares():
     }
 
 
+def test_immediate_order_rejects_zero_volume_bar():
+    engine = FreeStrategyEngine(
+        "def on_bar(context, bars):\n    context.buy('X', quantity=100)\n",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    )
+
+    result = engine.run([
+        Bar("X", datetime(2024, 1, 2, 9, 31), 10, 10, 10, 10, volume=0),
+    ])
+
+    assert result["fills"] == []
+    assert result["orders"][0]["status"] == "rejected"
+    assert result["orders"][0]["reason"] == "当前行情无成交量"
+
+
+def test_next_open_order_waits_for_positive_volume_bar():
+    engine = FreeStrategyEngine(
+        """
+def on_bar(context, bars):
+    if not context.state.get('ordered'):
+        context.buy('X', quantity=100)
+        context.state['ordered'] = True
+""",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="next_open",
+        ),
+    )
+
+    result = engine.run([
+        Bar("X", datetime(2024, 1, 2, 9, 31), 10, 10, 10, 10, volume=100),
+        Bar("X", datetime(2024, 1, 2, 9, 32), 11, 11, 11, 11, volume=0),
+        Bar("X", datetime(2024, 1, 2, 9, 33), 12, 12, 12, 12, volume=100),
+    ])
+
+    assert result["orders"][0]["status"] == "filled"
+    assert result["fills"][0]["timestamp"] == "2024-01-02T09:33:00"
+    assert result["fills"][0]["price"] == 12
+
+
 def test_market_timestamp_conversion_is_explicitly_shanghai_wall_time():
     assert cn_naive_from_timestamp(0) == datetime(1970, 1, 1, 8)
     assert as_cn_naive(datetime(2026, 7, 29, 1, 30, tzinfo=CN_TZ)) == datetime(2026, 7, 29, 1, 30)

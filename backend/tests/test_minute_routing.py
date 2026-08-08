@@ -156,19 +156,20 @@ def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):
 
 def test_scheduled_minute_queries_read_only_explicit_date_partitions(tmp_path, monkeypatch):
     rows = pl.DataFrame({
-        "symbol": ["600519.SH", "600519.SH", "600519.SH", "000001.SZ"],
+        "symbol": ["600519.SH", "600519.SH", "600519.SH", "600519.SH", "000001.SZ"],
         "datetime": [
             datetime(2026, 1, 15, 9, 59),
             datetime(2026, 1, 15, 10, 0),
             datetime(2026, 1, 15, 10, 1),
+            datetime(2026, 1, 15, 10, 2),
             datetime(2026, 1, 15, 10, 0),
         ],
-        "open": [99.0, 100.0, 101.0, 10.0],
-        "high": [99.0, 100.0, 101.0, 10.0],
-        "low": [99.0, 100.0, 101.0, 10.0],
-        "close": [99.0, 100.0, 101.0, 10.0],
-        "volume": [40.0, 60.0, 100.0, 100.0],
-        "amount": [3_960.0, 6_000.0, 10_100.0, 1_000.0],
+        "open": [99.0, 100.0, 101.0, 102.0, 10.0],
+        "high": [99.0, 100.0, 101.0, 102.0, 10.0],
+        "low": [99.0, 100.0, 101.0, 102.0, 10.0],
+        "close": [99.0, 100.0, 101.0, 102.0, 10.0],
+        "volume": [40.0, 60.0, 0.0, 100.0, 100.0],
+        "amount": [3_960.0, 6_000.0, 0.0, 10_200.0, 1_000.0],
     })
     target = tmp_path / "kline_minute" / "date=2026-01-15" / "part.parquet"
     target.parent.mkdir(parents=True)
@@ -195,14 +196,14 @@ def test_scheduled_minute_queries_read_only_explicit_date_partitions(tmp_path, m
     following = repo.get_minute_next(
         ["600519.SH"],
         datetime(2026, 1, 15, 10, 0),
-        datetime(2026, 1, 15, 10, 2),
+        datetime(2026, 1, 15, 10, 3),
         "stock",
     )
 
     assert available == {"600519.SH", "000001.SZ"}
     assert snapshot["close"].to_list() == [100.0]
     assert snapshot["session_volume"].to_list() == [100.0]
-    assert following["close"].to_list() == [101.0]
+    assert following["close"].to_list() == [102.0]
     assert scanned == [[str(target)], [str(target)], [str(target)]]
 
 

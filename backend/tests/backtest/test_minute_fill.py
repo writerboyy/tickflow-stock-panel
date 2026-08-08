@@ -83,6 +83,15 @@ def test_resolve_minute_fill_vwap_converts_lots_to_shares():
     assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == total_amt / (total_vol * 100)
 
 
+def test_resolve_minute_fill_rejects_raw_vwap_outside_adjusted_price_range():
+    arr = np.array([
+        [5.0, 5.1, 4.9, 5.0, 100, 100_000],
+        [5.0, 5.1, 4.9, 5.0, 100, 100_000],
+    ], dtype=np.float64)
+
+    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == 5.0
+
+
 def test_resolve_minute_fill_empty_returns_none():
     """空数组 → None (降级到日K口径)。"""
     assert BacktestEngine._resolve_minute_fill(np.array([]).reshape(0, 6), None, "buy") is None
