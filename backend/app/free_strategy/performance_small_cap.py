@@ -429,7 +429,10 @@ def initialize(context) -> None:
                 "fields": ["revenue", "net_income", "net_income_attributable"],
                 "periods": 1,
             },
-            "metrics": {"fields": ["roe"], "periods": 1},
+            # ROE is a selection criterion, not a data-presence requirement:
+            # a provider may legally publish a report with a null ROE.  PIT
+            # still requires the metrics report row and announcement date.
+            "metrics": {"fields": [], "periods": 1},
             "balance_sheet": {"fields": ["total_assets"], "periods": 1},
         },
         valuation_fields=["market_cap"],

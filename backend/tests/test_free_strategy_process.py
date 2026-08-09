@@ -385,6 +385,8 @@ def test_performance_small_cap_declares_readiness_contract():
     assert {item.table for item in requirement.financials} == {
         "income", "metrics", "balance_sheet",
     }
+    metrics = next(item for item in requirement.financials if item.table == "metrics")
+    assert metrics.fields == ()
     assert requirement.lifecycle is True
     assert requirement.adjustment == "pre"
     assert requirement.corporate_actions is True

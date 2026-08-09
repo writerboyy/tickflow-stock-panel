@@ -231,6 +231,33 @@ def test_readiness_classifies_null_required_field_as_financial_gap(tmp_path):
     assert all(item["kind"] != "financial_conflict" for item in raised.value.report["gaps"])
 
 
+def test_readiness_allows_nullable_selection_metric_when_pit_row_exists(tmp_path):
+    prepare_complete_data(tmp_path)
+    write_table(tmp_path, "financials/metrics/part.parquet", {
+        "symbol": ["X"],
+        "period_end": ["2023-09-30"],
+        "announce_date": ["2023-10-30"],
+        "roe": [None],
+    })
+
+    nullable_metric = make_requirement(
+        rebalance="monthly",
+        financials={"metrics": {"fields": [], "periods": 1}},
+    )
+    report = build_readiness_manifest(
+        tmp_path,
+        [nullable_metric],
+        strategy_sha256="strategy-hash",
+        universe=["X"],
+        trading_dates=[date(2024, 1, 2)],
+        calendar_dates=[date(2024, 1, 1), date(2024, 1, 2)],
+        benchmark_symbol="BENCH",
+        benchmark_dates=[date(2024, 1, 1)],
+    )
+
+    assert report["status"] == "passed"
+
+
 def test_readiness_validates_declared_comparison_periods(tmp_path):
     prepare_complete_data(tmp_path)
     write_table(tmp_path, "financials/income/part.parquet", {
