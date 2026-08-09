@@ -391,8 +391,9 @@ class MarketDataHub:
         with self._lock:
             if mode == "websocket":
                 combined = cleaned | self._websocket_symbols(exclude=account_id)
-                if len(combined) > WS_SYMBOL_LIMIT:
-                    raise ValueError(f"WebSocket 去重订阅最多 {WS_SYMBOL_LIMIT} 只，当前需要 {len(combined)} 只")
+                capacity = self._ws_capacity()
+                if len(combined) > capacity:
+                    raise ValueError(f"WebSocket 去重订阅最多 {capacity} 只，当前需要 {len(combined)} 只")
             previous = self._subscriptions.get(account_id)
             self._subscriptions[account_id] = _Subscription(
                 account_id,
@@ -479,8 +480,9 @@ class MarketDataHub:
             if subscription is None:
                 return
             cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
-            if subscription.mode == "websocket" and len(cleaned | self._websocket_symbols(exclude=account_id)) > WS_SYMBOL_LIMIT:
-                raise ValueError(f"运行时股票池扩容超过 WebSocket {WS_SYMBOL_LIMIT} 只上限")
+            capacity = self._ws_capacity()
+            if subscription.mode == "websocket" and len(cleaned | self._websocket_symbols(exclude=account_id)) > capacity:
+                raise ValueError(f"运行时股票池扩容超过 WebSocket {capacity} 只上限")
             subscription.symbols = cleaned
             if valuation_symbols is not None:
                 subscription.valuation_symbols = {
@@ -910,6 +912,18 @@ class MarketDataHub:
             if sub.mode == "websocket" and sub.account_id != exclude
         )) if any(sub.mode == "websocket" and sub.account_id != exclude for sub in self._subscriptions.values()) else set()
 
+    def _ws_capacity(self) -> int:
+        """读取运行时能力声明；服务端未返回上限时按 200。"""
+        app_state = getattr(self.quote_service, "_app_state", None)
+        capset = getattr(app_state, "capabilities", None)
+        try:
+            from app.tickflow.capabilities import Cap
+
+            limits = capset.limits(Cap.WEBSOCKET) if capset and capset.has(Cap.WEBSOCKET) else None
+            return int(limits.subscribe or 200) if limits else 200
+        except Exception:  # noqa: BLE001
+            return 200
+
     def _depth_stream_enabled(self) -> bool:
         app_state = getattr(self.quote_service, "_app_state", None)
         capset = getattr(app_state, "capabilities", None)
@@ -925,8 +939,9 @@ class MarketDataHub:
 
     def _sync_websocket(self) -> None:
         desired = self._websocket_symbols()
-        if len(desired) > WS_SYMBOL_LIMIT:
-            raise ValueError(f"WebSocket 去重订阅最多 {WS_SYMBOL_LIMIT} 只")
+        capacity = self._ws_capacity()
+        if len(desired) > capacity:
+            raise ValueError(f"WebSocket 去重订阅最多 {capacity} 只")
         if not desired:
             if self._stream is not None:
                 if self._ws_symbols:
@@ -993,13 +1008,16 @@ class MarketDataHub:
         app_state = getattr(self.quote_service, "_app_state", None)
         depth_service = getattr(app_state, "depth_service", None)
         ingest = getattr(depth_service, "ingest_stream_snapshots", None)
-        if not callable(ingest):
-            return
-        try:
-            if ingest(records):
-                self._last_depth_at = cn_naive_now().isoformat()
-        except Exception:  # noqa: BLE001
-            logger.exception("WebSocket 深度快照处理失败")
+        if callable(ingest):
+            try:
+                if ingest(records):
+                    self._last_depth_at = cn_naive_now().isoformat()
+            except Exception:  # noqa: BLE001
+                logger.exception("WebSocket 深度快照处理失败")
+        position_risk = getattr(app_state, "position_risk_service", None)
+        enqueue_depth = getattr(position_risk, "enqueue_depth", None)
+        if callable(enqueue_depth):
+            enqueue_depth(records)
 
     def _on_websocket_error(self, message: str) -> None:
         self._ws_state = "reconnecting"
@@ -1063,7 +1081,7 @@ class MarketDataHub:
                 "symbols": len(self._ws_symbols),
                 "depth_symbols": len(self._ws_depth_symbols),
                 "depth_supported": self._ws_depth_supported,
-                "capacity": WS_SYMBOL_LIMIT,
+                "capacity": self._ws_capacity(),
                 "last_error": self._ws_error,
             },
             "last_quote_at": self._last_quote_at,

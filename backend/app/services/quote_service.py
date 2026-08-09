@@ -64,6 +64,7 @@ class QuoteSubscriber:
         self._strategy_results_updated = False
         self._depth_updated = False
         self._large_orders_updated = False
+        self._position_risk_updated = False
         self._alerts: list[dict] = []
         self._reviews: list[str] = []
 
@@ -80,6 +81,7 @@ class QuoteSubscriber:
                 "strategy_results_updated": self._strategy_results_updated,
                 "depth_updated": self._depth_updated,
                 "large_orders_updated": self._large_orders_updated,
+                "position_risk_updated": self._position_risk_updated,
                 "alerts": self._alerts,
                 "reviews": self._reviews,
             }
@@ -87,6 +89,7 @@ class QuoteSubscriber:
             self._strategy_results_updated = False
             self._depth_updated = False
             self._large_orders_updated = False
+            self._position_risk_updated = False
             self._alerts = []
             self._reviews = []
             self._event.clear()
@@ -115,6 +118,7 @@ class QuoteSubscriber:
                 and not self._strategy_results_updated
                 and not self._depth_updated
                 and not self._large_orders_updated
+                and not self._position_risk_updated
                 and not self._reviews
             ):
                 self._event.clear()
@@ -137,6 +141,11 @@ class QuoteSubscriber:
     def notify_large_orders(self) -> None:
         with self._lock:
             self._large_orders_updated = True
+            self._event.set()
+
+    def notify_position_risk(self) -> None:
+        with self._lock:
+            self._position_risk_updated = True
             self._event.set()
 
 
@@ -186,6 +195,7 @@ class QuoteService:
         self._symbol_consumer_revision = 0
         self._latest_quotes: dict[str, dict] = {}
         self._fetch_listeners: set[Callable[[], None]] = set()
+        self._alert_listeners: set[Callable[[list[dict]], None]] = set()
         self._repo = None          # 延迟注入, 避免循环导入
         # SSE 订阅者集合: 每个 /stream 连接一个 QuoteSubscriber, 事件广播到所有订阅者
         self._subscribers: set[QuoteSubscriber] = set()
@@ -411,6 +421,18 @@ class QuoteService:
         for sub in self._snapshot_subscribers():
             sub.notify_large_orders()
 
+    def notify_position_risk_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_position_risk()
+
+    def add_alert_listener(self, callback: Callable[[list[dict]], None]) -> None:
+        with self._lock:
+            self._alert_listeners.add(callback)
+
+    def remove_alert_listener(self, callback: Callable[[list[dict]], None]) -> None:
+        with self._lock:
+            self._alert_listeners.discard(callback)
+
     def set_symbol_consumer(self, consumer_id: str, symbols: set[str]) -> None:
         """注册需要随现有轮询补拉的少量标的。"""
         cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
@@ -557,11 +579,44 @@ class QuoteService:
             sub.notify_depth()
 
     def _broadcast_alerts(self, alerts: list[dict]) -> None:
+        with self._lock:
+            listeners = list(self._alert_listeners)
+        for listener in listeners:
+            try:
+                listener(alerts)
+            except Exception:  # noqa: BLE001
+                logger.exception("告警监听器执行失败")
         for sub in self._snapshot_subscribers():
             sub.push_alerts(alerts)
 
     def push_alerts(self, alerts: list[dict]) -> None:
         self._broadcast_alerts(alerts)
+
+    def publish_external_alerts(self, alerts: list[dict]) -> None:
+        """发布已由外部服务持久化的告警，并复用系统/IM通知通道。"""
+        if not alerts:
+            return
+        self._broadcast_alerts(alerts)
+        self._maybe_send_system_notifications(alerts)
+        try:
+            from app.services import preferences, webhook_adapter
+
+            feishu_url = preferences.get_feishu_webhook_url()
+            wecom_url = preferences.get_wecom_webhook_url()
+            feishu_secret = preferences.get_feishu_webhook_secret()
+            for event in alerts:
+                title = "TickFlow · 持仓风控"
+                body = str(event.get("message") or "")
+                if event.get("symbol"):
+                    body = f"{event['symbol']} {body}".strip()
+                if feishu_url:
+                    _WEBHOOK_EXECUTOR.submit(
+                        webhook_adapter.send_feishu, feishu_url, title, body, feishu_secret,
+                    )
+                if wecom_url:
+                    _WEBHOOK_EXECUTOR.submit(webhook_adapter.send_wecom, wecom_url, title, body)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("持仓风控 Webhook 提交异常: %s", exc)
 
     def clear_pending_alerts(self) -> None:
         for sub in self._snapshot_subscribers():
@@ -1651,7 +1706,7 @@ class QuoteService:
                 source = ev.get("source", "")
                 source_label = {
                     "strategy": "策略", "signal": "信号",
-                    "price": "价格", "market": "异动",
+                    "price": "价格", "market": "异动", "position_risk": "持仓风控",
                 }.get(source, source or "通知")
 
                 name = ev.get("name") or ""

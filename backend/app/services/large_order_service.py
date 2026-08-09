@@ -100,7 +100,7 @@ def _as_datetime(value: object) -> datetime | None:
 
 
 class LargeOrderService:
-    """有界的全市场候选扫描 + 候选股 L2 深挖。"""
+    """持仓池的大单证据聚合；持仓模块未初始化时保留旧调用兼容。"""
 
     def __init__(self, quote_service=None) -> None:
         self._quote_service = quote_service
@@ -206,6 +206,22 @@ class LargeOrderService:
             if not self._config.get("exclude_st", True):
                 configured.append("st")
         return self._market_segment(symbol, name) not in configured
+
+    def _position_symbols(self) -> set[str] | None:
+        """返回当前持仓池；None 表示持仓服务尚未完成启动。"""
+        if self._app_state is None or not hasattr(self._app_state, "position_risk_service"):
+            return None
+        service = getattr(self._app_state, "position_risk_service", None)
+        if service is None:
+            return set()
+        try:
+            return {
+                str(item.get("symbol") or "").strip().upper()
+                for item in service.store.load().get("positions", [])
+                if item.get("symbol")
+            }
+        except Exception:  # noqa: BLE001
+            return set()
 
     @staticmethod
     def _new_window_tracker(now_ts: float, window: int) -> dict[str, Any]:
@@ -354,7 +370,13 @@ class LargeOrderService:
         """行情线程只复制缓存并投递最新任务，不执行开盘啦请求。"""
         if not self._running or not self._config.get("enabled", True) or self._quote_service is None:
             return
-        snapshot = self._quote_service.get_latest_quotes()
+        position_symbols = self._position_symbols()
+        if position_symbols == set():
+            with self._lock:
+                self._states.clear()
+                self._rankings = {window: () for window in WINDOWS}
+            return
+        snapshot = self._quote_service.get_latest_quotes(position_symbols)
         with self._lock:
             self._pending_snapshot = snapshot
             if self._snapshot_running:
@@ -403,6 +425,17 @@ class LargeOrderService:
             self._reset_for_new_day()
         if not records:
             return
+        position_symbols = self._position_symbols()
+        if position_symbols is not None:
+            with self._lock:
+                for stale_symbol in set(self._states) - position_symbols:
+                    self._states.pop(stale_symbol, None)
+            records = [
+                row for row in records
+                if str(row.get("symbol") or "").strip().upper() in position_symbols
+            ]
+            if not records:
+                return
         now = cn_now()
         now_ts = now.timestamp()
         calculation_started = time.perf_counter()
@@ -505,6 +538,10 @@ class LargeOrderService:
         depth_service = getattr(self._app_state, "depth_service", None) if self._app_state else None
         if depth_service is None:
             return
+        position_symbols = self._position_symbols()
+        if position_symbols is not None:
+            depth_service.request_symbols(position_symbols)
+            return
         symbols = {str(row["symbol"]) for row in self._rankings.get(60, ())}
         try:
             from app.services import preferences
@@ -523,6 +560,7 @@ class LargeOrderService:
             return
         now_ms = int(time.time() * 1000)
         rows = []
+        position_symbols = self._position_symbols()
         watchlist = set()
         try:
             from app.services import preferences
@@ -530,6 +568,8 @@ class LargeOrderService:
         except Exception:  # noqa: BLE001
             pass
         for snapshot in snapshots:
+            if position_symbols is not None and snapshot.get("symbol") not in position_symbols:
+                continue
             row = dict(snapshot)
             row.update({
                 "trade_date": self._trade_date,
@@ -543,7 +583,11 @@ class LargeOrderService:
                 "received_at_ms": now_ms,
                 "schema_version": SCHEMA_VERSION,
                 "parser_version": "depth5_v1",
-                "target_kind": "watchlist" if snapshot["symbol"] in watchlist else "candidate",
+                "target_kind": (
+                    "position" if position_symbols is not None
+                    else "watchlist" if snapshot["symbol"] in watchlist
+                    else "candidate"
+                ),
             })
             rows.append(row)
         self._storage.submit("orderbook_snapshot", rows)
@@ -607,8 +651,9 @@ class LargeOrderService:
                 depth_metrics = {}
         filtered_near_limit = 0
         unassessable = 0
+        position_symbols = self._position_symbols()
         for symbol, state in self._states.items():
-            if self._is_filtered_symbol(symbol, state.get("name")):
+            if position_symbols is None and self._is_filtered_symbol(symbol, state.get("name")):
                 continue
             metrics_by_window = {
                 window: self._window_metrics_locked(state, window, now_ts)
@@ -700,13 +745,15 @@ class LargeOrderService:
             return
         now = time.time()
         ranked = list(self._rankings.get(60, ()))
+        position_symbols = self._position_symbols()
         watchlist: list[str] = []
-        try:
-            from app.services import preferences
+        if position_symbols is None:
+            try:
+                from app.services import preferences
 
-            watchlist = preferences.get_realtime_watchlist_symbols()
-        except Exception:  # noqa: BLE001
-            pass
+                watchlist = preferences.get_realtime_watchlist_symbols()
+            except Exception:  # noqa: BLE001
+                pass
         with self._lock:
             if self._deep_calls_date != cn_today():
                 self._deep_calls_date = cn_today()
@@ -716,7 +763,11 @@ class LargeOrderService:
                 for symbol in watchlist
                 if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
             ]
-            symbols = list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
+            symbols = (
+                sorted(position_symbols)
+                if position_symbols is not None
+                else list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
+            )
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
             budget = max(0, int(self._config.get("daily_call_budget", 60)))
             available_symbols = max(0, (budget - self._deep_calls_used) // 2)
@@ -883,9 +934,10 @@ class LargeOrderService:
         if now < self._cooldown_until.get(symbol, 0.0):
             return []
         self._cooldown_until[symbol] = now + float(self._config["cooldown_seconds"])
+        position_mode = self._position_symbols() is not None
         return [{
             "ts": int(now * 1000),
-            "source": "large_order",
+            "source": "position_risk" if position_mode else "large_order",
             "type": "large_order_buy",
             "rule_id": self._config["version"],
             "rule_name": "实时大单",

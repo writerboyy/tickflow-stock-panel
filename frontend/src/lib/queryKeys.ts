@@ -23,6 +23,10 @@ export const QK = {
   indexQuotes:    ['index-quotes'] as const,
   largeOrders:   ['large-orders'] as const,
   largeOrdersAnalysis: (symbol: string) => ['large-orders', 'analysis', symbol] as const,
+  positionRisk:  ['position-risk'] as const,
+  positionRiskOptions: ['position-risk', 'options'] as const,
+  positionRiskRecommendations: (status?: string) => ['position-risk', 'recommendations', status ?? 'all'] as const,
+  positionRiskEvents: ['position-risk', 'events'] as const,
   indexList:      ['index-list'] as const,
 
   // Watchlist
@@ -119,4 +123,5 @@ export const SSE_INVALIDATE_PREFIXES = [
   'overview-market',
   'limit-ladder',
   'large-orders',
+  'position-risk',
 ] as const

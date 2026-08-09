@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -307,6 +307,17 @@ async def lifespan(app: FastAPI):
         logger.warning("monitor engine load failed: %s", e)
     app.state.monitor_engine = monitor_engine
 
+    # 持仓风控复用模拟盘的唯一 MarketDataHub；容量不足时服务内部整体降级到轮询。
+    try:
+        from app.services.position_risk_service import PositionRiskService
+
+        position_risk_service = PositionRiskService(store.data_dir, repo, qs, app.state)
+        app.state.position_risk_service = position_risk_service
+        position_risk_service.start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position risk service not started: %s", e)
+        app.state.position_risk_service = None
+
     yield
 
     kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
@@ -323,6 +334,9 @@ async def lifespan(app: FastAPI):
     fsc = getattr(app.state, "financial_scheduler", None)
     if fsc:
         fsc.stop()
+    position_risk_service = getattr(app.state, "position_risk_service", None)
+    if position_risk_service:
+        position_risk_service.stop()
     paper_supervisor = getattr(app.state, "paper_supervisor", None)
     if paper_supervisor:
         paper_supervisor.close()
@@ -428,6 +442,7 @@ app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
 app.include_router(large_orders.router)
+app.include_router(position_risk.router)
 app.include_router(kaipanla_router)
 app.include_router(strategy.router)
 app.include_router(signals.router)

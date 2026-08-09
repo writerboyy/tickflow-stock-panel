@@ -15,6 +15,7 @@ from app.db_safe import is_valid_ext_ident, quote_ident
 from app.services import watchlist
 from app.services.watchlist_ocr import import_watchlist_image
 from app.services.watchlist_ocr.provider import get_ocr_provider
+from app.services.watchlist_ocr.runtime import OCR_LIMITER
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ _IMPORT_IMAGE_TYPES = {
     "image/gif",
 }
 # OCR 独立并发上限：避免多张大图同时解码 + 多 Tesseract 子进程
-_OCR_LIMITER = anyio.CapacityLimiter(2)
+_OCR_LIMITER = OCR_LIMITER
 
 
 class AddRequest(BaseModel):

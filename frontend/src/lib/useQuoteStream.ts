@@ -181,6 +181,10 @@ export function useQuoteStream(
         qc.invalidateQueries({ queryKey: QK.largeOrders })
       })
 
+      es.addEventListener('position_risk_updated', () => {
+        qc.invalidateQueries({ queryKey: QK.positionRisk })
+      })
+
       es.addEventListener('strategy_alert', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data)

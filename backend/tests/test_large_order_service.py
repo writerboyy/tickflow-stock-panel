@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 import asyncio
 import time
 
@@ -98,6 +99,34 @@ def test_candidate_market_segments_default_to_main_star_and_chinext():
         "430001.BJ",
         "000002.SZ",
     }
+    service.stop()
+
+
+def test_position_mode_only_tracks_holdings_without_market_segment_filter():
+    quote = FakeQuoteService()
+    service = LargeOrderService(quote)
+    service._running = True
+    service._config["max_deep_dive_symbols"] = 0
+    portfolio_store = SimpleNamespace(load=lambda: {
+        "positions": [{"symbol": "430001.BJ", "name": "北交持仓"}],
+    })
+    service._app_state = SimpleNamespace(
+        position_risk_service=SimpleNamespace(store=portfolio_store),
+    )
+    initial = [
+        _quote(symbol="430001.BJ", name="北交持仓"),
+        _quote(symbol="000001.SZ", name="非持仓"),
+    ]
+    updated = [
+        _quote(symbol="430001.BJ", name="北交持仓", price=10.1, amount=3_000_000, volume=300),
+        _quote(symbol="000001.SZ", name="非持仓", price=10.1, amount=3_000_000, volume=300),
+    ]
+
+    service._process_snapshot(initial)
+    service._process_snapshot(updated)
+
+    assert set(service._states) == {"430001.BJ"}
+    assert {row["symbol"] for row in service.ranking(60)["rows"]} == {"430001.BJ"}
     service.stop()
 
 

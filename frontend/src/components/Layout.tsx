@@ -49,7 +49,7 @@ import {
   X,
   WifiOff,
   WalletCards,
-  Zap,
+  ShieldCheck,
   Menu,
   ChevronDown,
   ChevronRight,
@@ -76,7 +76,7 @@ type CoreIndex = (typeof CORE_INDEXES)[number]
 const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/watchlist',  label: '自选',   icon: Star },
-  { to: '/large-orders', label: '实时大单', icon: Zap },
+  { to: '/large-orders', label: '持仓风控', icon: ShieldCheck },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/free-strategy', label: '量化策略', icon: Code2 },

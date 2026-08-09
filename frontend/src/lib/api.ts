@@ -834,6 +834,145 @@ export interface MonitorRuleOptions {
   }
 }
 
+// ===== Position Risk (持仓风控) =====
+export type PositionRiskStatus = 'idle' | 'websocket' | 'polling_degraded' | 'reconnecting' | 'data_unavailable'
+export type PositionRiskRecommendationStatus = 'pending' | 'confirmed' | 'dismissed' | 'superseded' | 'stale'
+
+export interface PositionRiskEvidence {
+  cost: boolean
+  history: boolean
+  quote: boolean
+  depth: boolean
+  flow: boolean
+}
+
+export interface PositionRiskRecommendation {
+  id: string
+  fingerprint: string
+  symbol: string | null
+  scope: 'symbol' | 'portfolio'
+  rule_id: string
+  severity: 'info' | 'warn' | 'critical'
+  risk_score: number
+  action: string
+  reduction_pct: number
+  reasons: string[]
+  source_ids: string[]
+  status: PositionRiskRecommendationStatus
+  portfolio_revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PositionRiskPosition {
+  symbol: string
+  name: string
+  asset_type: 'stock' | 'etf'
+  quantity: number
+  available: number
+  cost_price: number
+  import_price: number | null
+  price_source: string | null
+  price: number | null
+  market_value: number | null
+  profit_loss: number | null
+  profit_loss_pct: number | null
+  weight: number | null
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  latest_signal: string | null
+  evidence: PositionRiskEvidence
+  evidence_coverage: number
+  data_status: 'ready' | 'insufficient'
+  risk_score: number
+  risk_level: 'low' | 'medium' | 'high'
+  suggestion: PositionRiskRecommendation | null
+}
+
+export interface PositionRiskPortfolio {
+  schema_version: number
+  revision: number
+  account: {
+    name: string
+    cash: number | null
+    total_asset: number | null
+    previous_close_total_asset: number | null
+    high_watermark: number | null
+  }
+  positions: PositionRiskPosition[]
+  template: {
+    rules: Record<string, Record<string, any>>
+    signals: {
+      builtin: Record<string, Record<string, any>>
+      custom: Record<string, Record<string, any>>
+      monitor_rules: Record<string, Record<string, any>>
+    }
+  }
+  overrides: Record<string, Record<string, any>>
+  imported_at: string | null
+  updated_at: string | null
+  runtime: {
+    status: PositionRiskStatus
+    reason: string
+    last_processed_at: string | null
+    pending_count: number
+  }
+}
+
+export interface PositionRiskOcrRow {
+  code: string
+  symbol: string | null
+  name: string | null
+  quantity: number | null
+  available: number | null
+  cost_price: number | null
+  current_price: number | null
+  market_value: number | null
+  profit_loss: number | null
+  field_confidence: Record<string, number>
+  requires_review: boolean
+  issues: string[]
+}
+
+export interface PositionRiskOcrResult {
+  provider: string
+  template_version: string
+  account_candidates: Record<string, { value: string | number; confidence: number }>
+  positions: PositionRiskOcrRow[]
+  issues: Array<{ level: string; code: string; message: string }>
+}
+
+export interface PositionRiskPreview {
+  revision: number
+  account: Record<string, any>
+  positions: Array<Record<string, any>>
+  reconciliation: {
+    cash: number
+    holding_value: number
+    computed_total: number
+    reported_total: number | null
+    difference: number | null
+    difference_pct: number | null
+  }
+  replacement: { added: string[]; removed: string[]; changed: string[]; unchanged: string[] }
+  issues: Array<{ level: 'error' | 'warning'; field?: string; row?: number; message: string }>
+  can_confirm: boolean
+}
+
+export interface PositionRiskOptions {
+  rules: Record<string, Record<string, any>>
+  builtin_signals: Array<{ id: string; label: string; direction: 'entry' | 'exit' | 'both'; enabled: boolean; group: string }>
+  custom_signals: Array<{ id: string; label: string; direction: 'entry' | 'exit' | 'both'; enabled: boolean; available: boolean; group: string }>
+  monitor_rules: Array<{ id: string; name: string; enabled: boolean; conditions: MonitorCondition[]; severity: string; default_action_pct: number }>
+  capabilities: {
+    websocket: boolean
+    websocket_capacity: number
+    depth: boolean
+    intraday: { available: boolean; source: string | null; max_symbols: number; reason: string }
+  }
+}
+
 export interface AlertEvent {
   ts: number
   rule_id?: string
@@ -1914,6 +2053,42 @@ export const api = {
     request<{ rows: IndexQuote[]; count: number; source?: string }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
+  positionRiskPortfolio: () => request<PositionRiskPortfolio>('/api/position-risk/portfolio'),
+  positionRiskOptions: () => request<PositionRiskOptions>('/api/position-risk/options'),
+  positionRiskImportImage: (file: File, signal?: AbortSignal, quiet = false) => {
+    const data = new FormData()
+    data.append('file', file)
+    return request<PositionRiskOcrResult>('/api/position-risk/import-image', {
+      method: 'POST', body: data, signal, quiet,
+    })
+  },
+  positionRiskPreview: (payload: { revision: number; account: Record<string, any>; positions: Array<Record<string, any>> }) =>
+    request<PositionRiskPreview>('/api/position-risk/portfolio/preview', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  positionRiskReplace: (payload: { revision: number; account: Record<string, any>; positions: Array<Record<string, any>> }) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio; message: string }>('/api/position-risk/portfolio', {
+      method: 'PUT', body: JSON.stringify(payload),
+    }),
+  positionRiskUpdateTemplate: (revision: number, template: PositionRiskPortfolio['template']) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio }>('/api/position-risk/template', {
+      method: 'PUT', body: JSON.stringify({ revision, template }),
+    }),
+  positionRiskUpdateOverride: (symbol: string, revision: number, override: Record<string, any>) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio }>(`/api/position-risk/overrides/${encodeURIComponent(symbol)}`, {
+      method: 'PUT', body: JSON.stringify({ revision, override }),
+    }),
+  positionRiskRecommendations: (status?: PositionRiskRecommendationStatus) =>
+    request<{ recommendations: PositionRiskRecommendation[]; count: number }>(
+      `/api/position-risk/recommendations${status ? `?status=${status}` : ''}`,
+    ),
+  positionRiskRecommendationAction: (id: string, action: 'confirm' | 'dismiss', revision: number) =>
+    request<{ ok: boolean; recommendation: PositionRiskRecommendation; holding_changed: false; message: string }>(
+      `/api/position-risk/recommendations/${encodeURIComponent(id)}/${action}`,
+      { method: 'POST', body: JSON.stringify({ revision }) },
+    ),
+  positionRiskEvents: () =>
+    request<{ events: AlertEvent[]; count: number }>('/api/position-risk/events'),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
   largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all', mode: LargeOrderEvidenceMode = 'combined') =>
     request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; mode: LargeOrderEvidenceMode; stale: boolean; last_updated_ms: number | null }>(
