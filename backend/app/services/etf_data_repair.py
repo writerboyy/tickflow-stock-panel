@@ -14,12 +14,14 @@ import polars as pl
 from app.parquet import scan_daily_parquet, scan_parquet_compat
 from app.services import kline_sync
 from app.services.kline_sync import _write_minute_partition
+from app.services.minute_quality import assert_required_minute_coverage
 from app.tickflow.repository import KlineRepository
 
 
 logger = logging.getLogger(__name__)
 MAX_SCAN_SYMBOLS = 2_000
 MINUTE_BARS_PER_DAY = 240
+MIN_HISTORY_START = date(1990, 1, 1)
 
 
 def _load_factors(data_dir: Path) -> pl.DataFrame:
@@ -46,6 +48,79 @@ def _scan_rows(path: Path, symbols: list[str], start: date, end: date, *, minute
         return pl.DataFrame({"symbol": [], "date": []}, schema={"symbol": pl.Utf8, "date": pl.Date})
 
 
+def _latest_daily_date(path: Path, end: date) -> date | None:
+    try:
+        value = (
+            scan_daily_parquet(str(path / "**" / "*.parquet"))
+            .filter(pl.col("date") <= end)
+            .select(pl.col("date").max())
+            .collect(engine="streaming")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ETF latest daily scan skipped for %s: %s", path, exc)
+        return None
+    return value.item() if value.height and value.item() is not None else None
+
+
+def _scan_minute_day_quality(
+    path: Path,
+    symbols: list[str],
+    start: date,
+    end: date,
+) -> dict[tuple[str, date], bool]:
+    try:
+        scan = scan_parquet_compat(str(path / "**" / "*.parquet"))
+        timestamp = pl.col("datetime")
+        hour = timestamp.dt.hour()
+        minute = timestamp.dt.minute()
+        continuous = (
+            ((hour == 9) & (minute >= 31))
+            | (hour == 10)
+            | ((hour == 11) & (minute <= 30))
+            | ((hour == 13) & (minute >= 1))
+            | (hour == 14)
+            | ((hour == 15) & (minute == 0))
+        )
+        allowed = continuous | ((hour == 9) & (minute == 30))
+        valid_ohlc = pl.all_horizontal(
+            pl.col(column).is_not_null()
+            & pl.col(column).is_finite()
+            & (pl.col(column) > 0)
+            for column in ("open", "high", "low", "close")
+        ) & (pl.col("high") >= pl.max_horizontal("open", "close")) & (
+            pl.col("low") <= pl.min_horizontal("open", "close")
+        )
+        frame = (
+            scan.filter(
+                pl.col("symbol").is_in(symbols)
+                & (timestamp.dt.date() >= start)
+                & (timestamp.dt.date() <= end)
+            )
+            .with_columns(timestamp.dt.date().alias("date"))
+            .group_by(["symbol", "date"])
+            .agg(
+                pl.len().alias("rows"),
+                timestamp.n_unique().alias("unique_rows"),
+                timestamp.filter(continuous).n_unique().alias("continuous_rows"),
+                (~allowed).sum().alias("invalid_times"),
+                (~valid_ohlc).sum().alias("invalid_ohlc"),
+            )
+            .collect(engine="streaming")
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ETF minute quality scan skipped for %s: %s", path, exc)
+        return {}
+    return {
+        (str(row["symbol"]), row["date"]): (
+            int(row["continuous_rows"]) == MINUTE_BARS_PER_DAY
+            and int(row["invalid_times"]) == 0
+            and int(row["invalid_ohlc"]) == 0
+            and int(row["unique_rows"]) == int(row["rows"])
+        )
+        for row in frame.iter_rows(named=True)
+    }
+
+
 def _issue(kind: str, symbol: str, start: date, end: date, **values: Any) -> dict[str, Any]:
     issue_id = sha256(f"{kind}|{symbol}|{start}|{end}".encode()).hexdigest()[:16]
     return {"id": issue_id, "type": kind, "symbol": symbol, "start": start.isoformat(), "end": end.isoformat(), **values}
@@ -58,24 +133,34 @@ def _local_issues(
     end: date,
     *,
     require_minute: bool,
+    min_daily_bars: int,
 ) -> list[dict[str, Any]]:
     data_dir = repo.store.data_dir
     daily = _scan_rows(data_dir / "kline_etf_daily", symbols, start, end, minute=False)
+    history = _scan_rows(
+        data_dir / "kline_etf_daily", symbols, MIN_HISTORY_START, end, minute=False,
+    )
     daily_by_symbol = {
         symbol: set(frame["date"].to_list())
         for symbol, frame in daily.partition_by("symbol", as_dict=True).items()
     } if not daily.is_empty() else {}
-    minute_by_symbol: dict[str, set[date]] = {}
+    history_by_symbol = {
+        symbol: set(frame["date"].to_list())
+        for symbol, frame in history.partition_by("symbol", as_dict=True).items()
+    } if not history.is_empty() else {}
+    expected_tail = _latest_daily_date(data_dir / "kline_etf_daily", end)
+    minute_quality: dict[tuple[str, date], bool] = {}
     if require_minute:
-        minute = _scan_rows(data_dir / "kline_etf_minute", symbols, start, end, minute=True)
-        minute_by_symbol = {
-            symbol: set(frame["date"].to_list())
-            for symbol, frame in minute.partition_by("symbol", as_dict=True).items()
-        } if not minute.is_empty() else {}
+        minute_quality = _scan_minute_day_quality(
+            data_dir / "kline_etf_minute", symbols, start, end,
+        )
 
     issues = []
     for symbol in symbols:
         expected = daily_by_symbol.get((symbol,), daily_by_symbol.get(symbol, set()))
+        available_history = history_by_symbol.get(
+            (symbol,), history_by_symbol.get(symbol, set()),
+        )
         if not expected:
             issues.append(_issue(
                 "daily_missing", symbol, start, end, severity="error", title="缺少 ETF 日K",
@@ -83,13 +168,34 @@ def _local_issues(
                 action="请使用当前日K数据源同步后重新检查", repairable=False,
             ))
             continue
+        latest = max(expected)
+        if expected_tail is not None and latest < expected_tail:
+            issues.append(_issue(
+                "daily_tail_stale", symbol, latest, expected_tail,
+                severity="error", title="ETF 日K尾部滞后",
+                detail=f"本地最新交易日为 {latest.isoformat()}，市场基准为 {expected_tail.isoformat()}。",
+                action="使用已校验的日K数据源补齐后重新计算", repairable=False,
+                latest_date=latest.isoformat(), expected_date=expected_tail.isoformat(),
+            ))
+        if len(available_history) < min_daily_bars:
+            issues.append(_issue(
+                "daily_history_short", symbol,
+                min(available_history) if available_history else start,
+                latest,
+                severity="error", title="ETF 日K预热不足",
+                detail=f"本地只有 {len(available_history)} 根日K，策略至少需要 {min_daily_bars} 根。",
+                action="补齐历史日K后重新检查", repairable=False,
+                available_bars=len(available_history), required_bars=min_daily_bars,
+            ))
         if require_minute:
-            actual = minute_by_symbol.get((symbol,), minute_by_symbol.get(symbol, set()))
-            missing = sorted(expected - actual)
+            missing = sorted(
+                day for day in expected
+                if not minute_quality.get((symbol, day), False)
+            )
             if missing:
                 issues.append(_issue(
                     "minute_gap", symbol, missing[0], missing[-1], severity="error", title="分钟K存在缺口",
-                    detail=f"缺少 {len(missing)} 个交易日的分钟K。",
+                    detail=f"缺少或不完整 {len(missing)} 个交易日的分钟K。",
                     action="使用当前分钟数据源补齐缺失交易日", repairable=True,
                     missing_dates=[day.isoformat() for day in missing],
                 ))
@@ -122,6 +228,7 @@ def inspect_etf_data(
     end: date,
     *,
     require_minute: bool,
+    min_daily_bars: int = 1,
     persist_scan: bool = False,
 ) -> dict[str, Any]:
     normalized = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
@@ -131,14 +238,27 @@ def inspect_etf_data(
         raise ValueError("没有可检查的 ETF 标的")
     if len(normalized) > MAX_SCAN_SYMBOLS:
         raise ValueError(f"单次最多检查 {MAX_SCAN_SYMBOLS} 只 ETF")
+    if isinstance(min_daily_bars, bool) or min_daily_bars <= 0:
+        raise ValueError("最小日K根数必须是正整数")
 
-    unique = {issue["id"]: issue for issue in _local_issues(repo, normalized, start, end, require_minute=require_minute)}
+    unique = {
+        issue["id"]: issue
+        for issue in _local_issues(
+            repo,
+            normalized,
+            start,
+            end,
+            require_minute=require_minute,
+            min_daily_bars=min_daily_bars,
+        )
+    }
     result = {
         "scan_id": uuid.uuid4().hex[:12] if persist_scan else None,
         "status": "healthy" if not unique else "issues",
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "start": start.isoformat(), "end": end.isoformat(), "symbols": normalized,
         "symbol_count": len(normalized), "require_minute": require_minute,
+        "min_daily_bars": min_daily_bars,
         "issues": list(unique.values()),
     }
     if persist_scan:
@@ -220,6 +340,13 @@ def _required_minute_rows(source: pl.DataFrame, symbol: str, dates: list[date]) 
     incomplete = [day.isoformat() for day in dates if counts.get(day, 0) < MINUTE_BARS_PER_DAY]
     if incomplete:
         raise RuntimeError(f"当前分钟数据源未返回完整交易日: {', '.join(incomplete)}")
+    try:
+        assert_required_minute_coverage(
+            frame,
+            ((symbol, day.isoformat()) for day in dates),
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     return frame.sort(["symbol", "datetime"])
 
 

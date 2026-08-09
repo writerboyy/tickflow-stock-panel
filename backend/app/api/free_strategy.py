@@ -697,6 +697,7 @@ async def backtest_data_health(req: DataHealthWrite, request: Request):
             date.fromisoformat(payload["start"]),
             date.fromisoformat(payload["end"]),
             require_minute=req.timeframe != "1d" or scheduled_intraday,
+            min_daily_bars=max(1, engine.history_requirements.get("1d", 0)),
             persist_scan=req.persist_scan,
         )
         return {

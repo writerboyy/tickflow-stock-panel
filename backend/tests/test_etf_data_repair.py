@@ -24,11 +24,7 @@ def _repo(tmp_path) -> KlineRepository:
     }).write_parquet(daily_path)
     minute_path = tmp_path / "kline_etf_minute" / "date=2026-07-20" / "part.parquet"
     minute_path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "symbol": ["510300.SH"], "datetime": [datetime(2026, 7, 20, 9, 30)],
-        "open": [4.0], "high": [4.0], "low": [4.0], "close": [4.0],
-        "volume": [100.0], "amount": [40_000.0],
-    }).write_parquet(minute_path)
+    _minute_frame("510300.SH", date(2026, 7, 20)).write_parquet(minute_path)
     factor_path = tmp_path / "adj_factor_etf" / "all.parquet"
     factor_path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({
@@ -38,8 +34,8 @@ def _repo(tmp_path) -> KlineRepository:
 
 
 def _minute_frame(symbol: str, day: date) -> pl.DataFrame:
-    morning = [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=30) + timedelta(minutes=index) for index in range(120)]
-    afternoon = [datetime.combine(day, datetime.min.time()).replace(hour=13) + timedelta(minutes=index) for index in range(120)]
+    morning = [datetime.combine(day, datetime.min.time()).replace(hour=9, minute=31) + timedelta(minutes=index) for index in range(120)]
+    afternoon = [datetime.combine(day, datetime.min.time()).replace(hour=13, minute=1) + timedelta(minutes=index) for index in range(120)]
     times = morning + afternoon
     prices = [4.1 + index * 0.0001 for index in range(len(times))]
     return pl.DataFrame({
@@ -100,6 +96,81 @@ def test_inspection_tolerates_added_daily_quote_timestamp(tmp_path):
     assert not any(issue["type"] == "daily_missing" for issue in result["issues"])
 
 
+def test_inspection_rejects_per_symbol_stale_daily_tail(tmp_path):
+    repo = _repo(tmp_path)
+    latest = tmp_path / "kline_etf_daily" / "date=2026-07-22" / "part.parquet"
+    latest.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["515880.SH"], "date": [date(2026, 7, 22)],
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+        "volume": [100.0], "amount": [10_000.0],
+    }).write_parquet(latest)
+
+    result = repair.inspect_etf_data(
+        repo, ["510300.SH"], date(2026, 7, 20), date(2026, 7, 22),
+        require_minute=False,
+    )
+
+    issue = next(item for item in result["issues"] if item["type"] == "daily_tail_stale")
+    assert issue["latest_date"] == "2026-07-21"
+    assert issue["expected_date"] == "2026-07-22"
+
+
+def test_inspection_rejects_short_daily_warmup(tmp_path):
+    repo = _repo(tmp_path)
+
+    result = repair.inspect_etf_data(
+        repo, ["510300.SH"], date(2026, 7, 20), date(2026, 7, 21),
+        require_minute=False, min_daily_bars=3,
+    )
+
+    issue = next(item for item in result["issues"] if item["type"] == "daily_history_short")
+    assert issue["available_bars"] == 2
+    assert issue["required_bars"] == 3
+
+
+def test_inspection_rejects_minute_day_with_invalid_ohlc(tmp_path):
+    repo = _repo(tmp_path)
+    path = tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    frame = _minute_frame("510300.SH", date(2026, 7, 21)).with_columns(
+        pl.when(pl.col("datetime") == datetime(2026, 7, 21, 9, 31))
+        .then(0.0)
+        .otherwise(pl.col("open"))
+        .alias("open")
+    )
+    frame.write_parquet(path)
+
+    result = repair.inspect_etf_data(
+        repo, ["510300.SH"], date(2026, 7, 21), date(2026, 7, 21),
+        require_minute=True,
+    )
+
+    issue = next(item for item in result["issues"] if item["type"] == "minute_gap")
+    assert issue["missing_dates"] == ["2026-07-21"]
+
+
+def test_inspection_rejects_minute_day_with_invalid_ohlc_bounds(tmp_path):
+    repo = _repo(tmp_path)
+    path = tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet"
+    path.parent.mkdir(parents=True)
+    frame = _minute_frame("510300.SH", date(2026, 7, 21)).with_columns(
+        pl.when(pl.col("datetime") == datetime(2026, 7, 21, 9, 31))
+        .then(pl.col("open") - 0.01)
+        .otherwise(pl.col("high"))
+        .alias("high")
+    )
+    frame.write_parquet(path)
+
+    result = repair.inspect_etf_data(
+        repo, ["510300.SH"], date(2026, 7, 21), date(2026, 7, 21),
+        require_minute=True,
+    )
+
+    issue = next(item for item in result["issues"] if item["type"] == "minute_gap")
+    assert issue["missing_dates"] == ["2026-07-21"]
+
+
 def test_repair_uses_configured_minute_source_without_overwriting_existing(monkeypatch, tmp_path):
     repo = _repo(tmp_path)
     scan = _scan(repo)
@@ -136,6 +207,29 @@ def test_repair_fails_closed_when_current_source_returns_incomplete_day(monkeypa
     )
 
     with pytest.raises(RuntimeError, match="完整交易日"):
+        repair.repair_etf_data(repo, scan["scan_id"], [minute_issue["id"]])
+
+    assert not (tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet").exists()
+    assert repair.list_repair_records(tmp_path)[0]["status"] == "failed"
+
+
+def test_repair_fails_closed_when_current_source_has_invalid_ohlc_bounds(monkeypatch, tmp_path):
+    repo = _repo(tmp_path)
+    scan = _scan(repo)
+    minute_issue = next(issue for issue in scan["issues"] if issue["type"] == "minute_gap")
+    invalid = _minute_frame("510300.SH", date(2026, 7, 21)).with_columns(
+        pl.when(pl.col("datetime") == datetime(2026, 7, 21, 9, 31))
+        .then(pl.col("open") - 0.01)
+        .otherwise(pl.col("high"))
+        .alias("high")
+    )
+    monkeypatch.setattr(
+        repair.kline_sync,
+        "sync_minute_batch",
+        lambda *_args, **_kwargs: invalid,
+    )
+
+    with pytest.raises(RuntimeError, match="240 根连续竞价数据"):
         repair.repair_etf_data(repo, scan["scan_id"], [minute_issue["id"]])
 
     assert not (tmp_path / "kline_etf_minute" / "date=2026-07-21" / "part.parquet").exists()

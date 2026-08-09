@@ -133,7 +133,11 @@ def on_bar(context, bars):
 
     assert response.status_code == 200
     assert captured["symbols"] == ["510300.SH"]
-    assert captured["kwargs"] == {"require_minute": True, "persist_scan": False}
+    assert captured["kwargs"] == {
+        "require_minute": True,
+        "min_daily_bars": 1,
+        "persist_scan": False,
+    }
 
 
 def test_job_payload_keeps_legacy_saved_universe_as_fallback(tmp_path):

@@ -1626,7 +1626,7 @@ export interface FreeBacktestRunSummary {
 
 export interface EtfDataIssue {
   id: string
-  type: 'daily_missing' | 'minute_gap' | 'split_rounding'
+  type: 'daily_missing' | 'daily_tail_stale' | 'daily_history_short' | 'minute_gap' | 'split_rounding'
   symbol: string
   start: string
   end: string
@@ -1636,6 +1636,10 @@ export interface EtfDataIssue {
   action: string
   repairable: boolean
   missing_dates?: string[]
+  latest_date?: string
+  expected_date?: string
+  available_bars?: number
+  required_bars?: number
 }
 
 export interface EtfDataScan {
@@ -1647,6 +1651,7 @@ export interface EtfDataScan {
   symbols?: string[]
   symbol_count: number
   require_minute?: boolean
+  min_daily_bars?: number
   execution_mode?: 'full_bar' | 'scheduled'
   universe_source?: string
   issues: EtfDataIssue[]

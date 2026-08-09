@@ -34,6 +34,8 @@ const TAB_LABELS: Record<Tab, string> = {
 
 const ISSUE_LABELS: Record<EtfDataIssue['type'], string> = {
   daily_missing: '日K缺失',
+  daily_tail_stale: '日K尾部滞后',
+  daily_history_short: '日K预热不足',
   minute_gap: '分钟K缺口',
   split_rounding: '拆分比例',
 }

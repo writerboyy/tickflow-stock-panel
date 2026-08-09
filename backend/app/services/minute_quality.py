@@ -39,6 +39,8 @@ def minute_group_complete(frame: pl.DataFrame) -> bool:
             pl.col(column).is_not_null() & pl.col(column).is_finite() & (pl.col(column) > 0)
             for column in ("open", "high", "low", "close")
         )
+        & (pl.col("high") >= pl.max_horizontal("open", "close"))
+        & (pl.col("low") <= pl.min_horizontal("open", "close"))
     )
     if valid.height != frame.height or valid["datetime"].n_unique() != frame.height:
         return False
