@@ -154,6 +154,26 @@ def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):
     assert stored["symbol"].to_list() == ["510300.SH"]
 
 
+def test_write_minute_partition_merges_columns_by_name(tmp_path):
+    minute_dir = tmp_path / "kline_etf_minute"
+    partition = minute_dir / "date=2026-07-21" / "part.parquet"
+    partition.parent.mkdir(parents=True)
+    existing = _mock_minute_df("510300.SH").with_columns(
+        pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
+    )
+    existing.write_parquet(partition)
+    incoming = _mock_minute_df("159509.SZ").with_columns(
+        pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
+    ).select(sorted(existing.columns))
+
+    written = kline_sync._write_minute_partition(incoming, minute_dir)
+    stored = pl.read_parquet(partition)
+
+    assert written == 2
+    assert stored["symbol"].to_list() == ["159509.SZ", "510300.SH"]
+    assert stored.select(existing.columns).columns == existing.columns
+
+
 def test_scheduled_minute_queries_read_only_explicit_date_partitions(tmp_path, monkeypatch):
     rows = pl.DataFrame({
         "symbol": ["600519.SH", "600519.SH", "600519.SH", "600519.SH", "000001.SZ"],

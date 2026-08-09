@@ -621,9 +621,9 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         if out.exists():
             existing = _sanitize_minute_rows(pl.read_parquet(out))
             incoming = day_df.drop("_trade_date")
-            day_df = incoming if existing.is_empty() else pl.concat([existing, incoming]).unique(
-                subset=["symbol", "datetime"], keep="last",
-            )
+            day_df = incoming if existing.is_empty() else pl.concat(
+                [existing, incoming], how="diagonal_relaxed",
+            ).unique(subset=["symbol", "datetime"], keep="last")
         else:
             day_df = day_df.drop("_trade_date")
         day_df = _sanitize_minute_rows(day_df)
