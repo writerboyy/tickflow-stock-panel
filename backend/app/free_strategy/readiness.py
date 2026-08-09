@@ -10,7 +10,11 @@ from typing import Any, Iterable, Mapping
 
 import polars as pl
 
-from .financial_pit import FinancialPitUnavailable, load_financial_periods
+from .financial_pit import (
+    FinancialPitRequiredFieldsMissing,
+    FinancialPitUnavailable,
+    load_financial_periods,
+)
 from .industry import IndustryHistoryUnavailable, load_industry_history
 
 
@@ -347,6 +351,18 @@ def build_readiness_manifest(
                                 f"{financial.periods} 个报告期或必需字段: {len(missing_symbols)} 只"
                             ),
                         })
+                except FinancialPitRequiredFieldsMissing as exc:
+                    gaps.append({
+                        "kind": "financial",
+                        "table": financial.table,
+                        "rebalance_date": rebalance_day.isoformat(),
+                        "as_of": as_of.isoformat(),
+                        "symbols": list(exc.symbols),
+                        "detail": (
+                            f"{financial.table} 在 {as_of.isoformat()} 的最新可见报告"
+                            f"缺少必需字段: {len(exc.symbols)} 只"
+                        ),
+                    })
                 except FinancialPitUnavailable as exc:
                     gaps.append({
                         "kind": "financial_conflict",

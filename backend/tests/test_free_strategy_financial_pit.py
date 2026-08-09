@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from app.free_strategy.financial_pit import (
+    FinancialPitRequiredFieldsMissing,
     FinancialPitUnavailable,
     select_financial_periods,
 )
@@ -63,3 +64,23 @@ def test_financial_pit_returns_empty_when_only_future_announcement_exists():
         symbols=["X"],
         as_of=date(2024, 8, 29),
     ) == {}
+
+
+def test_financial_pit_reports_all_symbols_with_required_field_missing():
+    frame = pl.DataFrame({
+        "symbol": ["X", "Y"],
+        "period_end": ["2024-06-30", "2024-06-30"],
+        "announce_date": ["2024-08-30", "2024-08-30"],
+        "roe": [None, None],
+    })
+
+    with pytest.raises(FinancialPitRequiredFieldsMissing) as raised:
+        select_financial_periods(
+            frame,
+            table="metrics",
+            symbols=["X", "Y"],
+            as_of=date(2024, 9, 1),
+            required_fields=["roe"],
+        )
+
+    assert raised.value.symbols == ("X", "Y")

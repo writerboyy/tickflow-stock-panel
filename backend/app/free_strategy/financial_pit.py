@@ -12,6 +12,16 @@ class FinancialPitUnavailable(ValueError):
     """Financial PIT records cannot be selected without ambiguity."""
 
 
+class FinancialPitRequiredFieldsMissing(FinancialPitUnavailable):
+    """The latest visible records exist but omit strategy-required fields."""
+
+    def __init__(self, table: str, symbols: Iterable[str], samples: Iterable[str]) -> None:
+        self.table = table
+        self.symbols = tuple(dict.fromkeys(str(symbol) for symbol in symbols))
+        detail = ", ".join(samples)
+        super().__init__(f"{table} 必需字段为空: {detail}")
+
+
 def _date_expr(frame: pl.DataFrame, column: str) -> pl.Expr:
     dtype = frame.schema.get(column)
     if dtype == pl.Date:
@@ -92,8 +102,10 @@ def select_financial_periods(
                 f"{row['symbol']}:{row['_period_date']}"
                 for row in invalid.head(8).iter_rows(named=True)
             ]
-            raise FinancialPitUnavailable(
-                f"{table} 必需字段为空: {', '.join(samples)}"
+            raise FinancialPitRequiredFieldsMissing(
+                table,
+                invalid["symbol"].unique(maintain_order=True).to_list(),
+                samples,
             )
     result: dict[str, list[dict[str, Any]]] = {}
     for row in selected.iter_rows(named=True):

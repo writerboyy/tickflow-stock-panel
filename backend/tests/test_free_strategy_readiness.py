@@ -204,6 +204,33 @@ def test_readiness_blocks_future_only_financial_period(tmp_path):
     assert financial["symbols"] == ["X"]
 
 
+def test_readiness_classifies_null_required_field_as_financial_gap(tmp_path):
+    prepare_complete_data(tmp_path)
+    write_table(tmp_path, "financials/income/part.parquet", {
+        "symbol": ["X"],
+        "period_end": ["2023-09-30"],
+        "announce_date": ["2023-10-30"],
+        "revenue": [None],
+    })
+
+    with pytest.raises(ReadinessUnavailable) as raised:
+        build_readiness_manifest(
+            tmp_path,
+            [requirement()],
+            strategy_sha256="strategy-hash",
+            universe=["X"],
+            trading_dates=[date(2024, 1, 2)],
+            calendar_dates=[date(2024, 1, 1), date(2024, 1, 2)],
+            benchmark_symbol="BENCH",
+            benchmark_dates=[date(2024, 1, 1)],
+            dataset_roots=[Path("kline_daily")],
+        )
+
+    financial = next(item for item in raised.value.report["gaps"] if item["kind"] == "financial")
+    assert financial["symbols"] == ["X"]
+    assert all(item["kind"] != "financial_conflict" for item in raised.value.report["gaps"])
+
+
 def test_readiness_validates_declared_comparison_periods(tmp_path):
     prepare_complete_data(tmp_path)
     write_table(tmp_path, "financials/income/part.parquet", {
