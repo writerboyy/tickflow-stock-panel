@@ -1097,12 +1097,9 @@ def _engine_from_state(
 ) -> FreeStrategyEngine:
     from app.free_strategy.process import (
         MarketData,
+        configure_strategy_data_loaders,
         _instrument_records,
-        _load_dividend_ratio_ranked,
         _load_market_data,
-        _load_financial_snapshot,
-        _load_smallcap_index_value,
-        _load_valuation_market_caps,
         _load_scheduled_history_batch,
         _prepare_market_reference,
         _preload_tradable_dates,
@@ -1153,41 +1150,17 @@ def _engine_from_state(
         if runtime_timestamp else cn_today()
     )
     engine.set_run_window(run_start, cn_today())
-    engine.set_financial_snapshot_loader(
-        lambda symbols, cutoff: _load_financial_snapshot(
-            data_dir,
-            symbols,
-            cutoff,
-        )
-    )
-    from app.free_strategy.industry import load_industry_history
-
-    engine.set_industry_history_loader(
-        lambda symbols, cutoff, standard, level: load_industry_history(
-            data_dir,
-            symbols,
-            cutoff,
-            standard,
-            level,
-        )
-    )
-    engine.set_dividend_ratio_loader(
-        lambda symbols, cutoff: _load_dividend_ratio_ranked(
-            repo,
-            data_dir,
-            symbols,
-            cutoff,
-        )
-    )
-    engine.set_valuation_market_cap_loader(
-        lambda symbols, cutoff: _load_valuation_market_caps(
-            data_dir,
-            symbols,
-            cutoff,
-        )
-    )
-    engine.set_smallcap_index_loader(
-        lambda symbols, cutoff: _load_smallcap_index_value(repo, data_dir, symbols, cutoff)
+    try:
+        strategy_start = date.fromisoformat(str(raw.get("start")))
+    except (TypeError, ValueError):
+        strategy_start = run_start
+    configure_strategy_data_loaders(
+        engine,
+        repo,
+        data_dir,
+        source,
+        strategy_start,
+        cn_today(),
     )
     if config.allow_stale_fills:
         _preload_tradable_dates(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -11,6 +12,7 @@ from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
 from app.free_strategy.process import (
     MarketData,
+    StyleLiquiditySignalCache,
     _aligned_warmup_bars,
     _is_performance_small_cap_source,
     _load_financial_snapshot,
@@ -79,6 +81,70 @@ def _write_financial_table(tmp_path, table: str, rows: dict) -> None:
     path = tmp_path / "financials" / table / "part.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(rows).write_parquet(path)
+
+
+def _write_style_liquidity_market(tmp_path, days: list[date]) -> None:
+    symbols = [f"0000{index:02d}.SZ" for index in range(1, 11)]
+    daily_path = tmp_path / "kline_daily" / "part.parquet"
+    valuation_path = tmp_path / "valuation_daily" / "part.parquet"
+    daily_path.parent.mkdir(parents=True, exist_ok=True)
+    valuation_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame([
+        {
+            "symbol": symbol,
+            "date": day,
+            "amount": float((11 - index) * 1_000 + day.day),
+        }
+        for day in days
+        for index, symbol in enumerate(symbols, start=1)
+    ]).write_parquet(daily_path)
+    pl.DataFrame([
+        {
+            "symbol": symbol,
+            "date": day,
+            "market_cap": float((11 - index) * 1_000_000),
+        }
+        for day in days
+        for index, symbol in enumerate(symbols, start=1)
+    ]).write_parquet(valuation_path)
+
+
+def test_style_liquidity_cache_extends_when_live_data_crosses_trading_day(tmp_path):
+    symbols = [f"0000{index:02d}.SZ" for index in range(1, 11)]
+    repo = SimpleNamespace(
+        store=SimpleNamespace(data_dir=tmp_path),
+        get_instruments_asset=lambda _asset: pl.DataFrame({
+            "symbol": symbols,
+            "name": [f"样本{index}" for index in range(1, 11)],
+        }),
+    )
+    initial_days = [
+        date(2025, 1, 2),
+        date(2025, 1, 3),
+        date(2025, 1, 6),
+        date(2025, 1, 7),
+        date(2025, 1, 8),
+        date(2025, 1, 9),
+        date(2025, 1, 10),
+    ]
+    _write_style_liquidity_market(tmp_path, initial_days)
+    cache = StyleLiquiditySignalCache(
+        repo,
+        date(2025, 1, 10),
+        date(2025, 1, 10),
+    )
+
+    initial = cache.signal(date(2025, 1, 10))
+    assert initial["available"] is True
+
+    next_day = date(2025, 1, 13)
+    _write_style_liquidity_market(tmp_path, [*initial_days, next_day])
+
+    extended = cache.signal(next_day)
+    assert extended["available"] is True
+    assert extended["date"] == next_day.isoformat()
+    assert extended["entry_threshold"] == initial["entry_threshold"]
+    assert extended["recovery_threshold"] == initial["recovery_threshold"]
 
 
 def test_xdxr_cash_dividend_import_overrides_price_inference(tmp_path):

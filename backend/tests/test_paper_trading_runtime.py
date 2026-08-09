@@ -621,6 +621,7 @@ def test_supervisor_clears_scheduled_close_wait_reason(tmp_path, monkeypatch):
 
 def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monkeypatch, tmp_path):
     calls = []
+    style_caches = []
 
     monkeypatch.setattr(
         "app.free_strategy.process._instrument_records",
@@ -642,6 +643,30 @@ def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monk
         "app.free_strategy.process._load_smallcap_index_value",
         lambda repo, data_dir, symbols, cutoff: calls.append(("smallcap", repo, data_dir, symbols, cutoff)) or 12.34,
     )
+    monkeypatch.setattr(
+        "app.free_strategy.process.load_industry_history",
+        lambda data_dir, symbols, cutoff, standard, level: calls.append(
+            ("industry", data_dir, symbols, cutoff, standard, level)
+        ) or {"X": {"industry_code": "BANK"}},
+    )
+
+    class FakeStyleLiquiditySignalCache:
+        def __init__(self, repo, start, end):
+            style_caches.append((repo, start, end))
+
+        @staticmethod
+        def signal(cutoff):
+            calls.append(("style", cutoff))
+            return {"available": True, "date": cutoff.isoformat()}
+
+    monkeypatch.setattr(
+        "app.free_strategy.process.StyleLiquiditySignalCache",
+        FakeStyleLiquiditySignalCache,
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.paper.cn_today",
+        lambda: date(2026, 8, 9),
+    )
     account_root = tmp_path / "free_strategy_paper" / "performance"
     account_root.mkdir(parents=True)
     (account_root / "strategy.py").write_text(
@@ -650,7 +675,15 @@ def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monk
     )
 
     engine = _engine_from_state(
-        {"config": {"market_mode": "bar_1m", "asset_type": "stock", "benchmark_symbol": "X"}},
+        {
+            "last_bar": "2026-08-07T15:00:00",
+            "config": {
+                "market_mode": "bar_1m",
+                "asset_type": "stock",
+                "benchmark_symbol": "X",
+                "start": "2025-08-07",
+            },
+        },
         account_root,
         tmp_path,
     )
@@ -658,10 +691,20 @@ def test_performance_small_cap_paper_engine_uses_backtest_selection_loaders(monk
     engine.context.now = datetime(2025, 7, 25, 9, 30)
 
     assert engine.context.financial_snapshot(["X"], cutoff) == {"X": {}}
+    assert engine.context.get_industry(
+        ["X"], cutoff, "申银万国行业分类标准",
+    ) == {"X": {"industry_code": "BANK"}}
     assert engine.context.dividend_ratio_ranked(["X"], cutoff) == ["X"]
     assert engine.context.valuation_market_caps(["X"], cutoff) == {"X": 1.0}
     assert engine.context.smallcap_index_value(["X"], cutoff) == 12.34
-    assert [item[0] for item in calls] == ["financial", "dividend", "valuation", "smallcap"]
+    assert engine.context.style_liquidity_signal(cutoff) == {
+        "available": True,
+        "date": cutoff.isoformat(),
+    }
+    assert style_caches[0][1:] == (date(2025, 8, 7), date(2026, 8, 9))
+    assert [item[0] for item in calls] == [
+        "financial", "industry", "dividend", "valuation", "smallcap", "style",
+    ]
 
 
 def test_on_quote_current_and_next_quote_fill_rules():

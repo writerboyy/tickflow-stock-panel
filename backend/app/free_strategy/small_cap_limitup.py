@@ -640,10 +640,16 @@ def _select_industries(
         records = loader(ranked, as_of, INDUSTRY_STANDARD, None)
     except Exception as exc:  # noqa: BLE001
         raise SelectionDataUnavailable(f"{INDUSTRY_DATA_ERROR}: {exc}") from exc
-    industry_by_symbol = {
-        symbol: str(row.get("industry_code") or "").strip()
-        for symbol, row in records.items()
-    }
+    industry_by_symbol: dict[str, str] = {}
+    for symbol in ranked:
+        row = records.get(symbol, {})
+        code = str(row.get("industry_code") or "").strip()
+        name = str(row.get("industry_name") or "").strip()
+        if not code and not name:
+            raise SelectionDataUnavailable(
+                f"{INDUSTRY_DATA_ERROR}: PIT 行业标识为空: {symbol}"
+            )
+        industry_by_symbol[symbol] = f"code:{code}" if code else f"name:{name}"
     selected: list[str] = []
     seen: set[str] = set()
     for symbol in ranked:

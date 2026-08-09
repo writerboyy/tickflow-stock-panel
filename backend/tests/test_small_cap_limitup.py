@@ -555,6 +555,25 @@ def test_select_industries_deduplicates_with_tickflow_pit_industry():
     assert _select_industries(["A", "B", "C"], context, date(2026, 8, 3)) == ["A", "C"]
 
 
+def test_select_industries_uses_pit_name_when_code_is_empty():
+    context = SimpleNamespace(get_industry=lambda *_args: {
+        "A": {"industry_code": "", "industry_name": "基础化工"},
+        "B": {"industry_code": "", "industry_name": "机械设备"},
+        "C": {"industry_code": "", "industry_name": "基础化工"},
+    })
+
+    assert _select_industries(["A", "B", "C"], context, date(2026, 8, 3)) == ["A", "B"]
+
+
+def test_select_industries_fails_closed_when_pit_identity_is_empty():
+    context = SimpleNamespace(get_industry=lambda *_args: {
+        "A": {"industry_code": "", "industry_name": ""},
+    })
+
+    with pytest.raises(ValueError, match="TickFlow PIT 申万行业.*标识为空"):
+        _select_industries(["A"], context, date(2026, 8, 3))
+
+
 def test_select_industries_fails_closed_when_pit_industry_has_gap():
     def unavailable(*_args):
         raise ValueError("PIT 行业区间缺口: B")

@@ -61,7 +61,10 @@ class StyleLiquiditySignalCache:
         self._recovery_quantile = recovery_quantile
         self._lock = threading.RLock()
         self._loaded = False
+        self._loaded_through: date | None = None
         self._error: str | None = None
+        self._entry_threshold: float | None = None
+        self._recovery_threshold: float | None = None
         self._signals: dict[date, dict[str, Any]] = {}
 
     @staticmethod
@@ -71,7 +74,7 @@ class StyleLiquiditySignalCache:
         except ValueError:
             return day.replace(year=day.year - years, day=28)
 
-    def _load(self) -> None:
+    def _valid_symbols(self) -> pl.DataFrame:
         instruments = self._repo.get_instruments_asset("stock")
         required = {"symbol", "name"}
         if instruments.is_empty() or not required.issubset(instruments.columns):
@@ -91,9 +94,15 @@ class StyleLiquiditySignalCache:
         )
         if valid.is_empty():
             raise ValueError("大小盘成交占比择时没有有效股票标的")
+        return valid
 
-        history_start = self._years_before(self._start, 10)
-        load_start = history_start - timedelta(days=14)
+    def _load_metrics(
+        self,
+        load_start: date,
+        output_start: date,
+        end: date,
+    ) -> pl.DataFrame:
+        valid = self._valid_symbols()
         daily_glob = str(
             self._data_dir / "kline_daily" / "**" / "*.parquet"
         ).replace("'", "''")
@@ -118,7 +127,7 @@ class StyleLiquiditySignalCache:
                 FROM read_parquet('{daily_glob}', hive_partitioning=false) AS k
                 INNER JOIN valid_symbols AS s USING (symbol)
                 WHERE k.date BETWEEN DATE '{load_start.isoformat()}'
-                    AND DATE '{self._end.isoformat()}'
+                    AND DATE '{end.isoformat()}'
             ), ranked AS (
                 SELECT
                     b.symbol,
@@ -156,13 +165,43 @@ class StyleLiquiditySignalCache:
                 100 * small_amount_5d / total_amount_5d AS small_ratio,
                 large_amount_5d / small_amount_5d AS cap_ratio
             FROM daily
-            WHERE date >= DATE '{history_start.isoformat()}'
+            WHERE date >= DATE '{output_start.isoformat()}'
             ORDER BY date
         """
         try:
-            metrics = connection.sql(query).pl()
+            return connection.sql(query).pl()
         finally:
             connection.close()
+
+    def _append_signals(self, metrics: pl.DataFrame, risk_off: bool) -> None:
+        if self._entry_threshold is None or self._recovery_threshold is None:
+            raise ValueError("大小盘成交占比择时阈值尚未初始化")
+        for row in metrics.iter_rows(named=True):
+            ratio = float(row["cap_ratio"])
+            if not risk_off and ratio >= self._entry_threshold:
+                risk_off = True
+            elif risk_off and ratio <= self._recovery_threshold:
+                risk_off = False
+            self._signals[row["date"]] = {
+                "available": True,
+                "date": row["date"].isoformat(),
+                "risk_off": risk_off,
+                "large_ratio": float(row["large_ratio"]),
+                "small_ratio": float(row["small_ratio"]),
+                "cap_ratio": ratio,
+                "entry_quantile": self._entry_quantile,
+                "recovery_quantile": self._recovery_quantile,
+                "entry_threshold": self._entry_threshold,
+                "recovery_threshold": self._recovery_threshold,
+            }
+
+    def _load(self) -> None:
+        history_start = self._years_before(self._start, 10)
+        metrics = self._load_metrics(
+            history_start - timedelta(days=MARKET_METADATA_CALENDAR_DAYS),
+            history_start,
+            self._end,
+        )
         history = metrics.filter(pl.col("date") < self._start)
         period = metrics.filter(pl.col("date").is_between(self._start, self._end))
         if history.is_empty() or period.is_empty():
@@ -175,26 +214,25 @@ class StyleLiquiditySignalCache:
         ).item()
         if entry is None or recovery is None:
             raise ValueError("大小盘成交占比择时无法计算历史分位")
+        self._entry_threshold = float(entry)
+        self._recovery_threshold = float(recovery)
+        self._append_signals(period, False)
+        self._loaded_through = period["date"].max()
 
-        risk_off = False
-        for row in period.iter_rows(named=True):
-            ratio = float(row["cap_ratio"])
-            if not risk_off and ratio >= float(entry):
-                risk_off = True
-            elif risk_off and ratio <= float(recovery):
-                risk_off = False
-            self._signals[row["date"]] = {
-                "available": True,
-                "date": row["date"].isoformat(),
-                "risk_off": risk_off,
-                "large_ratio": float(row["large_ratio"]),
-                "small_ratio": float(row["small_ratio"]),
-                "cap_ratio": ratio,
-                "entry_quantile": self._entry_quantile,
-                "recovery_quantile": self._recovery_quantile,
-                "entry_threshold": float(entry),
-                "recovery_threshold": float(recovery),
-            }
+    def _extend(self, cutoff: date) -> None:
+        if self._loaded_through is None or cutoff <= self._loaded_through:
+            return
+        metrics = self._load_metrics(
+            self._loaded_through - timedelta(days=MARKET_METADATA_CALENDAR_DAYS),
+            self._loaded_through + timedelta(days=1),
+            cutoff,
+        )
+        if metrics.is_empty():
+            return
+        previous = self._signals[max(self._signals)]
+        self._append_signals(metrics, bool(previous["risk_off"]))
+        self._loaded_through = metrics["date"].max()
+        self._error = None
 
     def signal(self, cutoff: date) -> dict[str, Any] | None:
         if cutoff < self._start:
@@ -206,6 +244,13 @@ class StyleLiquiditySignalCache:
                 except Exception as exc:
                     self._error = str(exc)
                 self._loaded = True
+            if self._error is None and (
+                self._loaded_through is None or cutoff > self._loaded_through
+            ):
+                try:
+                    self._extend(cutoff)
+                except Exception as exc:
+                    self._error = str(exc)
             signal = self._signals.get(cutoff)
             if signal is not None:
                 return dict(signal)
@@ -598,6 +643,56 @@ def _load_smallcap_index_value(
 
 def _is_performance_small_cap_source(source: str) -> bool:
     return PERFORMANCE_SMALL_CAP_SOURCE_MARKER in source
+
+
+def configure_strategy_data_loaders(
+    engine: FreeStrategyEngine,
+    repo: Any,
+    data_dir: Path,
+    source: str,
+    start: date,
+    end: date,
+) -> None:
+    """Attach the point-in-time data capabilities shared by backtest and paper."""
+    data_dir = Path(data_dir)
+    engine.set_financial_snapshot_loader(
+        lambda symbols, cutoff: _load_financial_snapshot(data_dir, symbols, cutoff)
+    )
+    engine.set_industry_history_loader(
+        lambda symbols, cutoff, standard, level: load_industry_history(
+            data_dir,
+            symbols,
+            cutoff,
+            standard,
+            level,
+        )
+    )
+    engine.set_dividend_ratio_loader(
+        lambda symbols, cutoff: _load_dividend_ratio_ranked(
+            repo,
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
+    engine.set_valuation_market_cap_loader(
+        lambda symbols, cutoff: _load_valuation_market_caps(
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
+    engine.set_smallcap_index_loader(
+        lambda symbols, cutoff: _load_smallcap_index_value(
+            repo,
+            data_dir,
+            symbols,
+            cutoff,
+        )
+    )
+    if _is_performance_small_cap_source(source):
+        style_liquidity = StyleLiquiditySignalCache(repo, start, end)
+        engine.set_style_liquidity_loader(style_liquidity.signal)
 
 
 def _load_market_data(
@@ -1987,48 +2082,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             callback_deadline=callback_deadline,
         )
         engine.set_run_window(start, end)
-        engine.set_financial_snapshot_loader(
-            lambda symbols, cutoff: _load_financial_snapshot(
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
+        configure_strategy_data_loaders(
+            engine,
+            repo,
+            Path(payload["data_dir"]),
+            source,
+            start,
+            end,
         )
-        engine.set_industry_history_loader(
-            lambda symbols, cutoff, standard, level: load_industry_history(
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-                standard,
-                level,
-            )
-        )
-        engine.set_dividend_ratio_loader(
-            lambda symbols, cutoff: _load_dividend_ratio_ranked(
-                repo,
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
-        )
-        engine.set_valuation_market_cap_loader(
-            lambda symbols, cutoff: _load_valuation_market_caps(
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
-        )
-        engine.set_smallcap_index_loader(
-            lambda symbols, cutoff: _load_smallcap_index_value(
-                repo,
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
-        )
-        if _is_performance_small_cap_source(source):
-            style_liquidity = StyleLiquiditySignalCache(repo, start, end)
-            engine.set_style_liquidity_loader(style_liquidity.signal)
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data

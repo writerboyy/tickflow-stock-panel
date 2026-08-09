@@ -788,11 +788,9 @@ def _paper_loop(account_id: str, root: str) -> None:
     import time
     from datetime import time as clock_time
     from app.free_strategy.process import (
+        configure_strategy_data_loaders,
         _instrument_records,
         _load_market_data,
-        _load_dividend_ratio_ranked,
-        _load_smallcap_index_value,
-        _load_valuation_market_caps,
         _load_scheduled_history,
         _load_scheduled_history_batch,
         _merge_market_data,
@@ -816,7 +814,8 @@ def _paper_loop(account_id: str, root: str) -> None:
         timeframe = config.pop("timeframe", "1m")
         asset_type = config.pop("asset_type", "stock")
         config.pop("strategy_id", None)
-        config.pop("start", None); config.pop("end", None)
+        configured_start = config.pop("start", None)
+        config.pop("end", None)
         config.pop("name", None)
         engine_config = FreeStrategyConfig(asset_type=asset_type, **config)
         repo = KlineRepository(DataStore(Path(root).parent))
@@ -824,28 +823,18 @@ def _paper_loop(account_id: str, root: str) -> None:
         engine = FreeStrategyEngine(
             source, timeframe, engine_config, state=state.get("state", {}), instruments=instruments,
         )
-        engine.set_dividend_ratio_loader(
-            lambda symbols, cutoff: _load_dividend_ratio_ranked(
-                repo,
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
-        )
-        engine.set_valuation_market_cap_loader(
-            lambda symbols, cutoff: _load_valuation_market_caps(
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
-        )
-        engine.set_smallcap_index_loader(
-            lambda symbols, cutoff: _load_smallcap_index_value(
-                repo,
-                repo.store.data_dir,
-                symbols,
-                cutoff,
-            )
+        today = cn_today()
+        try:
+            strategy_start = date.fromisoformat(str(configured_start))
+        except (TypeError, ValueError):
+            strategy_start = today
+        configure_strategy_data_loaders(
+            engine,
+            repo,
+            repo.store.data_dir,
+            source,
+            strategy_start,
+            today,
         )
         symbols, universe_source = _resolve_symbols(engine, {"symbols": legacy_symbols})
         state["universe"] = symbols
@@ -855,7 +844,6 @@ def _paper_loop(account_id: str, root: str) -> None:
         else:
             engine.account.restore(state.get("account", {}))
             engine.restore_runtime(state.get("runtime"))
-        today = cn_today()
         market_data, warmup_metadata = _prepare_market_data(
             repo, engine, symbols, today, today, asset_type, timeframe,
         )
