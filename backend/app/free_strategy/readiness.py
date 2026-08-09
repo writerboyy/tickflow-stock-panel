@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -138,30 +138,48 @@ def _file_manifest(data_dir: Path, roots: Iterable[Path]) -> dict[str, Any]:
     return {"sha256": sha256(encoded.encode("utf-8")).hexdigest(), "files": files}
 
 
-def _lifecycle_pool(
+def _load_lifecycle_events(
     data_dir: Path,
     symbols: list[str],
-    as_of: date,
-) -> tuple[list[str], list[str], list[str]]:
+) -> dict[str, tuple[tuple[date, str], ...]]:
     path = data_dir / "pit_reference/history/instrument_lifecycle_events/part.parquet"
     if not path.exists():
-        return [], list(symbols), []
+        return {}
     frame = pl.read_parquet(path)
     required = {"symbol", "event_date", "event_type"}
     if not required <= set(frame.columns):
-        return [], list(symbols), []
-    rows = frame.filter(pl.col("symbol").is_in(symbols))
+        return {}
+    rows = (
+        frame
+        .filter(pl.col("symbol").is_in(symbols))
+        .select("symbol", "event_date", "event_type")
+        .sort(["symbol", "event_date"])
+    )
+    events: dict[str, list[tuple[date, str]]] = {}
+    for row in rows.iter_rows(named=True):
+        event_date = row["event_date"]
+        if isinstance(event_date, datetime):
+            event_date = event_date.date()
+        if not isinstance(event_date, date):
+            continue
+        events.setdefault(str(row["symbol"]), []).append((
+            event_date, str(row["event_type"]).lower(),
+        ))
+    return {symbol: tuple(values) for symbol, values in events.items()}
+
+
+def _lifecycle_pool(
+    events_by_symbol: Mapping[str, tuple[tuple[date, str], ...]],
+    symbols: list[str],
+    as_of: date,
+) -> tuple[list[str], list[str], list[str]]:
     active: list[str] = []
     missing: list[str] = []
     delisted: list[str] = []
     for symbol in symbols:
-        events = rows.filter(pl.col("symbol") == symbol).sort("event_date")
-        historical = events.filter(pl.col("event_date") <= as_of)
-        types = [str(value).lower() for value in historical["event_type"].to_list()]
-        future_types = [
-            str(value).lower()
-            for value in events.filter(pl.col("event_date") > as_of)["event_type"].to_list()
-        ]
+        events = events_by_symbol.get(symbol, ())
+        types = [event_type for event_date, event_type in events if event_date <= as_of]
+        future_types = [event_type for event_date, event_type in events if event_date > as_of]
         if "listed" not in types and "listed" in future_types:
             continue
         if "listed" not in types:
@@ -223,6 +241,11 @@ def build_readiness_manifest(
     checked: list[dict[str, Any]] = []
     roots = list(dataset_roots)
     roots.append(Path("pit_reference/history/instrument_lifecycle_events/part.parquet"))
+    lifecycle_events = (
+        _load_lifecycle_events(data_dir, symbols)
+        if any(requirement.lifecycle for requirement in values)
+        else {}
+    )
     for requirement in values:
         roots.extend(
             Path("financials") / item.table for item in requirement.financials
@@ -282,7 +305,9 @@ def build_readiness_manifest(
                 })
             active = list(symbols)
             if requirement.lifecycle:
-                active, missing_lifecycle, _delisted = _lifecycle_pool(data_dir, symbols, as_of)
+                active, missing_lifecycle, _delisted = _lifecycle_pool(
+                    lifecycle_events, symbols, as_of,
+                )
                 if missing_lifecycle:
                     gaps.append({
                         "kind": "lifecycle",

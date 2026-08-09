@@ -145,6 +145,39 @@ def test_readiness_excludes_symbol_listed_after_as_of(tmp_path):
     assert report["checks"][0]["universe_size"] == 0
 
 
+def test_readiness_loads_lifecycle_events_once_for_multiple_rebalances(
+    tmp_path, monkeypatch,
+):
+    prepare_complete_data(tmp_path)
+    real_read_parquet = pl.read_parquet
+    lifecycle_reads = 0
+
+    def tracked_read_parquet(path, *args, **kwargs):
+        nonlocal lifecycle_reads
+        if str(path).endswith("instrument_lifecycle_events/part.parquet"):
+            lifecycle_reads += 1
+        return real_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(pl, "read_parquet", tracked_read_parquet)
+
+    report = build_readiness_manifest(
+        tmp_path,
+        [make_requirement(rebalance="daily", lifecycle=True)],
+        strategy_sha256="strategy-hash",
+        universe=["X"],
+        trading_dates=[date(2024, 1, 2), date(2024, 1, 3)],
+        calendar_dates=[
+            date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3),
+        ],
+        benchmark_symbol="BENCH",
+        benchmark_dates=[date(2024, 1, 1), date(2024, 1, 2)],
+    )
+
+    assert report["status"] == "passed"
+    assert len(report["checks"]) == 2
+    assert lifecycle_reads == 1
+
+
 def test_readiness_blocks_future_only_financial_period(tmp_path):
     prepare_complete_data(tmp_path)
     write_table(tmp_path, "financials/income/part.parquet", {
