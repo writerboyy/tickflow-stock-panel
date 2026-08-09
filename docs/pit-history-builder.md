@@ -44,6 +44,10 @@ Important boundaries:
   from the canonical table.
 - Industry history is a multi-standard table. Always filter exactly one
   `industry_standard` before joining it to a daily PIT panel.
+- Cninfo standard `008003` rows are expanded from `行业门类/行业次类/行业中类`
+  into Shenwan levels 1/2/3. Cninfo exposes only the leaf `行业编码`, so level
+  1/2 identities use the supplied names; the leaf code is retained only at
+  level 3 and is never shortened to invent parent codes.
 
 Examples:
 

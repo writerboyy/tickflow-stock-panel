@@ -34,6 +34,7 @@ def test_template_declares_weekly_and_monthly_trading_conditions():
         make_requirement(
             rebalance="weekly",
             industry_standard=small_cap_limitup.INDUSTRY_STANDARD,
+            industry_level=small_cap_limitup.INDUSTRY_LEVEL,
             lifecycle=True,
             adjustment="pre",
         ),
@@ -546,11 +547,16 @@ def test_afternoon_scope_uses_daily_market_cap_pool_instead_of_full_market_minut
 
 
 def test_select_industries_deduplicates_with_tickflow_pit_industry():
-    context = SimpleNamespace(get_industry=lambda *_args: {
-        "A": {"industry_code": "X480101"},
-        "B": {"industry_code": "X480101"},
-        "C": {"industry_code": "X490101"},
-    })
+    def get_industry(_symbols, _as_of, standard, level):
+        assert standard == small_cap_limitup.INDUSTRY_STANDARD
+        assert level == small_cap_limitup.INDUSTRY_LEVEL
+        return {
+            "A": {"industry_code": "X480101"},
+            "B": {"industry_code": "X480101"},
+            "C": {"industry_code": "X490101"},
+        }
+
+    context = SimpleNamespace(get_industry=get_industry)
 
     assert _select_industries(["A", "B", "C"], context, date(2026, 8, 3)) == ["A", "C"]
 

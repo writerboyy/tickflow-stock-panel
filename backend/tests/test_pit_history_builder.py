@@ -221,7 +221,7 @@ def test_industry_history_accepts_public_raw_columns():
     ]
 
 
-def test_cninfo_sw_history_normalizes_to_level_one_without_reusing_leaf_code():
+def test_cninfo_sw_history_expands_names_without_reusing_leaf_code():
     frame = normalize_industry_membership_history(
         [
             {
@@ -253,7 +253,21 @@ def test_cninfo_sw_history_normalizes_to_level_one_without_reusing_leaf_code():
             "industry_level": 1,
             "industry_code": "",
             "industry_name": "家用电器",
-        }
+        },
+        {
+            "member_symbol": "000016.SZ",
+            "industry_standard_code": "008003",
+            "industry_level": 2,
+            "industry_code": "",
+            "industry_name": "白色家电",
+        },
+        {
+            "member_symbol": "000016.SZ",
+            "industry_standard_code": "008003",
+            "industry_level": 3,
+            "industry_code": "S330106",
+            "industry_name": "冰洗",
+        },
     ]
 
 

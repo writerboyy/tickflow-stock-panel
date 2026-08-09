@@ -514,12 +514,15 @@ DATASET_SPECS.update({
 DATASET_SPECS.update({
     "index_member_all": TushareDatasetSpec(
         "index_member_all", "申万行业历史成分", "reference", "pit_industry", "global",
-        ("member_symbol", "industry_standard", "effective_from"), "effective_from",
+        ("member_symbol", "industry_standard", "industry_level", "effective_from"),
+        "effective_from",
         (_f("member_symbol", "string", "成分代码", None, "ts_code"),
          _f("member_name", "string", "成分名称", None, "name"),
          _f("industry_standard", "string", "行业标准"),
-         _f("industry_code", "string", "行业代码", None, "l3_code", "l2_code", "l1_code"),
-         _f("industry_name", "string", "行业名称", None, "l3_name", "l2_name", "l1_name"),
+         _f("industry_standard_code", "string", "行业标准编码"),
+         _f("industry_level", "int", "行业级别"),
+         _f("industry_code", "string", "行业代码"),
+         _f("industry_name", "string", "行业名称"),
          _f("effective_from", "string", "生效日期", None, "in_date"),
          _f("effective_to", "string", "失效日期", None, "out_date")),
         max_rows=10_000,

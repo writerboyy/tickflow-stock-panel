@@ -18,6 +18,7 @@ STOPLOSS_LIMIT = 0.91
 MARKET_STOPLOSS_LIMIT = 0.93
 TRADE_CAPITAL_LIMIT = 130_000.0
 INDUSTRY_STANDARD = "申银万国行业分类标准"
+INDUSTRY_LEVEL = 2
 INDUSTRY_DATA_ERROR = "涨停基因小市值策略缺少 TickFlow PIT 申万行业历史，无法执行行业去重"
 
 
@@ -170,6 +171,7 @@ def initialize(context) -> None:
     context.require_data_readiness(
         rebalance="weekly",
         industry_standard=INDUSTRY_STANDARD,
+        industry_level=INDUSTRY_LEVEL,
         lifecycle=True,
         adjustment="pre",
     )
@@ -637,7 +639,7 @@ def _select_industries(
     if not callable(loader):
         raise SelectionDataUnavailable(INDUSTRY_DATA_ERROR)
     try:
-        records = loader(ranked, as_of, INDUSTRY_STANDARD, None)
+        records = loader(ranked, as_of, INDUSTRY_STANDARD, INDUSTRY_LEVEL)
     except Exception as exc:  # noqa: BLE001
         raise SelectionDataUnavailable(f"{INDUSTRY_DATA_ERROR}: {exc}") from exc
     industry_by_symbol: dict[str, str] = {}

@@ -28,7 +28,7 @@ INDEX_MEMBERSHIP_HISTORY_TABLE = "index_membership_history"
 INDUSTRY_MEMBERSHIP_HISTORY_TABLE = "industry_membership_history"
 INSTRUMENT_LIFECYCLE_EVENTS_TABLE = "instrument_lifecycle_events"
 PARSER_VERSION = "pit_history_v1"
-INDUSTRY_PARSER_VERSION = "pit_industry_l1_v2"
+INDUSTRY_PARSER_VERSION = "pit_industry_levels_v3"
 CNINFO_SW_STANDARD = "申银万国行业分类标准"
 CNINFO_SW_STANDARD_CODE = "008003"
 DEFAULT_CSI300_COVERAGE_DATES = (
@@ -783,68 +783,127 @@ def normalize_industry_membership_history(
         if is_cninfo_sw:
             industry_standard = CNINFO_SW_STANDARD
             industry_standard_code = CNINFO_SW_STANDARD_CODE
-            industry_level = 1
-            industry_code = _first_text(row, ["industry_l1_code", "l1_code"])
-            industry_name = _first_text(
-                row,
-                ["industry_l1_name", "l1_name", "行业门类", "门类名称"],
-            )
+            if industry_level is None:
+                classifications = [
+                    (
+                        1,
+                        _first_text(row, ["industry_l1_code", "l1_code"]),
+                        _first_text(
+                            row,
+                            ["industry_l1_name", "l1_name", "行业门类", "门类名称"],
+                        ),
+                    ),
+                    (
+                        2,
+                        _first_text(row, ["industry_l2_code", "l2_code"]),
+                        _first_text(
+                            row,
+                            ["industry_l2_name", "l2_name", "行业次类"],
+                        ),
+                    ),
+                    (
+                        3,
+                        _first_text(
+                            row,
+                            ["industry_l3_code", "l3_code", "industry_code", "行业编码", "行业代码"],
+                        ),
+                        _first_text(
+                            row,
+                            ["industry_l3_name", "l3_name", "行业中类", "行业大类"],
+                        ),
+                    ),
+                ]
+            else:
+                classifications = [(
+                    industry_level,
+                    _first_text(
+                        row,
+                        [
+                            f"industry_l{industry_level}_code",
+                            f"l{industry_level}_code",
+                            "industry_code",
+                        ],
+                    ),
+                    _first_text(
+                        row,
+                        [
+                            f"industry_l{industry_level}_name",
+                            f"l{industry_level}_name",
+                            "industry_name",
+                        ],
+                    ),
+                )]
         elif industry_level == 1:
-            industry_code = _first_text(
-                row,
-                ["industry_l1_code", "l1_code", "industry_code", "行业代码"],
-            )
-            industry_name = _first_text(
-                row,
-                [
-                    "industry_l1_name",
-                    "l1_name",
-                    "industry_name",
-                    "行业名称",
-                    "行业门类",
-                    "门类名称",
-                ],
-            )
+            classifications = [(
+                industry_level,
+                _first_text(
+                    row,
+                    ["industry_l1_code", "l1_code", "industry_code", "行业代码"],
+                ),
+                _first_text(
+                    row,
+                    [
+                        "industry_l1_name",
+                        "l1_name",
+                        "industry_name",
+                        "行业名称",
+                        "行业门类",
+                        "门类名称",
+                    ],
+                ),
+            )]
         else:
-            industry_code = _text(_pick(row, ["industry_code", "行业编码", "行业代码"]))
-            industry_name = _first_text(
-                row,
-                [
-                    "industry_name",
-                    "行业名称",
-                    "所属行业",
-                    "行业中类",
-                    "行业大类",
-                    "行业次类",
-                    "行业门类",
-                    "门类名称",
-                    "大类名称",
-                ],
-            )
-        if not industry_name:
-            continue
-        item = {
-            "member_symbol": symbol,
-            "member_code": _member_code(symbol),
-            "member_name": _text(
-                _pick(
-                    row, ["member_name", "证券简称", "股票简称", "新证券简称", "name", "股票名称"]
-                )
-            ),
-            "industry_standard": industry_standard,
-            "industry_standard_code": industry_standard_code,
-            "industry_level": industry_level,
-            "industry_code": industry_code,
-            "industry_name": industry_name,
-            "effective_from": effective_from,
-            "_provider_effective_to": _parse_date(
-                _pick(row, ["effective_to", "out_date", "失效日期", "结束日期"])
-            ),
-            "source": source,
-            "provenance": "historical_event",
-            "raw_hash": _source_hash(row),
-        }
-        grouped[(symbol, industry_standard, industry_standard_code, industry_level)].append(item)
+            classifications = [(
+                industry_level,
+                _text(_pick(row, ["industry_code", "行业编码", "行业代码"])),
+                _first_text(
+                    row,
+                    [
+                        "industry_name",
+                        "行业名称",
+                        "所属行业",
+                        "行业中类",
+                        "行业大类",
+                        "行业次类",
+                        "行业门类",
+                        "门类名称",
+                        "大类名称",
+                    ],
+                ),
+            )]
+        for selected_level, industry_code, industry_name in classifications:
+            if not industry_name:
+                continue
+            item = {
+                "member_symbol": symbol,
+                "member_code": _member_code(symbol),
+                "member_name": _text(
+                    _pick(
+                        row,
+                        [
+                            "member_name",
+                            "证券简称",
+                            "股票简称",
+                            "新证券简称",
+                            "name",
+                            "股票名称",
+                        ],
+                    )
+                ),
+                "industry_standard": industry_standard,
+                "industry_standard_code": industry_standard_code,
+                "industry_level": selected_level,
+                "industry_code": industry_code,
+                "industry_name": industry_name,
+                "effective_from": effective_from,
+                "_provider_effective_to": _parse_date(
+                    _pick(row, ["effective_to", "out_date", "失效日期", "结束日期"])
+                ),
+                "source": source,
+                "provenance": "historical_event",
+                "raw_hash": _source_hash(row),
+            }
+            grouped[(symbol, industry_standard, industry_standard_code, selected_level)].append(item)
 
     output: list[dict[str, Any]] = []
     for items in grouped.values():

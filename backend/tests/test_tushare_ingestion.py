@@ -464,20 +464,117 @@ def test_weekly_audit_detects_financial_and_valuation_lookahead(tmp_path):
     assert report["pit_checks"]["valuation_lookahead_rows"] == 1
 
 
-def test_index_member_all_maps_actual_sw_industry_fields():
+def _sw_industry_row() -> dict:
+    return {
+        "l1_code": "801130.SI",
+        "l1_name": "纺织服饰",
+        "l2_code": "801131.SI",
+        "l2_name": "纺织制造",
+        "l3_code": "851316.SI",
+        "l3_name": "其他纺织",
+        "ts_code": "001312.SZ",
+        "name": "某公司",
+        "in_date": "20260428",
+        "out_date": None,
+    }
+
+
+def test_index_member_all_expands_every_sw_industry_level():
     frame, audit = normalize_dataset_rows(
         DATASET_SPECS["index_member_all"],
-        [{
-            "l1_code": "", "l2_code": "350100", "l3_code": "851316.SI",
-            "l3_name": "其他纺织", "ts_code": "001312.SZ",
-            "name": "某公司", "in_date": "20260428", "out_date": None,
-        }],
+        [_sw_industry_row()],
     )
 
     assert audit["rejected_rows"] == 0
     assert frame.select(
-        "member_symbol", "industry_standard", "industry_code", "effective_from"
-    ).row(0) == ("001312.SZ", "sw", "851316.SI", "2026-04-28")
+        "member_symbol",
+        "industry_standard",
+        "industry_standard_code",
+        "industry_level",
+        "industry_code",
+        "industry_name",
+        "effective_from",
+    ).to_dicts() == [
+        {
+            "member_symbol": "001312.SZ",
+            "industry_standard": "申银万国行业分类标准",
+            "industry_standard_code": "008003",
+            "industry_level": 1,
+            "industry_code": "801130.SI",
+            "industry_name": "纺织服饰",
+            "effective_from": "2026-04-28",
+        },
+        {
+            "member_symbol": "001312.SZ",
+            "industry_standard": "申银万国行业分类标准",
+            "industry_standard_code": "008003",
+            "industry_level": 2,
+            "industry_code": "801131.SI",
+            "industry_name": "纺织制造",
+            "effective_from": "2026-04-28",
+        },
+        {
+            "member_symbol": "001312.SZ",
+            "industry_standard": "申银万国行业分类标准",
+            "industry_standard_code": "008003",
+            "industry_level": 3,
+            "industry_code": "851316.SI",
+            "industry_name": "其他纺织",
+            "effective_from": "2026-04-28",
+        },
+    ]
+
+
+def test_index_member_all_publishes_levels_as_independent_pit_rows(tmp_path):
+    engine = TushareDatasetIngestion(
+        IngestionConfig(
+            tmp_path,
+            "sw-levels",
+            start=date(2026, 4, 28),
+            end=date(2026, 8, 7),
+            publish=True,
+        ),
+        _Client({"index_member_all": [_sw_industry_row()]}),
+    )
+    spec = DATASET_SPECS["index_member_all"]
+
+    engine.collect((spec,))
+    published = engine.publish((spec,))["index_member_all"]
+
+    target = tmp_path / "pit_reference/history/industry_membership_history/part.parquet"
+    frame = pl.read_parquet(target)
+    assert published["published_rows"] == 3
+    assert frame.select("industry_level", "industry_code").to_dicts() == [
+        {"industry_level": 1, "industry_code": "801130.SI"},
+        {"industry_level": 2, "industry_code": "801131.SI"},
+        {"industry_level": 3, "industry_code": "851316.SI"},
+    ]
+
+
+def test_ci_index_member_without_declared_level_still_publishes(tmp_path):
+    engine = TushareDatasetIngestion(
+        IngestionConfig(
+            tmp_path,
+            "citics-no-level",
+            start=date(2026, 4, 28),
+            end=date(2026, 8, 7),
+            publish=True,
+        ),
+        _Client({"ci_index_member": [{
+            "l1_code": "CI005001.WI",
+            "l1_name": "银行",
+            "con_code": "000001.SZ",
+            "con_name": "平安银行",
+            "in_date": "20260428",
+            "out_date": None,
+        }]}),
+    )
+    spec = DATASET_SPECS["ci_index_member"]
+
+    engine.collect((spec,))
+    published = engine.publish((spec,))["ci_index_member"]
+
+    assert published["published_rows"] == 1
 
 
 def test_financial_publish_blocks_existing_key_conflict(tmp_path):

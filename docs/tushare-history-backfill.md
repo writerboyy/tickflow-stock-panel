@@ -98,6 +98,10 @@ uv run python scripts/backfill_tushare_history.py --data-dir /path/to/data \
 重建 `kline_daily_enriched`、ETF/指数 enriched 和 `valuation_daily`。扩展表只有发布
 成功后，`config.json` 才会出现 `factor-input`。
 
+`index_member_all` 的每条申万记录按 `l1/l2/l3` 展开为三条独立 PIT 记录，统一使用
+`申银万国行业分类标准`（`008003`），并将 `industry_level` 纳入主键。策略必须显式声明
+所需层级；当前快照中 `out_date` 为空的数据不能单独证明更早日期的完整行业归属。
+
 分钟历史使用现有阶段，反向游标每页最多 8,000 行，实际最早日期写入能力矩阵：
 
 ```bash

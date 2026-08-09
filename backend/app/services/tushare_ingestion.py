@@ -17,6 +17,8 @@ from uuid import uuid4
 import polars as pl
 
 from app.plugins.pit_history.storage import (
+    CNINFO_SW_STANDARD,
+    CNINFO_SW_STANDARD_CODE,
     INDUSTRY_MEMBERSHIP_HISTORY_TABLE,
     INSTRUMENT_LIFECYCLE_EVENTS_TABLE,
     INDEX_MEMBERSHIP_HISTORY_TABLE,
@@ -43,7 +45,7 @@ from app.services.tushare_datasets import (
 
 SOURCE = "tushare_proxy"
 INGESTION_SCHEMA_VERSION = 2
-PARSER_VERSION = "tushare_ingestion_v4"
+PARSER_VERSION = "tushare_ingestion_v5"
 DEFAULT_HISTORY_START = date(2010, 1, 1)
 _NUMERIC_DTYPES = {"float": pl.Float64, "int": pl.Int64, "bool": pl.Boolean}
 _DATE_FORMATS = ("%Y%m%d", "%Y-%m-%d", "%Y/%m/%d")
@@ -301,30 +303,51 @@ def normalize_dataset_rows(
     normalized: list[dict[str, Any]] = []
     rejected = 0
     for provider_row in rows:
-        output: dict[str, Any] = {}
-        for field in spec.fields:
-            value = _pick(provider_row, field)
-            if field.name in {"symbol", "member_symbol", "index_symbol"}:
-                value = _normalize_symbol(value)
-            elif field.name in _DATE_FIELDS:
-                value = _iso_date(value)
-            output[field.name] = value
-        if spec.api_name == "ci_index_member":
-            output["industry_standard"] = output.get("industry_standard") or "citics"
-        elif spec.api_name == "index_member_all":
-            output["industry_standard"] = output.get("industry_standard") or "sw"
-        if any(output.get(column) in (None, "") for column in spec.primary_key):
-            rejected += 1
-            continue
-        output["source"] = SOURCE
-        output["collected_at"] = timestamp
-        output["source_revision_hash"] = _row_hash(provider_row)
-        if spec.revisioned:
-            revision_flag = provider_row.get("update_flag")
-            output["provider_revision_flag"] = (
-                None if revision_flag in (None, "") else str(revision_flag)
+        if spec.api_name == "index_member_all":
+            provider_rows = []
+            for level in (1, 2, 3):
+                expanded = dict(provider_row)
+                expanded.update({
+                    "industry_standard": CNINFO_SW_STANDARD,
+                    "industry_standard_code": CNINFO_SW_STANDARD_CODE,
+                    "industry_level": level,
+                    "industry_code": provider_row.get(f"l{level}_code"),
+                    "industry_name": provider_row.get(f"l{level}_name"),
+                })
+                provider_rows.append(expanded)
+        else:
+            provider_rows = [provider_row]
+
+        for normalized_provider_row in provider_rows:
+            output: dict[str, Any] = {}
+            for field in spec.fields:
+                value = _pick(normalized_provider_row, field)
+                if field.name in {"symbol", "member_symbol", "index_symbol"}:
+                    value = _normalize_symbol(value)
+                elif field.name in _DATE_FIELDS:
+                    value = _iso_date(value)
+                output[field.name] = value
+            if spec.api_name == "ci_index_member":
+                output["industry_standard"] = output.get("industry_standard") or "citics"
+            missing_key = any(
+                output.get(column) in (None, "") for column in spec.primary_key
             )
-        normalized.append(output)
+            missing_industry = spec.api_name == "index_member_all" and any(
+                output.get(column) in (None, "")
+                for column in ("industry_code", "industry_name")
+            )
+            if missing_key or missing_industry:
+                rejected += 1
+                continue
+            output["source"] = SOURCE
+            output["collected_at"] = timestamp
+            output["source_revision_hash"] = _row_hash(provider_row)
+            if spec.revisioned:
+                revision_flag = provider_row.get("update_flag")
+                output["provider_revision_flag"] = (
+                    None if revision_flag in (None, "") else str(revision_flag)
+                )
+            normalized.append(output)
 
     if not normalized:
         frame = _empty_frame(spec)
@@ -1223,6 +1246,8 @@ class TushareDatasetIngestion:
         )
         table = INDUSTRY_MEMBERSHIP_HISTORY_TABLE
         key = ["member_symbol", "industry_standard", "effective_from"]
+        if spec.api_name == "index_member_all":
+            key[2:2] = ["industry_standard_code", "industry_level"]
         if not incoming.is_empty() and spec.kind == "pit_industry":
             incoming = incoming.with_columns(pl.lit(self.config.end).alias("source_snapshot_date"))
         target = self.config.data_dir / "pit_reference" / "history" / table / "part.parquet"
@@ -1587,9 +1612,13 @@ class TushareDatasetIngestion:
                 if not membership_validation["usable"]:
                     item["status"] = "unhealthy"
             elif spec.kind == "pit_industry":
+                interval_columns = ["member_symbol", "industry_standard"]
+                for column in ("industry_standard_code", "industry_level"):
+                    if column in frame.columns:
+                        interval_columns.append(column)
                 invalid_intervals, overlap_intervals = _interval_defects(
                     frame,
-                    ("member_symbol", "industry_standard"),
+                    tuple(interval_columns),
                 )
                 item["invalid_intervals"] = invalid_intervals
                 item["overlap_intervals"] = overlap_intervals
