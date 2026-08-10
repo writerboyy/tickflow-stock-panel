@@ -153,7 +153,17 @@ def list_recommendations(
     status: str | None = Query(None),
     limit: int = Query(500, ge=1, le=5000),
 ):
-    rows = _service(request).store.list_recommendations(status, limit)
+    service = _service(request)
+    rows = [
+        {
+            **item,
+            "reasons": [
+                service.localize_text(str(reason))
+                for reason in item.get("reasons", [])
+            ],
+        }
+        for item in service.store.list_recommendations(status, limit)
+    ]
     return {"recommendations": rows, "count": len(rows)}
 
 
@@ -191,7 +201,12 @@ def list_events(request: Request, days: int = Query(7, ge=1, le=30), limit: int 
     positions = {item["symbol"] for item in service.store.load()["positions"]}
     rows = alert_store.list_recent(service.store.root.parents[1], days=days, limit=limit * 3)
     rows = [
-        {**item, "timeline_origin": "position_risk" if item.get("source") == "position_risk" else "monitor_rule"}
+        {
+            **item,
+            "message": service.localize_text(str(item.get("message") or "")),
+            "rule_name": service.localize_text(str(item.get("rule_name") or "")),
+            "timeline_origin": "position_risk" if item.get("source") == "position_risk" else "monitor_rule",
+        }
         for item in rows
         if item.get("source") == "position_risk" or item.get("symbol") in positions
     ][:limit]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import math
 import queue
+import re
 import statistics
 import threading
 import time
@@ -14,10 +15,11 @@ from typing import Any
 
 import polars as pl
 
+from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now, cn_today
 from app.services import alert_store
 from app.services.position_risk_store import PositionRiskStore
-from app.strategy.intraday_signals import IntradaySignalEvaluator
+from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, IntradaySignalEvaluator
 
 _ACCOUNT_ID = "position-risk"
 _RULE_WEIGHTS = {
@@ -28,6 +30,30 @@ _RULE_WEIGHTS = {
     "flow": 15,
     "signal": 10,
 }
+
+_SIGNAL_LABELS = {
+    **{key: value for key, value in ENRICHED_COLUMNS.items() if key.startswith("signal_")},
+    **INTRADAY_SIGNAL_LABELS,
+}
+_SIGNAL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:signal|csg)[._][A-Za-z0-9_]+")
+
+
+def position_risk_signal_label(signal_id: str, custom_labels: dict[str, str] | None = None) -> str:
+    """把持仓风控内部信号 ID 转为用户可读名称，兼容历史点号格式。"""
+    normalized = signal_id.replace("signal.", "signal_").replace("csg.", "csg_")
+    if custom_labels:
+        label = custom_labels.get(signal_id) or custom_labels.get(normalized)
+        if label and label not in {signal_id, normalized}:
+            return label
+    return _SIGNAL_LABELS.get(normalized, signal_id)
+
+
+def localize_position_risk_text(text: str, custom_labels: dict[str, str] | None = None) -> str:
+    """替换事件/建议文本中残留的内置信号 ID，不改写未知业务文本。"""
+    return _SIGNAL_TOKEN.sub(
+        lambda match: position_risk_signal_label(match.group(0), custom_labels),
+        text,
+    )
 
 
 def _finite(value: object) -> float | None:
@@ -79,6 +105,7 @@ class PositionRiskService:
         self._polling_lease = False
         self._last_processed_at: str | None = None
         self._custom_signal_directions: dict[str, str] = {}
+        self._custom_signal_labels: dict[str, str] = {}
         self._recent_exit_signals: dict[str, deque[tuple[float, str]]] = defaultdict(
             lambda: deque(maxlen=20)
         )
@@ -229,13 +256,19 @@ class PositionRiskService:
         try:
             from app.strategy import custom_signals
 
-            self._custom_signal_directions = {
-                f"csg_{item['id']}": str(item.get("kind") or "both")
-                for item in custom_signals.load_all(self.store.root.parents[1])
+            custom = [
+                item for item in custom_signals.load_all(self.store.root.parents[1])
                 if item.get("enabled", True)
+            ]
+            self._custom_signal_directions = {
+                f"csg_{item['id']}": str(item.get("kind") or "both") for item in custom
+            }
+            self._custom_signal_labels = {
+                f"csg_{item['id']}": str(item.get("name") or item['id']) for item in custom
             }
         except Exception:  # noqa: BLE001
             self._custom_signal_directions = {}
+            self._custom_signal_labels = {}
         with self._lock:
             self._history = rows
 
@@ -343,7 +376,7 @@ class PositionRiskService:
                 severity=str(event.get("severity") or "info"),
                 risk_score=score,
                 reduction_pct=reduction,
-                reasons=[str(event.get("message") or event.get("rule_name") or "监控规则命中")],
+                reasons=[localize_position_risk_text(str(event.get("message") or event.get("rule_name") or "监控规则命中"), self._custom_signal_labels)],
                 source_ids=[str(event.get("rule_id") or "")],
                 fingerprint=str(event.get("fingerprint") or f"monitor:{event.get('rule_id')}:{symbol}:{event.get('ts')}")
             )
@@ -710,7 +743,7 @@ class PositionRiskService:
                     reasons.append("5 分钟内两个独立出场信号共振")
             if self._set_rule(symbol, f"signal:{signal_id}", True):
                 self._emit(
-                    portfolio, position, f"signal:{signal_id}", configured.get("label", signal_id),
+                    portfolio, position, f"signal:{signal_id}", self._signal_label(signal_id, configured),
                     "warn" if action else "info",
                     60 if action >= 50 else _RULE_WEIGHTS["signal"] + (40 if action else 10),
                     action,
@@ -723,6 +756,15 @@ class PositionRiskService:
     def _signal_direction(signal_id: str) -> str:
         exit_tokens = ("dead", "breakdown", "low", "limit_down", "broken")
         return "exit" if any(token in signal_id for token in exit_tokens) else "entry"
+
+    def _signal_label(self, signal_id: str, configured: dict[str, Any] | None = None) -> str:
+        configured_label = str((configured or {}).get("label") or "")
+        if configured_label and configured_label not in {signal_id, signal_id.replace("signal.", "signal_")}:
+            return configured_label
+        return position_risk_signal_label(signal_id, self._custom_signal_labels)
+
+    def localize_text(self, text: str) -> str:
+        return localize_position_risk_text(text, self._custom_signal_labels)
 
     def _depth_state(
         self,
@@ -1190,7 +1232,7 @@ class PositionRiskService:
                 "evidence_coverage": sum(bool(evidence[field]) for field in evidence_fields) / len(evidence_fields),
                 "data_status": "ready" if evidence["quote"] and evidence["history"] else "insufficient",
             })
-        pending = self.store.list_recommendations("pending")
+        pending = [self._localize_recommendation(item) for item in self.store.list_recommendations("pending")]
         by_symbol = {item["symbol"]: item for item in pending if item.get("symbol")}
         for row in rows:
             suggestion = by_symbol.get(row["symbol"])
@@ -1207,3 +1249,11 @@ class PositionRiskService:
                 "pending_count": len(pending),
             },
         }
+
+    def _localize_recommendation(self, item: dict[str, Any]) -> dict[str, Any]:
+        localized = dict(item)
+        localized["reasons"] = [
+            localize_position_risk_text(str(reason), self._custom_signal_labels)
+            for reason in item.get("reasons", [])
+        ]
+        return localized

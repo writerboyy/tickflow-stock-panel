@@ -29,7 +29,7 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
-import { cnSignal } from '@/lib/signals'
+import { cnSignal, cnSignalText } from '@/lib/signals'
 
 type Tab = 'positions' | 'pending' | 'events'
 
@@ -255,7 +255,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
   )
 }
 
-function PendingRow({ item, revision, name }: { item: PositionRiskRecommendation; revision: number; name?: string }) {
+function PendingRow({ item, revision, name, signalNames }: { item: PositionRiskRecommendation; revision: number; name?: string; signalNames: Record<string, string> }) {
   const queryClient = useQueryClient()
   const mutation = useMutation({
     mutationFn: (action: 'confirm' | 'dismiss') => api.positionRiskRecommendationAction(item.id, action, revision),
@@ -272,7 +272,7 @@ function PendingRow({ item, revision, name }: { item: PositionRiskRecommendation
           <span className={cn('font-mono text-xs', riskTone(item.risk_score))}>{item.risk_score} 分</span>
           <span className="text-xs text-warning">{item.action} {item.reduction_pct}%</span>
         </div>
-        <p className="mt-1 truncate text-xs text-muted">{item.reasons.join(' · ')}</p>
+        <p className="mt-1 truncate text-xs text-muted">{item.reasons.map(reason => cnSignalText(reason, signalNames)).join(' · ')}</p>
       </div>
       <time className="text-[11px] text-muted">{new Date(item.created_at).toLocaleString('zh-CN')}</time>
       <div className="flex justify-end gap-2">
@@ -296,6 +296,10 @@ export function LargeOrders() {
   const options = useQuery({ queryKey: QK.positionRiskOptions, queryFn: api.positionRiskOptions })
   const pending = useQuery({ queryKey: QK.positionRiskRecommendations('pending'), queryFn: () => api.positionRiskRecommendations('pending') })
   const events = useQuery({ queryKey: QK.positionRiskEvents, queryFn: api.positionRiskEvents })
+  const signalNames = useMemo(
+    () => Object.fromEntries((options.data?.custom_signals ?? []).map(signal => [signal.id, signal.label])),
+    [options.data?.custom_signals],
+  )
   const rows = useMemo(() => (portfolio.data?.positions ?? []).filter(row => {
     const matchesSearch = !search || row.symbol.toLowerCase().includes(search.toLowerCase()) || row.name.includes(search)
     const matchesRisk = risk === 'all' || row.risk_level === risk
@@ -384,12 +388,12 @@ export function LargeOrders() {
 
       {tab === 'pending' && <div>
         <div className="border-b border-border bg-warning/5 px-4 py-2 text-[11px] text-warning sm:px-5">确认建议仅记录人工判断，不修改持仓、模拟盘或发送券商委托。</div>
-        {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} name={item.symbol ? namesBySymbol.get(item.symbol) : undefined} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
+        {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} name={item.symbol ? namesBySymbol.get(item.symbol) : undefined} signalNames={signalNames} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
       </div>}
 
       {tab === 'events' && <div className="divide-y divide-border">
         {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_80px] sm:px-5">
-          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time><span>{event.symbol || '组合'} {event.name}</span><span className="truncate text-secondary">{event.message}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
+          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time><span>{event.symbol || '组合'} {event.name}</span><span className="truncate text-secondary">{cnSignalText(event.message, signalNames)}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 

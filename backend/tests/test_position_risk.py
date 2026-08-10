@@ -8,7 +8,7 @@ import polars as pl
 import pytest
 
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
-from app.services.position_risk_service import PositionRiskService
+from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict
 from app.services.quote_service import QuoteService
 from app.services.watchlist_ocr.provider import OcrProvider
@@ -212,6 +212,17 @@ class _NoChineseOcr(OcrProvider):
 def test_position_ocr_requires_simplified_chinese_language(tmp_path: Path):
     with pytest.raises(RuntimeError, match="chi_sim|简体中文"):
         import_position_image(b"image", tmp_path, provider=_NoChineseOcr())
+
+
+def test_position_risk_localizes_current_and_historical_signal_ids():
+    text = "九安医疗：signal_intraday_avg_cross_down / signal.n_day_high"
+    assert localize_position_risk_text(text) == "九安医疗：分时价格下穿均价 / 创60日新高"
+
+
+def test_position_risk_uses_custom_signal_name_for_new_events(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service._custom_signal_labels = {"csg_take_profit": "自定义止盈"}
+    assert service.localize_text("csg.take_profit") == "自定义止盈"
 
 
 def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):
