@@ -351,10 +351,10 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
                   type="button"
                   disabled={!rows.length || unresolved > 0 || lowConfidence > 0 || previewMutation.isPending}
                   onClick={() => previewMutation.mutate()}
-                  className="grid h-8 w-8 place-items-center rounded-btn border border-border hover:bg-elevated disabled:opacity-40"
-                  title="重新核对"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-[11px] hover:bg-elevated disabled:opacity-40"
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${previewMutation.isPending ? 'animate-spin' : ''}`} />
+                  核对资产
                 </button>
               </div>
               {preview ? (
@@ -366,7 +366,7 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
                   {preview.issues.map((issue, index) => <div key={index} className="text-[11px] text-danger">{issue.message}</div>)}
                 </div>
               ) : (
-                <p className="border-y border-border py-4 text-[11px] leading-5 text-muted">完成校正后点击核对。负差异超过总资产 1% 将禁止确认。</p>
+                <p className="border-y border-border py-4 text-[11px] leading-5 text-muted">填写账户字段后点击“核对资产”。负差异超过总资产 1% 将禁止确认。</p>
               )}
             </section>
           </aside>
