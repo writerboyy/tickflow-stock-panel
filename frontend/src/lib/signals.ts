@@ -202,6 +202,8 @@ const FIELD_LABELS: Record<string, string> = {
  * 技术指标查 FIELD_LABELS; 都找不到则原样返回。
  */
 export function cnSignal(name: string, customNames?: Record<string, string>): string {
+  const normalized = name.replace(/^signal\./, 'signal_').replace(/^csg\./, 'csg_')
   if (customNames && name in customNames) return customNames[name]
-  return SIGNAL_LABELS[name] ?? FIELD_LABELS[name] ?? name
+  if (customNames && normalized in customNames) return customNames[normalized]
+  return SIGNAL_LABELS[normalized] ?? FIELD_LABELS[normalized] ?? name
 }

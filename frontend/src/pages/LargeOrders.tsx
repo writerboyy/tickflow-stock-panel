@@ -29,6 +29,7 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
+import { cnSignal } from '@/lib/signals'
 
 type Tab = 'positions' | 'pending' | 'events'
 
@@ -233,7 +234,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             <section>
               <h3 className="mb-2 text-xs font-semibold text-secondary">证据状态</h3>
               <div className="border-y border-border py-2 text-xs">
-                <div className="flex justify-between"><span className="text-muted">最新命中</span><span>{row.latest_signal ?? '暂无'}</span></div>
+                <div className="flex justify-between"><span className="text-muted">最新命中</span><span>{row.latest_signal ? cnSignal(row.latest_signal) : '暂无'}</span></div>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {Object.entries(row.evidence).map(([key, ready]) => (
                     <span key={key} className={cn('rounded px-1.5 py-0.5 text-[10px]', ready ? 'bg-bull/10 text-bull' : 'bg-elevated text-muted')}>
@@ -365,7 +366,7 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
                 <td className="px-3 py-2 font-mono text-muted">{price(row.ma5)} / {price(row.ma10)} / {price(row.ma20)}</td>
                 <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
-                <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ?? ''}>{row.latest_signal ?? '—'}</td>
+                <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
                 <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
                 <td className="px-3 py-2">{row.suggestion ? <span className="text-warning">{row.suggestion.action} {row.suggestion.reduction_pct}%</span> : <span className="text-muted">观察</span>}</td>
                 <td className="px-3 py-2"><button type="button" onClick={() => setSelected(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="单股规则"><ChevronRight className="h-4 w-4" /></button></td>
@@ -375,7 +376,7 @@ export function LargeOrders() {
         </div>
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <button key={row.symbol} type="button" onClick={() => setSelected(row)} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <div><div className="font-medium">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ?? '观察'}</div></div>
+            <div><div className="font-medium">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div></div>
             <div className="text-right"><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div><div className={(row.profit_loss ?? 0) >= 0 ? 'text-danger' : 'text-bull'}>{pct(row.profit_loss_pct)}</div></div>
           </button>)}
         </div>
