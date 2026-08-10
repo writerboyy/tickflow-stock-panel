@@ -376,6 +376,41 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     assert any(alert["source"] == "position_risk" for alert in quotes.alerts)
 
 
+def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
+        "template": {"rules": {"stop_loss": {"threshold": -0.05, "action_pct": 25}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 37.9, "timestamp": "2026-08-07T10:00:00"}
+
+    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    stop = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "stop_loss")
+    assert stop["reduction_pct"] == 25
+
+
+def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Path):
+    repo = _Repo()
+    repo.rows = repo.rows.with_columns(pl.lit(True).alias("signal_macd_dead"))
+    service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
+        "template": {"signals": {"builtin": {"signal_macd_dead": {"enabled": True, "direction": "exit", "action_pct": 100}}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
+
+    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    signal = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "signal:signal_macd_dead")
+    assert signal["reduction_pct"] == 100
+    assert repo.rows["signal_macd_dead"].to_list() == [True]
+
+
 def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
     quotes = _IntradayQuotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))

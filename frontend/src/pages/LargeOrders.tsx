@@ -18,7 +18,7 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { PositionRiskImportDialog } from '@/components/PositionRiskImportDialog'
-import { PositionRiskRulesDialog } from '@/components/PositionRiskRulesDialog'
+import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS, PositionRiskRulesDialog } from '@/components/PositionRiskRulesDialog'
 import { toast } from '@/components/Toast'
 import {
   api,
@@ -99,6 +99,12 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
       rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), enabled } },
     })
   }
+  const setRuleValue = (ruleId: string, key: string, value: number) => {
+    mutation.mutate({
+      ...override,
+      rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [key]: value } },
+    })
+  }
   const setSignal = (
     group: 'builtin' | 'custom',
     signal: { id: string; label: string; direction: string },
@@ -113,11 +119,23 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
           [signal.id]: {
             ...(override.signals?.[group]?.[signal.id] ?? {}),
             enabled,
-            direction: signal.direction,
-            label: signal.label,
+            direction: override.signals?.[group]?.[signal.id]?.direction ?? signal.direction,
+            label: override.signals?.[group]?.[signal.id]?.label ?? signal.label,
           },
         },
       },
+    })
+  }
+  const setSignalValue = (group: 'builtin' | 'custom', signalId: string, key: string, value: string | number | null) => {
+    const groupValues = { ...(override.signals?.[group] ?? {}) }
+    const signalValues = { ...(groupValues[signalId] ?? {}) }
+    if (value == null) delete signalValues[key]
+    else signalValues[key] = value
+    if (Object.keys(signalValues).length) groupValues[signalId] = signalValues
+    else delete groupValues[signalId]
+    mutation.mutate({
+      ...override,
+      signals: { ...(override.signals ?? {}), [group]: groupValues },
     })
   }
   const setMonitorAction = (ruleId: string, actionPct: number | null) => {
@@ -165,14 +183,52 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                     const inherited = portfolio?.template.rules[ruleId]?.enabled !== false
                     const explicit = override.rules?.[ruleId]?.enabled
                     const enabled = explicit ?? inherited
+                    const hasOverride = Object.keys(override.rules?.[ruleId] ?? {}).length > 0
+                    const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
+                      ? LARGE_ORDER_FIELDS
+                      : POSITION_RISK_RULE_FIELDS[ruleId] ?? []
                     return (
-                      <label key={ruleId} className="flex min-h-9 items-center justify-between gap-3 py-1.5 text-xs">
-                        <span>{RULE_LABELS[ruleId] ?? ruleId}</span>
-                        <span className="flex items-center gap-2">
-                          <span className="text-[10px] text-muted">{explicit == null ? '继承模板' : '单股覆盖'}</span>
-                          <input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} />
-                        </span>
-                      </label>
+                      <div key={ruleId} className="py-2 text-xs">
+                        <div className="flex min-h-7 items-center justify-between gap-3">
+                          <span>{RULE_LABELS[ruleId] ?? ruleId}</span>
+                          <span className="flex items-center gap-2">
+                            <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
+                            <input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`启用${RULE_LABELS[ruleId] ?? ruleId}`} />
+                          </span>
+                        </div>
+                        {fields.length > 0 && (
+                          <div className="mt-2 grid grid-cols-2 gap-2">
+                            {fields.map(field => {
+                              const inheritedValue = portfolio?.template.rules[ruleId]?.[field.key] ?? field.defaultValue ?? 0
+                              const storedValue = override.rules?.[ruleId]?.[field.key] ?? inheritedValue
+                              const displayValue = field.percent ? Number(storedValue) * 100 : Number(storedValue)
+                              return (
+                                <label key={field.key} className="min-w-0 text-[10px] text-muted">
+                                  <span>{field.label}</span>
+                                  <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
+                                    <input
+                                      key={`${ruleId}-${field.key}-${displayValue}`}
+                                      type="number"
+                                      min={field.min}
+                                      max={field.max}
+                                      step={field.step}
+                                      defaultValue={displayValue}
+                                      disabled={mutation.isPending || !enabled}
+                                      onBlur={event => {
+                                        const next = Number(event.target.value)
+                                        const stored = field.percent ? next / 100 : next
+                                        if (Number.isFinite(next) && stored !== Number(storedValue)) setRuleValue(ruleId, field.key, stored)
+                                      }}
+                                      className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                                    />
+                                    {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
+                                  </span>
+                                </label>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
                     )
                   })}
                 </div>
@@ -186,11 +242,17 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                     const explicit = override.signals?.[storageGroup]?.[signal.id]?.enabled
                     const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
                     const available = !('available' in signal) || signal.available
+                    const hasOverride = Object.keys(override.signals?.[storageGroup]?.[signal.id] ?? {}).length > 0
+                    const inheritedDirection = portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
+                    const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
+                    const explicitDirection = override.signals?.[storageGroup]?.[signal.id]?.direction
+                    const explicitAction = override.signals?.[storageGroup]?.[signal.id]?.action_pct
                     return (
-                      <label key={signal.id} className={cn('flex min-h-9 items-center justify-between gap-3 py-1.5 text-xs', available ? '' : 'opacity-50')}>
+                      <div key={signal.id} className={cn('py-2 text-xs', available ? '' : 'opacity-50')}>
+                        <div className="flex min-h-7 items-center justify-between gap-3">
                         <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
                         <span className="flex shrink-0 items-center gap-2">
-                          <span className="text-[10px] text-muted">{explicit == null ? '继承模板' : '单股覆盖'}</span>
+                          <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
                           <input
                             type="checkbox"
                             checked={available && (explicit ?? inherited)}
@@ -198,7 +260,22 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                             onChange={event => setSignal(storageGroup, signal, event.target.checked)}
                           />
                         </span>
-                      </label>
+                        </div>
+                        <div className="mt-2 grid grid-cols-2 gap-2">
+                          <label className="text-[10px] text-muted">信号方向
+                            <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
+                              <option value="inherit">继承（{inheritedDirection === 'exit' ? '出场' : inheritedDirection === 'entry' ? '入场' : '双向'}）</option>
+                              <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
+                            </select>
+                          </label>
+                          <label className="text-[10px] text-muted">建议比例
+                            <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
+                              <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
+                              <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
+                            </select>
+                          </label>
+                        </div>
+                      </div>
                     )
                   }) : <p className="py-2 text-xs text-muted">暂无可用信号</p>}
                 </div>
