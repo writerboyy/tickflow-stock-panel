@@ -411,6 +411,25 @@ def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Pa
     assert repo.rows["signal_macd_dead"].to_list() == [True]
 
 
+def test_position_signal_can_be_computed_without_sending(tmp_path: Path):
+    repo = _Repo()
+    repo.rows = repo.rows.with_columns(pl.lit(True).alias("signal_macd_dead"))
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, repo, quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
+        "template": {"signals": {"builtin": {"signal_macd_dead": {"notify": False, "action_pct": 100}}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
+
+    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    assert service.store.list_recommendations("pending") == []
+    assert not any(item["rule_id"] == "signal:signal_macd_dead" for item in quotes.alerts)
+
+
 def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
     quotes = _IntradayQuotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))

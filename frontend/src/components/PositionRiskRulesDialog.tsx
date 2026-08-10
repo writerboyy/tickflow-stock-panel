@@ -161,6 +161,16 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     }))
   }
 
+  const toggleRuleNotify = (ruleId: string, notify: boolean) => {
+    setTemplate(previous => ({
+      ...previous,
+      rules: {
+        ...previous.rules,
+        [ruleId]: { ...(previous.rules[ruleId] ?? options?.rules[ruleId] ?? {}), notify },
+      },
+    }))
+  }
+
   const updateRuleValue = (ruleId: string, key: string, value: number) => {
     setTemplate(previous => ({
       ...previous,
@@ -184,7 +194,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     }))
   }
 
-  const updateSignal = (group: 'builtin' | 'custom', id: string, patch: Record<string, unknown>) => {
+  const updateSignal = (group: 'builtin' | 'custom' | 'monitor_rules', id: string, patch: Record<string, unknown>) => {
     setTemplate(previous => ({
       ...previous,
       signals: {
@@ -229,7 +239,10 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <h4 className="text-xs font-medium">{ruleId === 'large_buy' ? '大单买入' : '大单卖出'}</h4>
                         <p className="mt-0.5 text-[10px] text-muted">{Number(config.action_pct ?? 0) > 0 ? `命中后建议减仓 ${config.action_pct}%` : '命中后只提醒'}</p>
                       </div>
-                      <input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} aria-label={`启用${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}`} />
+                      <span className="flex shrink-0 items-center gap-2 text-[10px] text-muted">
+                        <label className="flex items-center gap-1"><span>监控</span><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} aria-label={`监控${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}`} /></label>
+                        <label className="flex items-center gap-1"><span>发送</span><input type="checkbox" checked={config.notify !== false} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} aria-label={`发送${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}信号`} /></label>
+                      </span>
                     </div>
                     <div className="grid grid-cols-2 gap-x-3 gap-y-2">
                       {LARGE_ORDER_FIELDS.map(field => {
@@ -277,7 +290,8 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                       <span>{RULE_LABELS[id] ?? id}</span>
                       <span className="flex items-center gap-3">
                         <span className="text-[11px] text-muted">{actionLabel}</span>
-                        <input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} aria-label={`启用${RULE_LABELS[id] ?? id}`} />
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} aria-label={`监控${RULE_LABELS[id] ?? id}`} /></label>
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={config.notify !== false} onChange={event => toggleRuleNotify(id, event.target.checked)} aria-label={`发送${RULE_LABELS[id] ?? id}信号`} /></label>
                       </span>
                     </div>
                     {POSITION_RISK_RULE_FIELDS[id] && (
@@ -332,7 +346,8 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <select value={actionPct} onChange={event => updateSignal('builtin', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px]" aria-label={`${signal.label}建议比例`}>
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
-                        <input type="checkbox" checked={saved?.enabled !== false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} />
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={saved?.enabled !== false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /></label>
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={saved?.notify !== false} onChange={event => updateSignal('builtin', signal.id, { notify: event.target.checked })} aria-label={`发送${signal.label}信号`} /></label>
                       </span>
                     </div>
                   )
@@ -356,7 +371,8 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <select disabled={!signal.available} value={actionPct} onChange={event => updateSignal('custom', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px]" aria-label={`${signal.label}建议比例`}>
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
-                        <input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.enabled !== false} onChange={event => toggleSignal('custom', signal.id, event.target.checked, signal.direction, signal.label)} />
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.enabled !== false} onChange={event => toggleSignal('custom', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /></label>
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.notify !== false} onChange={event => updateSignal('custom', signal.id, { notify: event.target.checked })} aria-label={`发送${signal.label}信号`} /></label>
                       </span>
                     </div>
                   )
@@ -371,25 +387,20 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                   return (
                     <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
                       <span className="min-w-0 truncate">{rule.name}</span>
-                      <select
-                        value={saved?.action_pct ?? 0}
-                        onChange={event => setTemplate(previous => ({
-                          ...previous,
-                          signals: {
-                            ...previous.signals,
-                            monitor_rules: {
-                              ...previous.signals.monitor_rules,
-                              [rule.id]: { action_pct: Number(event.target.value) },
-                            },
-                          },
-                        }))}
-                        className="h-7 rounded border border-border bg-surface px-2 text-[11px]"
-                      >
-                        <option value={0}>只进时间线</option>
-                        <option value={25}>建议减仓 25%</option>
-                        <option value={50}>建议减仓 50%</option>
-                        <option value={100}>建议清仓</option>
-                      </select>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={saved?.notify !== false} onChange={event => updateSignal('monitor_rules', rule.id, { notify: event.target.checked })} aria-label={`发送${rule.name}信号`} /></label>
+                        <select
+                          value={saved?.action_pct ?? 0}
+                          onChange={event => updateSignal('monitor_rules', rule.id, { action_pct: Number(event.target.value) })}
+                          className="h-7 rounded border border-border bg-surface px-2 text-[11px]"
+                          aria-label={`${rule.name}建议比例`}
+                        >
+                          <option value={0}>只进时间线</option>
+                          <option value={25}>建议减仓 25%</option>
+                          <option value={50}>建议减仓 50%</option>
+                          <option value={100}>建议清仓</option>
+                        </select>
+                      </span>
                     </div>
                   )
                 }) : <p className="py-3 text-xs text-muted">暂无监控中心规则</p>}

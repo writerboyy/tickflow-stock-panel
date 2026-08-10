@@ -420,6 +420,8 @@ class PositionRiskService:
                 "monitor_rules",
                 str(event.get("rule_id") or ""),
             )
+            if configured.get("notify", True) is False:
+                continue
             reduction = int(configured.get("action_pct") or 0)
             if reduction <= 0:
                 continue
@@ -1160,6 +1162,19 @@ class PositionRiskService:
         source_ids: list[str] | None = None,
     ) -> None:
         symbol = position.get("symbol") if position else None
+        config_symbol = symbol or "__portfolio__"
+        if rule_id.startswith("signal:"):
+            signal_id = rule_id.removeprefix("signal:")
+            signal_group = "custom" if signal_id.startswith("csg_") else "builtin"
+            notify = self._signal_config(portfolio, config_symbol, signal_group, signal_id).get("notify", True)
+        elif rule_id.startswith("monitor:"):
+            notify = self._signal_config(
+                portfolio, config_symbol, "monitor_rules", rule_id.removeprefix("monitor:"),
+            ).get("notify", True)
+        else:
+            notify = self._rule_config(portfolio, config_symbol, rule_id).get("notify", True)
+        if notify is False:
+            return
         name = position.get("name") if position else "组合"
         fingerprint_raw = f"{cn_today()}:{symbol or '__portfolio__'}:{rule_id}"
         fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
