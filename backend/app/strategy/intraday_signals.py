@@ -111,10 +111,36 @@ class IntradaySignalEvaluator:
 
             previous = points[-2]
             baseline = _finite(prev_close.get(symbol))
-            avg_up = previous[2] is not None and current[2] is not None and previous[1] <= previous[2] and current[1] > current[2]
-            avg_down = previous[2] is not None and current[2] is not None and previous[1] >= previous[2] and current[1] < current[2]
-            zero_up = baseline is not None and baseline > 0 and previous[1] <= baseline and current[1] > baseline
-            zero_down = baseline is not None and baseline > 0 and previous[1] >= baseline and current[1] < baseline
+            # A-share/ETF prices are quoted on a finite tick grid.  A tiny
+            # provider rounding difference around the baseline is not a
+            # crossing and must not create a repeated event.
+            tolerance = max(
+                0.001,
+                abs(current[1]) * 1e-6,
+                abs(previous[1]) * 1e-6,
+                abs(current[2] or 0.0) * 1e-6,
+                abs(previous[2] or 0.0) * 1e-6,
+            )
+            avg_up = (
+                previous[2] is not None and current[2] is not None
+                and previous[1] <= previous[2] + tolerance
+                and current[1] > current[2] + tolerance
+            )
+            avg_down = (
+                previous[2] is not None and current[2] is not None
+                and previous[1] >= previous[2] - tolerance
+                and current[1] < current[2] - tolerance
+            )
+            zero_up = (
+                baseline is not None and baseline > 0
+                and previous[1] <= baseline + tolerance
+                and current[1] > baseline + tolerance
+            )
+            zero_down = (
+                baseline is not None and baseline > 0
+                and previous[1] >= baseline - tolerance
+                and current[1] < baseline - tolerance
+            )
             if avg_up or avg_down or zero_up or zero_down:
                 results.append({
                     "symbol": symbol,

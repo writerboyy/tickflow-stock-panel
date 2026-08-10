@@ -28,8 +28,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import date, datetime, time as dt_time
-from typing import Callable
+from datetime import date, datetime, time as dt_time, timedelta
+from typing import Any, Callable
 
 import polars as pl
 
@@ -38,6 +38,14 @@ from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 
 logger = logging.getLogger(__name__)
+
+
+def _finite(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
 
 # Webhook(飞书等)投递专用线程池 —— 与行情轮询线程隔离。
 # send_feishu 内置重试(最坏 ~3×5s 超时 + 退避), 若在 _poll_loop 上同步投递,
@@ -217,7 +225,20 @@ class QuoteService:
         self._etf_symbol_count: int = 0
         self._index_quotes_cache: pl.DataFrame | None = None
         self._intraday_signal_evaluator = IntradaySignalEvaluator()
-        self._intraday_signal_bucket: dict[str, str] = {}
+        # Shared intraday input for the monitor center and position risk.  WS
+        # quotes are accumulated here as closed one-minute bars; the minute
+        # provider seeds the day and fills gaps, so neither consumer rebuilds
+        # a private window from its own queue.
+        self._intraday_rows: dict[tuple[str, str, datetime], dict] = {}
+        self._intraday_last_quote: dict[tuple[str, str], tuple[datetime, float, float]] = {}
+        self._intraday_buckets: dict[tuple[str, str], dict] = {}
+        self._intraday_seeded: set[tuple[str, str, date]] = set()
+        self._intraday_fetch_bucket: dict[tuple[str, date], str] = {}
+        self._intraday_fetch_symbols: dict[tuple[str, date], set[str]] = {}
+        self._intraday_ws_seen: set[tuple[str, str, date]] = set()
+        self._intraday_consumers: dict[str, tuple[str, set[str]]] = {}
+        self._intraday_prev_close: dict[str, dict[str, float]] = {}
+        self._intraday_signal_cache: dict[str, tuple[tuple, dict[str, dict], set[str]]] = {}
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
@@ -524,6 +545,259 @@ class QuoteService:
     def record_quotes(self, records: list[dict]) -> None:
         """把其他共享行情通道收到的报价并入只读快照。"""
         self._cache_latest_quotes(records)
+        self._record_intraday_quotes(records)
+
+    def set_intraday_consumer(
+        self, consumer_id: str, symbols: set[str], asset_type: str = "stock",
+    ) -> None:
+        """注册共享分时输入消费者；WS 和公共监控使用同一份分钟快照。"""
+        cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        with self._lock:
+            if cleaned:
+                self._intraday_consumers[consumer_id] = (asset_type, cleaned)
+            else:
+                self._intraday_consumers.pop(consumer_id, None)
+        if consumer_id.startswith("monitor:"):
+            hub = getattr(getattr(self._app_state, "paper_supervisor", None), "hub", None)
+            setter = getattr(hub, "set_intraday_consumer", None)
+            capset = getattr(self._app_state, "capabilities", None)
+            try:
+                from app.tickflow.capabilities import Cap
+                websocket_allowed = bool(capset and capset.has(Cap.WEBSOCKET))
+            except Exception:  # noqa: BLE001
+                websocket_allowed = False
+            if callable(setter) and websocket_allowed:
+                try:
+                    setter(consumer_id, cleaned, asset_type)
+                except (ValueError, RuntimeError) as exc:
+                    logger.info("分时 WS 容量不足，%s 降级到分钟接口: %s", consumer_id, exc)
+
+    def remove_intraday_consumer(self, consumer_id: str) -> None:
+        with self._lock:
+            self._intraday_consumers.pop(consumer_id, None)
+        if consumer_id.startswith("monitor:"):
+            hub = getattr(getattr(self._app_state, "paper_supervisor", None), "hub", None)
+            remover = getattr(hub, "remove_intraday_consumer", None)
+            if callable(remover):
+                try:
+                    remover(consumer_id)
+                except (ValueError, RuntimeError):
+                    logger.debug("移除分时 WS 消费者失败", exc_info=True)
+
+    @staticmethod
+    def _intraday_datetime(value: object) -> datetime | None:
+        parsed = QuoteService._quote_datetime(value)
+        return parsed.replace(tzinfo=None) if parsed else None
+
+    def _record_intraday_quotes(self, records: list[dict]) -> None:
+        """把实时 WS/轮询快照按累计成交量聚合为闭合 1 分钟 K。"""
+        with self._lock:
+            consumers = {
+                (asset_type, symbol)
+                for asset_type, symbols in self._intraday_consumers.values()
+                for symbol in symbols
+            }
+        if not consumers:
+            return
+        for raw in records:
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            matching_types = {kind for kind, candidate in consumers if candidate == symbol}
+            if not matching_types:
+                continue
+            asset_type = next(iter(matching_types))
+            if (asset_type, symbol) not in consumers:
+                continue
+            point = self._intraday_datetime(raw.get("timestamp"))
+            price = _finite(raw.get("last_price", raw.get("close")))
+            if point is None or price is None or price <= 0:
+                continue
+            if not (
+                dt_time(9, 30) <= point.time() < dt_time(11, 30)
+                or dt_time(13, 0) <= point.time() < dt_time(15, 0)
+            ):
+                continue
+            current_volume = _finite(raw.get("volume")) or 0.0
+            current_amount = _finite(raw.get("amount")) or 0.0
+            key = (asset_type, symbol)
+            with self._lock:
+                self._intraday_ws_seen.add((asset_type, symbol, point.date()))
+                previous = self._intraday_last_quote.get(key)
+                if previous is not None and point <= previous[0]:
+                    continue
+                volume_delta = max(0.0, current_volume - previous[1]) if previous else 0.0
+                amount_delta = max(0.0, current_amount - previous[2]) if previous else 0.0
+                self._intraday_last_quote[key] = (point, current_volume, current_amount)
+                bucket_time = point.replace(second=0, microsecond=0)
+                bucket = self._intraday_buckets.get(key)
+                if bucket is not None and bucket["datetime"] != bucket_time:
+                    row = dict(bucket)
+                    self._intraday_rows[(asset_type, symbol, bucket["datetime"])] = row
+                    bucket = None
+                if bucket is None:
+                    bucket = {
+                        "symbol": symbol, "datetime": bucket_time,
+                        "open": price, "high": price, "low": price, "close": price,
+                        "volume": volume_delta, "amount": amount_delta,
+                    }
+                    self._intraday_buckets[key] = bucket
+                else:
+                    bucket["high"] = max(bucket["high"], price)
+                    bucket["low"] = min(bucket["low"], price)
+                    bucket["close"] = price
+                    bucket["volume"] += volume_delta
+                    bucket["amount"] += amount_delta
+
+    def _seed_intraday_rows(self, asset_type: str, symbols: set[str], now: datetime) -> None:
+        """按分钟接口补齐当天历史，WS 已聚合行保留为权威输入。"""
+        if not symbols:
+            return
+        trade_date = now.date()
+        key = (asset_type, trade_date)
+        bucket = now.strftime("%Y%m%d%H%M")
+        with self._lock:
+            if self._intraday_fetch_bucket.get(key) != bucket:
+                self._intraday_fetch_bucket[key] = bucket
+                self._intraday_fetch_symbols[key] = {
+                    symbol for symbol in symbols
+                    if (asset_type, symbol, trade_date) in self._intraday_seeded
+                    and (asset_type, symbol, trade_date) in self._intraday_ws_seen
+                }
+            already_fetched = self._intraday_fetch_symbols.setdefault(key, set())
+            seeded = set(symbols) - already_fetched
+            if not seeded:
+                return
+        from app.services.kline_sync import fetch_intraday_monitor_batch, intraday_monitor_support
+        capset = getattr(self._app_state, "capabilities", None)
+        support = intraday_monitor_support(capset)
+        if not support["available"]:
+            return
+        max_symbols = int(support["max_symbols"])
+        frames: list[pl.DataFrame] = []
+        for offset in range(0, len(seeded), max_symbols):
+            frame = fetch_intraday_monitor_batch(
+                sorted(seeded)[offset:offset + max_symbols], capset, now=now,
+            )
+            if not frame.is_empty():
+                frames.append(frame)
+        with self._lock:
+            self._intraday_fetch_symbols.setdefault(key, set()).update(seeded)
+        if not frames:
+            return
+        minute_df = pl.concat(frames, how="diagonal_relaxed")
+        cutoff = now.replace(second=0, microsecond=0)
+        rows = minute_df.filter(
+            pl.col("datetime").dt.date() == trade_date,
+            pl.col("datetime") < cutoff,
+            pl.col("volume").fill_null(0) >= 0,
+        )
+        with self._lock:
+            for row in rows.to_dicts():
+                symbol = str(row.get("symbol") or "").strip().upper()
+                if not symbol or (asset_type, symbol) not in {(asset_type, s) for s in seeded}:
+                    continue
+                dt = row.get("datetime")
+                if isinstance(dt, datetime):
+                    self._intraday_rows.setdefault((asset_type, symbol, dt.replace(tzinfo=None)), row)
+            self._intraday_seeded.update((asset_type, symbol, trade_date) for symbol in seeded)
+
+    def get_intraday_snapshot(
+        self, symbols: set[str], *, asset_type: str = "stock", now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """返回共享分钟行、完整日内 VWAP 和数据能力状态。"""
+        now = now or cn_now()
+        cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        with self._lock:
+            stale_rows = [key for key in self._intraday_rows if key[2].date() < now.date()]
+            for key in stale_rows:
+                self._intraday_rows.pop(key, None)
+            stale_days = [key for key in self._intraday_seeded if key[2] < now.date()]
+            self._intraday_seeded.difference_update(stale_days)
+        self._seed_intraday_rows(asset_type, cleaned, now)
+        cutoff = now.replace(second=0, microsecond=0)
+        with self._lock:
+            row_map = {
+                (symbol, dt): dict(row) for (kind, symbol, dt), row in self._intraday_rows.items()
+                if kind == asset_type and symbol in cleaned and dt.date() == now.date() and dt < cutoff
+            }
+            for symbol in cleaned:
+                bucket = self._intraday_buckets.get((asset_type, symbol))
+                if bucket and bucket["datetime"].date() == now.date() and bucket["datetime"] < cutoff:
+                    key = (symbol, bucket["datetime"])
+                    existing = row_map.get(key)
+                    if existing is None or float(bucket.get("volume") or 0) > 0 or float(bucket.get("amount") or 0) > 0:
+                        row_map[key] = dict(bucket)
+            rows = list(row_map.values())
+        rows.sort(key=lambda row: (str(row.get("symbol")), row.get("datetime")))
+        vwap: dict[str, float] = {}
+        for symbol in cleaned:
+            points = [row for row in rows if row.get("symbol") == symbol]
+            volume = sum(float(row.get("volume") or 0) for row in points)
+            amount = sum(float(row.get("amount") or 0) for row in points)
+            if volume > 0 and amount > 0:
+                vwap[symbol] = amount / (volume * 100.0)
+        return {
+            "rows": rows,
+            "vwap": vwap,
+            "as_of": max((row["datetime"] for row in rows), default=None),
+            "source": "websocket_aggregate+minute_seed",
+            "available": bool(rows),
+        }
+
+    def get_intraday_signals(
+        self,
+        symbols: set[str],
+        *,
+        prev_close: dict[str, float],
+        asset_type: str = "stock",
+        now: datetime | None = None,
+        consumer_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """用共享分钟快照计算一次闭合分钟边沿事件，供所有消费者读取。"""
+        now = now or cn_now()
+        with self._lock:
+            active_symbols = set(symbols)
+            active_symbols.update(
+                candidate
+                for kind, candidates in self._intraday_consumers.values()
+                if kind == asset_type
+                for candidate in candidates
+            )
+            self._intraday_prev_close.setdefault(asset_type, {}).update(prev_close)
+            prev_close_all = dict(self._intraday_prev_close[asset_type])
+        snapshot = self.get_intraday_snapshot(active_symbols, asset_type=asset_type, now=now)
+        rows = snapshot["rows"]
+        if not rows:
+            return {}
+        latest = max(row["datetime"] for row in rows)
+        cache_key = (
+            now.date().isoformat(), now.strftime("%Y%m%d%H%M"), latest,
+            tuple(sorted(active_symbols)),
+        )
+        with self._lock:
+            cached = self._intraday_signal_cache.get(asset_type)
+            if cached and cached[0] == cache_key:
+                delivered = cached[2]
+                if consumer_id and consumer_id in delivered:
+                    return {}
+                if consumer_id:
+                    delivered.add(consumer_id)
+                return {
+                    symbol: dict(value) for symbol, value in cached[1].items()
+                    if symbol in symbols
+                }
+        frame = pl.DataFrame(rows)
+        signals = self._intraday_signal_evaluator.evaluate(
+            frame,
+            symbols=active_symbols,
+            prev_close=prev_close_all,
+            asset_type=asset_type,
+            now=now,
+        )
+        by_symbol = {str(item["symbol"]): dict(item) for item in signals}
+        with self._lock:
+            delivered = {consumer_id} if consumer_id else set()
+            self._intraday_signal_cache[asset_type] = (cache_key, by_symbol, delivered)
+        return {symbol: dict(value) for symbol, value in by_symbol.items() if symbol in symbols}
 
     def _notify_fetch_listeners(self) -> None:
         with self._lock:
@@ -970,6 +1244,7 @@ class QuoteService:
             logger.warning("行情数据为空")
             return
         self._cache_latest_quotes(records)
+        self._record_intraday_quotes(records)
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
@@ -1545,34 +1820,21 @@ class QuoteService:
             logger.debug("告警 ext 富化失败 (不影响推送): %s", e)
 
     def _inject_intraday_signals(self, enriched: pl.DataFrame, engine, asset_type: str) -> pl.DataFrame:
-        """每分钟为分时信号规则批量获取一次数据并注入临时布尔列。"""
+        """从共享分钟快照注入分时信号，监控中心与持仓风控使用同一输入。"""
         get_symbols = getattr(engine, "intraday_signal_symbols", None)
         if not callable(get_symbols):
             return enriched
         symbols = get_symbols(asset_type)
         if not symbols:
+            self.remove_intraday_consumer(f"monitor:{asset_type}")
             return enriched
 
         now = cn_now()
-        bucket = now.strftime("%Y%m%d%H%M")
-        if self._intraday_signal_bucket.get(asset_type) == bucket:
-            return self._intraday_signal_evaluator.inject(enriched, [])
-        self._intraday_signal_bucket[asset_type] = bucket
-
-        from app.services.kline_sync import (
-            fetch_intraday_monitor_batch,
-            intraday_monitor_support,
-        )
-
-        capset = getattr(self._app_state, "capabilities", None)
-        support = intraday_monitor_support(capset)
-        if not support["available"] or len(symbols) > int(support["max_symbols"]):
-            return self._intraday_signal_evaluator.inject(enriched, [])
-
-        minute_df = fetch_intraday_monitor_batch(sorted(symbols), capset, now=now)
+        self.set_intraday_consumer(f"monitor:{asset_type}", symbols, asset_type)
         prev_close: dict[str, float] = {}
         available_cols = set(enriched.columns)
-        for row in enriched.filter(pl.col("symbol").is_in(sorted(symbols))).iter_rows(named=True):
+        scoped = enriched.filter(pl.col("symbol").is_in(sorted(symbols)))
+        for row in scoped.iter_rows(named=True):
             symbol = str(row.get("symbol") or "")
             reference = row.get("prev_close") if "prev_close" in available_cols else None
             if reference is None and "close" in available_cols and "change_pct" in available_cols:
@@ -1583,14 +1845,39 @@ class QuoteService:
             if symbol and reference is not None:
                 prev_close[symbol] = float(reference)
 
-        signals = self._intraday_signal_evaluator.evaluate(
-            minute_df,
-            symbols=symbols,
+        signal_map = self.get_intraday_signals(
+            symbols,
             prev_close=prev_close,
             asset_type=asset_type,
             now=now,
+            consumer_id=f"monitor:{asset_type}",
         )
-        return self._intraday_signal_evaluator.inject(enriched, signals)
+        signals = list(signal_map.values())
+        # 涨停/封板是更高优先级状态；同一涨停价附近的均价穿越不重复提醒。
+        limit_prices: dict[str, float] = {}
+        if "limit_up" in enriched.columns:
+            for row in scoped.iter_rows(named=True):
+                limit = _finite(row.get("limit_up"))
+                if limit and limit > 0:
+                    limit_prices[str(row.get("symbol"))] = limit
+        with self._lock:
+            for symbol in symbols:
+                quote = self._latest_quotes.get(symbol)
+                limit = _finite(quote.get("limit_up")) if quote else None
+                if limit and limit > 0:
+                    limit_prices.setdefault(symbol, limit)
+        filtered: list[dict[str, Any]] = []
+        for signal in signals:
+            symbol = str(signal.get("symbol") or "")
+            limit = limit_prices.get(symbol)
+            quote = self._latest_quotes.get(symbol)
+            price = _finite(quote.get("last_price")) if quote else None
+            if limit and price and price >= limit - max(0.001, limit * 1e-6):
+                signal = dict(signal)
+                signal["signal_intraday_avg_cross_up"] = False
+                signal["signal_intraday_avg_cross_down"] = False
+            filtered.append(signal)
+        return self._intraday_signal_evaluator.inject(enriched, filtered)
 
     def _inject_sealed_vol(self, enriched_today: pl.DataFrame, enriched_date) -> pl.DataFrame:
         """从 depth_service 取封单量, 作为临时列 _sealed_vol 注入 enriched 副本。

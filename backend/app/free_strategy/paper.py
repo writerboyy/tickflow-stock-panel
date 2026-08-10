@@ -364,6 +364,7 @@ class MarketDataHub:
         self._stream = None
         self._ws_symbols: set[str] = set()
         self._ws_depth_symbols: set[str] = set()
+        self._intraday_consumers: dict[str, tuple[set[str], str]] = {}
         self._ws_depth_supported = False
         self._ws_state = "disconnected"
         self._ws_error: str | None = None
@@ -504,6 +505,33 @@ class MarketDataHub:
     def has_subscription(self, account_id: str) -> bool:
         with self._lock:
             return account_id in self._subscriptions
+
+    def set_intraday_consumer(
+        self, consumer_id: str, symbols: set[str], asset_type: str,
+    ) -> None:
+        """把公共监控标的并入共享 WS；失败时由调用方降级到分钟接口。"""
+        cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        with self._lock:
+            previous = self._intraday_consumers.get(consumer_id)
+            if cleaned:
+                self._intraday_consumers[consumer_id] = (cleaned, asset_type)
+            else:
+                self._intraday_consumers.pop(consumer_id, None)
+            try:
+                self._sync_websocket()
+            except Exception:
+                if previous is None:
+                    self._intraday_consumers.pop(consumer_id, None)
+                else:
+                    self._intraday_consumers[consumer_id] = previous
+                raise
+
+    def remove_intraday_consumer(self, consumer_id: str) -> None:
+        with self._lock:
+            if consumer_id not in self._intraday_consumers:
+                return
+            self._intraday_consumers.pop(consumer_id, None)
+            self._sync_websocket()
 
     def _on_quote_fetch(self) -> None:
         records_by_asset = self._cached_quote_records_by_asset()
@@ -907,10 +935,14 @@ class MarketDataHub:
         return values
 
     def _websocket_symbols(self, *, exclude: str | None = None) -> set[str]:
-        return set().union(*(
+        account_symbols = set().union(*(
             sub.symbols for sub in self._subscriptions.values()
             if sub.mode == "websocket" and sub.account_id != exclude
         )) if any(sub.mode == "websocket" and sub.account_id != exclude for sub in self._subscriptions.values()) else set()
+        intraday_symbols = set().union(*(
+            symbols for symbols, _asset_type in self._intraday_consumers.values()
+        )) if self._intraday_consumers else set()
+        return account_symbols | intraday_symbols
 
     def _ws_capacity(self) -> int:
         """读取运行时能力声明；服务端未返回上限时按 200。"""
@@ -1094,6 +1126,8 @@ class MarketDataHub:
             account_ids = list(self._subscriptions)
         for account_id in account_ids:
             self.unregister(account_id)
+        with self._lock:
+            self._intraday_consumers.clear()
         self._bar_stop.set()
         if self._bar_thread:
             self._bar_thread.join(timeout=3)

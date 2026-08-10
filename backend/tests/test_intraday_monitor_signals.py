@@ -7,6 +7,7 @@ import pytest
 
 from app.market_time import CN_TZ
 from app.services.kline_sync import fetch_intraday_monitor_batch, intraday_monitor_support
+from app.services.quote_service import QuoteService
 from app.strategy import monitor_rules
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 from app.strategy.monitor import MonitorRuleEngine
@@ -124,6 +125,72 @@ def test_intraday_cutoff_keeps_beijing_time_in_utc_runtime():
         **kwargs,
     )
     assert signals[0]["signal_intraday_zero_cross_up"] is True
+
+
+def test_intraday_cross_ignores_sub_tick_rounding():
+    evaluator = IntradaySignalEvaluator()
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "datetime": [datetime(2026, 7, 17, 9, 30), datetime(2026, 7, 17, 9, 31)],
+        "close": [10.0, 10.0005],
+        "volume": [100.0, 100.0],
+        "amount": [100_000.0, 100_005.0],
+    })
+    signals = evaluator.evaluate(
+        rows,
+        symbols={"600000.SH"},
+        prev_close={"600000.SH": 10.0},
+        asset_type="stock",
+        now=datetime(2026, 7, 17, 9, 32),
+    )
+    assert signals == []
+
+
+def test_quote_service_keeps_ws_minutes_for_shared_snapshot():
+    service = QuoteService()
+    service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")
+    service.record_quotes([
+        {"symbol": "600000.SH", "last_price": 10.0, "volume": 100, "amount": 100_000, "timestamp": "2026-07-17T09:30:05"},
+        {"symbol": "600000.SH", "last_price": 10.1, "volume": 110, "amount": 101_000, "timestamp": "2026-07-17T09:30:35"},
+        {"symbol": "600000.SH", "last_price": 10.2, "volume": 120, "amount": 102_000, "timestamp": "2026-07-17T09:31:05"},
+    ])
+    snapshot = service.get_intraday_snapshot(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 9, 32),
+    )
+    assert snapshot["source"] == "websocket_aggregate+minute_seed"
+    assert [row["datetime"] for row in snapshot["rows"]] == [datetime(2026, 7, 17, 9, 30), datetime(2026, 7, 17, 9, 31)]
+    assert snapshot["rows"][0]["close"] == 10.1
+
+
+def test_shared_intraday_event_is_delivered_once_per_consumer():
+    service = QuoteService()
+    service.set_intraday_consumer("monitor:stock", {"600000.SH"}, "stock")
+    service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")
+    for minute, price in ((30, 9.0), (31, 11.0)):
+        service._intraday_rows[("stock", "600000.SH", datetime(2026, 7, 17, 9, minute))] = {
+            "symbol": "600000.SH", "datetime": datetime(2026, 7, 17, 9, minute),
+            "close": price, "open": price, "high": price, "low": price,
+            "volume": 1.0, "amount": price * 100.0,
+        }
+    service.get_intraday_signals(
+        {"600000.SH"}, prev_close={"600000.SH": 10.0}, now=datetime(2026, 7, 17, 9, 31),
+        consumer_id="monitor:stock",
+    )
+    first = service.get_intraday_signals(
+        {"600000.SH"}, prev_close={"600000.SH": 10.0}, now=datetime(2026, 7, 17, 9, 32),
+        consumer_id="monitor:stock",
+    )
+    repeated = service.get_intraday_signals(
+        {"600000.SH"}, prev_close={"600000.SH": 10.0}, now=datetime(2026, 7, 17, 9, 32),
+        consumer_id="monitor:stock",
+    )
+    other_consumer = service.get_intraday_signals(
+        {"600000.SH"}, prev_close={"600000.SH": 10.0}, now=datetime(2026, 7, 17, 9, 32),
+        consumer_id="position-risk",
+    )
+    assert first["600000.SH"]["signal_intraday_avg_cross_up"] is True
+    assert repeated == {}
+    assert other_consumer["600000.SH"]["signal_intraday_avg_cross_up"] is True
 
 
 def _intraday_rule(scope: str = "symbols") -> dict:

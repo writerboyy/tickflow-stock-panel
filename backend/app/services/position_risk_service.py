@@ -19,7 +19,7 @@ from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now, cn_today
 from app.services import alert_store
 from app.services.position_risk_store import PositionRiskStore
-from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS, IntradaySignalEvaluator
+from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
 _ACCOUNT_ID = "position-risk"
 _RULE_WEIGHTS = {
@@ -110,7 +110,6 @@ class PositionRiskService:
             lambda: deque(maxlen=20)
         )
         self._severe_events: deque[float] = deque(maxlen=20)
-        self._intraday_signal_evaluator = IntradaySignalEvaluator()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -177,6 +176,9 @@ class PositionRiskService:
                 pass
         self.quote_service.remove_fetch_listener(self._on_poll)
         self.quote_service.remove_symbol_consumer(_ACCOUNT_ID)
+        remove_intraday = getattr(self.quote_service, "remove_intraday_consumer", None)
+        if callable(remove_intraday):
+            remove_intraday(_ACCOUNT_ID)
         if self._polling_lease:
             self.quote_service.release_temporary_polling()
             self._polling_lease = False
@@ -192,6 +194,10 @@ class PositionRiskService:
             self._runtime_reason = "尚未导入持仓"
             self._notify_updated()
             return
+
+        set_intraday = getattr(self.quote_service, "set_intraday_consumer", None)
+        if callable(set_intraday):
+            set_intraday(_ACCOUNT_ID, symbols, "stock")
 
         supervisor = getattr(self.app_state, "paper_supervisor", None)
         hub = getattr(supervisor, "hub", None)
@@ -460,35 +466,21 @@ class PositionRiskService:
         symbols: set[str],
         now: datetime,
     ) -> dict[str, dict[str, Any]]:
-        bars: list[dict[str, Any]] = []
-        for symbol in symbols:
-            grouped: dict[datetime, list[dict[str, float]]] = defaultdict(list)
-            for item in self._flow.get(symbol, ()):
-                point = datetime.fromtimestamp(item["ts"])
-                if point.date() == now.date():
-                    grouped[point.replace(second=0, microsecond=0)].append(item)
-            for bar_time, items in grouped.items():
-                bars.append({
-                    "symbol": symbol,
-                    "datetime": bar_time,
-                    "close": items[-1]["price"],
-                    "volume": sum(item["volume"] for item in items),
-                    "amount": sum(item["amount"] for item in items),
-                })
-        if not bars:
+        getter = getattr(self.quote_service, "get_intraday_signals", None)
+        if not callable(getter):
             return {}
-        signals = self._intraday_signal_evaluator.evaluate(
-            pl.DataFrame(bars),
-            symbols=symbols,
-            prev_close={
-                symbol: raw_close
-                for symbol in symbols
-                if (raw_close := _finite((self._history.get(symbol) or {}).get("raw_close")))
-            },
-            asset_type="position_risk",
+        prev_close = {
+            symbol: raw_close
+            for symbol in symbols
+            if (raw_close := _finite((self._history.get(symbol) or {}).get("raw_close")))
+        }
+        return getter(
+            symbols,
+            prev_close=prev_close,
+            asset_type="stock",
             now=now,
+            consumer_id=_ACCOUNT_ID,
         )
-        return {str(item["symbol"]): item for item in signals}
 
     def _evaluate_position(
         self,
@@ -503,6 +495,14 @@ class PositionRiskService:
         cost = _finite(position.get("cost_price"))
         if price is None:
             return
+        if intraday_signals:
+            limit_up = _finite(quote.get("limit_up"))
+            if limit_up and price >= limit_up - max(0.001, limit_up * 1e-6):
+                intraday_signals = {
+                    **intraday_signals,
+                    "signal_intraday_avg_cross_up": False,
+                    "signal_intraday_avg_cross_down": False,
+                }
         runtime_key = f"position:{symbol}"
         runtime = self.store.get_runtime(runtime_key, {}) or {}
         high = max(price, _finite(runtime.get("high_price")) or price)
@@ -673,15 +673,9 @@ class PositionRiskService:
                     portfolio, position, "five_minute_drawdown", "5 分钟高点回撤", "warn",
                     45, 25, [f"从 5 分钟高点回撤 {(1 - price / five_minute_high):.2%}"],
                 )
-        day_flow = [
-            item for item in self._flow.get(symbol, ())
-            if datetime.fromtimestamp(item["ts"]).date() == now.date()
-        ]
-        total_volume = sum(item["volume"] for item in day_flow)
-        vwap = (
-            sum(item["amount"] for item in day_flow) / (total_volume * 100)
-            if total_volume > 0 else None
-        )
+        snapshot_getter = getattr(self.quote_service, "get_intraday_snapshot", None)
+        snapshot = snapshot_getter({symbol}, asset_type="stock", now=now) if callable(snapshot_getter) else {}
+        vwap = (snapshot.get("vwap") or {}).get(symbol)
         vwap_cfg = self._rule_config(portfolio, symbol, "vwap_breakdown")
         vwap_below = bool(
             vwap_cfg.get("enabled", True)
