@@ -183,6 +183,32 @@ def test_metric_rejects_nav_from_a_different_date():
     assert row["passed_premium"] is False
 
 
+def test_metric_uses_recent_disclosed_nav_with_same_day_close():
+    context = initialized_context()
+    context.now = datetime(2026, 8, 10, 13, 10)
+    closes = [100 * (1.001 ** index) for index in range(70)]
+    volumes = [1_000_000.0] * 69
+    history = [
+        {"date": "2026-08-05", "close": closes[-4]},
+        {"date": "2026-08-06", "close": closes[-3]},
+        {"date": "2026-08-07", "close": closes[-2]},
+    ]
+    context.extra_rows[("unit_net_value", "510300.SH")] = [
+        {"date": "2026-08-06", "value": closes[-3] / 1.01},
+    ]
+
+    row = five._metric_for(
+        "510300.SH", closes, volumes, 550_000, context, "正常期",
+        "2026-08-07", history,
+    )
+
+    assert row is not None
+    assert row["nav_available"] is True
+    assert row["nav_date"] == "2026-08-06"
+    assert row["nav_lag_trading_days"] == 1
+    assert row["premium_rate"] == pytest.approx(1.0)
+
+
 def test_history_is_aligned_to_previous_raw_close():
     context = initialized_context()
     context.market_rows["159667.SZ"] = [

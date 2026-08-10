@@ -30,6 +30,17 @@ MANAGED_FIVE_FORTUNES_SHA256 = frozenset({
     "ea7370773f12ed6e19fc707c0065271557aa9c64a4f9db208206838a3894f99a",
     "098dd281478b43527ecf706f2f140a19b21f4e7b9e2c6744d8120fcf64279380",
 })
+MANAGED_ETF_NAV_ALIGNMENT_SHA256 = {
+    "five_fortunes": frozenset({
+        "df96a2526a8ae27a464893add4ee22f5134fdac04f0e7c69f9a2e8d7864a48cb",
+    }),
+    "five_fortunes_v2": frozenset({
+        "30cb1562438fe75b1e9ec214d748cbdfb88807a78f6c2c6650c2177e67dbfec5",
+    }),
+    "seven_stars": frozenset({
+        "128072cf2734eedd7f86214f8369f26769e80e3c879dfa8b16899a43cc34fe96",
+    }),
+}
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 FIVE_FORTUNES_V2_SOURCE = Path(__file__).with_name("five_fortunes_v2.py").read_text(encoding="utf-8")
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")

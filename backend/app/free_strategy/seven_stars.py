@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.free_strategy.fund_nav import align_disclosed_nav
+
 
 SEVEN_STARS_ETF_POOL = [
     "518880.SH",
@@ -374,13 +376,9 @@ def _cached_rankings(context) -> list[dict[str, Any]]:
     return state["rankings"]
 
 
-def _previous_daily_row(context, symbol: str) -> Any | None:
-    rows = list(context.history_bars(symbol, count=1, timeframe="1d"))
-    return rows[-1] if rows else None
-
-
 def _passes_premium_filter(context, symbol: str) -> bool | None:
-    previous = _previous_daily_row(context, symbol)
+    daily = list(context.history_bars(symbol, count=5, timeframe="1d"))
+    previous = daily[-1] if daily else None
     timestamp = getattr(previous, "timestamp", None) if previous is not None else None
     if previous is None or timestamp is None:
         return None
@@ -388,15 +386,17 @@ def _passes_premium_filter(context, symbol: str) -> bool | None:
     nav_rows = context.extra_history(
         "unit_net_value",
         symbol,
-        count=1,
+        count=5,
         end_date=previous_day,
     )
-    if not nav_rows or nav_rows[-1].get("date") != previous_day.isoformat():
+    aligned_nav = align_disclosed_nav(nav_rows, daily, previous_day)
+    if aligned_nav is None:
         return None
-    nav = float(nav_rows[-1].get("value") or 0.0)
+    nav_row, premium_bar, _lag = aligned_nav
+    nav = float(nav_row["value"])
     if nav <= 0:
         return None
-    premium = (_bar_price(previous) - nav) / nav
+    premium = (_bar_price(premium_bar) - nav) / nav
     return premium <= PREMIUM_THRESHOLD
 
 

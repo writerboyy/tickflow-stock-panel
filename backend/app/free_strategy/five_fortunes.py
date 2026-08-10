@@ -4,6 +4,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.free_strategy.fund_nav import align_disclosed_nav
+
 
 WUFU_ETF_POOL = [
     "159206.SZ", "159218.SZ", "159227.SZ", "159256.SZ", "159323.SZ", "159326.SZ",
@@ -809,7 +811,7 @@ def _rank_candidates(context) -> list[dict[str, Any]]:
         metric = _metric_for(
             symbol, closes[-46:], volumes[-45:],
             float(intraday["volume"].get(symbol, 0.0)), context, regime,
-            history[-1]["date"],
+            history[-1]["date"], history,
             stale_quote=float(intraday.get("last_volume", {}).get(symbol, 0.0)) <= 0,
         )
         if metric is None:
@@ -842,6 +844,7 @@ def _metric_for(
     context,
     regime: str,
     nav_date: str,
+    history_rows: list[dict[str, Any]] | None = None,
     *,
     stale_quote: bool = False,
 ) -> dict[str, Any] | None:
@@ -860,20 +863,27 @@ def _metric_for(
     gaussian_value, gaussian_slope = _gaussian(closes)
     day_ratios = [closes[-index] / closes[-index - 1] for index in range(1, 4)]
     nav_rows = context.extra_history(
-        "unit_net_value", symbol, count=1, end_date=nav_date,
+        "unit_net_value", symbol, count=5, end_date=nav_date,
     )
     required_nav_date = str(nav_date)[:10]
-    nav_row = (
-        nav_rows[-1]
-        if nav_rows and str(nav_rows[-1].get("date") or "")[:10] == required_nav_date
-        else None
+    premium_market_rows = history_rows or [{
+        "date": required_nav_date,
+        "close": closes[-2],
+    }]
+    aligned_nav = align_disclosed_nav(
+        nav_rows, premium_market_rows, required_nav_date,
     )
-    try:
-        nav = float(nav_row.get("value")) if nav_row is not None else None
-    except (TypeError, ValueError):
-        nav = None
+    nav_row, premium_market_row, nav_lag = aligned_nav or (None, None, None)
+    nav = float(nav_row["value"]) if nav_row is not None else None
     nav_available = nav is not None and nav > 0
-    premium_rate = (closes[-2] - nav) / nav * 100 if nav is not None and nav > 0 else None
+    premium_close = (
+        float(premium_market_row["close"])
+        if premium_market_row is not None else None
+    )
+    premium_rate = (
+        (premium_close - nav) / nav * 100
+        if premium_close is not None and nav is not None and nav > 0 else None
+    )
     premium_limit = 8.0 if regime == "走弱期" else (10.0 if regime == "震荡期" else 30.0)
     return {
         "symbol": symbol,
@@ -894,6 +904,8 @@ def _metric_for(
         "premium_rate": premium_rate,
         "premium_limit": premium_limit,
         "nav_available": nav_available,
+        "nav_date": nav_row["date"] if nav_row is not None else None,
+        "nav_lag_trading_days": nav_lag,
         "passed_premium": premium_rate is not None and premium_rate <= premium_limit,
         "history": closes[-61:],
     }

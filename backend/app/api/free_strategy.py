@@ -8,10 +8,11 @@ import asyncio
 import json
 import math
 import multiprocessing as mp
+import os
 import shutil
 import threading
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +28,7 @@ from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
 from app.free_strategy.templates import (
     LEGACY_FIVE_FORTUNES_SOURCE,
+    MANAGED_ETF_NAV_ALIGNMENT_SHA256,
     MANAGED_FIVE_FORTUNES_SHA256,
     TEMPLATES,
 )
@@ -353,6 +355,93 @@ def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
         )
         migrated.append(str(strategy["id"]))
     return migrated
+
+
+def migrate_managed_etf_nav_alignment(data_dir: Path) -> dict[str, list[str]]:
+    """Upgrade exact managed ETF strategy snapshots while preserving account state."""
+    strategy_store = FreeStrategyStore(data_dir)
+    targets: dict[str, dict[str, Any]] = {}
+    migrated_strategies: list[str] = []
+    for summary in strategy_store.list():
+        strategy_id = str(summary["id"])
+        strategy = strategy_store.get(strategy_id)
+        source = str(strategy["source"])
+        source_hash = sha256(source.encode("utf-8")).hexdigest()
+        template_id = next(
+            (
+                candidate
+                for candidate, hashes in MANAGED_ETF_NAV_ALIGNMENT_SHA256.items()
+                if source_hash in hashes
+                or source_hash == sha256(TEMPLATES[candidate]["source"].encode("utf-8")).hexdigest()
+            ),
+            None,
+        )
+        if template_id is None:
+            continue
+        replacement = TEMPLATES[template_id]["source"]
+        replacement_hash = sha256(replacement.encode("utf-8")).hexdigest()
+        if source_hash != replacement_hash:
+            strategy = strategy_store.save(
+                strategy_id,
+                strategy["name"],
+                replacement,
+                strategy.get("config", {}),
+            )
+            migrated_strategies.append(strategy_id)
+        targets[strategy_id] = {
+            "source": replacement,
+            "source_hash": replacement_hash,
+            "source_revision": strategy["revision"],
+            "old_hashes": MANAGED_ETF_NAV_ALIGNMENT_SHA256[template_id],
+        }
+
+    paper_store = PaperAccountStore(data_dir)
+    migrated_accounts: list[str] = []
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for account in paper_store.list():
+        account_id = str(account["id"])
+        target = targets.get(str(account.get("strategy_id")))
+        if target is None:
+            continue
+        account_root = paper_store._path(account_id)
+        source_path = account_root / "strategy.py"
+        try:
+            current_source = source_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        current_hash = sha256(current_source.encode("utf-8")).hexdigest()
+        state_hash = str(account.get("source_hash") or current_hash)
+        if current_hash == target["source_hash"] and state_hash == target["source_hash"]:
+            continue
+        if current_hash not in target["old_hashes"] and state_hash not in target["old_hashes"]:
+            continue
+
+        backup_root = account_root / "backups" / f"managed-nav-alignment-{stamp}"
+        backup_root.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(account_root / "state.json", backup_root / "state.json")
+        shutil.copy2(source_path, backup_root / "strategy.py")
+        temporary = source_path.with_name(f".{source_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(str(target["source"]), encoding="utf-8")
+            os.replace(temporary, source_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        paper_store.update_fields(account_id, {
+            "source_hash": target["source_hash"],
+            "source_revision": target["source_revision"],
+        })
+        paper_store.append_event_once(account_id, {
+            "id": f"managed-nav-alignment:{target['source_hash']}",
+            "type": "strategy_migration",
+            "from_source_hash": state_hash,
+            "to_source_hash": target["source_hash"],
+            "source_revision": target["source_revision"],
+        })
+        migrated_accounts.append(account_id)
+    return {
+        "strategies": migrated_strategies,
+        "accounts": migrated_accounts,
+    }
 
 
 class StrategyWrite(BaseModel):

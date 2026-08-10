@@ -92,6 +92,41 @@ def test_fund_nav_registry_tracks_both_backward_compatible_physical_schemas(tmp_
     assert (tmp_path / "fund_nav" / "metadata.json").exists()
 
 
+def test_disclosed_nav_is_aligned_with_its_own_market_close():
+    market_rows = [
+        {"date": "2026-08-05", "close": 1.20},
+        {"date": "2026-08-06", "close": 1.17},
+        {"date": "2026-08-07", "close": 1.19},
+    ]
+
+    aligned = fund_nav.align_disclosed_nav(
+        [{"date": "2026-08-06", "value": 1.16}],
+        market_rows,
+        "2026-08-07",
+    )
+
+    assert aligned is not None
+    nav_row, market_row, lag = aligned
+    assert nav_row == {"date": "2026-08-06", "value": 1.16}
+    assert market_row == market_rows[1]
+    assert lag == 1
+
+
+def test_disclosed_nav_rejects_more_than_two_trading_days_of_lag():
+    market_rows = [
+        {"date": "2026-08-04", "close": 1.18},
+        {"date": "2026-08-05", "close": 1.20},
+        {"date": "2026-08-06", "close": 1.17},
+        {"date": "2026-08-07", "close": 1.19},
+    ]
+
+    assert fund_nav.align_disclosed_nav(
+        [{"date": "2026-08-04", "value": 1.16}],
+        market_rows,
+        "2026-08-07",
+    ) is None
+
+
 def test_stale_nonempty_cache_is_refreshed_merged_and_written_as_v2(tmp_path, monkeypatch):
     symbol = "510300.SH"
     path = fund_nav._fund_nav_path(tmp_path, symbol)

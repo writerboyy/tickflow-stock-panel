@@ -64,6 +64,16 @@ async def lifespan(app: FastAPI):
             logger.info("migrated %d legacy five-fortunes strategies", len(migrated))
     except Exception as e:  # noqa: BLE001
         logger.warning("legacy five-fortunes strategy migration failed: %s", e)
+    try:
+        migrated = free_strategy.migrate_managed_etf_nav_alignment(store.data_dir)
+        if migrated["strategies"] or migrated["accounts"]:
+            logger.info(
+                "migrated managed ETF NAV alignment: strategies=%d accounts=%d",
+                len(migrated["strategies"]),
+                len(migrated["accounts"]),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("managed ETF NAV alignment migration failed: %s", e)
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
         repo.get_matrix_data_generation("stock")

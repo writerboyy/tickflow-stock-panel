@@ -19,6 +19,64 @@ logger = logging.getLogger(__name__)
 
 _NAV_PATTERN = re.compile(r"var\s+Data_netWorthTrend\s*=\s*(\[[^;]*\])", re.DOTALL)
 _CHINA_TIMEZONE = timezone(timedelta(hours=8))
+# QDII NAVs are commonly published one or two Chinese trading sessions late.
+MAX_NAV_DISCLOSURE_LAG_TRADING_DAYS = 2
+
+
+def _row_date(row: Any) -> date | None:
+    if isinstance(row, dict):
+        value = row.get("date") or row.get("timestamp")
+    else:
+        value = getattr(row, "date", None) or getattr(row, "timestamp", None)
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def align_disclosed_nav(
+    nav_rows: list[dict[str, Any]],
+    market_rows: list[Any],
+    required_date: date | datetime | str,
+    *,
+    max_lag_trading_days: int = MAX_NAV_DISCLOSURE_LAG_TRADING_DAYS,
+) -> tuple[dict[str, Any], Any, int] | None:
+    """Pair the latest disclosed NAV with the market close from the same day."""
+    required = (
+        required_date.date()
+        if isinstance(required_date, datetime)
+        else required_date
+        if isinstance(required_date, date)
+        else date.fromisoformat(str(required_date)[:10])
+    )
+    market_by_date = {
+        day: row
+        for row in market_rows
+        if (day := _row_date(row)) is not None and day <= required
+    }
+    if required not in market_by_date:
+        return None
+    market_dates = sorted(market_by_date)
+    candidates: list[tuple[date, dict[str, Any]]] = []
+    for row in nav_rows:
+        day = _row_date(row)
+        try:
+            value = float(row.get("value"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if day is not None and day in market_by_date and day <= required and value > 0:
+            candidates.append((day, {"date": day.isoformat(), "value": value}))
+    if not candidates:
+        return None
+    nav_date, nav_row = max(candidates, key=lambda item: item[0])
+    lag = sum(nav_date < day <= required for day in market_dates)
+    if lag > max_lag_trading_days:
+        return None
+    return nav_row, market_by_date[nav_date], lag
 
 
 def _fund_nav_path(data_dir: Path, symbol: str) -> Path:

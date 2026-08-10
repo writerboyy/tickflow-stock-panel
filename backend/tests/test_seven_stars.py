@@ -296,6 +296,30 @@ def test_high_premium_candidate_is_skipped_for_next_eligible_target(monkeypatch)
     assert seven._state(context)["target_selection_unavailable"] is False
 
 
+def test_recent_disclosed_nav_uses_the_matching_market_close():
+    context = initialized_context()
+    context.now = datetime(2026, 8, 10, 13, 9)
+    for day, close in ((5, 1.10), (6, 1.01), (7, 1.30)):
+        daily = bar(close)
+        daily.timestamp = datetime(2026, 8, day, 15)
+        context.daily_rows.setdefault("513050.SH", []).append(daily)
+    context.nav_rows["513050.SH"] = [{"date": "2026-08-06", "value": 1.0}]
+
+    assert seven._passes_premium_filter(context, "513050.SH") is True
+
+
+def test_nav_older_than_two_trading_days_remains_unavailable():
+    context = initialized_context()
+    context.now = datetime(2026, 8, 10, 13, 9)
+    for day in (4, 5, 6, 7):
+        daily = bar(1.0)
+        daily.timestamp = datetime(2026, 8, day, 15)
+        context.daily_rows.setdefault("513050.SH", []).append(daily)
+    context.nav_rows["513050.SH"] = [{"date": "2026-08-04", "value": 1.0}]
+
+    assert seven._passes_premium_filter(context, "513050.SH") is None
+
+
 def test_buy_fails_closed_when_previous_nav_is_missing(monkeypatch):
     context = initialized_context()
     context.now = datetime(2026, 7, 20, 13, 10)

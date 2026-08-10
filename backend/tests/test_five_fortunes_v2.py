@@ -1,6 +1,8 @@
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from app.free_strategy import five_fortunes_v2 as five
 from app.free_strategy.engine import FreeStrategyEngine
 from app.free_strategy.templates import TEMPLATES
@@ -64,6 +66,33 @@ def test_metric_requires_nav_from_the_requested_date():
     assert row["nav_available"] is False
     assert row["premium_rate"] is None
     assert row["passed_premium"] is False
+
+
+def test_metric_accepts_recent_nav_and_uses_its_market_date():
+    closes = [100 * (1.001 ** index) for index in range(46)]
+
+    class Context:
+        now = datetime(2026, 8, 10, 13, 10)
+        state = {"five_fortunes_v2": {"weak_momentum_lookback": 25}}
+
+        @staticmethod
+        def extra_history(_name, _symbol, count=1, end_date=None):
+            return [{"date": "2026-08-06", "value": closes[-3] / 1.02}][-count:]
+
+    row = five._metric_for(
+        "510300.SH", closes, [1_000_000.0] * 45, 550_000, Context(),
+        "正常期", "2026-08-07", [
+            {"date": "2026-08-05", "close": closes[-4]},
+            {"date": "2026-08-06", "close": closes[-3]},
+            {"date": "2026-08-07", "close": closes[-2]},
+        ],
+    )
+
+    assert row is not None
+    assert row["nav_available"] is True
+    assert row["nav_date"] == "2026-08-06"
+    assert row["nav_lag_trading_days"] == 1
+    assert row["premium_rate"] == pytest.approx(2.0)
 
 
 def test_intraday_trend_confirmation_uses_price_only():

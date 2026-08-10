@@ -14,6 +14,7 @@ from app.api.free_strategy import (
     _job_payload,
     cleanup_incomplete_backtests,
     migrate_legacy_five_fortunes_strategies,
+    migrate_managed_etf_nav_alignment,
     router,
 )
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
@@ -229,6 +230,66 @@ def test_managed_five_fortunes_snapshot_migrates_only_legacy_default_config(monk
     assert migrated_config["price_tick"] == 0.001
     assert migrated_config["fill_policy"] == "close"
     assert store.get(customized["id"])["config"]["initial_capital"] == 500_000
+
+
+def test_managed_etf_nav_alignment_migrates_strategy_and_paper_snapshot(
+    monkeypatch,
+    tmp_path,
+):
+    old_source = "# old managed ETF source\n"
+    new_source = "# aligned managed ETF source\n"
+    old_hash = sha256(old_source.encode("utf-8")).hexdigest()
+    new_hash = sha256(new_source.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(
+        free_strategy,
+        "MANAGED_ETF_NAV_ALIGNMENT_SHA256",
+        {"five_fortunes": frozenset({old_hash})},
+    )
+    monkeypatch.setitem(TEMPLATES["five_fortunes"], "source", new_source)
+
+    strategy_store = FreeStrategyStore(tmp_path)
+    strategy = strategy_store.save("managed", "受管 ETF", old_source, {"timeframe": "1m"})
+    custom = strategy_store.save(
+        "custom", "自定义 ETF", f"{old_source}# customized\n", {"timeframe": "1m"},
+    )
+    paper_store = PaperAccountStore(tmp_path)
+    paper_store.save({
+        "id": "paper",
+        "strategy_id": strategy["id"],
+        "source_hash": old_hash,
+        "source_revision": strategy["revision"],
+        "status": "running",
+        "checkpoint": {"state": {"five_fortunes": {"target": ["510300.SH"]}}},
+    })
+    paper_root = paper_store._path("paper")
+    (paper_root / "strategy.py").write_text(old_source, encoding="utf-8")
+
+    migrated = migrate_managed_etf_nav_alignment(tmp_path)
+    repeated = migrate_managed_etf_nav_alignment(tmp_path)
+
+    assert migrated == {"strategies": ["managed"], "accounts": ["paper"]}
+    assert repeated == {"strategies": [], "accounts": []}
+    loaded_strategy = strategy_store.get("managed")
+    assert loaded_strategy["source"] == new_source
+    assert loaded_strategy["revision"] == 2
+    assert strategy_store.get(custom["id"])["revision"] == 1
+    loaded_account = paper_store.get("paper")
+    assert loaded_account["source_hash"] == new_hash
+    assert loaded_account["source_revision"] == 2
+    assert loaded_account["status"] == "running"
+    assert loaded_account["checkpoint"]["state"]["five_fortunes"]["target"] == [
+        "510300.SH",
+    ]
+    assert (paper_root / "strategy.py").read_text(encoding="utf-8") == new_source
+    backup_roots = list((paper_root / "backups").glob("managed-nav-alignment-*"))
+    assert len(backup_roots) == 1
+    assert (backup_roots[0] / "strategy.py").read_text(encoding="utf-8") == old_source
+    migration_events = [
+        event for event in paper_store.events("paper")
+        if event["type"] == "strategy_migration"
+    ]
+    assert len(migration_events) == 1
+    assert migration_events[0]["to_source_hash"] == new_hash
 
 
 def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeypatch, tmp_path):
