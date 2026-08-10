@@ -35,8 +35,16 @@ def default_template() -> dict[str, Any]:
             "sealed_order_shrink_50": {"enabled": True, "threshold": 0.50, "action_pct": 25},
             "sealed_order_shrink_80": {"enabled": True, "threshold": 0.80, "action_pct": 50},
             "limit_down": {"enabled": True, "action_pct": 100},
-            "large_buy": {"enabled": True, "action_pct": 0},
-            "large_sell": {"enabled": True, "action_pct": 25},
+            "large_buy": {
+                "enabled": True, "action_pct": 0, "window_seconds": 60,
+                "min_samples": 7, "min_amount": 1_000_000,
+                "mad_multiplier": 3.0, "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
+            "large_sell": {
+                "enabled": True, "action_pct": 25, "window_seconds": 60,
+                "min_samples": 7, "min_amount": 1_000_000,
+                "mad_multiplier": 3.0, "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
             "continuous_outflow": {"enabled": True, "direction_ratio": 0.65, "sustain_seconds": 10, "action_pct": 25},
             "orderbook_imbalance": {"enabled": True, "threshold": -0.35, "sustain_seconds": 10, "action_pct": 25},
             "daily_equity_loss": {"enabled": True, "threshold": 0.03, "action_pct": 50},
@@ -124,7 +132,11 @@ class PositionRiskStore:
         result.update({key: deepcopy(item) for key, item in value.items() if key not in {"account", "template"}})
         result["account"].update(value.get("account") or {})
         incoming_template = value.get("template") or {}
-        result["template"]["rules"].update(incoming_template.get("rules") or {})
+        for rule_id, incoming_rule in (incoming_template.get("rules") or {}).items():
+            if isinstance(incoming_rule, dict) and isinstance(result["template"]["rules"].get(rule_id), dict):
+                result["template"]["rules"][rule_id].update(incoming_rule)
+            else:
+                result["template"]["rules"][rule_id] = deepcopy(incoming_rule)
         result["template"]["signals"].update(incoming_template.get("signals") or {})
         result["schema_version"] = SCHEMA_VERSION
         return result

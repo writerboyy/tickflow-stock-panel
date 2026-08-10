@@ -697,12 +697,16 @@ class PositionRiskService:
                 [f"盘口失衡 {depth_state['imbalance']:.2f} 持续 10 秒"],
             )
 
+        large_buy_cfg = self._rule_config(portfolio, symbol, "large_buy")
+        large_sell_cfg = self._rule_config(portfolio, symbol, "large_sell")
+        buy_flow = self._flow_state(symbol, now, large_buy_cfg)
+        sell_flow = self._flow_state(symbol, now, large_sell_cfg)
         flow = self._flow_state(symbol, now)
-        for rule_id, active, action, label in (
-            ("large_buy", flow["large_buy"], 0, "大单买入"),
-            ("large_sell", flow["large_sell"], 25, "大单卖出"),
+        for rule_id, active, action, label, flow_state in (
+            ("large_buy", buy_flow["large_buy"], 0, "大单买入", buy_flow),
+            ("large_sell", sell_flow["large_sell"], 25, "大单卖出", sell_flow),
         ):
-            flow_cfg = self._rule_config(portfolio, symbol, rule_id)
+            flow_cfg = large_buy_cfg if rule_id == "large_buy" else large_sell_cfg
             if self._set_rule(symbol, rule_id, bool(flow_cfg.get("enabled", True) and active)):
                 chosen_action = (
                     50
@@ -714,7 +718,7 @@ class PositionRiskService:
                     portfolio, position, rule_id, label, "warn" if action else "info",
                     75 if chosen_action >= 50 else _RULE_WEIGHTS["flow"] + (35 if action else 15),
                     chosen_action,
-                    [flow["summary"]],
+                    [flow_state["summary"]],
                 )
         outflow_cfg = self._rule_config(portfolio, symbol, "continuous_outflow")
         outflow_below = bool(
@@ -905,8 +909,16 @@ class PositionRiskService:
             "imbalance": imbalance,
         }
 
-    def _flow_state(self, symbol: str, now: datetime) -> dict[str, Any]:
-        cutoff = now.timestamp() - 60
+    def _flow_state(
+        self,
+        symbol: str,
+        now: datetime,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        config = config or {}
+        configured_window = _finite(config.get("window_seconds"))
+        window_seconds = max(1, int(configured_window if configured_window is not None else 60))
+        cutoff = now.timestamp() - window_seconds
         values = [item for item in self._flow.get(symbol, ()) if item["ts"] >= cutoff]
         if not values:
             return {
@@ -915,7 +927,7 @@ class PositionRiskService:
                 "buy_ratio": None,
                 "sell_ratio": None,
                 "samples": 0,
-                "summary": "60 秒成交证据不足",
+                "summary": f"最近 {window_seconds} 秒成交证据不足",
             }
         amounts = [item["amount"] for item in values]
         total = sum(amounts)
@@ -923,29 +935,40 @@ class PositionRiskService:
         sell = sum(item["amount"] for item in values if item["direction"] < 0)
         buy_ratio = buy / total if total > 0 else 0.0
         sell_ratio = sell / total if total > 0 else 0.0
-        if len(values) < 7:
+        configured_samples = _finite(config.get("min_samples"))
+        minimum_samples = max(1, int(configured_samples if configured_samples is not None else 7))
+        if len(values) < minimum_samples:
             return {
                 "large_buy": False,
                 "large_sell": False,
                 "buy_ratio": buy_ratio,
                 "sell_ratio": sell_ratio,
                 "samples": len(values),
-                "summary": f"60秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}，大单证据不足",
+                "summary": f"最近 {window_seconds} 秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}，样本不足 {minimum_samples} 笔",
             }
         median = statistics.median(amounts)
         mad = statistics.median(abs(value - median) for value in amounts)
-        threshold = max(1_000_000.0, median + 3 * 1.4826 * mad)
+        def is_large(direction_ratio: float) -> bool:
+            configured_amount = _finite(config.get("min_amount"))
+            configured_mad = _finite(config.get("mad_multiplier"))
+            configured_z_score = _finite(config.get("min_z_score"))
+            configured_direction = _finite(config.get("direction_ratio"))
+            min_amount = max(0.0, configured_amount if configured_amount is not None else 1_000_000.0)
+            mad_multiplier = max(0.0, configured_mad if configured_mad is not None else 3.0)
+            min_z_score = max(0.0, configured_z_score if configured_z_score is not None else 2.5)
+            minimum_direction = min(1.0, max(0.0, configured_direction if configured_direction is not None else 0.65))
+            threshold = max(min_amount, median + mad_multiplier * 1.4826 * mad)
+            return largest >= threshold and z_score >= min_z_score and direction_ratio >= minimum_direction
         dispersion = max(1.0, 1.4826 * mad)
         largest = max(amounts)
         z_score = (largest - median) / dispersion
-        large = largest >= threshold and z_score >= 2.5 and total > 0
         return {
-            "large_buy": large and buy_ratio >= 0.65,
-            "large_sell": large and sell_ratio >= 0.65,
+            "large_buy": total > 0 and is_large(buy_ratio),
+            "large_sell": total > 0 and is_large(sell_ratio),
             "buy_ratio": buy_ratio,
             "sell_ratio": sell_ratio,
             "samples": len(values),
-            "summary": f"60秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}，z={z_score:.2f}",
+            "summary": f"最近 {window_seconds} 秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}，z={z_score:.2f}",
         }
 
     def _check_quote_staleness(self) -> None:

@@ -27,6 +27,25 @@ const RULE_LABELS: Record<string, string> = {
   quote_interruption: '行情中断 30 秒',
 }
 
+type LargeOrderField = {
+  key: string
+  label: string
+  suffix: string
+  min: number
+  max?: number
+  step: number
+  percent?: boolean
+}
+
+const LARGE_ORDER_FIELDS: LargeOrderField[] = [
+  { key: 'window_seconds', label: '观察窗口', suffix: '秒', min: 1, step: 1 },
+  { key: 'min_samples', label: '最少样本', suffix: '笔', min: 1, step: 1 },
+  { key: 'min_amount', label: '最低单笔金额', suffix: '元', min: 0, step: 100_000 },
+  { key: 'mad_multiplier', label: 'MAD 倍数', suffix: '倍', min: 0, step: 0.5 },
+  { key: 'min_z_score', label: '最低 Z 分数', suffix: '', min: 0, step: 0.5 },
+  { key: 'direction_ratio', label: '同向成交占比', suffix: '%', min: 0, max: 100, step: 1, percent: true },
+]
+
 export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: Props) {
   const queryClient = useQueryClient()
   const [template, setTemplate] = useState(portfolio.template)
@@ -50,6 +69,16 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
       rules: {
         ...previous.rules,
         [ruleId]: { ...(previous.rules[ruleId] ?? options?.rules[ruleId] ?? {}), enabled },
+      },
+    }))
+  }
+
+  const updateRuleValue = (ruleId: string, key: string, value: number) => {
+    setTemplate(previous => ({
+      ...previous,
+      rules: {
+        ...previous.rules,
+        [ruleId]: { ...(previous.rules[ruleId] ?? options?.rules[ruleId] ?? {}), [key]: value },
       },
     }))
   }
@@ -84,6 +113,55 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid gap-6 md:grid-cols-2">
+          <section className="md:col-span-2">
+            <div className="mb-2">
+              <h3 className="text-xs font-semibold text-secondary">大单买入 / 卖出判定标准</h3>
+              <p className="mt-1 text-[11px] leading-5 text-muted">同一方向必须同时满足：窗口内样本数达标、单笔金额不低于阈值、金额异常度不低于“中位数 + MAD 倍数 × 1.4826 × MAD”、Z 分数达标，以及同向成交额占比达标。买卖方向按现价相对上一条报价的涨跌判断，同价成交不计入方向。</p>
+            </div>
+            <div className="grid divide-y divide-border border-y border-border md:grid-cols-2 md:divide-x md:divide-y-0">
+              {(['large_buy', 'large_sell'] as const).map(ruleId => {
+                const config = template.rules[ruleId] ?? options?.rules[ruleId] ?? {}
+                return (
+                  <section key={ruleId} className="p-3 first:md:pl-0 last:md:pr-0">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <h4 className="text-xs font-medium">{ruleId === 'large_buy' ? '大单买入' : '大单卖出'}</h4>
+                        <p className="mt-0.5 text-[10px] text-muted">{ruleId === 'large_buy' ? '命中后只提醒' : `命中后建议减仓 ${config.action_pct ?? 25}%`}</p>
+                      </div>
+                      <input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} aria-label={`启用${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}`} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+                      {LARGE_ORDER_FIELDS.map(field => {
+                        const rawValue = Number(config[field.key] ?? (field.key === 'direction_ratio' ? 0.65 : undefined))
+                        const value = field.percent ? rawValue * 100 : rawValue
+                        return (
+                          <label key={field.key} className="min-w-0 text-[10px] text-muted">
+                            <span>{field.label}</span>
+                            <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
+                              <input
+                                type="number"
+                                min={field.min}
+                                max={field.max}
+                                step={field.step}
+                                value={Number.isFinite(value) ? value : ''}
+                                disabled={config.enabled === false}
+                                onChange={event => {
+                                  const next = Number(event.target.value)
+                                  if (Number.isFinite(next)) updateRuleValue(ruleId, field.key, field.percent ? next / 100 : next)
+                                }}
+                                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                              />
+                              {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
+                            </span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )
+              })}
+            </div>
+          </section>
           <section>
             <h3 className="mb-2 text-xs font-semibold text-secondary">核心风控</h3>
             <div className="divide-y divide-border border-y border-border">

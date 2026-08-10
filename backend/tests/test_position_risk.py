@@ -253,6 +253,18 @@ def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):
     assert store.load()["positions"] == []
 
 
+def test_portfolio_store_adds_new_large_order_defaults_to_existing_rule(tmp_path: Path):
+    store = PositionRiskStore(tmp_path)
+    saved = store.replace({
+        "template": {"rules": {"large_buy": {"enabled": False, "action_pct": 0}}},
+    }, 0)
+
+    large_buy = saved["template"]["rules"]["large_buy"]
+    assert large_buy["enabled"] is False
+    assert large_buy["min_amount"] == 1_000_000
+    assert large_buy["direction_ratio"] == 0.65
+
+
 class _Repo:
     def __init__(self) -> None:
         self.rows = pl.DataFrame({
@@ -501,6 +513,31 @@ def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
 
     outflow = next(item for item in quotes.alerts if item["rule_id"] == "continuous_outflow")
     assert outflow["suggestion_pct"] == 25
+
+
+def test_large_order_uses_configured_thresholds(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    now = datetime(2026, 8, 7, 10, 0)
+    for offset, amount in enumerate([100, 100, 100, 100, 100, 100, 1_000]):
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - offset,
+            "amount": amount,
+            "volume": 1,
+            "direction": 1,
+            "price": 36,
+        })
+
+    assert service._flow_state("600036.SH", now)["large_buy"] is False
+    configured = service._flow_state("600036.SH", now, {
+        "window_seconds": 60,
+        "min_samples": 7,
+        "min_amount": 500,
+        "mad_multiplier": 0,
+        "min_z_score": 2.5,
+        "direction_ratio": 0.65,
+    })
+    assert configured["large_buy"] is True
+    assert configured["large_sell"] is False
 
 
 def test_two_independent_exit_signals_upgrade_to_half_reduction(tmp_path: Path):
