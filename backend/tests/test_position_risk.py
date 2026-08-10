@@ -7,10 +7,11 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
-from app.services.position_risk_ocr import parse_position_tokens
+from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict
 from app.services.quote_service import QuoteService
+from app.services.watchlist_ocr.provider import OcrProvider
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
@@ -35,6 +36,16 @@ def _instruments(data_dir: Path) -> None:
         "code": ["600036"],
         "symbol": ["600036.SH"],
         "name": ["招商银行"],
+    }).write_parquet(target / "instruments.parquet")
+
+
+def _margin_instruments(data_dir: Path) -> None:
+    target = data_dir / "instruments"
+    target.mkdir(parents=True)
+    pl.DataFrame({
+        "code": ["002432", "001258"],
+        "symbol": ["002432.SZ", "001258.SZ"],
+        "name": ["九安医疗", "立新能源"],
     }).write_parquet(target / "instruments.parquet")
 
 
@@ -112,6 +123,95 @@ def test_ths_position_ocr_accepts_split_headers_and_code(tmp_path: Path):
     assert result["issues"] == []
     assert result["positions"][0]["symbol"] == "600036.SH"
     assert result["positions"][0]["cost_price"] == 34.5
+
+
+def test_ths_margin_position_ocr_parses_name_only_two_line_rows(tmp_path: Path):
+    _margin_instruments(tmp_path)
+    tokens = [
+        _token("市", 10, 100, 1), _token("值", 80, 100, 1),
+        _token("盈亏", 310, 100, 1), _token("持仓", 520, 100, 1),
+        _token("/可", 590, 100, 1), _token("用", 650, 100, 1),
+        _token("成", 760, 100, 1), _token("本", 820, 100, 1),
+        _token("/现价", 880, 100, 1),
+        _token("九安医疗", 10, 140, 2, 84), _token("-3,984.97", 310, 140, 2, 79),
+        _token("3900", 520, 140, 2), _token("73.642", 840, 140, 2),
+        _token("283,218.00", 10, 170, 3), _token("-1.388%", 310, 170, 3),
+        _token("3900", 520, 170, 3), _token("72.620", 840, 170, 3),
+        _token("立新", 10, 220, 4), _token("能", 80, 220, 4), _token("源", 140, 220, 4),
+        _token("959.87", 310, 220, 4), _token("9700", 520, 220, 4),
+        _token("13.061", 840, 220, 4),
+        _token("127,652.00", 10, 250, 5), _token("0.758%", 310, 250, 5),
+        _token("9700", 520, 250, 5), _token("13.160", 840, 250, 5),
+    ]
+
+    result = parse_position_tokens(tokens, tmp_path)
+
+    assert result["issues"] == []
+    assert result["positions"] == [
+        {
+            "code": "002432", "symbol": "002432.SZ", "name": "九安医疗",
+            "quantity": 3900.0, "available": 3900.0,
+            "cost_price": 73.642, "current_price": 72.62,
+            "market_value": 283218.0, "profit_loss": -3984.97,
+            "field_confidence": {
+                "name_code": 84.0, "quantity": 95.0, "available": 95.0,
+                "cost_price": 95.0, "current_price": 95.0,
+                "market_value": 95.0, "profit_loss": 79.0,
+            },
+            "requires_review": False, "issues": [],
+        },
+        {
+            "code": "001258", "symbol": "001258.SZ", "name": "立新能源",
+            "quantity": 9700.0, "available": 9700.0,
+            "cost_price": 13.061, "current_price": 13.16,
+            "market_value": 127652.0, "profit_loss": 959.87,
+            "field_confidence": {
+                "name_code": 95.0, "quantity": 95.0, "available": 95.0,
+                "cost_price": 95.0, "current_price": 95.0,
+                "market_value": 95.0, "profit_loss": 95.0,
+            },
+            "requires_review": False, "issues": [],
+        },
+    ]
+
+
+def test_ths_margin_position_ocr_reads_account_values_from_next_line(tmp_path: Path):
+    _margin_instruments(tmp_path)
+    tokens = [
+        _token("总", 10, 10, 1, 90), _token("资产", 70, 10, 1, 80),
+        _token("493,171.85", 10, 40, 2),
+        _token("总", 10, 70, 3), _token("市", 70, 70, 3), _token("值", 130, 70, 3),
+        _token("可", 310, 70, 3), _token("用", 370, 70, 3),
+        _token("可用", 610, 70, 3), _token("保证金", 680, 70, 3),
+        _token("410,870.00", 10, 100, 4), _token("82,301.85", 310, 100, 4),
+        _token("184,920.21", 610, 100, 4),
+        _token("市", 10, 140, 5), _token("值", 80, 140, 5),
+        _token("盈亏", 310, 140, 5), _token("持仓", 520, 140, 5),
+        _token("成本", 800, 140, 5),
+    ]
+
+    candidates = parse_position_tokens(tokens, tmp_path)["account_candidates"]
+
+    assert candidates["total_asset"] == {"value": 493171.85, "confidence": 80.0}
+    assert candidates["cash"] == {"value": 82301.85, "confidence": 95.0}
+
+
+class _NoChineseOcr(OcrProvider):
+    name = "fake"
+
+    def available(self) -> bool:
+        return True
+
+    def supports_language(self, language: str) -> bool:
+        return language != "chi_sim"
+
+    def extract_text(self, image_bytes: bytes) -> str:
+        return ""
+
+
+def test_position_ocr_requires_simplified_chinese_language(tmp_path: Path):
+    with pytest.raises(RuntimeError, match="chi_sim|简体中文"):
+        import_position_image(b"image", tmp_path, provider=_NoChineseOcr())
 
 
 def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):

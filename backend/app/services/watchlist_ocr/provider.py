@@ -32,6 +32,10 @@ class OcrProvider(ABC):
     def available(self) -> bool:
         """运行时依赖是否就绪（二进制/模型等）。"""
 
+    def supports_language(self, language: str) -> bool:
+        """当前 provider 是否支持指定语言；非 Tesseract provider 默认自行处理语言。"""
+        return True
+
     def extract_tokens(self, image_bytes: bytes) -> list[dict]:
         """返回带坐标和置信度的 OCR token；旧 provider 自动降级为逐行文本。"""
         rows = []
@@ -102,6 +106,15 @@ class TesseractOcrProvider(OcrProvider):
             return True
         except Exception as e:  # noqa: BLE001
             logger.debug("tesseract unavailable: %s", e)
+            return False
+
+    def supports_language(self, language: str) -> bool:
+        try:
+            import pytesseract
+
+            return language in set(pytesseract.get_languages(config=""))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("tesseract languages unavailable: %s", e)
             return False
 
     def extract_text(self, image_bytes: bytes) -> str:

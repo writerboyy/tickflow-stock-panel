@@ -34,9 +34,9 @@ function sameHolding(a: PositionRiskOcrRow, b: PositionRiskOcrRow) {
 /** 重叠行数值一致时去重；数值冲突时保留全部候选并要求人工选择。 */
 export function mergePositionRows(lists: PositionRiskOcrRow[][]): EditableRow[] {
   const byCode = new Map<string, EditableRow>()
-  for (const list of lists) {
-    for (const row of list) {
-      const key = row.symbol || row.code
+  for (const [listIndex, list] of lists.entries()) {
+    for (const [rowIndex, row] of list.entries()) {
+      const key = row.symbol || row.code || `unresolved:${listIndex}:${rowIndex}`
       const previous = byCode.get(key)
       if (!previous) {
         byCode.set(key, { ...row })
@@ -155,20 +155,24 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
     setPreview(null)
     const results: PositionRiskOcrResult[] = []
     let failures = 0
+    let firstFailure = ''
     try {
       for (let index = 0; index < selected.length; index += 1) {
         setProgress(`OCR ${index + 1}/${selected.length}`)
         try {
           results.push(await api.positionRiskImportImage(selected[index], controller.signal, true))
-        } catch {
-          if (!controller.signal.aborted) failures += 1
+        } catch (error) {
+          if (!controller.signal.aborted) {
+            failures += 1
+            if (!firstFailure && error instanceof Error) firstFailure = error.message
+          }
         }
       }
       if (controller.signal.aborted) return
       const merged = mergePositionRows(results.map(result => result.positions))
       setRows(merged)
       applyAccountCandidates(results)
-      if (!merged.length) toast('未识别到持仓行，请使用同花顺手机持仓页清晰截图', 'error')
+      if (!merged.length) toast(firstFailure || '未识别到持仓行，请使用同花顺手机持仓页清晰截图', 'error')
       else if (failures) toast(`${failures} 张识别失败，已保留其余结果`, 'error')
     } finally {
       if (!controller.signal.aborted) {
