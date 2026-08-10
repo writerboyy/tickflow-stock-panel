@@ -254,7 +254,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
   )
 }
 
-function PendingRow({ item, revision }: { item: PositionRiskRecommendation; revision: number }) {
+function PendingRow({ item, revision, name }: { item: PositionRiskRecommendation; revision: number; name?: string }) {
   const queryClient = useQueryClient()
   const mutation = useMutation({
     mutationFn: (action: 'confirm' | 'dismiss') => api.positionRiskRecommendationAction(item.id, action, revision),
@@ -267,7 +267,7 @@ function PendingRow({ item, revision }: { item: PositionRiskRecommendation; revi
     <div className="grid gap-3 border-b border-border px-3 py-3 md:grid-cols-[minmax(0,1fr)_110px_190px] md:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-          <span>{item.symbol || '组合'}</span>
+          <span>{item.symbol ? <>{name || item.symbol}<span className="ml-1.5 font-mono text-xs text-muted">{item.symbol}</span></> : '组合'}</span>
           <span className={cn('font-mono text-xs', riskTone(item.risk_score))}>{item.risk_score} 分</span>
           <span className="text-xs text-warning">{item.action} {item.reduction_pct}%</span>
         </div>
@@ -307,6 +307,7 @@ export function LargeOrders() {
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
+  const namesBySymbol = new Map(data.positions.map(row => [row.symbol, row.name]))
 
   return (
     <div className="min-h-full bg-background">
@@ -382,7 +383,7 @@ export function LargeOrders() {
 
       {tab === 'pending' && <div>
         <div className="border-b border-border bg-warning/5 px-4 py-2 text-[11px] text-warning sm:px-5">确认建议仅记录人工判断，不修改持仓、模拟盘或发送券商委托。</div>
-        {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
+        {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} name={item.symbol ? namesBySymbol.get(item.symbol) : undefined} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
       </div>}
 
       {tab === 'events' && <div className="divide-y divide-border">
