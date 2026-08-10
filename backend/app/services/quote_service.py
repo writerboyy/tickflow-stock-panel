@@ -231,6 +231,7 @@ class QuoteService:
         # a private window from its own queue.
         self._intraday_rows: dict[tuple[str, str, datetime], dict] = {}
         self._intraday_last_quote: dict[tuple[str, str], tuple[datetime, float, float]] = {}
+        self._intraday_gap_anchors: set[tuple[str, str]] = set()
         self._intraday_buckets: dict[tuple[str, str], dict] = {}
         self._intraday_seeded: set[tuple[str, str, date]] = set()
         self._intraday_fetch_bucket: dict[tuple[str, date], str] = {}
@@ -547,6 +548,15 @@ class QuoteService:
         self._cache_latest_quotes(records)
         self._record_intraday_quotes(records)
 
+    def mark_intraday_gap(self, symbols: set[str] | None = None, asset_type: str | None = None) -> None:
+        """让断线后的第一条累计行情只做基线，不把缺口成交量并入当前分钟。"""
+        with self._lock:
+            selected = {str(symbol).strip().upper() for symbol in (symbols or set()) if str(symbol).strip()}
+            if not selected:
+                selected = {symbol for _, symbol in self._intraday_last_quote}
+            kinds = {asset_type} if asset_type else {kind for kind, _ in self._intraday_last_quote}
+            self._intraday_gap_anchors.update((kind, symbol) for kind in kinds for symbol in selected)
+
     def set_intraday_consumer(
         self, consumer_id: str, symbols: set[str], asset_type: str = "stock",
     ) -> None:
@@ -621,7 +631,10 @@ class QuoteService:
             key = (asset_type, symbol)
             with self._lock:
                 self._intraday_ws_seen.add((asset_type, symbol, point.date()))
-                previous = self._intraday_last_quote.get(key)
+                gap_anchor = key in self._intraday_gap_anchors
+                if gap_anchor:
+                    self._intraday_gap_anchors.discard(key)
+                previous = None if gap_anchor else self._intraday_last_quote.get(key)
                 if previous is not None and point <= previous[0]:
                     continue
                 volume_delta = max(0.0, current_volume - previous[1]) if previous else 0.0

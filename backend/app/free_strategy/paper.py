@@ -1055,6 +1055,9 @@ class MarketDataHub:
         self._ws_state = "reconnecting"
         self._ws_error = str(message)
         self._ws_disconnected_at = cn_naive_now()
+        mark_gap = getattr(self.quote_service, "mark_intraday_gap", None)
+        if callable(mark_gap):
+            mark_gap(set(self._ws_symbols))
         with self._lock:
             targets = [sub for sub in self._subscriptions.values() if sub.mode == "websocket"]
         for sub in targets:

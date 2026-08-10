@@ -310,6 +310,11 @@ class _Quotes:
         pass
 
 
+class _IntradayQuotes(_Quotes):
+    def get_intraday_snapshot(self, _symbols, *, asset_type="stock", now=None):
+        return {"vwap": {"600036.SH": 100.0}, "rows": [], "available": True}
+
+
 def test_preview_rejects_negative_asset_gap_and_confirm_does_not_trade(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service._preload_history({"600036.SH"})
@@ -357,6 +362,39 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     assert stop["risk_score"] >= 85
     assert stop["reduction_pct"] == 100
     assert any(alert["source"] == "position_risk" for alert in quotes.alerts)
+
+
+def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
+    quotes = _IntradayQuotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 100_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1, "available": 1, "cost_price": 100}],
+    }, 0)
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    service._preload_history({"600036.SH"})
+    service._recovery_pending_symbols.add("600036.SH")
+
+    below = {"symbol": "600036.SH", "last_price": 98, "timestamp": "2026-08-07T13:00:01"}
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 0, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 0, 31))
+    assert not service.store.list_recommendations("pending")
+
+    above = {**below, "last_price": 102, "timestamp": "2026-08-07T13:01:00"}
+    service._evaluate_position(portfolio, position, above, datetime(2026, 8, 7, 13, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 1, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 1, 31))
+
+    recommendation = service.store.list_recommendations("pending")
+    assert [item["rule_id"] for item in recommendation] == ["vwap_breakdown"]
+
+
+def test_quote_age_excludes_lunch_break():
+    timestamp = datetime(2026, 8, 7, 11, 30)
+    assert PositionRiskService._quote_age_in_session(timestamp, datetime(2026, 8, 7, 13, 0)) == 0
+    assert PositionRiskService._quote_age_in_session(timestamp, datetime(2026, 8, 7, 13, 0, 31)) == 31
+    assert PositionRiskService._quote_age_in_session(None, datetime(2026, 8, 7, 13, 0)) == 0
 
 
 def test_depth_requires_three_snapshots_and_detects_break(tmp_path: Path):

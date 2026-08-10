@@ -162,6 +162,30 @@ def test_quote_service_keeps_ws_minutes_for_shared_snapshot():
     assert snapshot["rows"][0]["close"] == 10.1
 
 
+def test_quote_service_does_not_add_gap_volume_to_recovery_minute():
+    service = QuoteService()
+    service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")
+    service.record_quotes([{
+        "symbol": "600000.SH", "last_price": 10.0, "volume": 100,
+        "amount": 100_000, "timestamp": "2026-07-17T09:30:05",
+    }])
+    service.mark_intraday_gap({"600000.SH"})
+    service.record_quotes([{
+        "symbol": "600000.SH", "last_price": 10.2, "volume": 10_000,
+        "amount": 10_200_000, "timestamp": "2026-07-17T09:31:05",
+    }])
+    service.record_quotes([{
+        "symbol": "600000.SH", "last_price": 10.3, "volume": 10_010,
+        "amount": 10_201_000, "timestamp": "2026-07-17T09:32:05",
+    }])
+
+    snapshot = service.get_intraday_snapshot(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 9, 33),
+    )
+    recovery_row = next(row for row in snapshot["rows"] if row["datetime"] == datetime(2026, 7, 17, 9, 31))
+    assert recovery_row["volume"] == 0
+
+
 def test_shared_intraday_event_is_delivered_once_per_consumer():
     service = QuoteService()
     service.set_intraday_consumer("monitor:stock", {"600000.SH"}, "stock")
