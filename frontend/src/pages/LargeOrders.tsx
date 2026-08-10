@@ -204,7 +204,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                           <span className="flex items-center gap-2">
                             <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
                             <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
-                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify !== false)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`发送${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>
+                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify !== false)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>
                           </span>
                         </div>
                         {fields.length > 0 && (
@@ -272,7 +272,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                             disabled={mutation.isPending || !available}
                             onChange={event => setSignal(storageGroup, signal, event.target.checked)}
                           />
-                          <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`发送${signal.label}信号`} /></label>
+                          <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
                         </span>
                         </div>
                         <div className="mt-2 grid grid-cols-2 gap-2">
@@ -307,7 +307,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                     <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
                       <span className="min-w-0 truncate">{rule.name}</span>
                       <span className="flex shrink-0 items-center gap-2">
-                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>发送</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`发送${rule.name}信号`} /></label>
+                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
                         <select
                           value={explicit == null ? 'inherit' : String(explicit)}
                           disabled={mutation.isPending}
@@ -483,7 +483,7 @@ export function LargeOrders() {
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
 
       {tab === 'pending' && <div>
-        <div className="border-b border-border bg-warning/5 px-4 py-2 text-[11px] text-warning sm:px-5">确认建议仅记录人工判断，不修改持仓、模拟盘或发送券商委托。</div>
+        <div className="border-b border-border bg-warning/5 px-4 py-2 text-[11px] text-warning sm:px-5">确认建议仅记录人工判断，不修改持仓、模拟盘或通知券商委托。</div>
         {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} name={item.symbol ? namesBySymbol.get(item.symbol) : undefined} signalNames={signalNames} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
       </div>}
 
