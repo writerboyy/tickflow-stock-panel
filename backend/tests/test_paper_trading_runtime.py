@@ -1905,6 +1905,69 @@ def test_checkpoint_restores_dynamic_universe():
     assert restored.universe == ["A", "B"]
 
 
+def test_checkpoint_restores_active_position_valuation_prices():
+    source = "def on_bar(context, bars):\n    pass\n"
+    engine = FreeStrategyEngine(source, config=FreeStrategyConfig(initial_capital=100))
+    engine.account.cash = 20
+    engine.account.positions = {"X": 10, "Y": 0}
+    engine.preload_valuation_prices({"X": 8, "Y": 99})
+
+    checkpoint = engine.checkpoint()
+    restored = FreeStrategyEngine(source, config=FreeStrategyConfig(initial_capital=100))
+    restored.restore_checkpoint(checkpoint)
+
+    assert checkpoint["valuation_prices"] == {"X": 8}
+    assert restored.context.portfolio.total_value == 100
+
+
+def test_paper_engine_restores_legacy_position_valuation_from_last_close(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "app.free_strategy.process._instrument_records",
+        lambda _repo, _asset_type, _timeframe: [{"symbol": "X", "asset_type": "stock"}],
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process._load_scheduled_history_batch",
+        lambda _repo, _market, _asset_type, symbols, count, period, cutoff: (
+            calls.append((symbols, count, period, cutoff))
+            or {"X": [Bar("X", datetime(2026, 8, 7, 15), 12, 12, 12, 12, raw_close=12)]}
+        ),
+    )
+    account_root = tmp_path / "paper_accounts" / "paper"
+    account_root.mkdir(parents=True)
+    (account_root / "strategy.py").write_text(
+        "def on_bar(context, bars):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    engine = _engine_from_state(
+        {
+            "config": {
+                "market_mode": "bar_1m",
+                "asset_type": "stock",
+                "initial_capital": 140,
+            },
+            "last_bar": "2026-08-07T15:00:00",
+            "checkpoint": {
+                "account": {
+                    "cash": 20,
+                    "positions": {"X": 10},
+                    "available": {"X": 10},
+                    "avg_cost": {"X": 8},
+                },
+                "state": {},
+                "runtime": {"last_timestamp": "2026-08-07T15:00:00"},
+                "universe": ["X"],
+            },
+        },
+        account_root,
+        tmp_path,
+    )
+
+    assert engine.context.portfolio.total_value == 140
+    assert calls == [(["X"], 1, "1d", datetime(2026, 8, 7, 15))]
+
+
 def test_market_history_loader_refreshes_before_read_and_skips_older_overlap():
     engine = FreeStrategyEngine("def on_bar(context, bars):\n    pass\n")
     calls = []

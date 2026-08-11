@@ -1116,8 +1116,19 @@ class FreeStrategyEngine:
         """更新重连快照估值，不触发策略回调或成交。"""
         values = list(quotes)
         prices = {quote.symbol: float(quote.last_price) for quote in values}
-        self._current_prices.update(prices)
-        self._current_close_prices.update(prices)
+        return self.preload_valuation_prices(prices)
+
+    def preload_valuation_prices(self, prices: dict[str, float]) -> int:
+        """恢复只读估值基线，不触发策略回调或成交。"""
+        values = {
+            str(symbol).strip().upper(): float(price)
+            for symbol, price in prices.items()
+            if str(symbol).strip()
+            and math.isfinite(float(price))
+            and float(price) > 0
+        }
+        self._current_prices.update(values)
+        self._current_close_prices.update(values)
         self.context._sync(self._current_close_prices)
         return len(values)
 
@@ -1699,11 +1710,20 @@ class FreeStrategyEngine:
 
     def checkpoint(self) -> dict[str, Any]:
         """返回可用于分段历史回测或模拟盘恢复的完整运行状态。"""
+        valuation_prices = {
+            symbol: float(self._current_close_prices[symbol])
+            for symbol, quantity in self.account.positions.items()
+            if float(quantity) > 0
+            and symbol in self._current_close_prices
+            and math.isfinite(float(self._current_close_prices[symbol]))
+            and float(self._current_close_prices[symbol]) > 0
+        }
         return {
             "account": self.account.snapshot(),
             "state": self.context.state,
             "runtime": self.runtime_snapshot(),
             "universe": self.universe,
+            "valuation_prices": valuation_prices,
             "benchmark_curve": self._benchmark_curve,
             "bought_dates": {symbol: value.isoformat() for symbol, value in self._bought_dates.items()},
             "applied_splits": {symbol: value.isoformat() for symbol, value in self._applied_splits.items()},
@@ -1738,6 +1758,7 @@ class FreeStrategyEngine:
         if raw.get("universe"):
             self.context.set_universe(raw["universe"])
         self.restore_runtime(raw.get("runtime"))
+        self.preload_valuation_prices(raw.get("valuation_prices", {}))
         self._benchmark_curve = list(raw.get("benchmark_curve", []))
         self._bought_dates = {
             symbol: date.fromisoformat(value)
