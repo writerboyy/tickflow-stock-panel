@@ -109,6 +109,29 @@ def _atomic_parquet(frame: pl.DataFrame, path: Path) -> None:
             temporary.unlink()
 
 
+def _collapse_staged_partition(directory: Path) -> None:
+    parts = sorted(directory.glob("*.parquet"))
+    if not parts:
+        raise StockDataEtfImportBlocked(f"staged partition is empty: {directory}")
+    target = directory / "part.parquet"
+    if len(parts) == 1:
+        if parts[0] != target:
+            parts[0].replace(target)
+        return
+    merged = pl.concat([pl.read_parquet(path) for path in parts], how="vertical_relaxed").sort(
+        ["symbol", "datetime"]
+    )
+    temporary = directory / f".part.parquet.{uuid4().hex}.tmp"
+    try:
+        merged.write_parquet(temporary)
+        for path in parts:
+            path.unlink()
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def _file_fingerprint(path: Path) -> tuple[int, int] | None:
     if not path.exists():
         return None
@@ -715,17 +738,13 @@ class StockDataEtfImporter:
                     PARTITION_BY (date),
                     COMPRESSION ZSTD,
                     COMPRESSION_LEVEL 3,
+                    PER_THREAD_OUTPUT false,
                     FILENAME_PATTERN 'part'
                 )
             """, [year])
             date_dirs = sorted(year_root.glob("date=*"))
             for directory in date_dirs:
-                parts = list(directory.glob("*.parquet"))
-                if len(parts) != 1:
-                    raise StockDataEtfImportBlocked(
-                        f"unexpected staged file count in {directory}: {len(parts)}"
-                    )
-                parts[0].replace(directory / "part.parquet")
+                _collapse_staged_partition(directory)
             rows = sum(pq.ParquetFile(path).metadata.num_rows for path in year_root.rglob("*.parquet"))
             if rows != int(expected[0]) or len(date_dirs) == 0:
                 raise StockDataEtfImportBlocked(

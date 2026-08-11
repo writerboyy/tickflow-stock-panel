@@ -9,6 +9,7 @@ import polars as pl
 
 from app.services.stockdata_etf_import import (
     StockDataEtfImportConfig,
+    _collapse_staged_partition,
     run_stockdata_etf_import,
 )
 
@@ -224,3 +225,21 @@ def test_publish_adjusts_prices_units_and_rebuilds_enriched(tmp_path):
     rollback = Path(result["publish"]["rollback_dir"])
     assert (rollback / "kline_etf_enriched" / "date=2020-01-03" / "part.parquet").exists()
     assert (data_dir / ".matrix_generation_etf.json").exists()
+
+
+def test_parallel_staged_parts_collapse_to_sorted_canonical_file(tmp_path):
+    partition = tmp_path / "date=2019-01-02"
+    partition.mkdir()
+    for index, symbols in enumerate((["B", "A"], ["D", "C"])):
+        pl.DataFrame({
+            "symbol": symbols,
+            "datetime": [datetime(2019, 1, 2, 9, 31)] * 2,
+            "close": [1.0, 1.0],
+        }).write_parquet(partition / f"part{index}.parquet")
+
+    _collapse_staged_partition(partition)
+
+    assert [path.name for path in partition.glob("*.parquet")] == ["part.parquet"]
+    assert pl.read_parquet(partition / "part.parquet")["symbol"].to_list() == [
+        "A", "B", "C", "D",
+    ]
