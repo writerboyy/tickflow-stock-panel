@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict
@@ -420,7 +421,7 @@ def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Pa
     assert repo.rows["signal_macd_dead"].to_list() == [True]
 
 
-def test_position_signal_can_be_computed_without_sending(tmp_path: Path):
+def test_position_signal_is_recorded_without_sending_notification(tmp_path: Path):
     repo = _Repo()
     repo.rows = repo.rows.with_columns(pl.lit(True).alias("signal_macd_dead"))
     quotes = _Quotes()
@@ -435,8 +436,27 @@ def test_position_signal_can_be_computed_without_sending(tmp_path: Path):
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    assert service.store.list_recommendations("pending") == []
+    pending = service.store.list_recommendations("pending")
+    assert [item["rule_id"] for item in pending] == ["signal:signal_macd_dead"]
     assert not any(item["rule_id"] == "signal:signal_macd_dead" for item in quotes.alerts)
+
+
+def test_default_rule_notification_off_still_records_event_and_recommendation(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 35.9, "timestamp": "2026-08-07T10:00:00"}
+
+    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    assert [item["rule_id"] for item in service.store.list_recommendations("pending")] == ["stop_loss"]
+    events = alert_store.list_recent(tmp_path, source="position_risk")
+    assert any(item["rule_id"] == "stop_loss" for item in events)
+    assert quotes.alerts == []
 
 
 def test_builtin_signal_direction_is_read_only_to_position_config(tmp_path: Path):

@@ -218,7 +218,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <div>
           <h2 id="position-risk-rules-title" className="text-sm font-semibold">全局风控模板</h2>
-          <p className="mt-0.5 text-[11px] text-muted">这里只修改持仓风控的阈值、方向和建议，不会改动公共信号或监控中心原规则；单股覆盖在持仓侧栏设置</p>
+          <p className="mt-0.5 text-[11px] text-muted">这里只修改持仓风控的阈值、方向和建议，不会改动公共信号或监控中心原规则；通知关闭时仍保留触发记录和待确认建议；单股覆盖在持仓侧栏设置</p>
         </div>
         <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
       </div>

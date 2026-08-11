@@ -420,8 +420,6 @@ class PositionRiskService:
                 "monitor_rules",
                 str(event.get("rule_id") or ""),
             )
-            if configured.get("notify", False) is False:
-                continue
             reduction = int(configured.get("action_pct") or 0)
             if reduction <= 0:
                 continue
@@ -1173,8 +1171,6 @@ class PositionRiskService:
             ).get("notify", False)
         else:
             notify = self._rule_config(portfolio, config_symbol, rule_id).get("notify", False)
-        if notify is False:
-            return
         name = position.get("name") if position else "组合"
         fingerprint_raw = f"{cn_today()}:{symbol or '__portfolio__'}:{rule_id}"
         fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
@@ -1196,11 +1192,12 @@ class PositionRiskService:
         if severity == "critical" and rule_id != "clustered_severe_events":
             self._severe_events.append(time.time())
         alert_store.append(self.store.root.parents[1], event)
-        publish = getattr(self.quote_service, "publish_external_alerts", None)
-        if callable(publish):
-            publish([event])
-        else:
-            self.quote_service.push_alerts([event])
+        if notify is True:
+            publish = getattr(self.quote_service, "publish_external_alerts", None)
+            if callable(publish):
+                publish([event])
+            else:
+                self.quote_service.push_alerts([event])
         if reduction_pct > 0:
             self._create_recommendation(
                 portfolio,
