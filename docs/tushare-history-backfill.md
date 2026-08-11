@@ -128,6 +128,19 @@ uv run python scripts/import_stockdata_etf.py /path/to/stockData \
 按年 staging、固定 241 根时钟网格校验、日线交叉检查和 ETF enriched 重建，再原子替换；
 与日线收盘偏差超过 0.5% 的标的交易日会隔离，无法解析复权因子或发现目标分区重叠时拒绝发布。
 
+按年份目录、按交易日文件保存的股票分钟数据使用独立导入器。它只接受当前股票标的，ETF 和指数
+不会写入股票分钟库；源成交量从股转换为手，源原始价按项目除权因子转换为前复权价。默认只读审计：
+
+```bash
+cd backend
+uv run python scripts/import_stockdata_stock.py /path/to/stockData \
+  --data-dir ../data --start 2019-01-01 --end 2025-12-31
+```
+
+发布时增加 `--run-id <id> --publish`。导入器逐年暂存、校验和发布，只补缺失键，现有分钟键始终
+优先；每年保留被替换分区的回滚硬链接。非标准交易时段行会排除，不完整时钟网格或与日线收盘
+偏差超过 0.5% 的标的交易日会隔离，零成交时钟行保留但不可成交。
+
 `teajoin.com` 文档声明绝对上限为每分钟 450 次请求，批量任务建议至少间隔 0.2 秒。
 `--rate-interval` 是所有 worker 共享的全局请求启动间隔，程序拒绝低于
 `60 / 450` 秒的配置；`--workers` 控制同时等待响应的标的数，范围为 1-64。高延迟
