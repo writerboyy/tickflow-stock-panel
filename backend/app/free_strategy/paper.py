@@ -1341,6 +1341,23 @@ def _engine_from_state(
     else:
         engine.account.restore(state.get("account", {}))
         engine.restore_runtime(state.get("runtime"))
+    missing_valuation = [
+        symbol
+        for symbol, quantity in engine.account.positions.items()
+        if float(quantity) > 0 and symbol not in engine._current_close_prices  # noqa: SLF001
+    ]
+    if missing_valuation and runtime_timestamp:
+        valuation_timestamp = datetime.fromisoformat(str(runtime_timestamp))
+        valuation_day = valuation_timestamp.date()
+        if valuation_timestamp.time() < clock_time(15, 0):
+            valuation_day -= timedelta(days=1)
+        valuation_cutoff = datetime.combine(valuation_day, clock_time(15, 0))
+        histories = load_history_batch(missing_valuation, 1, "1d", valuation_cutoff)
+        engine.preload_valuation_prices({
+            symbol: values[-1].execution_price("close")
+            for symbol, values in histories.items()
+            if values
+        })
     return engine
 
 
