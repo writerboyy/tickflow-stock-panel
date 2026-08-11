@@ -327,7 +327,13 @@ class _StockDataStockYearImporter:
             CREATE TEMP TABLE source_groups_control AS
             SELECT
                 g.*,
-                i.symbol IS NOT NULL AS is_stock,
+                (
+                    i.symbol IS NOT NULL
+                    OR (
+                        (d.symbol IS NOT NULL OR n.symbol IS NOT NULL)
+                        AND e.symbol IS NULL AND x.symbol IS NULL
+                    )
+                ) AS is_stock,
                 e.symbol IS NOT NULL AS is_etf,
                 x.symbol IS NOT NULL AS is_index,
                 d.close AS daily_close,

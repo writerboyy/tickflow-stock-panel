@@ -26,7 +26,13 @@ def _minute_times(day: date) -> list[datetime]:
     return values
 
 
-def _write_fixture(root: Path, *, daily_close: float = 10.0, incomplete: bool = False) -> tuple[Path, Path]:
+def _write_fixture(
+    root: Path,
+    *,
+    daily_close: float = 10.0,
+    incomplete: bool = False,
+    include_instrument: bool = True,
+) -> tuple[Path, Path]:
     source_dir = root / "source"
     data_dir = root / "data"
     day = date(2025, 1, 2)
@@ -49,7 +55,7 @@ def _write_fixture(root: Path, *, daily_close: float = 10.0, incomplete: bool = 
     }).write_parquet(source_path)
 
     for name, symbols in (
-        ("instruments", ["000001.SZ"]),
+        ("instruments", ["000001.SZ"] if include_instrument else ["000002.SZ"]),
         ("instruments_etf", ["510300.SH"]),
         ("instruments_index", ["000001.SH"]),
     ):
@@ -145,6 +151,17 @@ def test_daily_close_mismatch_quarantines_symbol_day(tmp_path: Path) -> None:
     assert year["status"] == "ready"
     assert year["minute"]["quarantined_symbol_days"] == 1
     assert year["minute"]["publish_rows"] == 0
+
+
+def test_stock_daily_control_can_confirm_symbol_missing_from_instruments(tmp_path: Path) -> None:
+    source_dir, data_dir = _write_fixture(tmp_path, include_instrument=False)
+
+    year = run_stockdata_stock_import(_config(source_dir, data_dir))["audit"]["years"][0]
+
+    assert year["source"]["stock_symbols"] == 1
+    assert year["source"]["unmatched_symbols"] == 0
+    assert year["minute"]["eligible_rows"] == 241
+    assert year["minute"]["publish_rows"] == 240
 
 
 def test_incomplete_clock_quarantines_symbol_day(tmp_path: Path) -> None:
