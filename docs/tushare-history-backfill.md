@@ -115,6 +115,19 @@ uv run python scripts/backfill_tushare_history.py --data-dir /path/to/data \
 到 `kline_minute` 和 `kline_etf_minute`，价格按复权因子处理，成交量和成交额不复权；
 Tushare 分钟成交量从股转换为系统的手口径后再审计和发布。
 
+已有本地 `stockData` 目录时，可用专用导入器只补当前 ETF 标的的缺口。命令默认只读审计；
+外部分钟价格会按最新 ETF 因子前复权，成交量从股转换为手，现有 TickFlow 分区和键始终优先：
+
+```bash
+cd backend
+uv run python scripts/import_stockdata_etf.py /path/to/stockData \
+  --data-dir ../data --start 2019-01-01 --end 2026-08-11
+```
+
+确认审计报告没有 `blockers` 后，使用同样参数增加 `--run-id <id> --publish`。发布先完成
+按年 staging、固定 241 根时钟网格校验、日线交叉检查和 ETF enriched 重建，再原子替换；
+与日线收盘偏差超过 0.5% 的标的交易日会隔离，无法解析复权因子或发现目标分区重叠时拒绝发布。
+
 `teajoin.com` 文档声明绝对上限为每分钟 450 次请求，批量任务建议至少间隔 0.2 秒。
 `--rate-interval` 是所有 worker 共享的全局请求启动间隔，程序拒绝低于
 `60 / 450` 秒的配置；`--workers` 控制同时等待响应的标的数，范围为 1-64。高延迟
