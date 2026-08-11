@@ -261,8 +261,16 @@ def test_portfolio_store_adds_new_large_order_defaults_to_existing_rule(tmp_path
 
     large_buy = saved["template"]["rules"]["large_buy"]
     assert large_buy["enabled"] is False
+    assert large_buy["notify"] is False
     assert large_buy["min_amount"] == 1_000_000
     assert large_buy["direction_ratio"] == 0.65
+
+
+def test_position_risk_notifications_default_to_off(tmp_path: Path):
+    portfolio = PositionRiskStore(tmp_path).load()
+
+    assert all(rule["enabled"] is True for rule in portfolio["template"]["rules"].values())
+    assert all(rule["notify"] is False for rule in portfolio["template"]["rules"].values())
 
 
 class _Repo:
@@ -365,6 +373,7 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000, "previous_close_total_asset": 100_000, "high_watermark": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40, "import_price": 40}],
+        "template": {"rules": {"stop_loss": {"notify": True}}},
     }, 0)
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 35.9, "timestamp": "2026-08-07T10:00:00"}
@@ -381,7 +390,7 @@ def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
-        "template": {"rules": {"stop_loss": {"threshold": -0.05, "action_pct": 25}}},
+        "template": {"rules": {"stop_loss": {"notify": True, "threshold": -0.05, "action_pct": 25}}},
     }, 0)
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 37.9, "timestamp": "2026-08-07T10:00:00"}
@@ -399,7 +408,7 @@ def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Pa
     service.store.replace({
         "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
-        "template": {"signals": {"builtin": {"signal_macd_dead": {"enabled": True, "direction": "exit", "action_pct": 100}}}},
+        "template": {"signals": {"builtin": {"signal_macd_dead": {"enabled": True, "notify": True, "direction": "exit", "action_pct": 100}}}},
     }, 0)
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
@@ -419,7 +428,7 @@ def test_position_signal_can_be_computed_without_sending(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
-        "template": {"signals": {"builtin": {"signal_macd_dead": {"notify": False, "action_pct": 100}}}},
+        "template": {"signals": {"builtin": {"signal_macd_dead": {"action_pct": 100}}}},
     }, 0)
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
@@ -430,12 +439,31 @@ def test_position_signal_can_be_computed_without_sending(tmp_path: Path):
     assert not any(item["rule_id"] == "signal:signal_macd_dead" for item in quotes.alerts)
 
 
+def test_builtin_signal_direction_is_read_only_to_position_config(tmp_path: Path):
+    repo = _Repo()
+    repo.rows = repo.rows.with_columns(pl.lit(True).alias("signal_macd_dead"))
+    service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
+        "template": {"signals": {"builtin": {"signal_macd_dead": {"notify": True, "direction": "entry"}}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
+
+    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    signal = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "signal:signal_macd_dead")
+    assert signal["reduction_pct"] == 25
+
+
 def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
     quotes = _IntradayQuotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 100_000, "total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1, "available": 1, "cost_price": 100}],
+        "template": {"rules": {"vwap_breakdown": {"notify": True}}},
     }, 0)
     portfolio = service.store.load()
     position = portfolio["positions"][0]
@@ -482,6 +510,11 @@ def test_breaking_limit_up_does_not_also_emit_seal_shrink(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 35}],
+        "template": {"rules": {
+            "broken_limit_up": {"notify": True},
+            "sealed_order_shrink_50": {"notify": True},
+            "sealed_order_shrink_80": {"notify": True},
+        }},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
@@ -511,7 +544,7 @@ def test_symbol_override_controls_builtin_signal_and_monitor_action(tmp_path: Pa
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
         "template": {
             "rules": {},
-            "signals": {"builtin": {}, "custom": {}, "monitor_rules": {"rule-one": {"action_pct": 25}}},
+            "signals": {"builtin": {}, "custom": {}, "monitor_rules": {"rule-one": {"notify": True, "action_pct": 25}}},
         },
         "overrides": {
             "600036.SH": {
@@ -546,6 +579,7 @@ def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
+        "template": {"rules": {"continuous_outflow": {"notify": True}}},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
@@ -604,6 +638,10 @@ def test_two_independent_exit_signals_upgrade_to_half_reduction(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000, "previous_close_total_asset": 100_000, "high_watermark": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35, "import_price": 36}],
+        "template": {"signals": {"builtin": {
+            "signal_macd_dead": {"notify": True},
+            "signal_n_day_low": {"notify": True},
+        }}},
     }, 0)
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}

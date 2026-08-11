@@ -241,7 +241,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                       </div>
                       <span className="flex shrink-0 items-center gap-3 text-[10px] text-muted">
                         <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} aria-label={`监控${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}`} /><span>监控</span></label>
-                        <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={config.notify !== false} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} aria-label={`通知${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}信号`} /><span>通知</span></label>
+                        <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} aria-label={`通知${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}信号`} /><span>通知</span></label>
                       </span>
                     </div>
                     <div className="grid grid-cols-2 gap-x-3 gap-y-2">
@@ -292,7 +292,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-muted">{actionLabel}</span>
                         <span className="flex items-center gap-3">
                           <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} aria-label={`监控${RULE_LABELS[id] ?? id}`} /><span>监控</span></label>
-                          <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.notify !== false} onChange={event => toggleRuleNotify(id, event.target.checked)} aria-label={`通知${RULE_LABELS[id] ?? id}信号`} /><span>通知</span></label>
+                          <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(id, event.target.checked)} aria-label={`通知${RULE_LABELS[id] ?? id}信号`} /><span>通知</span></label>
                         </span>
                       </span>
                     </div>
@@ -334,12 +334,12 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
             <section>
               <div className="mb-2 flex items-center gap-2">
                 <h3 className="text-xs font-semibold text-secondary">系统信号</h3>
-                <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">只读</span>
+                <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">方向只读</span>
               </div>
               <div className="max-h-64 divide-y divide-border overflow-y-auto border-y border-border">
                 {options?.builtin_signals.map(signal => {
                   const saved = template.signals.builtin[signal.id]
-                  const direction = saved?.direction ?? signal.direction
+                  const direction = signal.direction
                   const actionPct = saved?.action_pct ?? (direction === 'exit' ? 25 : 0)
                   return (
                     <div key={signal.id} className="flex min-h-9 flex-col items-stretch gap-2 py-2 text-xs sm:flex-row sm:items-center sm:justify-between">
@@ -348,14 +348,14 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">系统</span>
                       </span>
                       <span className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)_auto] items-center gap-2 sm:flex sm:shrink-0">
-                        <select value={direction} disabled className="h-7 cursor-not-allowed rounded border border-border bg-surface px-1 text-[10px] opacity-60" aria-label={`${signal.label}方向`}>
+                        <select value={direction} disabled className="h-7 cursor-not-allowed rounded border border-border bg-surface px-1 text-[10px] opacity-60" aria-label={`${signal.label}方向（只读）`} title="系统信号方向由公共信号定义，只读">
                           <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                         </select>
-                        <select value={actionPct} disabled className="h-7 cursor-not-allowed rounded border border-border bg-surface px-1 text-[10px] opacity-60" aria-label={`${signal.label}建议比例`}>
+                        <select value={actionPct} onChange={event => updateSignal('builtin', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px]" aria-label={`${signal.label}建议比例`}>
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
-                        <label className="flex cursor-not-allowed items-center gap-1.5 text-[10px] text-muted opacity-60"><input type="checkbox" checked={saved?.enabled !== false} disabled aria-label={`监控${signal.label}`} /><span>监控</span></label>
-                        <label className="flex cursor-not-allowed items-center gap-1.5 text-[10px] text-muted opacity-60"><input type="checkbox" checked={saved?.notify !== false} disabled aria-label={`通知${signal.label}信号`} /><span>通知</span></label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.enabled !== false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /><span>监控</span></label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.notify === true} onChange={event => updateSignal('builtin', signal.id, { notify: event.target.checked })} aria-label={`通知${signal.label}信号`} /><span>通知</span></label>
                       </span>
                     </div>
                   )
@@ -380,7 +380,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
                         <label className={`flex items-center gap-1.5 text-[10px] text-muted ${signal.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.enabled !== false} onChange={event => toggleSignal('custom', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /><span>监控</span></label>
-                        <label className={`flex items-center gap-1.5 text-[10px] text-muted ${signal.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.notify !== false} onChange={event => updateSignal('custom', signal.id, { notify: event.target.checked })} aria-label={`通知${signal.label}信号`} /><span>通知</span></label>
+                        <label className={`flex items-center gap-1.5 text-[10px] text-muted ${signal.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.notify === true} onChange={event => updateSignal('custom', signal.id, { notify: event.target.checked })} aria-label={`通知${signal.label}信号`} /><span>通知</span></label>
                       </span>
                     </div>
                   )
@@ -396,7 +396,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                     <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
                       <span className="min-w-0 truncate">{rule.name}</span>
                       <span className="flex shrink-0 items-center gap-3">
-                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.notify !== false} onChange={event => updateSignal('monitor_rules', rule.id, { notify: event.target.checked })} aria-label={`通知${rule.name}信号`} /><span>通知</span></label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.notify === true} onChange={event => updateSignal('monitor_rules', rule.id, { notify: event.target.checked })} aria-label={`通知${rule.name}信号`} /><span>通知</span></label>
                         <select
                           value={saved?.action_pct ?? 0}
                           onChange={event => updateSignal('monitor_rules', rule.id, { action_pct: Number(event.target.value) })}

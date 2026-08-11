@@ -204,7 +204,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                           <span className="flex items-center gap-2">
                             <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
                             <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
-                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify !== false)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>
+                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>
                           </span>
                         </div>
                         {fields.length > 0 && (
@@ -253,13 +253,14 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                     const explicit = override.signals?.[storageGroup]?.[signal.id]?.enabled
                     const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
                     const available = !('available' in signal) || signal.available
+                    const directionReadonly = storageGroup === 'builtin'
                     const hasOverride = Object.keys(override.signals?.[storageGroup]?.[signal.id] ?? {}).length > 0
-                    const inheritedDirection = portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
+                    const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
                     const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
-                    const explicitDirection = override.signals?.[storageGroup]?.[signal.id]?.direction
+                    const explicitDirection = directionReadonly ? undefined : override.signals?.[storageGroup]?.[signal.id]?.direction
                     const explicitAction = override.signals?.[storageGroup]?.[signal.id]?.action_pct
                     const explicitNotify = override.signals?.[storageGroup]?.[signal.id]?.notify
-                    const inheritedNotify = portfolio?.template.signals[storageGroup]?.[signal.id]?.notify !== false
+                    const inheritedNotify = portfolio?.template.signals[storageGroup]?.[signal.id]?.notify === true
                     return (
                       <div key={signal.id} className={cn('py-2 text-xs', available ? '' : 'opacity-50')}>
                         <div className="flex min-h-7 items-center justify-between gap-3">
@@ -276,8 +277,8 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                         </span>
                         </div>
                         <div className="mt-2 grid grid-cols-2 gap-2">
-                          <label className="text-[10px] text-muted">信号方向
-                            <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
+                          <label className="text-[10px] text-muted">信号方向{directionReadonly ? '（只读）' : ''}
+                            <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available || directionReadonly} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" title={directionReadonly ? '系统信号方向由公共信号定义，只读' : undefined}>
                               <option value="inherit">继承（{inheritedDirection === 'exit' ? '出场' : inheritedDirection === 'entry' ? '入场' : '双向'}）</option>
                               <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                             </select>
@@ -302,7 +303,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                   const explicit = override.signals?.monitor_rules?.[rule.id]?.action_pct
                   const inherited = portfolio?.template.signals.monitor_rules[rule.id]?.action_pct ?? 0
                   const explicitNotify = override.signals?.monitor_rules?.[rule.id]?.notify
-                  const inheritedNotify = portfolio?.template.signals.monitor_rules[rule.id]?.notify !== false
+                  const inheritedNotify = portfolio?.template.signals.monitor_rules[rule.id]?.notify === true
                   return (
                     <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
                       <span className="min-w-0 truncate">{rule.name}</span>

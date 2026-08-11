@@ -420,7 +420,7 @@ class PositionRiskService:
                 "monitor_rules",
                 str(event.get("rule_id") or ""),
             )
-            if configured.get("notify", True) is False:
+            if configured.get("notify", False) is False:
                 continue
             reduction = int(configured.get("action_pct") or 0)
             if reduction <= 0:
@@ -860,7 +860,7 @@ class PositionRiskService:
                 configured.get("direction")
                 or self._custom_signal_directions.get(signal_id)
                 or self._signal_direction(signal_id)
-            )
+            ) if is_custom else self._signal_direction(signal_id)
             configured_action = _finite(configured.get("action_pct"))
             action = int(round(configured_action)) if configured_action is not None else (25 if direction == "exit" else 0)
             action = max(0, min(100, action))
@@ -1166,13 +1166,13 @@ class PositionRiskService:
         if rule_id.startswith("signal:"):
             signal_id = rule_id.removeprefix("signal:")
             signal_group = "custom" if signal_id.startswith("csg_") else "builtin"
-            notify = self._signal_config(portfolio, config_symbol, signal_group, signal_id).get("notify", True)
+            notify = self._signal_config(portfolio, config_symbol, signal_group, signal_id).get("notify", False)
         elif rule_id.startswith("monitor:"):
             notify = self._signal_config(
                 portfolio, config_symbol, "monitor_rules", rule_id.removeprefix("monitor:"),
-            ).get("notify", True)
+            ).get("notify", False)
         else:
-            notify = self._rule_config(portfolio, config_symbol, rule_id).get("notify", True)
+            notify = self._rule_config(portfolio, config_symbol, rule_id).get("notify", False)
         if notify is False:
             return
         name = position.get("name") if position else "组合"
