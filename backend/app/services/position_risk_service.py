@@ -726,7 +726,10 @@ class PositionRiskService:
         if self._set_rule(symbol, "orderbook_imbalance", imbalance_active) and not imbalance_suppressed:
             self._emit(
                 portfolio, position, "orderbook_imbalance", "盘口失衡", "warn", 55, imbalance_action,
-                [f"盘口失衡 {depth_state['imbalance']:.2f} 持续 {int(imbalance_sustain)} 秒"],
+                [
+                    f"卖盘占优：买五档挂单 {depth_state['bid_total']:,.0f}，卖五档挂单 {depth_state['ask_total']:,.0f}；"
+                    f"失衡 {depth_state['imbalance']:.2f}（阈值 < {imbalance_threshold:.2f}）持续 {int(imbalance_sustain)} 秒"
+                ],
             )
 
         large_buy_cfg = self._rule_config(portfolio, symbol, "large_buy")
@@ -768,6 +771,10 @@ class PositionRiskService:
             now,
         ) if not outflow_suppressed else False
         if self._set_rule(symbol, "continuous_outflow", outflow_active) and not outflow_suppressed:
+            outflow_samples = int(flow["samples"])
+            outflow_sell_ratio = float(flow["sell_ratio"] or 0.0)
+            outflow_threshold = float(outflow_cfg.get("direction_ratio", 0.65))
+            outflow_sustain = int(outflow_cfg.get("sustain_seconds", 10))
             self._emit(
                 portfolio,
                 position,
@@ -776,7 +783,10 @@ class PositionRiskService:
                 "warn",
                 50,
                 int(outflow_cfg.get("action_pct", 25)),
-                [flow["summary"]],
+                [
+                    f"卖方主导：最近 60 秒 {outflow_samples} 笔报价增量中卖方占比 "
+                    f"{outflow_sell_ratio:.0%}（阈值 ≥ {outflow_threshold:.0%}）持续 {outflow_sustain} 秒"
+                ],
             )
 
         recent_five_minutes = [
@@ -913,6 +923,8 @@ class PositionRiskService:
                 "broken": False,
                 "shrink_ratio": 0.0,
                 "imbalance": None,
+                "bid_total": 0.0,
+                "ask_total": 0.0,
             }
         limit_up = _finite(quote.get("limit_up"))
         recent = list(snapshots)[-3:]
@@ -949,6 +961,8 @@ class PositionRiskService:
             "broken": was_sealed and not sealed,
             "shrink_ratio": shrink_ratio,
             "imbalance": imbalance,
+            "bid_total": bid_total,
+            "ask_total": ask_total,
         }
 
     def _flow_state(

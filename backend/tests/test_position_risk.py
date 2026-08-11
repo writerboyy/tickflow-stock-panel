@@ -518,7 +518,10 @@ def test_depth_requires_three_snapshots_and_detects_break(tmp_path: Path):
     service._depth["600036.SH"].extend([sealed, sealed])
     assert service._depth_state("600036.SH", quote, datetime(2026, 8, 7, 10, 0))["sealed"] is False
     service._depth["600036.SH"].append(sealed)
-    assert service._depth_state("600036.SH", quote, datetime(2026, 8, 7, 10, 0, 1))["sealed"] is True
+    state = service._depth_state("600036.SH", quote, datetime(2026, 8, 7, 10, 0, 1))
+    assert state["sealed"] is True
+    assert state["bid_total"] == 10_000
+    assert state["ask_total"] == 0
     service._depth["600036.SH"].append({**sealed, "bid1_price": 39.9, "ask1_price": 40.0, "ask1_volume": 100})
     service._depth["600036.SH"].extend([{**sealed, "bid1_price": 39.9}, {**sealed, "bid1_price": 39.9}])
     assert service._depth_state("600036.SH", quote, datetime(2026, 8, 7, 10, 0, 2))["broken"] is True
@@ -621,6 +624,8 @@ def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
 
     outflow = next(item for item in quotes.alerts if item["rule_id"] == "continuous_outflow")
     assert outflow["suggestion_pct"] == 25
+    assert outflow["reasons"] == ["卖方主导：最近 60 秒 3 笔报价增量中卖方占比 100%（阈值 ≥ 65%）持续 10 秒"]
+    assert "样本不足" not in outflow["reasons"][0]
 
 
 def test_large_order_uses_configured_thresholds(tmp_path: Path):

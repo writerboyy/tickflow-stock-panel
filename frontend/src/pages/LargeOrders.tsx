@@ -354,6 +354,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
 
 function PendingRow({ item, revision, name, signalNames }: { item: PositionRiskRecommendation; revision: number; name?: string; signalNames: Record<string, string> }) {
   const queryClient = useQueryClient()
+  const ruleLabel = RULE_LABELS[item.rule_id] ?? cnSignal(item.rule_id)
   const mutation = useMutation({
     mutationFn: (action: 'confirm' | 'dismiss') => api.positionRiskRecommendationAction(item.id, action, revision),
     onSuccess: data => {
@@ -366,10 +367,11 @@ function PendingRow({ item, revision, name, signalNames }: { item: PositionRiskR
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
           <span>{item.symbol ? <>{name || item.symbol}<span className="ml-1.5 font-mono text-xs text-muted">{item.symbol}</span></> : '组合'}</span>
+          <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{ruleLabel}</span>
           <span className={cn('font-mono text-xs', riskTone(item.risk_score))}>{item.risk_score} 分</span>
-          <span className="text-xs text-warning">{item.action} {item.reduction_pct}%</span>
+          <span className="rounded bg-warning/10 px-1.5 py-0.5 text-xs font-semibold text-warning">结论：{item.action} {item.reduction_pct}%</span>
         </div>
-        <p className="mt-1 truncate text-xs text-muted">{item.reasons.map(reason => cnSignalText(reason, signalNames)).join(' · ')}</p>
+        <div className="mt-2 flex items-start gap-2 text-xs text-muted"><span className="shrink-0 text-secondary">触发依据</span><span className="break-words leading-5">{item.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</span></div>
       </div>
       <time className="text-[11px] text-muted">{new Date(item.created_at).toLocaleString('zh-CN')}</time>
       <div className="flex justify-end gap-2">
@@ -490,7 +492,7 @@ export function LargeOrders() {
 
       {tab === 'events' && <div className="divide-y divide-border">
         {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_80px] sm:px-5">
-          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time><span>{event.symbol || '组合'} {event.name}</span><span className="truncate text-secondary">{cnSignalText(event.message, signalNames)}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
+          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time><span>{event.symbol || '组合'} {event.name}</span><span className="min-w-0"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{event.reasons?.length ? <span className="mt-1 flex items-start gap-2 break-words text-[11px] leading-5 text-muted"><span className="shrink-0 text-secondary">触发依据</span>{event.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</span> : null}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 
