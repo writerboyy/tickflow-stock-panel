@@ -34,6 +34,7 @@ CORE_INDEX_NAMES = {
 CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
+_OVERVIEW_INDUSTRY_CONFIG_ID = "ext_hy_ths"
 
 
 # ================================================================
@@ -260,6 +261,8 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
     store = ExtConfigStore(repo.store.data_dir)
     groups: dict[str, dict[str, dict]] = {}
     for config in store.load_all():
+        if kind == "industry" and config.id != _OVERVIEW_INDUSTRY_CONFIG_ID:
+            continue
         field = _dimension_field(config, kind)
         if not field:
             continue
