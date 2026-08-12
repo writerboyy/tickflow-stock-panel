@@ -314,6 +314,53 @@ def test_incremental_collection_uses_market_dates_instead_of_symbol_loops(tmp_pa
     ]
 
 
+def test_incremental_daily_basic_paginates_full_market_response(tmp_path):
+    first_page = [
+        {
+            "ts_code": f"{index:06d}.SZ",
+            "trade_date": "20250102",
+            "turnover_rate_f": 1.0,
+        }
+        for index in range(4_000)
+    ]
+    second_page = [
+        {
+            "ts_code": f"{index:06d}.SZ",
+            "trade_date": "20250102",
+            "turnover_rate_f": 1.0,
+        }
+        for index in range(4_000, 5_500)
+    ]
+
+    class PagedClient(_Client):
+        def request(self, api_name: str, params: dict) -> TushareResponse:
+            self.calls.append((api_name, dict(params)))
+            return _response(api_name, first_page if params["offset"] == 0 else second_page)
+
+    client = PagedClient({})
+    engine = TushareDatasetIngestion(
+        IngestionConfig(
+            tmp_path,
+            "paged-daily-basic",
+            start=date(2025, 1, 2),
+            end=date(2025, 1, 2),
+            incremental=True,
+        ),
+        client,
+    )
+
+    result = engine.collect(
+        (DATASET_SPECS["daily_basic"],),
+        trade_dates=[date(2025, 1, 2)],
+    )
+
+    assert result["daily_basic"]["rows"] == 5_500
+    assert [params for _, params in client.calls] == [
+        {"trade_date": "20250102", "limit": 4_000, "offset": 0},
+        {"trade_date": "20250102", "limit": 4_000, "offset": 4_000},
+    ]
+
+
 def test_reference_publish_keeps_existing_instrument_and_adds_gap(tmp_path):
     target = tmp_path / "instruments/instruments.parquet"
     target.parent.mkdir(parents=True)

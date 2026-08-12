@@ -27,6 +27,8 @@ from app.services.tushare_history import (
     save_tushare_key_from_stdin,
     _safe_part,
 )
+from app.services.tushare_datasets import resolve_datasets
+from app.services.tushare_ingestion import IngestionConfig, TushareDatasetIngestion
 
 
 def _print(value: object) -> None:
@@ -72,6 +74,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--end", type=_date, default=date.today(), help="历史终点 YYYY-MM-DD")
     parser.add_argument("--incremental", action="store_true", help="仅同步最近 10 个自然日并捕获公告修订")
     parser.add_argument("--publish", action="store_true", help="原子发布已审计缺口；默认仅归档和 staging")
+    parser.add_argument(
+        "--publish-staged",
+        action="store_true",
+        help="仅发布 --run-id 已完成的 staging，不访问 Tushare",
+    )
     parser.add_argument("--status", action="store_true", help="读取指定 run-id 的 manifest，不访问网络")
     parser.add_argument("--clear-key", action="store_true", help="清除本地 Tushare key")
     parser.add_argument("--symbols", action="append", help="限制股票代码，逗号分隔；仅用于小样本或恢复")
@@ -104,6 +111,29 @@ def main(argv: list[str] | None = None) -> int:
         if not path.exists():
             parser.error(f"manifest not found: {path}")
         _print(json.loads(path.read_text(encoding="utf-8")))
+        return 0
+
+    if args.publish_staged:
+        if not args.run_id:
+            parser.error("--publish-staged requires --run-id")
+        if not args.datasets:
+            parser.error("--publish-staged requires --datasets")
+        engine = TushareDatasetIngestion(
+            IngestionConfig(
+                data_dir,
+                _safe_part(args.run_id),
+                start=args.start,
+                end=args.end,
+                publish=True,
+                incremental=args.incremental,
+            ),
+            client=None,
+        )
+        try:
+            published = engine.publish(resolve_datasets(tuple(args.datasets)))
+        except (ValueError, RuntimeError) as exc:
+            parser.exit(1, f"Tushare staged publish blocked: {exc}\n")
+        _print({"status": "published", "datasets": published})
         return 0
 
     if args.key_stdin:

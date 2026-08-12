@@ -37,3 +37,37 @@ def test_cli_datasets_and_asset_samples_reach_backfill_config(tmp_path, monkeypa
     assert config.symbols == ("000001.SZ", "000002.SZ")
     assert config.etfs == ("510300.SH",)
     assert config.indexes == ("000300.SH",)
+
+
+def test_cli_can_publish_completed_staging_without_tushare_key(tmp_path, monkeypatch):
+    seen = {}
+
+    class Publisher:
+        def __init__(self, config, client):
+            seen["config"] = config
+            seen["client"] = client
+
+        def publish(self, specs):
+            seen["specs"] = tuple(spec.api_name for spec in specs)
+            return {name: {"status": "published"} for name in seen["specs"]}
+
+    monkeypatch.setattr(cli, "TushareDatasetIngestion", Publisher)
+    monkeypatch.setattr(
+        cli,
+        "load_tushare_key",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("offline publish must not load a Tushare key")
+        ),
+    )
+
+    code = cli.main([
+        "--data-dir", str(tmp_path),
+        "--run-id", "completed-run",
+        "--datasets", "top_list,margin_detail",
+        "--publish-staged",
+    ])
+
+    assert code == 0
+    assert seen["client"] is None
+    assert seen["config"].publish is True
+    assert seen["specs"] == ("top_list", "margin_detail")

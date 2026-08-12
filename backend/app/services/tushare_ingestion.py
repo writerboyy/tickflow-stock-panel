@@ -119,6 +119,9 @@ _INCREMENTAL_DATE_PARAMS = {
     "dividend": "ann_date",
     "suspend_d": "trade_date",
 }
+_INCREMENTAL_PAGED_APIS = {"daily_basic", "moneyflow"}
+_PAGE_SIZE = 4_000
+_MAX_PAGES_PER_BATCH = 10
 
 
 class TushareIngestionBlocked(RuntimeError):
@@ -536,7 +539,12 @@ def _batch_requests(
                 current += timedelta(days=1)
         for current in dates:
             value = current.strftime("%Y%m%d")
-            requests.append((f"{incremental_param}-{value}", {incremental_param: value}))
+            params: dict[str, Any] = {incremental_param: value}
+            batch_id = f"{incremental_param}-{value}"
+            if spec.api_name in _INCREMENTAL_PAGED_APIS:
+                params.update(limit=_PAGE_SIZE, offset=0)
+                batch_id = f"{batch_id}-offset-0"
+            requests.append((batch_id, params))
         return requests
     if spec.scope == "trade_date":
         for item in sorted(set(trade_dates)):
@@ -672,7 +680,11 @@ class TushareDatasetIngestion:
             rejected = 0
             failures: list[str] = []
             empty_unconfirmed: list[str] = []
-            for batch_id, params in requests:
+            request_index = 0
+            page_hashes: dict[str, set[str]] = {}
+            while request_index < len(requests):
+                batch_id, params = requests[request_index]
+                request_index += 1
                 path = _staging_path(self.run_root, spec, batch_id)
                 state = load_ingestion_manifest(
                     self.config.data_dir,
@@ -686,13 +698,33 @@ class TushareDatasetIngestion:
                     and prior.get("status") in {"completed", "valid_empty"}
                     and (prior.get("status") == "valid_empty" or path.exists())
                 ):
-                    rows += int(prior.get("row_count") or 0)
+                    prior_rows = int(prior.get("row_count") or 0)
+                    rows += prior_rows
+                    page_key = str(params.get("trade_date") or params.get("ann_date") or "")
+                    prior_hash = str(prior.get("source_content_hash") or "")
+                    if prior_hash:
+                        page_hashes.setdefault(page_key, set()).add(prior_hash)
+                    self._append_next_page(spec, requests, batch_id, params, prior_rows)
                     continue
                 try:
                     response = self.client.request(spec.api_name, params)
                     source_hash = self._archive(spec, batch_id, response)
                     frame, audit = normalize_dataset_rows(spec, response.rows)
-                    if frame.height >= spec.max_rows:
+                    if spec.api_name in _INCREMENTAL_PAGED_APIS:
+                        if frame.height > _PAGE_SIZE:
+                            raise TushareIngestionBlocked(
+                                f"{spec.api_name}/{batch_id} exceeded requested page size "
+                                f"{_PAGE_SIZE}"
+                            )
+                        page_key = str(params.get("trade_date") or params.get("ann_date") or "")
+                        seen_hashes = page_hashes.setdefault(page_key, set())
+                        if source_hash in seen_hashes:
+                            raise TushareIngestionBlocked(
+                                f"{spec.api_name}/{batch_id} repeated a prior page; "
+                                "provider may have ignored offset"
+                            )
+                        seen_hashes.add(source_hash)
+                    elif frame.height >= spec.max_rows:
                         raise TushareIngestionBlocked(
                             f"{spec.api_name}/{batch_id} reached row limit {spec.max_rows}; "
                             "split the request window before publishing"
@@ -733,6 +765,7 @@ class TushareDatasetIngestion:
                         request_params_hash=stable_content_hash(params),
                         audit=audit,
                     )
+                    self._append_next_page(spec, requests, batch_id, params, frame.height)
                 except Exception as exc:  # noqa: BLE001
                     failures.append(batch_id)
                     record_ingestion_batch(
@@ -774,6 +807,7 @@ class TushareDatasetIngestion:
                 rejected_rows=rejected,
                 failed_batches=failures,
                 empty_unconfirmed_batches=empty_unconfirmed,
+                requested_batches=len(requests),
                 batches=batches,
             )
             summary[spec.api_name] = {
@@ -795,6 +829,28 @@ class TushareDatasetIngestion:
                 # failed dataset itself remains impossible to publish.
                 manifest["status"] = "failed"
         return summary
+
+    @staticmethod
+    def _append_next_page(
+        spec: TushareDatasetSpec,
+        requests: list[tuple[str, dict[str, Any]]],
+        batch_id: str,
+        params: Mapping[str, Any],
+        row_count: int,
+    ) -> None:
+        if spec.api_name not in _INCREMENTAL_PAGED_APIS or row_count < _PAGE_SIZE:
+            return
+        offset = int(params.get("offset") or 0)
+        page_number = offset // _PAGE_SIZE + 1
+        if page_number >= _MAX_PAGES_PER_BATCH:
+            raise TushareIngestionBlocked(
+                f"{spec.api_name}/{batch_id} exceeded {_MAX_PAGES_PER_BATCH} pages"
+            )
+        next_offset = offset + _PAGE_SIZE
+        base_id = batch_id.rsplit("-offset-", 1)[0]
+        next_request = (f"{base_id}-offset-{next_offset}", {**params, "offset": next_offset})
+        if next_request[0] not in {item[0] for item in requests}:
+            requests.append(next_request)
 
     def _staged(self, spec: TushareDatasetSpec) -> pl.DataFrame:
         paths = sorted((self.run_root / "datasets" / spec.api_name).glob("*.parquet"))
