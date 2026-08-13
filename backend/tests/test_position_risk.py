@@ -750,6 +750,32 @@ def test_builtin_signal_directions_match_the_shared_catalog():
     } == expected
 
 
+def test_removed_custom_signal_state_is_cleared(tmp_path: Path):
+    repo = _Repo()
+    repo.rows = repo.rows.with_columns(pl.lit(True).alias("csg_take_profit"))
+    service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    service._set_rule("600036.SH", "signal:csg_take_profit", True, datetime(2026, 8, 7, 10, 0))
+    service._history["600036.SH"].pop("csg_take_profit", None)
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 36},
+        datetime(2026, 8, 7, 10, 1),
+    )
+
+    assert service._rule_states["600036.SH:signal:csg_take_profit"]["active"] is False
+
+
 def test_quote_age_excludes_lunch_break():
     timestamp = datetime(2026, 8, 7, 11, 30)
     assert PositionRiskService._quote_age_in_session(timestamp, datetime(2026, 8, 7, 13, 0)) == 0

@@ -1009,6 +1009,16 @@ class PositionRiskService:
             **{signal_id: False for signal_id in INTRADAY_SIGNAL_LABELS},
             **(intraday_signals or {}),
         }
+        current_signal_ids = {
+            signal_id for signal_id in combined_signals
+            if signal_id.startswith(("signal_", "csg_"))
+        }
+        prefix = f"{symbol}:signal:"
+        for key in list(self._rule_states):
+            if key.startswith(prefix):
+                signal_id = key.removeprefix(prefix)
+                if signal_id not in current_signal_ids:
+                    self._set_rule(symbol, f"signal:{signal_id}", False, now)
         overlap_signals = {
             "signal_ma5_breakdown",
             "signal_ma10_breakdown",
