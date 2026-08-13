@@ -97,7 +97,7 @@ const nav = [
 ] as const
 
 const CUSTOM_NAV_PARENT_ID = '__custom__'
-const CUSTOM_NAV_IDS = new Set(['/free-strategy', '/market-heat', '/large-orders', '/paper-trading'])
+const CUSTOM_NAV_IDS = new Set(['/free-strategy', '/market-heat', '/large-orders', '/paper-trading', '/limit-board'])
 
 type NavItem = {
   to: string
