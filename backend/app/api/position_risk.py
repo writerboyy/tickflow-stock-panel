@@ -39,10 +39,30 @@ class RevisionPayload(BaseModel):
     revision: int
 
 
+class QmtOrderPayload(BaseModel):
+    action: str
+    symbol: str
+    volume: int
+    price: float | None = None
+    price_type: str = "LIMIT"
+    idempotency_key: str = Field(min_length=8, max_length=120)
+
+
+class QmtTradeTogglePayload(BaseModel):
+    enabled: bool
+
+
 def _service(request: Request):
     service = getattr(request.app.state, "position_risk_service", None)
     if service is None:
         raise HTTPException(503, "持仓风控服务尚未初始化")
+    return service
+
+
+def _qmt(request: Request):
+    service = getattr(request.app.state, "qmt_trading_service", None)
+    if service is None:
+        raise HTTPException(503, "QMT交易网关尚未初始化")
     return service
 
 
@@ -292,3 +312,65 @@ def get_options(request: Request):
             "intraday": intraday_monitor_support(capset),
         },
     }
+
+
+@router.get("/qmt/status")
+def qmt_status(request: Request):
+    return _qmt(request).status()
+
+
+@router.post("/qmt/probe")
+def qmt_probe(request: Request):
+    try:
+        return _qmt(request).probe()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.post("/qmt/sync")
+def qmt_sync(request: Request):
+    qmt = _qmt(request)
+    try:
+        result = qmt.sync_into(_service(request))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, **result, "message": "QMT权威持仓已同步"}
+
+
+@router.post("/qmt/trading-toggle")
+def qmt_trading_toggle(payload: QmtTradeTogglePayload, request: Request):
+    try:
+        status = _qmt(request).set_trade_enabled(payload.enabled)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "status": status}
+
+
+@router.get("/qmt/orders")
+def qmt_orders(request: Request):
+    try:
+        return {"orders": _qmt(request).list_orders()}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.post("/qmt/orders")
+def qmt_submit_order(payload: QmtOrderPayload, request: Request):
+    try:
+        result = _qmt(request).submit_order(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "order": result}
+
+
+@router.post("/qmt/orders/cancel")
+def qmt_cancel_order(payload: dict[str, Any], request: Request):
+    try:
+        result = _qmt(request).cancel_order(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "order": result}

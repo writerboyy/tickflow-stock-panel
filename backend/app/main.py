@@ -108,6 +108,15 @@ async def lifespan(app: FastAPI):
     large_order_service.start()
     qs.boot_check()
 
+    # QMT 网关按需调用；未配置或公网不可达不会阻断主应用启动。
+    try:
+        from app.services.qmt_trading import QmtTradingService
+
+        app.state.qmt_trading_service = QmtTradingService(store.data_dir, settings)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("QMT trading gateway not initialized: %s", e)
+        app.state.qmt_trading_service = None
+
     # QuoteService 需要访问 strategy_monitor 等单例
     # 先创建 strategy_monitor，再注入 app.state
     from app.strategy.monitor import StrategyMonitorService
@@ -328,6 +337,9 @@ async def lifespan(app: FastAPI):
         position_risk_service = PositionRiskService(store.data_dir, repo, qs, app.state)
         app.state.position_risk_service = position_risk_service
         position_risk_service.start()
+        qmt_trading_service = getattr(app.state, "qmt_trading_service", None)
+        if qmt_trading_service and qmt_trading_service.start_auto_sync(position_risk_service):
+            logger.info("QMT automatic position sync started")
     except Exception as e:  # noqa: BLE001
         logger.warning("position risk service not started: %s", e)
         app.state.position_risk_service = None
@@ -358,9 +370,13 @@ async def lifespan(app: FastAPI):
     fsc = getattr(app.state, "financial_scheduler", None)
     if fsc:
         fsc.stop()
+    qmt_trading_service = getattr(app.state, "qmt_trading_service", None)
+    if qmt_trading_service:
+        qmt_trading_service.stop()
     position_risk_service = getattr(app.state, "position_risk_service", None)
     if position_risk_service:
         position_risk_service.stop()
+    app.state.qmt_trading_service = None
     limit_board_service = getattr(app.state, "limit_board_service", None)
     if limit_board_service:
         limit_board_service.stop()

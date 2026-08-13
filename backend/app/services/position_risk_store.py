@@ -189,6 +189,18 @@ class PositionRiskStore:
             self._write(next_value)
             return deepcopy(next_value)
 
+    def update_system(self, updater) -> dict[str, Any]:
+        """更新运行账户字段但不抢占用户配置 revision。"""
+        with self._lock:
+            current = self.load()
+            next_value = deepcopy(current)
+            updater(next_value)
+            next_value = self._merge_defaults(next_value)
+            next_value["revision"] = int(current["revision"])
+            next_value["updated_at"] = _now()
+            self._write(next_value)
+            return deepcopy(next_value)
+
     def get_runtime(self, key: str, default: Any = None) -> Any:
         with self._connect() as conn:
             row = conn.execute("SELECT value_json FROM runtime_state WHERE key = ?", (key,)).fetchone()

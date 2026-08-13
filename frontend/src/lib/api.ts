@@ -942,6 +942,39 @@ export interface PositionRiskPortfolio {
   }
 }
 
+export interface QmtStatus {
+  configured: boolean
+  trade_authorized: boolean
+  trade_enabled: boolean
+  max_order_lots: number
+  account_id: string | null
+  account_type: string
+  auto_sync_enabled: boolean
+  auto_sync_running: boolean
+  auto_sync_interval_seconds: number
+  last_probe_at: string | null
+  last_sync_at: string | null
+  state: 'not_configured' | 'unknown' | 'ready' | 'error'
+  reason: string
+  latency_ms?: number
+}
+
+export interface QmtOrder {
+  idempotency_key?: string
+  action?: 'BUY' | 'SELL' | string
+  symbol?: string
+  stock_code?: string
+  volume?: number
+  price?: number
+  price_type?: string
+  status?: string
+  order_sys_id?: string | null
+  user_order_id?: string | null
+  created_at?: string
+  updated_at?: string
+  [key: string]: any
+}
+
 export interface PositionRiskOcrRow {
   code: string
   symbol: string | null
@@ -2179,6 +2212,15 @@ export const api = {
     ),
   positionRiskEvents: () =>
     request<{ events: AlertEvent[]; count: number }>('/api/position-risk/events'),
+  qmtStatus: () => request<QmtStatus>('/api/position-risk/qmt/status'),
+  qmtProbe: () => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST' }),
+  qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
+  qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
+  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume: number; price?: number | null; price_type: string; idempotency_key: string }) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  qmtCancelOrder: (order_sys_id: string) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
   limitBoard: () => request<LimitBoardView>('/api/limit-board'),
   limitBoardAdd: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/selected', {

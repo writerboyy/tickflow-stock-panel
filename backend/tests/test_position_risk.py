@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import polars as pl
@@ -11,6 +12,7 @@ from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict
+from app.services.qmt_trading import QmtRedisRpcClient, QmtRpcError, QmtTradingService
 from app.services.quote_service import QuoteService
 from app.services.watchlist_ocr.provider import OcrProvider
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -272,6 +274,152 @@ def test_position_risk_notifications_default_to_off(tmp_path: Path):
 
     assert all(rule["enabled"] is True for rule in portfolio["template"]["rules"].values())
     assert all(rule["notify"] is False for rule in portfolio["template"]["rules"].values())
+
+
+def _qmt_settings(**overrides):
+    values = {
+        "qmt_enabled": True,
+        "qmt_redis_host": "127.0.0.1",
+        "qmt_redis_port": 6379,
+        "qmt_redis_db": 5,
+        "qmt_redis_username": "",
+        "qmt_redis_password": "secret",
+        "qmt_account_id": "account-1",
+        "qmt_rpc_timeout_seconds": 1,
+        "qmt_trade_enabled": False,
+        "qmt_max_order_lots": 1,
+        "qmt_account_type": "CREDIT",
+        "qmt_auto_sync": True,
+        "qmt_auto_sync_interval_seconds": 30,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_qmt_client_requires_explicit_enable_and_complete_credentials():
+    disabled = QmtRedisRpcClient(_qmt_settings(qmt_enabled=False))
+    assert disabled.configured is False
+    assert "QMT_ENABLED" in disabled.configuration_reason
+
+    incomplete = QmtRedisRpcClient(_qmt_settings(qmt_redis_password=""))
+    assert incomplete.configured is False
+    assert "QMT_REDIS_PASSWORD" in incomplete.configuration_reason
+
+
+def test_qmt_client_forces_resp2_for_legacy_cloud_redis(monkeypatch):
+    captured = {}
+
+    class FakeRedis:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("app.services.qmt_trading.redis.Redis", FakeRedis)
+    client = QmtRedisRpcClient(_qmt_settings())
+    client._redis()
+    assert captured["protocol"] == 2
+
+
+def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+    with pytest.raises(QmtRpcError, match="交易开关"):
+        service._validate_order({"action": "BUY", "symbol": "600036.SH", "volume": 100, "price": 35}, {"positions": []})
+
+
+def test_qmt_trading_service_enforces_one_lot_and_sell_available_volume(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    snapshot = {"positions": [{"symbol": "600036.SH", "available": 100}]}
+    with pytest.raises(ValueError, match="不超过 100 股"):
+        service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 200, "price": 35}, snapshot)
+    with pytest.raises(ValueError, match="可用持仓不足"):
+        service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, {"positions": [{"symbol": "600036.SH", "available": 0}]})
+    assert service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, snapshot)["volume"] == 100
+
+
+def test_qmt_runtime_trade_switch_starts_off_and_requires_sync(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    assert service.status()["trade_authorized"] is True
+    assert service.status()["trade_enabled"] is False
+    with pytest.raises(QmtRpcError, match="先成功同步"):
+        service.set_trade_enabled(True)
+    service._last_snapshot = {"synced_at": "2026-08-14T00:00:00+00:00"}
+    service._last_status = {"state": "ready"}
+    assert service.set_trade_enabled(True)["trade_enabled"] is True
+
+
+def test_qmt_auto_sync_starts_immediately_and_stops(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+    called = Event()
+    service.sync_into = lambda _position_risk: called.set()
+    assert service.start_auto_sync(object()) is True
+    assert called.wait(1) is True
+    assert service.status()["auto_sync_running"] is True
+    service.stop()
+    assert service.status()["auto_sync_running"] is False
+    assert service.status()["trade_enabled"] is False
+
+
+def test_qmt_submit_persists_unknown_before_timeout_and_does_not_retry(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    service.sync = lambda: {"account": {"cash": 100_000}, "positions": []}
+    calls = []
+
+    def fail_call(method, params):
+        calls.append((method, params))
+        raise QmtRpcError("QMT RPC 超时")
+
+    service.client.call = fail_call
+    request = {
+        "idempotency_key": "same-request-1", "action": "BUY", "symbol": "600036.SH",
+        "volume": 100, "price": 35, "price_type": "LIMIT",
+    }
+    with pytest.raises(QmtRpcError, match="超时"):
+        service.submit_order(request)
+    assert service._known_order("same-request-1")["status"] == "unknown"
+    assert service.submit_order(request)["status"] == "unknown"
+    assert len(calls) == 1
+
+
+def test_qmt_submit_uses_server_idempotency_and_backfills_order_id(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    service.sync = lambda: {"account": {"cash": 100_000}, "positions": []}
+
+    def fake_call(method, params):
+        if method == "submit_orders_batch":
+            assert params["orders"][0]["require_idempotency_check"] is True
+            return [{"success": True, "accepted": True, "user_order_id": "position-risk:request-2"}]
+        if method == "query_orders":
+            return [{
+                "stock_code": "600036.SH", "action": "BUY", "volume": 100,
+                "price": 35, "status": "50", "order_sys_id": "sys-2",
+                "user_order_id": "position-risk:request-2",
+            }]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "request-2", "action": "BUY", "symbol": "600036.SH",
+        "volume": 100, "price": 35, "price_type": "LIMIT",
+    })
+    assert result["status"] == "50"
+    assert result["order_sys_id"] == "sys-2"
+    assert result["symbol"] == "600036.SH"
+
+
+def test_qmt_snapshot_rejects_available_above_volume():
+    client = QmtRedisRpcClient(_qmt_settings())
+    responses = iter([
+        {"account_id": "account-1"},
+        {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
+        {"600036.SH": {"stock_code": "600036.SH", "volume": 100, "available": 200, "cost": 10}},
+        [],
+        [],
+    ])
+    client.call = lambda _method, _params=None: next(responses)
+    with pytest.raises(QmtRpcError, match="可用数量大于持仓数量"):
+        client.snapshot()
 
 
 class _Repo:
