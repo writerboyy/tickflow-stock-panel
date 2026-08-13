@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import polars as pl
@@ -331,6 +331,28 @@ class _Quotes:
         pass
 
 
+class _AssetAwareQuotes(_Quotes):
+    def __init__(self) -> None:
+        super().__init__()
+        self.intraday_consumers = {}
+        self.signal_assets = []
+        self.snapshot_assets = []
+
+    def set_intraday_consumer(self, consumer, symbols, asset_type="stock"):
+        self.intraday_consumers[consumer] = (set(symbols), asset_type)
+
+    def remove_intraday_consumer(self, consumer):
+        self.intraday_consumers.pop(consumer, None)
+
+    def get_intraday_signals(self, symbols, *, prev_close, asset_type, now, consumer_id):
+        self.signal_assets.append((set(symbols), asset_type, consumer_id))
+        return {}
+
+    def get_intraday_snapshot(self, symbols, *, asset_type, now):
+        self.snapshot_assets.append((set(symbols), asset_type))
+        return {"vwap": {}, "rows": [], "available": False}
+
+
 class _IntradayQuotes(_Quotes):
     def get_intraday_snapshot(self, _symbols, *, asset_type="stock", now=None):
         return {"vwap": {"600036.SH": 100.0}, "rows": [], "available": True}
@@ -512,6 +534,222 @@ def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
     assert event["rule_name"] == "分时均价负偏离超限"
 
 
+def test_active_rule_state_survives_service_restart(tmp_path: Path):
+    quotes = _Quotes()
+    first = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    first.store.replace({
+        "account": {"name": "账户", "cash": 64_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
+        "template": {"rules": {"stop_loss": {"notify": True}}},
+    }, 0)
+    portfolio = first.store.load()
+    position = portfolio["positions"][0]
+    quote = {"symbol": "600036.SH", "last_price": 35.9, "timestamp": "2026-08-07T10:00:00"}
+
+    first._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 10, 0))
+    assert [item["rule_id"] for item in quotes.alerts] == ["stop_loss"]
+
+    restarted_quotes = _Quotes()
+    restarted = PositionRiskService(
+        tmp_path, _Repo(), restarted_quotes, SimpleNamespace(paper_supervisor=None),
+    )
+    restarted._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 10, 1))
+    assert restarted_quotes.alerts == []
+
+
+def test_account_rule_state_survives_service_restart(tmp_path: Path):
+    quotes = _Quotes()
+    first = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    first.store.replace({
+        "account": {
+            "name": "账户", "cash": 1_000, "total_asset": 100_000,
+            "previous_close_total_asset": 100_000,
+        },
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 2_600,
+            "available": 2_600, "cost_price": 38,
+        }],
+    }, 0)
+    first._latest_quotes["600036.SH"] = {"last_price": 36}
+    portfolio = first.store.load()
+
+    first._evaluate_account(portfolio, datetime(2026, 8, 7, 10, 0))
+    assert any(
+        item["rule_id"] == "total_exposure"
+        for item in alert_store.list_recent(tmp_path, source="position_risk")
+    )
+
+    restarted = PositionRiskService(
+        tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None),
+    )
+    restarted._latest_quotes["600036.SH"] = {"last_price": 36}
+    restarted._evaluate_account(portfolio, datetime(2026, 8, 7, 10, 1))
+    assert len([
+        item for item in alert_store.list_recent(tmp_path, source="position_risk")
+        if item["rule_id"] == "total_exposure"
+    ]) == 1
+
+
+def test_normal_event_cooldown_survives_recovery_within_five_minutes(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    assert service._set_rule("600036.SH", "large_buy", True, datetime(2026, 8, 7, 10, 0))
+    assert not service._set_rule("600036.SH", "large_buy", False, datetime(2026, 8, 7, 10, 0, 1))
+    assert not service._set_rule("600036.SH", "large_buy", True, datetime(2026, 8, 7, 10, 4, 59))
+    assert not service._set_rule("600036.SH", "large_buy", False, datetime(2026, 8, 7, 10, 5))
+    assert service._set_rule("600036.SH", "large_buy", True, datetime(2026, 8, 7, 10, 5, 1))
+
+
+def test_quote_gap_is_scoped_and_waits_for_every_symbol_to_recover(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 80_000, "total_asset": 100_000},
+        "positions": [
+            {"symbol": "600036.SH", "name": "招商银行", "quantity": 100, "available": 100, "cost_price": 35},
+            {"symbol": "000001.SZ", "name": "平安银行", "quantity": 100, "available": 100, "cost_price": 10},
+        ],
+    }, 0)
+    service._flow["600036.SH"].append({"ts": 1, "amount": 1, "volume": 1, "direction": 1, "price": 36})
+    service._flow["000001.SZ"].append({"ts": 1, "amount": 1, "volume": 1, "direction": 1, "price": 10})
+
+    service._mark_quote_gap("单股中断", {"600036.SH"})
+    assert not service._flow["600036.SH"]
+    assert service._flow["000001.SZ"]
+    assert service._quote_gap_symbols == {"600036.SH"}
+
+    service._mark_quote_gap("另一标的中断", {"000001.SZ"})
+    service._mark_quote_recovered({"600036.SH"})
+    assert service._quote_gap_symbols == {"000001.SZ"}
+    assert service._runtime_status == "reconnecting"
+    service._mark_quote_recovered({"000001.SZ"})
+    assert not service._quote_gap_symbols
+    assert service._runtime_status == "websocket"
+
+
+def test_unrealized_loss_uses_current_equity_denominator(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {
+            "name": "账户", "cash": 50_000, "total_asset": 200_000,
+            "previous_close_total_asset": 200_000,
+        },
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 5_000,
+            "available": 5_000, "cost_price": 40,
+        }],
+    }, 0)
+    portfolio = service.store.load()
+    service._latest_quotes["600036.SH"] = {"last_price": 36}
+
+    service._evaluate_account(portfolio, datetime(2026, 8, 7, 10, 0))
+
+    assert any(
+        item["rule_id"] == "unrealized_loss"
+        for item in alert_store.list_recent(tmp_path, source="position_risk")
+    )
+
+
+def test_depth_state_isolated_between_trading_dates(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.set_runtime("depth:600036.SH", {
+        "trading_date": "2026-08-06", "sealed": True,
+        "had_broken": True, "peak_bid_volume": 10_000,
+    })
+    sealed = {
+        "symbol": "600036.SH", "bid1_price": 40, "bid1_volume": 10_000,
+        "ask1_price": None, "ask1_volume": 0,
+    }
+    service._depth["600036.SH"].extend([sealed] * 3)
+
+    state = service._depth_state(
+        "600036.SH", {"limit_up": 40}, datetime(2026, 8, 7, 10, 0),
+    )
+
+    assert state["broken"] is False
+    assert state["resealed"] is False
+
+
+def test_stock_and_etf_use_separate_intraday_routes(tmp_path: Path):
+    class _MixedRepo(_Repo):
+        def resolve_asset_type(self, symbol: str) -> str:
+            return "etf" if symbol == "510300.SH" else "stock"
+
+    quotes = _AssetAwareQuotes()
+    service = PositionRiskService(tmp_path, _MixedRepo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 90_000, "total_asset": 100_000},
+        "positions": [
+            {"symbol": "600036.SH", "name": "招商银行", "asset_type": "stock", "quantity": 100, "available": 100, "cost_price": 35},
+            {"symbol": "510300.SH", "name": "沪深300ETF", "asset_type": "etf", "quantity": 100, "available": 100, "cost_price": 4},
+        ],
+    }, 0)
+
+    service.refresh_subscription()
+    assert quotes.intraday_consumers["position-risk:stock"] == ({"600036.SH"}, "stock")
+    assert quotes.intraday_consumers["position-risk:etf"] == ({"510300.SH"}, "etf")
+
+    now = datetime(2026, 8, 7, 10, 0)
+    service._history = {
+        "600036.SH": {"raw_close": 36},
+        "510300.SH": {"raw_close": 4},
+    }
+    service._intraday_signals({"600036.SH", "510300.SH"}, now)
+    assert {(next(iter(symbols)), asset) for symbols, asset, _ in quotes.signal_assets} == {
+        ("600036.SH", "stock"), ("510300.SH", "etf"),
+    }
+    portfolio = service.store.load()
+    etf = next(item for item in portfolio["positions"] if item["asset_type"] == "etf")
+    service._evaluate_position(
+        portfolio, etf,
+        {"symbol": "510300.SH", "last_price": 4, "timestamp": now.isoformat()},
+        now,
+    )
+    assert quotes.snapshot_assets[-1] == ({"510300.SH"}, "etf")
+
+
+def test_history_preload_retries_after_repository_warmup(tmp_path: Path):
+    repo = _Repo()
+    calls = 0
+
+    def get_latest():
+        nonlocal calls
+        calls += 1
+        return (pl.DataFrame(), None) if calls == 1 else (repo.rows, None)
+
+    repo.get_enriched_latest = get_latest
+    service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service._preload_history({"600036.SH"})
+    assert service._history == {}
+    service._preload_history_if_missing()
+    assert "600036.SH" in service._history
+
+
+def test_limit_down_recovery_is_an_entry_signal():
+    assert PositionRiskService._signal_direction("signal_limit_down_recovery") == "entry"
+
+
+def test_builtin_signal_directions_match_the_shared_catalog():
+    expected = {
+        "signal_ma_golden_5_20": "entry",
+        "signal_ma_dead_5_20": "exit",
+        "signal_boll_breakout_upper": "entry",
+        "signal_boll_breakdown_lower": "exit",
+        "signal_volume_surge": "both",
+        "signal_limit_up": "entry",
+        "signal_limit_down": "exit",
+        "signal_limit_down_recovery": "entry",
+        "signal_broken_limit_up": "exit",
+        "signal_intraday_avg_cross_up": "entry",
+        "signal_intraday_avg_cross_down": "exit",
+        "signal_intraday_zero_cross_up": "entry",
+        "signal_intraday_zero_cross_down": "exit",
+    }
+    assert {
+        signal_id: PositionRiskService._signal_direction(signal_id)
+        for signal_id in expected
+    } == expected
+
+
 def test_quote_age_excludes_lunch_break():
     timestamp = datetime(2026, 8, 7, 11, 30)
     assert PositionRiskService._quote_age_in_session(timestamp, datetime(2026, 8, 7, 13, 0)) == 0
@@ -533,6 +771,51 @@ def test_depth_requires_three_snapshots_and_detects_break(tmp_path: Path):
     service._depth["600036.SH"].append({**sealed, "bid1_price": 39.9, "ask1_price": 40.0, "ask1_volume": 100})
     service._depth["600036.SH"].extend([{**sealed, "bid1_price": 39.9}, {**sealed, "bid1_price": 39.9}])
     assert service._depth_state("600036.SH", quote, datetime(2026, 8, 7, 10, 0, 2))["broken"] is True
+
+
+def test_resealed_limit_up_only_fires_after_a_confirmed_break(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 35}],
+        "template": {"rules": {"resealed_limit_up": {"notify": True}}},
+    }, 0)
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    quote = {"symbol": "600036.SH", "last_price": 40, "limit_up": 40}
+    sealed = {
+        "symbol": "600036.SH", "bid1_price": 40, "bid1_volume": 10_000,
+        "ask1_price": None, "ask1_volume": 0,
+    }
+    open_depth = {**sealed, "bid1_price": 39.9, "ask1_price": 40, "ask1_volume": 100}
+
+    service._depth["600036.SH"].extend([sealed] * 3)
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 10, 0))
+    assert not any(item["rule_id"] == "resealed_limit_up" for item in quotes.alerts)
+
+    service._depth["600036.SH"].append(open_depth)
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 10, 0, 1))
+    service._depth["600036.SH"].extend([sealed] * 3)
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 10, 0, 2))
+
+    event = next(item for item in quotes.alerts if item["rule_id"] == "resealed_limit_up")
+    assert event["rule_name"] == "涨停回封"
+
+
+def test_stale_depth_does_not_trigger_orderbook_rules(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    old = datetime(2026, 8, 7, 9, 59).timestamp()
+    depth = {
+        "symbol": "600036.SH", "bid_volumes": [10], "ask_volumes": [100],
+        "bid1_price": 35.9, "bid1_volume": 10, "ask1_price": 36, "ask1_volume": 100,
+        "received_at": old,
+    }
+    service._depth["600036.SH"].extend([depth] * 3)
+    state = service._depth_state(
+        "600036.SH", {"limit_up": 40}, datetime(2026, 8, 7, 10, 0),
+    )
+    assert state["imbalance"] is None
 
 
 def test_breaking_limit_up_does_not_also_emit_seal_shrink(tmp_path: Path):
@@ -661,6 +944,106 @@ def test_large_order_uses_configured_thresholds(tmp_path: Path):
     assert configured["large_sell"] is False
 
 
+def test_large_order_outlier_must_match_the_dominant_direction(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    now = datetime(2026, 8, 7, 10, 0)
+    amounts = [100, 100, 100, 100, 100, 100, 1_000]
+    directions = [-1, -1, -1, -1, -1, -1, 1]
+    for offset, (amount, direction) in enumerate(zip(amounts, directions, strict=True)):
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - offset,
+            "amount": amount,
+            "volume": 1,
+            "direction": direction,
+            "price": 36,
+        })
+    configured = {
+        "window_seconds": 60,
+        "min_samples": 7,
+        "min_amount": 500,
+        "mad_multiplier": 0,
+        "min_z_score": 2.5,
+        "direction_ratio": 0.65,
+    }
+
+    state = service._flow_state("600036.SH", now, configured)
+    assert state["large_buy"] is False
+    assert state["large_sell"] is False
+
+
+def test_large_order_summary_uses_the_matching_direction_z_score(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    now = datetime(2026, 8, 7, 10, 0)
+    for offset, (amount, direction) in enumerate([
+        (100, 1), (100, 1), (100, 1), (100, 1), (100, 1), (100, 1), (1_000, -1),
+    ]):
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - offset,
+            "amount": amount,
+            "volume": 1,
+            "direction": direction,
+            "price": 36,
+        })
+    configured = {
+        "min_amount": 500, "mad_multiplier": 0,
+        "min_z_score": 2.5, "direction_ratio": 0.10,
+    }
+
+    state = service._flow_state("600036.SH", now, configured)
+    assert state["large_sell"] is True
+    assert "卖向异常单" in state["sell_summary"]
+    assert state["sell_z_score"] > state["buy_z_score"]
+
+
+def test_large_buy_is_never_upgraded_to_reduction_by_sell_depth(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
+        "template": {"rules": {"large_buy": {
+            "notify": True, "min_amount": 500, "mad_multiplier": 0,
+            "min_z_score": 2.5, "direction_ratio": 0.65,
+        }}},
+    }, 0)
+    now = datetime(2026, 8, 7, 10, 0)
+    for offset, amount in enumerate([100, 100, 100, 100, 100, 100, 1_000]):
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - offset, "amount": amount, "volume": 1,
+            "direction": 1, "price": 36,
+        })
+    service._depth["600036.SH"].extend([{
+        "symbol": "600036.SH", "bid_volumes": [10], "ask_volumes": [100],
+        "bid1_price": 35.9, "bid1_volume": 10, "ask1_price": 36, "ask1_volume": 100,
+    }] * 3)
+    portfolio = service.store.load()
+    service._evaluate_position(
+        portfolio, portfolio["positions"][0],
+        {"symbol": "600036.SH", "last_price": 36, "timestamp": now.isoformat()},
+        now,
+    )
+    event = next(item for item in quotes.alerts if item["rule_id"] == "large_buy")
+    assert event["suggestion_pct"] == 0
+
+
+def test_sealed_order_shrink_requires_current_seal(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.set_runtime("depth:600036.SH", {
+        "sealed": False,
+        "peak_bid_volume": 10_000,
+    })
+    open_depth = {
+        "symbol": "600036.SH", "bid1_price": 39.9, "bid1_volume": 100,
+        "ask1_price": 40, "ask1_volume": 100,
+    }
+    service._depth["600036.SH"].extend([open_depth] * 3)
+    state = service._depth_state(
+        "600036.SH", {"limit_up": 40}, datetime(2026, 8, 7, 10, 0),
+    )
+    assert state["sealed"] is False
+    assert state["shrink_ratio"] == 0
+
+
 def test_two_independent_exit_signals_upgrade_to_half_reduction(tmp_path: Path):
     repo = _Repo()
     repo.rows = repo.rows.with_columns([
@@ -682,6 +1065,82 @@ def test_two_independent_exit_signals_upgrade_to_half_reduction(tmp_path: Path):
     pending = service.store.list_recommendations("pending")
     assert pending[0]["reduction_pct"] == 50
     assert any("共振" in reason for reason in pending[0]["reasons"])
+
+
+def test_exit_signal_resonance_survives_service_restart(tmp_path: Path):
+    first_repo = _Repo()
+    first_repo.rows = first_repo.rows.with_columns([
+        pl.lit(False).alias("signal_macd_dead"),
+        pl.lit(True).alias("signal_n_day_low"),
+    ])
+    first = PositionRiskService(tmp_path, first_repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    first.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+    }, 0)
+    first._preload_history({"600036.SH"})
+    first._latest_quotes["600036.SH"] = {
+        "symbol": "600036.SH", "last_price": 36,
+        "timestamp": "2026-08-07T10:00:00",
+    }
+    first._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+
+    second_repo = _Repo()
+    second_repo.rows = second_repo.rows.with_columns([
+        pl.lit(True).alias("signal_macd_dead"),
+        pl.lit(False).alias("signal_n_day_low"),
+    ])
+    restarted = PositionRiskService(
+        tmp_path, second_repo, _Quotes(), SimpleNamespace(paper_supervisor=None),
+    )
+    restarted._preload_history({"600036.SH"})
+    restarted._latest_quotes["600036.SH"] = {
+        "symbol": "600036.SH", "last_price": 36,
+        "timestamp": "2026-08-07T10:04:00",
+    }
+    restarted._evaluate_current(now=datetime(2026, 8, 7, 10, 4), force=True)
+
+    macd = next(
+        item for item in restarted.store.list_recommendations("pending")
+        if item["rule_id"] == "signal:signal_macd_dead"
+    )
+    assert macd["reduction_pct"] == 50
+    assert any("共振" in reason for reason in macd["reasons"])
+
+
+def test_persistent_daily_signal_emits_once_for_each_trading_date(tmp_path: Path):
+    repo = _Repo()
+    repo.rows = repo.rows.with_columns([
+        pl.lit(datetime(2026, 8, 7).date()).alias("date"),
+        pl.lit(True).alias("signal_volume_surge"),
+    ])
+    service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    quote = {"symbol": "600036.SH", "last_price": 36}
+
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 14, 59))
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 15, 0))
+    repo.rows = repo.rows.with_columns(pl.lit(datetime(2026, 8, 10).date()).alias("date"))
+    service._preload_history({"600036.SH"})
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 10, 9, 31))
+
+    events = [
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
+        if item["rule_id"] == "signal:signal_volume_surge"
+    ]
+    assert len(events) == 2
 
 
 def test_position_risk_sse_channel_is_independent():

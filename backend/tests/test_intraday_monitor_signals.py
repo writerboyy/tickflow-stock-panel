@@ -186,6 +186,23 @@ def test_quote_service_does_not_add_gap_volume_to_recovery_minute():
     assert recovery_row["volume"] == 0
 
 
+def test_intraday_gap_does_not_replay_crossing_on_recovery():
+    evaluator = IntradaySignalEvaluator()
+    kwargs = {
+        "symbols": {"600000.SH"},
+        "prev_close": {"600000.SH": 10.0},
+        "asset_type": "stock",
+    }
+    evaluator.evaluate(_minute_rows([9.0]), now=datetime(2026, 7, 17, 9, 32), **kwargs)
+    evaluator.mark_gap({"600000.SH"})
+
+    recovered = evaluator.evaluate(
+        _minute_rows([9.0, 11.0]), now=datetime(2026, 7, 17, 9, 33), **kwargs,
+    )
+
+    assert recovered == []
+
+
 def test_shared_intraday_event_is_delivered_once_per_consumer():
     service = QuoteService()
     service.set_intraday_consumer("monitor:stock", {"600000.SH"}, "stock")

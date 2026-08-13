@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import queue
 import re
@@ -16,12 +17,45 @@ from typing import Any
 import polars as pl
 
 from app.indicators.pipeline import ENRICHED_COLUMNS
-from app.market_time import cn_now, cn_today
+from app.market_time import cn_now
 from app.services import alert_store
 from app.services.position_risk_store import PositionRiskStore
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
 _ACCOUNT_ID = "position-risk"
+_EVENT_COOLDOWN_SECONDS = 300
+_NO_COOLDOWN_RULES = {
+    "stop_loss",
+    "broken_limit_up",
+    "limit_down",
+    "quote_interruption",
+}
+_BUILTIN_SIGNAL_DIRECTIONS = {
+    "signal_ma_golden_5_20": "entry",
+    "signal_ma_dead_5_20": "exit",
+    "signal_ma_golden_20_60": "entry",
+    "signal_macd_golden": "entry",
+    "signal_macd_dead": "exit",
+    "signal_ma20_breakout": "entry",
+    "signal_ma20_breakdown": "exit",
+    "signal_ma5_breakout": "entry",
+    "signal_ma5_breakdown": "exit",
+    "signal_ma10_breakout": "entry",
+    "signal_ma10_breakdown": "exit",
+    "signal_n_day_high": "entry",
+    "signal_n_day_low": "exit",
+    "signal_boll_breakout_upper": "entry",
+    "signal_boll_breakdown_lower": "exit",
+    "signal_volume_surge": "both",
+    "signal_limit_up": "entry",
+    "signal_limit_down": "exit",
+    "signal_limit_down_recovery": "entry",
+    "signal_broken_limit_up": "exit",
+    "signal_intraday_avg_cross_up": "entry",
+    "signal_intraday_avg_cross_down": "exit",
+    "signal_intraday_zero_cross_up": "entry",
+    "signal_intraday_zero_cross_down": "exit",
+}
 _RULE_WEIGHTS = {
     "cost": 30,
     "trend": 20,
@@ -36,6 +70,7 @@ _SIGNAL_LABELS = {
     **INTRADAY_SIGNAL_LABELS,
 }
 _SIGNAL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:signal|csg)[._][A-Za-z0-9_]+")
+logger = logging.getLogger(__name__)
 
 
 def position_risk_signal_label(signal_id: str, custom_labels: dict[str, str] | None = None) -> str:
@@ -105,21 +140,39 @@ class PositionRiskService:
         self._latest_quotes: dict[str, dict[str, Any]] = {}
         self._history: dict[str, dict[str, Any]] = {}
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=20))
-        self._flow: dict[str, deque[dict[str, float]]] = defaultdict(lambda: deque(maxlen=240))
-        self._active_rules: set[tuple[str, str]] = set()
+        self._flow: dict[str, deque[dict[str, float]]] = defaultdict(lambda: deque(maxlen=1800))
+        self._rule_states: dict[str, dict[str, Any]] = self.store.get_runtime("rule_states", {}) or {}
         self._runtime_status = "idle"
         self._runtime_reason = "尚未导入持仓"
         self._polling_lease = False
         self._last_processed_at: str | None = None
-        self._quote_gap_active = False
+        self._quote_gap_symbols: set[str] = set()
         self._recovery_pending_symbols: set[str] = set()
         self._flow_anchor_pending: set[str] = set()
+        self._asset_types: dict[str, str] = {}
+        self._history_pending_symbols: set[str] = set()
+        self._history_as_of: dict[str, str] = {}
+        self._next_history_refresh = 0.0
         self._custom_signal_directions: dict[str, str] = {}
         self._custom_signal_labels: dict[str, str] = {}
         self._recent_exit_signals: dict[str, deque[tuple[float, str]]] = defaultdict(
-            lambda: deque(maxlen=20)
+            lambda: deque(maxlen=20),
         )
-        self._severe_events: deque[float] = deque(maxlen=20)
+        recent_exit_signals = self.store.get_runtime("recent_exit_signals", {}) or {}
+        for symbol, values in recent_exit_signals.items():
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                timestamp = _finite(item[0])
+                if timestamp is not None:
+                    self._recent_exit_signals[str(symbol)].append((timestamp, str(item[1])))
+        severe_events = self.store.get_runtime("severe_events", []) or []
+        self._severe_events: deque[float] = deque(
+            (_finite(value) for value in severe_events if _finite(value) is not None),
+            maxlen=20,
+        )
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -169,30 +222,47 @@ class PositionRiskService:
         if selected:
             self._put_latest({"type": "monitor_events", "events": selected})
 
-    def _mark_quote_gap(self, reason: str) -> None:
+    def _mark_quote_gap(self, reason: str, symbols: set[str] | None = None) -> None:
         """标记行情连续性已丢失，恢复后必须重新建立规则基线。"""
         portfolio = self.store.load()
-        symbols = {str(item.get("symbol") or "").strip().upper() for item in portfolio["positions"]}
-        symbols.discard("")
-        if not symbols:
+        portfolio_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in portfolio["positions"]
+        }
+        affected = {
+            str(symbol).strip().upper() for symbol in (symbols or portfolio_symbols)
+            if str(symbol).strip().upper() in portfolio_symbols
+        }
+        if not affected:
             return
-        self._quote_gap_active = True
-        self._recovery_pending_symbols.update(symbols)
-        self._flow_anchor_pending.update(symbols)
-        for symbol in symbols:
+        self._quote_gap_symbols.update(affected)
+        self._recovery_pending_symbols.update(affected)
+        self._flow_anchor_pending.update(affected)
+        mark_intraday_gap = getattr(self.quote_service, "mark_intraday_gap", None)
+        if callable(mark_intraday_gap):
+            mark_intraday_gap(affected)
+        for symbol in affected:
             self._flow[symbol].clear()
             self._depth[symbol].clear()
             self.store.set_runtime(f"depth:{symbol}", {})
-        self._runtime_status = "reconnecting"
-        self._runtime_reason = reason
+        if self._runtime_status != "idle":
+            self._runtime_status = "reconnecting"
+            self._runtime_reason = reason
 
     def _mark_quote_recovered(self, symbols: set[str]) -> None:
-        if not self._quote_gap_active:
+        recovered = self._quote_gap_symbols & symbols
+        if not recovered:
             return
-        self._recovery_pending_symbols.update(symbols)
-        self._quote_gap_active = False
-        self._runtime_status = "websocket"
-        self._runtime_reason = "行情已恢复，正在重新建立连续性基线"
+        self._recovery_pending_symbols.update(recovered)
+        self._quote_gap_symbols.difference_update(recovered)
+        if self._quote_gap_symbols:
+            self._runtime_status = "reconnecting"
+            self._runtime_reason = (
+                f"仍有 {len(self._quote_gap_symbols)} 只持仓行情中断，等待全部恢复"
+            )
+        else:
+            self._runtime_status = "websocket"
+            self._runtime_reason = "行情已恢复，正在重新建立连续性基线"
 
     def _on_poll(self) -> None:
         portfolio = self.store.load()
@@ -213,7 +283,8 @@ class PositionRiskService:
         self.quote_service.remove_symbol_consumer(_ACCOUNT_ID)
         remove_intraday = getattr(self.quote_service, "remove_intraday_consumer", None)
         if callable(remove_intraday):
-            remove_intraday(_ACCOUNT_ID)
+            remove_intraday(f"{_ACCOUNT_ID}:stock")
+            remove_intraday(f"{_ACCOUNT_ID}:etf")
         if self._polling_lease:
             self.quote_service.release_temporary_polling()
             self._polling_lease = False
@@ -223,16 +294,23 @@ class PositionRiskService:
         portfolio = self.store.load()
         symbols = {str(item.get("symbol") or "").strip().upper() for item in portfolio["positions"]}
         symbols.discard("")
+        self._asset_types = {}
         self._preload_history(symbols)
         if not symbols:
             self._runtime_status = "idle"
             self._runtime_reason = "尚未导入持仓"
             self._notify_updated()
             return
+        self._mark_quote_gap("正在建立持仓行情连续性基线", symbols)
 
         set_intraday = getattr(self.quote_service, "set_intraday_consumer", None)
         if callable(set_intraday):
-            set_intraday(_ACCOUNT_ID, symbols, "stock")
+            for asset_type in ("stock", "etf"):
+                asset_symbols = {
+                    symbol for symbol in symbols
+                    if self._asset_types.get(symbol, "stock") == asset_type
+                }
+                set_intraday(f"{_ACCOUNT_ID}:{asset_type}", asset_symbols, asset_type)
 
         supervisor = getattr(self.app_state, "paper_supervisor", None)
         hub = getattr(supervisor, "hub", None)
@@ -246,7 +324,9 @@ class PositionRiskService:
             websocket_allowed = False
         if websocket_allowed and hub is not None:
             try:
-                hub.register(_ACCOUNT_ID, "websocket", symbols, "stock", self._queue)
+                asset_types = {self._asset_types.get(symbol, "stock") for symbol in symbols}
+                ws_asset_type = next(iter(asset_types)) if len(asset_types) == 1 else "mixed"
+                hub.register(_ACCOUNT_ID, "websocket", symbols, ws_asset_type, self._queue)
                 self._runtime_status = "websocket"
                 self._runtime_reason = "持仓池已整体接入共享 TickFlow WS"
                 self._notify_updated()
@@ -270,6 +350,7 @@ class PositionRiskService:
 
     def _preload_history(self, symbols: set[str]) -> None:
         rows: dict[str, dict[str, Any]] = {}
+        history_as_of: dict[str, str] = {}
         stock_symbols: list[str] = []
         etf_symbols: list[str] = []
         for symbol in symbols:
@@ -277,23 +358,36 @@ class PositionRiskService:
                 asset_type = self.repo.resolve_asset_type(symbol)
             except Exception:  # noqa: BLE001
                 asset_type = "stock"
+            self._asset_types[symbol] = asset_type
             (etf_symbols if asset_type == "etf" else stock_symbols).append(symbol)
         try:
-            frame, _ = self.repo.get_enriched_latest()
+            frame, as_of = self.repo.get_enriched_latest()
+            stock_as_of = str(as_of or "")
             if stock_symbols and not frame.is_empty():
-                rows.update({str(row["symbol"]): row for row in frame.filter(
-                    frame["symbol"].is_in(stock_symbols)
-                ).to_dicts()})
+                rows.update({
+                    str(row["symbol"]): {
+                        **row,
+                        "_position_risk_as_of": str(row.get("date") or as_of or ""),
+                    }
+                    for row in frame.filter(frame["symbol"].is_in(stock_symbols)).to_dicts()
+                })
+                history_as_of.update({symbol: stock_as_of for symbol in stock_symbols if symbol in rows})
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("持仓风控股票历史预载失败", exc_info=True)
         try:
-            frame, _ = self.repo.get_enriched_latest_asset("etf")
+            frame, as_of = self.repo.get_enriched_latest_asset("etf")
+            etf_as_of = str(as_of or "")
             if etf_symbols and not frame.is_empty():
-                rows.update({str(row["symbol"]): row for row in frame.filter(
-                    frame["symbol"].is_in(etf_symbols)
-                ).to_dicts()})
+                rows.update({
+                    str(row["symbol"]): {
+                        **row,
+                        "_position_risk_as_of": str(row.get("date") or as_of or ""),
+                    }
+                    for row in frame.filter(frame["symbol"].is_in(etf_symbols)).to_dicts()
+                })
+                history_as_of.update({symbol: etf_as_of for symbol in etf_symbols if symbol in rows})
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("持仓风控 ETF 历史预载失败", exc_info=True)
         try:
             from app.strategy import custom_signals
 
@@ -312,6 +406,31 @@ class PositionRiskService:
             self._custom_signal_labels = {}
         with self._lock:
             self._history = rows
+            self._history_pending_symbols = set(symbols) - set(rows)
+            self._history_as_of = history_as_of
+
+    def _preload_history_if_missing(self) -> None:
+        if not self._asset_types or time.monotonic() < self._next_history_refresh:
+            return
+        self._next_history_refresh = time.monotonic() + 5
+        symbols = set(self._asset_types)
+        needs_refresh = bool(self._history_pending_symbols)
+        for asset_type in {self._asset_types.get(symbol, "stock") for symbol in symbols}:
+            try:
+                if asset_type == "stock":
+                    _, as_of = self.repo.get_enriched_latest()
+                else:
+                    _, as_of = self.repo.get_enriched_latest_asset(asset_type, refresh=False)
+            except Exception:  # noqa: BLE001
+                continue
+            current_as_of = str(as_of or "")
+            needs_refresh = needs_refresh or any(
+                self._asset_types.get(symbol) == asset_type
+                and self._history_as_of.get(symbol, "") != current_as_of
+                for symbol in symbols
+            )
+        if needs_refresh:
+            self._preload_history(symbols)
 
     def _worker(self) -> None:
         while not self._stop.is_set():
@@ -319,12 +438,21 @@ class PositionRiskService:
                 message = self._queue.get(timeout=1)
             except queue.Empty:
                 self._check_quote_staleness()
+                self._preload_history_if_missing()
                 continue
             if message.get("type") == "stop":
                 return
             if message.get("type") in {"gap", "recovery"}:
                 if message.get("type") == "gap":
-                    self._mark_quote_gap(str(message.get("reason") or "WS 连接中断"))
+                    affected = {
+                        str(symbol).strip().upper()
+                        for symbol in message.get("symbols", [])
+                        if str(symbol).strip()
+                    }
+                    self._mark_quote_gap(
+                        str(message.get("reason") or "WS 连接中断"),
+                        affected or None,
+                    )
                     self._notify_updated()
                 else:
                     recovery_symbols = {
@@ -479,14 +607,35 @@ class PositionRiskService:
         result.update(((override_signals.get(group) or {}).get(signal_id)) or {})
         return result
 
-    def _set_rule(self, symbol: str, rule_id: str, active: bool) -> bool:
-        key = (symbol, rule_id)
-        was_active = key in self._active_rules
-        if active:
-            self._active_rules.add(key)
-        else:
-            self._active_rules.discard(key)
-        return active and not was_active
+    def _set_rule(
+        self,
+        symbol: str,
+        rule_id: str,
+        active: bool,
+        now: datetime | None = None,
+        event_token: str | None = None,
+    ) -> bool:
+        key = f"{symbol}:{rule_id}"
+        current = self._rule_states.get(key) or {}
+        was_active = bool(current.get("active"))
+        same_event = bool(event_token and current.get("last_event_token") == event_token)
+        should_emit = active and not same_event and (not was_active or event_token is not None)
+        changed = active != was_active
+        if not changed and not should_emit:
+            return False
+        event_time = (now or cn_now()).replace(tzinfo=None).timestamp()
+        next_state = {**current, "active": active, "changed_at": event_time}
+        if should_emit and rule_id not in _NO_COOLDOWN_RULES and not rule_id.startswith("signal:"):
+            last_emitted = _finite(current.get("last_emitted_at"))
+            if last_emitted is not None and event_time - last_emitted < _EVENT_COOLDOWN_SECONDS:
+                should_emit = False
+        if should_emit:
+            next_state["last_emitted_at"] = event_time
+            if event_token:
+                next_state["last_event_token"] = event_token
+        self._rule_states[key] = next_state
+        self.store.set_runtime("rule_states", self._rule_states)
+        return should_emit
 
     @staticmethod
     def _sustained(
@@ -530,6 +679,7 @@ class PositionRiskService:
         if not force and not _is_continuous_trading(current_time):
             return
         portfolio = self.store.load()
+        self._preload_history_if_missing()
         intraday_signals = self._intraday_signals(
             {item["symbol"] for item in portfolio["positions"]}, current_time,
         )
@@ -545,7 +695,7 @@ class PositionRiskService:
                 current_time,
                 intraday_signals.get(symbol, {}),
             )
-        self._evaluate_account(portfolio)
+        self._evaluate_account(portfolio, current_time)
 
     def _intraday_signals(
         self,
@@ -555,18 +705,27 @@ class PositionRiskService:
         getter = getattr(self.quote_service, "get_intraday_signals", None)
         if not callable(getter):
             return {}
-        prev_close = {
-            symbol: raw_close
-            for symbol in symbols
-            if (raw_close := _finite((self._history.get(symbol) or {}).get("raw_close")))
-        }
-        return getter(
-            symbols,
-            prev_close=prev_close,
-            asset_type="stock",
-            now=now,
-            consumer_id=_ACCOUNT_ID,
-        )
+        result: dict[str, dict[str, Any]] = {}
+        for asset_type in ("stock", "etf"):
+            asset_symbols = {
+                symbol for symbol in symbols
+                if self._asset_types.get(symbol, "stock") == asset_type
+            }
+            if not asset_symbols:
+                continue
+            prev_close = {
+                symbol: raw_close
+                for symbol in asset_symbols
+                if (raw_close := _finite((self._history.get(symbol) or {}).get("raw_close")))
+            }
+            result.update(getter(
+                asset_symbols,
+                prev_close=prev_close,
+                asset_type=asset_type,
+                now=now,
+                consumer_id=f"{_ACCOUNT_ID}:{asset_type}",
+            ))
+        return result
 
     def _evaluate_position(
         self,
@@ -604,7 +763,7 @@ class PositionRiskService:
         stop_threshold = stop_threshold if stop_threshold is not None else -0.10
         stop_action = _action_pct(stop_cfg, 100)
         stop_active = bool(stop_cfg.get("enabled", True) and cost and price / cost - 1 <= stop_threshold)
-        if self._set_rule(symbol, "stop_loss", stop_active):
+        if self._set_rule(symbol, "stop_loss", stop_active, now):
             self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {(price / cost - 1) * 100:.2f}%"])
 
         trailing_cfg = self._rule_config(portfolio, symbol, "trailing_drawdown")
@@ -617,7 +776,7 @@ class PositionRiskService:
             trailing_cfg.get("enabled", True) and cost and high / cost - 1 >= activation_gain
             and price / high - 1 <= -trailing_threshold
         )
-        if self._set_rule(symbol, "trailing_drawdown", trailing_active):
+        if self._set_rule(symbol, "trailing_drawdown", trailing_active, now):
             self._emit(portfolio, position, "trailing_drawdown", "盈利回撤", "warn", 60, trailing_action, [f"从持仓高点回撤 {(1 - price / high) * 100:.2f}%"])
 
         history = self._history.get(symbol) or {}
@@ -642,7 +801,7 @@ class PositionRiskService:
             active = self._sustained(
                 runtime, rule_id, below, int(sustain_seconds if sustain_seconds is not None else 5), now,
             ) if not ma_suppressed else False
-            if self._set_rule(symbol, rule_id, active) and not ma_suppressed:
+            if self._set_rule(symbol, rule_id, active, now) and not ma_suppressed:
                 self._emit(
                     portfolio, position, rule_id, f"跌破 MA{days}", "warn" if action else "info",
                     _RULE_WEIGHTS["trend"] + (20 if configured_action >= 50 else 10 if configured_action else 0), configured_action,
@@ -657,23 +816,25 @@ class PositionRiskService:
             and limit_down
             and price <= limit_down + 0.001
         )
-        if self._set_rule(symbol, "limit_down", at_limit_down):
+        if self._set_rule(symbol, "limit_down", at_limit_down, now):
             self._emit(portfolio, position, "limit_down", "跌停", "critical", 85, limit_down_action, ["原始现价触及当日跌停价"])
 
         depth_state = self._depth_state(symbol, quote, now)
         sealed_cfg = self._rule_config(portfolio, symbol, "resealed_limit_up")
         sealed_action = _action_pct(sealed_cfg, 0)
         if self._set_rule(
-            symbol, "sealed_limit_up", bool(sealed_cfg.get("enabled", True) and depth_state["sealed"]),
+            symbol, "resealed_limit_up",
+            bool(sealed_cfg.get("enabled", True) and depth_state["resealed"]),
+            now,
         ):
             self._emit(
-                portfolio, position, "sealed_limit_up", "涨停封板", "info", 35, sealed_action,
-                ["连续 3 个五档快照确认封板"],
+                portfolio, position, "resealed_limit_up", "涨停回封", "info", 35,
+                sealed_action, ["炸板后连续 3 个五档快照确认重新封板"],
             )
         broken_cfg = self._rule_config(portfolio, symbol, "broken_limit_up")
         broken_action = _action_pct(broken_cfg, 50)
         if self._set_rule(
-            symbol, "broken_limit_up", bool(broken_cfg.get("enabled", True) and depth_state["broken"]),
+            symbol, "broken_limit_up", bool(broken_cfg.get("enabled", True) and depth_state["broken"]), now,
         ):
             self._emit(portfolio, position, "broken_limit_up", "涨停炸板", "critical", 70, broken_action, ["连续封板状态中断"])
         shrink_80_cfg = self._rule_config(portfolio, symbol, "sealed_order_shrink_80")
@@ -685,21 +846,23 @@ class PositionRiskService:
         shrink_50_threshold = _finite(shrink_50_cfg.get("threshold"))
         shrink_50_threshold = shrink_50_threshold if shrink_50_threshold is not None else 0.50
         shrink_80 = bool(
-            not depth_state["broken"]
+            depth_state["sealed"]
+            and not depth_state["broken"]
             and shrink_80_cfg.get("enabled", True)
             and depth_state["shrink_ratio"] >= shrink_80_threshold
         )
         shrink_50 = bool(
-            not depth_state["broken"]
+            depth_state["sealed"]
+            and not depth_state["broken"]
             and shrink_50_cfg.get("enabled", True)
             and shrink_50_threshold <= depth_state["shrink_ratio"] < shrink_80_threshold
         )
-        if self._set_rule(symbol, "sealed_order_shrink_80", shrink_80):
+        if self._set_rule(symbol, "sealed_order_shrink_80", shrink_80, now):
             self._emit(
                 portfolio, position, "sealed_order_shrink_80", f"封单减少 {shrink_80_threshold:.0%}", "critical",
                 70, shrink_80_action, [f"买一封单较盘中峰值减少至少 {shrink_80_threshold:.0%}"],
             )
-        if self._set_rule(symbol, "sealed_order_shrink_50", shrink_50):
+        if self._set_rule(symbol, "sealed_order_shrink_50", shrink_50, now):
             self._emit(
                 portfolio, position, "sealed_order_shrink_50", f"封单减少 {shrink_50_threshold:.0%}", "warn",
                 55, shrink_50_action, [f"买一封单较盘中峰值减少至少 {shrink_50_threshold:.0%}"],
@@ -723,7 +886,7 @@ class PositionRiskService:
             int(imbalance_sustain),
             now,
         ) if not imbalance_suppressed else False
-        if self._set_rule(symbol, "orderbook_imbalance", imbalance_active) and not imbalance_suppressed:
+        if self._set_rule(symbol, "orderbook_imbalance", imbalance_active, now) and not imbalance_suppressed:
             self._emit(
                 portfolio, position, "orderbook_imbalance", "盘口失衡", "warn", 55, imbalance_action,
                 [
@@ -742,10 +905,11 @@ class PositionRiskService:
             ("large_sell", sell_flow["large_sell"], _action_pct(large_sell_cfg, 25), "大单卖出", sell_flow),
         ):
             flow_cfg = large_buy_cfg if rule_id == "large_buy" else large_sell_cfg
-            if self._set_rule(symbol, rule_id, bool(flow_cfg.get("enabled", True) and active)):
+            if self._set_rule(symbol, rule_id, bool(flow_cfg.get("enabled", True) and active), now):
                 chosen_action = (
                     50
-                    if active and action and depth_state["imbalance"] is not None
+                    if rule_id == "large_sell" and active and action
+                    and depth_state["imbalance"] is not None
                     and depth_state["imbalance"] < -0.35
                     else action
                 )
@@ -753,7 +917,7 @@ class PositionRiskService:
                     portfolio, position, rule_id, label, "warn" if action else "info",
                     75 if chosen_action >= 50 else _RULE_WEIGHTS["flow"] + (35 if action else 15),
                     chosen_action,
-                    [flow_state["summary"]],
+                    [flow_state[f"{'buy' if rule_id == 'large_buy' else 'sell'}_summary"]],
                 )
         outflow_cfg = self._rule_config(portfolio, symbol, "continuous_outflow")
         outflow_below = bool(
@@ -770,7 +934,7 @@ class PositionRiskService:
             int(outflow_cfg.get("sustain_seconds", 10)),
             now,
         ) if not outflow_suppressed else False
-        if self._set_rule(symbol, "continuous_outflow", outflow_active) and not outflow_suppressed:
+        if self._set_rule(symbol, "continuous_outflow", outflow_active, now) and not outflow_suppressed:
             outflow_samples = int(flow["samples"])
             outflow_sell_ratio = float(flow["sell_ratio"] or 0.0)
             outflow_threshold = float(outflow_cfg.get("direction_ratio", 0.65))
@@ -790,7 +954,8 @@ class PositionRiskService:
             )
 
         recent_five_minutes = [
-            item for item in self._flow.get(symbol, ()) if item["ts"] >= now.timestamp() - 300
+            item for item in self._flow.get(symbol, ())
+            if item["ts"] >= now.timestamp() - 300 and item["ts"] <= now.timestamp()
         ]
         if recent_five_minutes:
             five_minute_high = max(item["price"] for item in recent_five_minutes)
@@ -803,13 +968,16 @@ class PositionRiskService:
                 and price / five_minute_high - 1 <= -drawdown_threshold
             )
             drawdown_suppressed = self._recovery_suppressed(runtime, "five_minute_drawdown", drawdown_active)
-            if self._set_rule(symbol, "five_minute_drawdown", False if drawdown_suppressed else drawdown_active) and not drawdown_suppressed:
+            if self._set_rule(symbol, "five_minute_drawdown", False if drawdown_suppressed else drawdown_active, now) and not drawdown_suppressed:
                 self._emit(
                     portfolio, position, "five_minute_drawdown", "5 分钟高点回撤", "warn",
                     45, drawdown_action, [f"从 5 分钟高点回撤 {(1 - price / five_minute_high):.2%}"],
                 )
         snapshot_getter = getattr(self.quote_service, "get_intraday_snapshot", None)
-        snapshot = snapshot_getter({symbol}, asset_type="stock", now=now) if callable(snapshot_getter) else {}
+        asset_type = str(position.get("asset_type") or self._asset_types.get(symbol) or "stock")
+        snapshot = snapshot_getter(
+            {symbol}, asset_type=asset_type, now=now,
+        ) if callable(snapshot_getter) else {}
         vwap = (snapshot.get("vwap") or {}).get(symbol)
         vwap_cfg = self._rule_config(portfolio, symbol, "vwap_breakdown")
         vwap_buffer = _finite(vwap_cfg.get("buffer"))
@@ -827,7 +995,7 @@ class PositionRiskService:
             runtime, "vwap_breakdown", vwap_below,
             int(vwap_sustain), now,
         ) if not vwap_suppressed else False
-        if self._set_rule(symbol, "vwap_breakdown", vwap_active) and not vwap_suppressed:
+        if self._set_rule(symbol, "vwap_breakdown", vwap_active, now) and not vwap_suppressed:
             self._emit(
                 portfolio, position, "vwap_breakdown", "分时均价负偏离超限", "warn", 45, vwap_action,
                 [
@@ -836,7 +1004,11 @@ class PositionRiskService:
                 ],
             )
 
-        combined_signals = {**history, **(intraday_signals or {})}
+        combined_signals = {
+            **history,
+            **{signal_id: False for signal_id in INTRADAY_SIGNAL_LABELS},
+            **(intraday_signals or {}),
+        }
         overlap_signals = {
             "signal_ma5_breakdown",
             "signal_ma10_breakdown",
@@ -846,7 +1018,7 @@ class PositionRiskService:
         }
         for signal_id, value in combined_signals.items():
             if signal_id.startswith(("signal_", "csg_")) and value is not True:
-                self._set_rule(symbol, f"signal:{signal_id}", False)
+                self._set_rule(symbol, f"signal:{signal_id}", False, now)
         for signal_id, value in combined_signals.items():
             if (
                 not signal_id.startswith(("signal_", "csg_"))
@@ -862,10 +1034,11 @@ class PositionRiskService:
                 signal_id,
             )
             if configured.get("enabled", True) is False:
+                self._set_rule(symbol, f"signal:{signal_id}", False, now)
                 continue
             signal_rule_id = f"signal:{signal_id}"
             if self._recovery_suppressed(runtime, signal_rule_id, True):
-                self._set_rule(symbol, signal_rule_id, False)
+                self._set_rule(symbol, signal_rule_id, False, now)
                 continue
             direction = (
                 configured.get("direction")
@@ -882,10 +1055,18 @@ class PositionRiskService:
                     recent.popleft()
                 independent = {item[1] for item in recent if item[1] != signal_id}
                 recent.append((now.timestamp(), signal_id))
+                self.store.set_runtime("recent_exit_signals", {
+                    current_symbol: list(values)
+                    for current_symbol, values in self._recent_exit_signals.items()
+                    if values
+                })
                 if independent:
                     action = max(action, 50)
                     reasons.append("5 分钟内两个独立出场信号共振")
-            if self._set_rule(symbol, signal_rule_id, True):
+            event_token = None
+            if signal_id not in INTRADAY_SIGNAL_LABELS:
+                event_token = f"{signal_id}:{history.get('_position_risk_as_of') or now.date()}"
+            if self._set_rule(symbol, signal_rule_id, True, now, event_token=event_token):
                 self._emit(
                     portfolio, position, f"signal:{signal_id}", self._signal_label(signal_id, configured),
                     "warn" if action else "info",
@@ -901,6 +1082,8 @@ class PositionRiskService:
 
     @staticmethod
     def _signal_direction(signal_id: str) -> str:
+        if signal_id in _BUILTIN_SIGNAL_DIRECTIONS:
+            return _BUILTIN_SIGNAL_DIRECTIONS[signal_id]
         exit_tokens = ("dead", "breakdown", "low", "limit_down", "broken")
         return "exit" if any(token in signal_id for token in exit_tokens) else "entry"
 
@@ -924,6 +1107,22 @@ class PositionRiskService:
             return {
                 "sealed": False,
                 "broken": False,
+                "resealed": False,
+                "shrink_ratio": 0.0,
+                "imbalance": None,
+                "bid_total": 0.0,
+                "ask_total": 0.0,
+            }
+        if any(
+            item.get("received_at") is not None
+            and now.timestamp() - float(item["received_at"]) > 30
+            for item in list(snapshots)[-3:]
+        ):
+            self.store.set_runtime(f"depth:{symbol}", {})
+            return {
+                "sealed": False,
+                "broken": False,
+                "resealed": False,
                 "shrink_ratio": 0.0,
                 "imbalance": None,
                 "bid_total": 0.0,
@@ -940,11 +1139,18 @@ class PositionRiskService:
             sealed_flags.append(bool(limit_up and bid_price and abs(bid_price - limit_up) < 0.001 and bid_volume and bid_volume > 0 and not (ask_price and ask_volume)))
         sealed = all(sealed_flags)
         runtime = self.store.get_runtime(f"depth:{symbol}", {}) or {}
+        trading_date = now.date().isoformat()
+        if runtime.get("trading_date") != trading_date:
+            runtime = {"trading_date": trading_date}
         was_sealed = bool(runtime.get("sealed"))
+        had_broken = bool(runtime.get("had_broken"))
+        broken = was_sealed and not sealed
+        resealed = sealed and had_broken
         latest = recent[-1]
         latest_bid = _finite(latest.get("bid1_volume", latest.get("bid_volume1"))) or 0.0
-        peak_bid = max(latest_bid, _finite(runtime.get("peak_bid_volume")) or 0.0)
-        shrink_ratio = 1 - latest_bid / peak_bid if peak_bid > 0 else 0.0
+        previous_peak = _finite(runtime.get("peak_bid_volume")) or 0.0
+        peak_bid = max(latest_bid, previous_peak) if sealed else previous_peak
+        shrink_ratio = 1 - latest_bid / peak_bid if sealed and peak_bid > 0 else 0.0
         bid_volumes = latest.get("bid_volumes") or [latest_bid]
         ask_volumes = latest.get("ask_volumes") or [
             _finite(latest.get("ask1_volume", latest.get("ask_volume1"))) or 0.0
@@ -956,12 +1162,15 @@ class PositionRiskService:
             if bid_total + ask_total > 0 else None
         )
         runtime["sealed"] = sealed
+        runtime["trading_date"] = trading_date
+        runtime["had_broken"] = (had_broken or broken) and not resealed
         runtime["peak_bid_volume"] = peak_bid
         runtime["last_depth_at"] = now.timestamp()
         self.store.set_runtime(f"depth:{symbol}", runtime)
         return {
             "sealed": sealed,
-            "broken": was_sealed and not sealed,
+            "broken": broken,
+            "resealed": resealed,
             "shrink_ratio": shrink_ratio,
             "imbalance": imbalance,
             "bid_total": bid_total,
@@ -1007,7 +1216,7 @@ class PositionRiskService:
             }
         median = statistics.median(amounts)
         mad = statistics.median(abs(value - median) for value in amounts)
-        def is_large(direction_ratio: float) -> bool:
+        def direction_evidence(direction_ratio: float, direction: int) -> tuple[bool, float]:
             configured_amount = _finite(config.get("min_amount"))
             configured_mad = _finite(config.get("mad_multiplier"))
             configured_z_score = _finite(config.get("min_z_score"))
@@ -1017,17 +1226,37 @@ class PositionRiskService:
             min_z_score = max(0.0, configured_z_score if configured_z_score is not None else 2.5)
             minimum_direction = min(1.0, max(0.0, configured_direction if configured_direction is not None else 0.65))
             threshold = max(min_amount, median + mad_multiplier * 1.4826 * mad)
-            return largest >= threshold and z_score >= min_z_score and direction_ratio >= minimum_direction
+            direction_amounts = [
+                item["amount"] for item in values if item["direction"] * direction > 0
+            ]
+            if not direction_amounts:
+                return False, 0.0
+            direction_largest = max(direction_amounts)
+            direction_z_score = (direction_largest - median) / dispersion
+            return (
+                direction_largest >= threshold
+                and direction_z_score >= min_z_score
+                and direction_ratio >= minimum_direction,
+                direction_z_score,
+            )
         dispersion = max(1.0, 1.4826 * mad)
-        largest = max(amounts)
-        z_score = (largest - median) / dispersion
+        large_buy, buy_z_score = direction_evidence(buy_ratio, 1)
+        large_sell, sell_z_score = direction_evidence(sell_ratio, -1)
         return {
-            "large_buy": total > 0 and is_large(buy_ratio),
-            "large_sell": total > 0 and is_large(sell_ratio),
+            "large_buy": total > 0 and large_buy,
+            "large_sell": total > 0 and large_sell,
             "buy_ratio": buy_ratio,
             "sell_ratio": sell_ratio,
+            "buy_z_score": buy_z_score,
+            "sell_z_score": sell_z_score,
             "samples": len(values),
-            "summary": f"最近 {window_seconds} 秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}，z={z_score:.2f}",
+            "summary": f"最近 {window_seconds} 秒方向占比 买{buy_ratio:.0%}/卖{sell_ratio:.0%}",
+            "buy_summary": (
+                f"最近 {window_seconds} 秒买方占比 {buy_ratio:.0%}，买向异常单 Z={buy_z_score:.2f}"
+            ),
+            "sell_summary": (
+                f"最近 {window_seconds} 秒卖方占比 {sell_ratio:.0%}，卖向异常单 Z={sell_z_score:.2f}"
+            ),
         }
 
     def _check_quote_staleness(self) -> None:
@@ -1049,10 +1278,12 @@ class PositionRiskService:
         stale = bool(stale_symbols)
         if stale:
             self._mark_quote_gap(
-                f"持仓行情超过 {int(threshold)} 秒未更新，等待恢复后重新建立基线"
+                f"持仓行情超过 {int(threshold)} 秒未更新，等待恢复后重新建立基线",
+                set(stale_symbols),
             )
         if self._set_rule(
             "__portfolio__", "quote_interruption", bool(config.get("enabled", True) and stale),
+            now,
         ):
             self._emit(
                 portfolio,
@@ -1066,7 +1297,12 @@ class PositionRiskService:
             )
             self._notify_updated()
 
-    def _evaluate_account(self, portfolio: dict[str, Any]) -> None:
+    def _evaluate_account(
+        self,
+        portfolio: dict[str, Any],
+        now: datetime | None = None,
+    ) -> None:
+        evaluation_time = (now or cn_now()).replace(tzinfo=None)
         account = portfolio["account"]
         total_asset = _finite(account.get("total_asset"))
         cash = _finite(account.get("cash"))
@@ -1099,17 +1335,24 @@ class PositionRiskService:
         checks = [
             ("daily_equity_loss", previous, lambda config: current_equity / previous - 1 <= -abs(_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.03), "当日权益亏损"),
             ("equity_drawdown", high, lambda config: current_equity / high - 1 <= -abs(_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.08), "账户从导入后高点回撤"),
-            ("unrealized_loss", total_asset, lambda config: unrealized / total_asset <= -abs(_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.08), "持仓总浮亏超过权益"),
+            ("unrealized_loss", current_equity, lambda config: unrealized / current_equity <= -abs(_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.08), "持仓总浮亏超过权益"),
             ("total_exposure", current_equity, lambda config: market_value / current_equity > (_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.95), "总仓位超过"),
         ]
         for rule_id, denominator, condition, reason_label in checks:
             config = self._rule_config(portfolio, "__portfolio__", rule_id)
             active = bool(denominator and condition(config))
             threshold = _finite(config.get("threshold"))
-            threshold = threshold if threshold is not None else (0.95 if rule_id == "total_exposure" else 0.08)
+            default_thresholds = {
+                "daily_equity_loss": 0.03,
+                "equity_drawdown": 0.08,
+                "unrealized_loss": 0.08,
+                "total_exposure": 0.95,
+            }
+            threshold = threshold if threshold is not None else default_thresholds[rule_id]
             reason = f"{reason_label} {threshold:.0%}"
             if self._set_rule(
                 "__portfolio__", rule_id, bool(config.get("enabled", True) and active),
+                evaluation_time,
             ):
                 action = _action_pct(config, 25 if rule_id == "total_exposure" else 50)
                 self._emit(portfolio, None, rule_id, reason, "critical" if rule_id != "total_exposure" else "warn", 75, action, [reason])
@@ -1129,6 +1372,7 @@ class PositionRiskService:
                 position["symbol"],
                 "symbol_concentration",
                 bool(config.get("enabled", True) and concentration),
+                evaluation_time,
             ):
                 reduction = _action_pct(config, max(1, round((weight - target_weight) / weight * 100)))
                 self._emit(
@@ -1146,12 +1390,14 @@ class PositionRiskService:
         cluster_window = cluster_window if cluster_window is not None else 300
         cluster_count = _finite(cluster_config.get("count"))
         cluster_count = cluster_count if cluster_count is not None else 3
-        cutoff = time.time() - cluster_window
+        cutoff = evaluation_time.timestamp() - cluster_window
         while self._severe_events and self._severe_events[0] < cutoff:
             self._severe_events.popleft()
         config = cluster_config
         clustered = bool(config.get("enabled", True) and len(self._severe_events) >= cluster_count)
-        if self._set_rule("__portfolio__", "clustered_severe_events", clustered):
+        if self._set_rule(
+            "__portfolio__", "clustered_severe_events", clustered, evaluation_time,
+        ):
             self._emit(
                 portfolio,
                 None,
@@ -1175,6 +1421,7 @@ class PositionRiskService:
         reasons: list[str],
         *,
         source_ids: list[str] | None = None,
+        occurred_at: datetime | None = None,
     ) -> None:
         symbol = position.get("symbol") if position else None
         config_symbol = symbol or "__portfolio__"
@@ -1189,10 +1436,21 @@ class PositionRiskService:
         else:
             notify = self._rule_config(portfolio, config_symbol, rule_id).get("notify", False)
         name = position.get("name") if position else "组合"
-        fingerprint_raw = f"{cn_today()}:{symbol or '__portfolio__'}:{rule_id}"
+        state = self._rule_states.get(f"{config_symbol}:{rule_id}") or {}
+        state_time = _finite(state.get("changed_at"))
+        event_time = (
+            occurred_at.replace(tzinfo=None)
+            if occurred_at is not None
+            else datetime.fromtimestamp(state_time) if state_time is not None
+            else cn_now().replace(tzinfo=None)
+        )
+        event_token = str(state.get("last_event_token") or "")
+        fingerprint_raw = (
+            f"{event_time.date()}:{symbol or '__portfolio__'}:{rule_id}:{event_token}"
+        )
         fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
         event = {
-            "ts": int(time.time() * 1000),
+            "ts": int(event_time.timestamp() * 1000),
             "fingerprint": fingerprint,
             "source": "position_risk",
             "type": rule_id,
@@ -1206,8 +1464,11 @@ class PositionRiskService:
             "suggestion_pct": reduction_pct,
             "reasons": reasons,
         }
-        if severity == "critical" and rule_id != "clustered_severe_events":
-            self._severe_events.append(time.time())
+        if severity == "critical" and rule_id not in {
+            "clustered_severe_events", "quote_interruption",
+        }:
+            self._severe_events.append(event_time.timestamp())
+            self.store.set_runtime("severe_events", list(self._severe_events))
         alert_store.append(self.store.root.parents[1], event)
         if notify is True:
             publish = getattr(self.quote_service, "publish_external_alerts", None)
@@ -1384,6 +1645,12 @@ class PositionRiskService:
         }
         saved = self.store.replace(value, revision)
         self.store.stale_pending()
+        self._rule_states = {}
+        self.store.set_runtime("rule_states", {})
+        self._severe_events.clear()
+        self.store.set_runtime("severe_events", [])
+        self._recent_exit_signals.clear()
+        self.store.set_runtime("recent_exit_signals", {})
         self.store.set_runtime("account", {
             "high_watermark": account["high_watermark"],
             "last_equity": account["total_asset"],

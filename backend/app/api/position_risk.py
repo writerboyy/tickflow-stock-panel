@@ -236,7 +236,7 @@ def get_options(request: Request):
     builtin.extend({
         "id": signal_id,
         "label": label,
-        "direction": "exit" if signal_id.endswith("down") else "entry",
+        "direction": service._signal_direction(signal_id),  # noqa: SLF001
         "enabled": True,
         "group": "intraday",
     } for signal_id, label in INTRADAY_SIGNAL_LABELS.items())

@@ -556,6 +556,7 @@ class QuoteService:
                 selected = {symbol for _, symbol in self._intraday_last_quote}
             kinds = {asset_type} if asset_type else {kind for kind, _ in self._intraday_last_quote}
             self._intraday_gap_anchors.update((kind, symbol) for kind in kinds for symbol in selected)
+            self._intraday_signal_evaluator.mark_gap(selected, asset_type)
 
     def set_intraday_consumer(
         self, consumer_id: str, symbols: set[str], asset_type: str = "stock",

@@ -47,6 +47,15 @@ class IntradaySignalEvaluator:
 
     def __init__(self) -> None:
         self._last_bar: dict[tuple[str, str], datetime] = {}
+        self._gap_pending: set[tuple[str, str]] = set()
+
+    def mark_gap(self, symbols: set[str], asset_type: str | None = None) -> None:
+        """断线恢复后的第一根新分钟只建立边沿基线。"""
+        selected = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        self._gap_pending.update(
+            key for key in self._last_bar
+            if key[1] in selected and (asset_type is None or key[0] == asset_type)
+        )
 
     def evaluate(
         self,
@@ -103,6 +112,11 @@ class IntradaySignalEvaluator:
             current = points[-1]
             key = (asset_type, symbol)
             last_bar = self._last_bar.get(key)
+            if key in self._gap_pending:
+                if last_bar is None or current[0] > last_bar:
+                    self._last_bar[key] = current[0]
+                    self._gap_pending.discard(key)
+                continue
             self._last_bar[key] = current[0]
             if last_bar is None or last_bar.date() != current[0].date() or current[0] <= last_bar:
                 continue

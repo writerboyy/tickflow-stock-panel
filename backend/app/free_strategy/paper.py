@@ -1061,7 +1061,12 @@ class MarketDataHub:
         with self._lock:
             targets = [sub for sub in self._subscriptions.values() if sub.mode == "websocket"]
         for sub in targets:
-            _put_latest(sub.input_queue, {"type": "gap", "reason": str(message), "account_id": sub.account_id})
+            _put_latest(sub.input_queue, {
+                "type": "gap",
+                "reason": str(message),
+                "account_id": sub.account_id,
+                "symbols": sorted(sub.symbols),
+            })
 
     def _dispatch_recovery_snapshot(self) -> None:
         records: list[dict[str, Any]] = []
@@ -1083,7 +1088,18 @@ class MarketDataHub:
         for sub in targets:
             bars: list[Bar] = []
             try:
-                bars = _read_rows(self.repo, sorted(sub.symbols), cn_today(), cn_today(), sub.asset_type, "1m")
+                if sub.asset_type == "mixed":
+                    for asset_type in ("stock", "etf", "index"):
+                        symbols = {
+                            symbol for symbol in sub.symbols
+                            if self.repo.resolve_asset_type(symbol) == asset_type
+                        }
+                        if symbols:
+                            bars.extend(_read_rows(
+                                self.repo, sorted(symbols), cn_today(), cn_today(), asset_type, "1m",
+                            ))
+                else:
+                    bars = _read_rows(self.repo, sorted(sub.symbols), cn_today(), cn_today(), sub.asset_type, "1m")
             except ValueError:
                 pass
             if self._ws_disconnected_at is not None:
