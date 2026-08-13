@@ -185,6 +185,10 @@ export function useQuoteStream(
         qc.invalidateQueries({ queryKey: QK.positionRisk })
       })
 
+      es.addEventListener('limit_board_updated', () => {
+        qc.invalidateQueries({ queryKey: QK.limitBoard })
+      })
+
       es.addEventListener('strategy_alert', (e: MessageEvent) => {
         try {
           const data = JSON.parse(e.data)

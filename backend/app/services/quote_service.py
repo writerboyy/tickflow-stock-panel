@@ -73,6 +73,7 @@ class QuoteSubscriber:
         self._depth_updated = False
         self._large_orders_updated = False
         self._position_risk_updated = False
+        self._limit_board_updated = False
         self._alerts: list[dict] = []
         self._reviews: list[str] = []
 
@@ -90,6 +91,7 @@ class QuoteSubscriber:
                 "depth_updated": self._depth_updated,
                 "large_orders_updated": self._large_orders_updated,
                 "position_risk_updated": self._position_risk_updated,
+                "limit_board_updated": self._limit_board_updated,
                 "alerts": self._alerts,
                 "reviews": self._reviews,
             }
@@ -98,6 +100,7 @@ class QuoteSubscriber:
             self._depth_updated = False
             self._large_orders_updated = False
             self._position_risk_updated = False
+            self._limit_board_updated = False
             self._alerts = []
             self._reviews = []
             self._event.clear()
@@ -127,6 +130,7 @@ class QuoteSubscriber:
                 and not self._depth_updated
                 and not self._large_orders_updated
                 and not self._position_risk_updated
+                and not self._limit_board_updated
                 and not self._reviews
             ):
                 self._event.clear()
@@ -154,6 +158,11 @@ class QuoteSubscriber:
     def notify_position_risk(self) -> None:
         with self._lock:
             self._position_risk_updated = True
+            self._event.set()
+
+    def notify_limit_board(self) -> None:
+        with self._lock:
+            self._limit_board_updated = True
             self._event.set()
 
 
@@ -446,6 +455,10 @@ class QuoteService:
     def notify_position_risk_updated(self) -> None:
         for sub in self._snapshot_subscribers():
             sub.notify_position_risk()
+
+    def notify_limit_board_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_limit_board()
 
     def add_alert_listener(self, callback: Callable[[list[dict]], None]) -> None:
         with self._lock:
@@ -893,7 +906,11 @@ class QuoteService:
             wecom_url = preferences.get_wecom_webhook_url()
             feishu_secret = preferences.get_feishu_webhook_secret()
             for event in alerts:
-                title = "TickFlow · 持仓风控"
+                title = (
+                    "TickFlow · 打板专区"
+                    if event.get("source") == "limit_board"
+                    else "TickFlow · 持仓风控"
+                )
                 body = str(event.get("message") or "")
                 if event.get("symbol"):
                     body = f"{event['symbol']} {body}".strip()

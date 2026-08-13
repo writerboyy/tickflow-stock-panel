@@ -27,6 +27,7 @@ export const QK = {
   positionRiskOptions: ['position-risk', 'options'] as const,
   positionRiskRecommendations: (status?: string) => ['position-risk', 'recommendations', status ?? 'all'] as const,
   positionRiskEvents: ['position-risk', 'events'] as const,
+  limitBoard: ['limit-board'] as const,
   indexList:      ['index-list'] as const,
 
   // Watchlist
@@ -124,4 +125,5 @@ export const SSE_INVALIDATE_PREFIXES = [
   'limit-ladder',
   'large-orders',
   'position-risk',
+  'limit-board',
 ] as const

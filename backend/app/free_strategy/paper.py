@@ -16,7 +16,7 @@ from hashlib import sha256
 from itertools import groupby
 from math import isfinite
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from app.free_strategy.bars import Bar, group_bars, rows_to_bars
 from app.free_strategy.continuation import compact_paper_checkpoint
@@ -365,6 +365,7 @@ class MarketDataHub:
         self._ws_symbols: set[str] = set()
         self._ws_depth_symbols: set[str] = set()
         self._intraday_consumers: dict[str, tuple[set[str], str]] = {}
+        self._depth_listeners: set[Callable[[list[dict[str, Any]]], None]] = set()
         self._ws_depth_supported = False
         self._ws_state = "disconnected"
         self._ws_error: str | None = None
@@ -532,6 +533,27 @@ class MarketDataHub:
                 return
             self._intraday_consumers.pop(consumer_id, None)
             self._sync_websocket()
+
+    def add_depth_listener(self, callback: Callable[[list[dict[str, Any]]], None]) -> None:
+        """Register a non-blocking consumer of normalized WS depth batches."""
+        with self._lock:
+            self._depth_listeners.add(callback)
+
+    def remove_depth_listener(self, callback: Callable[[list[dict[str, Any]]], None]) -> None:
+        with self._lock:
+            self._depth_listeners.discard(callback)
+
+    def websocket_capacity(self) -> int:
+        return self._ws_capacity()
+
+    def websocket_symbol_count(self) -> int:
+        with self._lock:
+            return len(self._ws_symbols)
+
+    def websocket_available(self, *, exclude: str | None = None) -> int:
+        with self._lock:
+            used = len(self._websocket_symbols(exclude=exclude))
+        return max(0, self._ws_capacity() - used)
 
     def _on_quote_fetch(self) -> None:
         records_by_asset = self._cached_quote_records_by_asset()
@@ -1050,6 +1072,13 @@ class MarketDataHub:
         enqueue_depth = getattr(position_risk, "enqueue_depth", None)
         if callable(enqueue_depth):
             enqueue_depth(records)
+        with self._lock:
+            listeners = list(self._depth_listeners)
+        for callback in listeners:
+            try:
+                callback(records)
+            except Exception:  # noqa: BLE001
+                logger.exception("WebSocket 深度监听器处理失败")
 
     def _on_websocket_error(self, message: str) -> None:
         self._ws_state = "reconnecting"

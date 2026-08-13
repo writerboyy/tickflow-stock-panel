@@ -11,6 +11,7 @@ import { Logo } from './components/Logo'
 // Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
 const LargeOrders = lazy(() => import('./pages/LargeOrders').then(m => ({ default: m.LargeOrders })))
+const LimitBoard = lazy(() => import('./pages/LimitBoard').then(m => ({ default: m.LimitBoard })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
 const FreeStrategyPage = lazy(() => import('./pages/FreeStrategy').then(m => ({ default: m.FreeStrategyPage })))
@@ -81,6 +82,7 @@ export const router = createBrowserRouter([
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'large-orders', element: <LargeOrders /> },
+      { path: 'limit-board', element: <LimitBoard /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'free-strategy', element: <FreeStrategyPage /> },

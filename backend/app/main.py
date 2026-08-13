@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, limit_board, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -332,6 +332,16 @@ async def lifespan(app: FastAPI):
         logger.warning("position risk service not started: %s", e)
         app.state.position_risk_service = None
 
+    try:
+        from app.services.limit_board_service import LimitBoardService
+
+        limit_board_service = LimitBoardService(store.data_dir, repo, qs, app.state)
+        app.state.limit_board_service = limit_board_service
+        limit_board_service.start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("limit board service not started: %s", e)
+        app.state.limit_board_service = None
+
     yield
 
     kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
@@ -351,6 +361,9 @@ async def lifespan(app: FastAPI):
     position_risk_service = getattr(app.state, "position_risk_service", None)
     if position_risk_service:
         position_risk_service.stop()
+    limit_board_service = getattr(app.state, "limit_board_service", None)
+    if limit_board_service:
+        limit_board_service.stop()
     paper_supervisor = getattr(app.state, "paper_supervisor", None)
     if paper_supervisor:
         paper_supervisor.close()
@@ -457,6 +470,7 @@ app.include_router(market_recap.router)
 app.include_router(settings_api.router)
 app.include_router(large_orders.router)
 app.include_router(position_risk.router)
+app.include_router(limit_board.router)
 app.include_router(kaipanla_router)
 app.include_router(strategy.router)
 app.include_router(signals.router)

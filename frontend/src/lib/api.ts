@@ -995,6 +995,59 @@ export interface PositionRiskOptions {
   }
 }
 
+export interface LimitBoardRow {
+  symbol: string
+  name?: string
+  status?: string
+  last_price?: number
+  limit_up?: number
+  limit_gap_pct?: number
+  break_count?: number
+  bid1_volume?: number
+  ask1_volume?: number
+  last_depth_at?: string
+  ws_active?: boolean
+  source_modes?: string[]
+  blacklisted?: boolean
+}
+
+export interface LimitBoardView {
+  revision: number
+  settings: {
+    near_limit_pct: number
+    exit_limit_pct: number
+    exit_sustain_seconds: number
+    first_board_lookback_days: number
+    blacklist_after_breaks: number
+    notifications: { touched: boolean; broken: boolean; resealed: boolean }
+  }
+  first_board: LimitBoardRow[]
+  selected: LimitBoardRow[]
+  blacklist: string[]
+  events: Array<Record<string, any>>
+  runtime: {
+    trading_date: string
+    history_ready: boolean
+    history_reason: string
+    last_scan_at: string | null
+    last_error: string | null
+    websocket_status: string
+    websocket_symbols: number
+    websocket_capacity: number
+    trading_enabled: boolean
+    trading_reason: string
+    market_mode: string
+    first_board_enabled: boolean
+  }
+}
+
+export interface LimitBoardConfig {
+  schema_version: number
+  revision: number
+  settings: LimitBoardView['settings']
+  selected: Array<{ symbol: string; name?: string; added_at?: string }>
+}
+
 export interface AlertEvent {
   ts: number
   rule_id?: string
@@ -2126,6 +2179,16 @@ export const api = {
     ),
   positionRiskEvents: () =>
     request<{ events: AlertEvent[]; count: number }>('/api/position-risk/events'),
+  limitBoard: () => request<LimitBoardView>('/api/limit-board'),
+  limitBoardAdd: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/selected', {
+      method: 'POST', body: JSON.stringify({ symbol, revision }),
+    }),
+  limitBoardRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/selected/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
   largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all', mode: LargeOrderEvidenceMode = 'combined') =>
     request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; mode: LargeOrderEvidenceMode; stale: boolean; last_updated_ms: number | null }>(
