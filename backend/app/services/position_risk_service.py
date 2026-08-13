@@ -132,7 +132,7 @@ def _is_continuous_trading(now: datetime) -> bool:
 
 
 class PositionRiskService:
-    """只生成提醒和建议；任何路径都不修改真实或模拟持仓。"""
+    """生成风险提醒；QMT同步可替换本地快照，建议确认仍不会直接交易。"""
 
     def __init__(self, data_dir, repo, quote_service, app_state) -> None:
         self.store = PositionRiskStore(data_dir)
@@ -1784,6 +1784,103 @@ class PositionRiskService:
                 "reset_at": saved["imported_at"],
             })
         self.refresh_subscription()
+        return saved
+
+    def replace_from_qmt(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """把已通过同一轮 QMT 探活的快照作为权威持仓写入本地。"""
+        account = dict(snapshot.get("account") or {})
+        total_asset = _finite(account.get("total_asset"))
+        cash = _finite(account.get("cash"))
+        if total_asset is None or total_asset <= 0 or cash is None or cash < 0:
+            raise ValueError("QMT 账户资金字段无效，拒绝替换本地持仓")
+        positions = []
+        for row in snapshot.get("positions") or []:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            quantity = _finite(row.get("quantity"))
+            available = _finite(row.get("available"))
+            cost = _finite(row.get("cost_price"))
+            if (
+                not symbol or quantity is None or available is None or cost is None
+                or quantity < 0 or available < 0 or available > quantity or cost <= 0
+            ):
+                raise ValueError(f"QMT 持仓字段无效: {symbol or 'unknown'}")
+            positions.append({
+                "symbol": symbol,
+                "name": str(row.get("name") or symbol),
+                "asset_type": str(row.get("asset_type") or "stock"),
+                "quantity": int(quantity),
+                "available": int(available),
+                "cost_price": round(cost, 4),
+                "import_price": _finite(row.get("price")) or round(cost, 4),
+                "price_source": "qmt_position",
+            })
+        current = self.store.load()
+        account_id = str(snapshot.get("account_id") or account.get("name") or "").strip()
+        account_value = {
+            **current.get("account", {}),
+            "name": account_id or str(current["account"].get("name") or "QMT账户"),
+            "cash": round(cash, 2),
+            "total_asset": round(total_asset, 2),
+            "previous_close_total_asset": _finite(current["account"].get("previous_close_total_asset")) or total_asset,
+        }
+        position_fields = ("symbol", "name", "asset_type", "quantity", "available", "cost_price")
+
+        def position_signature(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+            return sorted(tuple(row.get(field) for field in position_fields) for row in rows)
+
+        positions_changed = position_signature(current.get("positions") or []) != position_signature(positions)
+        account_changed = any(
+            current.get("account", {}).get(field) != account_value.get(field)
+            for field in ("name", "cash", "total_asset")
+        )
+        first_qmt_sync = self.store.get_runtime("qmt_account_id") != account_id
+        sync_state = {"synced_at": snapshot.get("synced_at"), "account_id": account_id}
+        self.store.set_runtime("qmt_sync", sync_state)
+        if not first_qmt_sync and not positions_changed and not account_changed:
+            return current
+
+        if first_qmt_sync:
+            account_value["high_watermark"] = round(total_asset, 2)
+        value = {
+            **current,
+            "account": account_value,
+            "positions": positions,
+            "imported_at": cn_now().isoformat(),
+        }
+        if positions_changed:
+            saved = self.store.replace(value, current["revision"])
+        else:
+            saved = self.store.update_system(lambda stored: stored.update({
+                "account": account_value,
+                "imported_at": value["imported_at"],
+            }))
+        self.store.set_runtime("qmt_account_id", account_id)
+        if first_qmt_sync:
+            self.store.set_runtime("account", {
+                "high_watermark": round(total_asset, 2),
+                "last_equity": round(total_asset, 2),
+                "reset_at": saved["imported_at"],
+            })
+        if positions_changed:
+            old_by_symbol = {row.get("symbol"): row for row in current.get("positions") or []}
+            new_by_symbol = {row.get("symbol"): row for row in positions}
+
+            def row_signature(row: dict[str, Any]) -> tuple[Any, ...]:
+                return tuple(row.get(field) for field in position_fields)
+
+            changed_symbols = {
+                symbol for symbol in old_by_symbol.keys() | new_by_symbol.keys()
+                if symbol not in old_by_symbol
+                or symbol not in new_by_symbol
+                or row_signature(old_by_symbol[symbol]) != row_signature(new_by_symbol[symbol])
+            }
+            self._rule_states = {
+                key: state for key, state in self._rule_states.items()
+                if key.split(":", 1)[0] not in changed_symbols
+            }
+            self.store.set_runtime("rule_states", self._rule_states)
+            self.refresh_subscription()
+        self._notify_updated()
         return saved
 
     def view(self) -> dict[str, Any]:

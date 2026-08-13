@@ -110,6 +110,21 @@ class Settings(BaseSettings):
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""
 
+    # 云端 QMT Redis RPC。公网模式仅用于临时联调，凭据只能通过环境变量注入。
+    qmt_enabled: bool = False
+    qmt_redis_host: str = ""
+    qmt_redis_port: int = 6379
+    qmt_redis_db: int = 5
+    qmt_redis_username: str = ""
+    qmt_redis_password: str = ""
+    qmt_account_id: str = ""
+    qmt_rpc_timeout_seconds: float = 6.0
+    qmt_trade_enabled: bool = False
+    qmt_max_order_lots: int = 1
+    qmt_account_type: str = "STOCK"
+    qmt_auto_sync: bool = True
+    qmt_auto_sync_interval_seconds: float = 30.0
+
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
     data_dir: Path = _user_data_root()
