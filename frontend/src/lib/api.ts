@@ -1007,6 +1007,7 @@ export interface AlertEvent {
   price?: number | null
   change_pct?: number | null
   reasons?: string[]
+  source_ids?: string[]
   signals?: string[]
   severity?: string
   strategy_id?: string

@@ -44,7 +44,7 @@ const STATUS_LABEL: Record<PositionRiskStatus, string> = {
 const RULE_GROUPS = [
   ['成本趋势', ['stop_loss', 'trailing_drawdown', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['涨跌停', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
-  ['资金盘口', ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance']],
+  ['资金盘口', ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance']],
   ['仓位', ['symbol_concentration']],
 ] as const
 
@@ -53,6 +53,7 @@ const RULE_LABELS: Record<string, string> = {
   five_minute_drawdown: '5 分钟回撤', vwap_breakdown: '分时均价负偏离超限', broken_limit_up: '炸板', resealed_limit_up: '回封',
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
+  fund_flow_pressure: '资金卖压',
   equity_drawdown: '账户高点回撤', unrealized_loss: '持仓总浮亏', total_exposure: '总仓位', symbol_concentration: '单票集中度',
   clustered_severe_events: '严重事件聚集', quote_interruption: '行情中断',
 }
@@ -191,6 +192,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                 <h3 className="mb-2 text-xs font-semibold text-secondary">{group}</h3>
                 <div className="divide-y divide-border border-y border-border">
                   {rules.map(ruleId => {
+                    const evidenceOnly = ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'].includes(ruleId)
                     const inherited = portfolio?.template.rules[ruleId]?.enabled !== false
                     const explicit = override.rules?.[ruleId]?.enabled
                     const enabled = explicit ?? inherited
@@ -205,7 +207,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                           <span className="flex items-center gap-2">
                             <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
                             <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
-                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>
+                            {!evidenceOnly && <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
                           </span>
                         </div>
                         {fields.length > 0 && (

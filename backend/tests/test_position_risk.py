@@ -913,13 +913,20 @@ def test_symbol_override_controls_builtin_signal_and_monitor_action(tmp_path: Pa
     assert pending[0]["reduction_pct"] == 50
 
 
-def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
+def test_raw_fund_evidence_does_not_emit_independent_events(tmp_path: Path):
     quotes = _Quotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000, "previous_close_total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 500, "available": 500, "cost_price": 35}],
-        "template": {"rules": {"continuous_outflow": {"notify": True}}},
+        "template": {"rules": {
+            "large_sell": {
+                "notify": True, "min_amount": 500, "mad_multiplier": 0,
+                "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
+            "continuous_outflow": {"notify": True},
+            "fund_flow_pressure": {"sustain_seconds": 0},
+        }},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
@@ -928,7 +935,7 @@ def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
     for offset in range(3):
         service._flow["600036.SH"].append({
             "ts": started.timestamp() - offset,
-            "amount": 200_000,
+            "amount": 100 if offset else 1_000,
             "volume": 50,
             "direction": -1,
             "price": 36,
@@ -936,13 +943,10 @@ def test_continuous_outflow_requires_sustained_direction_ratio(tmp_path: Path):
     quote = {"symbol": "600036.SH", "last_price": 36, "timestamp": started.isoformat()}
 
     service._evaluate_position(portfolio, position, quote, started)
-    assert not any(item["rule_id"] == "continuous_outflow" for item in quotes.alerts)
+    assert quotes.alerts == []
     service._evaluate_position(portfolio, position, quote, started.replace(second=10))
 
-    outflow = next(item for item in quotes.alerts if item["rule_id"] == "continuous_outflow")
-    assert outflow["suggestion_pct"] == 25
-    assert outflow["reasons"] == ["卖方主导：最近 60 秒 3 笔报价增量中卖方占比 100%（阈值 ≥ 65%）持续 10 秒"]
-    assert "样本不足" not in outflow["reasons"][0]
+    assert quotes.alerts == []
 
 
 def test_large_order_uses_configured_thresholds(tmp_path: Path):
@@ -1021,7 +1025,7 @@ def test_large_order_summary_uses_the_matching_direction_z_score(tmp_path: Path)
     assert state["sell_z_score"] > state["buy_z_score"]
 
 
-def test_large_buy_is_never_upgraded_to_reduction_by_sell_depth(tmp_path: Path):
+def test_large_buy_is_only_internal_fund_evidence(tmp_path: Path):
     quotes = _Quotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
     service.store.replace({
@@ -1048,8 +1052,186 @@ def test_large_buy_is_never_upgraded_to_reduction_by_sell_depth(tmp_path: Path):
         {"symbol": "600036.SH", "last_price": 36, "timestamp": now.isoformat()},
         now,
     )
-    event = next(item for item in quotes.alerts if item["rule_id"] == "large_buy")
+    assert quotes.alerts == []
+
+
+def test_fund_pressure_requires_two_evidence_price_confirmation_and_sustain(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+        "template": {"rules": {
+            "large_sell": {
+                "min_samples": 7, "min_amount": 500, "mad_multiplier": 0,
+                "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
+            "continuous_outflow": {"direction_ratio": 0.65, "sustain_seconds": 0},
+            "fund_flow_pressure": {
+                "notify": True, "sustain_seconds": 30, "price_buffer": 0.002,
+            },
+        }},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    started = datetime(2026, 8, 7, 10, 0)
+    for offset, amount in enumerate([100, 100, 100, 100, 100, 100, 1_000]):
+        service._flow["600036.SH"].append({
+            "ts": started.timestamp() - offset,
+            "amount": amount,
+            "volume": 1,
+            "direction": -1,
+            "price": 36.0 if offset else 35.8,
+        })
+    service._flow["600036.SH"].append({
+        "ts": started.timestamp() - 61,
+        "amount": 100,
+        "volume": 1,
+        "direction": -1,
+        "price": 36.0,
+    })
+    quote = {"symbol": "600036.SH", "last_price": 35.8, "timestamp": started.isoformat()}
+
+    service._evaluate_position(portfolio, position, quote, started)
+    service._evaluate_position(portfolio, position, quote, started.replace(second=29))
+    assert quotes.alerts == []
+
+    service._evaluate_position(portfolio, position, quote, started.replace(second=30))
+
+    assert len(quotes.alerts) == 1
+    event = quotes.alerts[0]
+    assert event["rule_id"] == "fund_flow_pressure"
+    assert set(event["source_ids"]) == {"large_sell", "continuous_outflow"}
     assert event["suggestion_pct"] == 0
+    assert event["risk_score"] == 50
+
+
+def test_fund_pressure_three_evidence_and_sharp_drop_upgrades_action(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+        "template": {"rules": {
+            "large_sell": {
+                "min_samples": 7, "min_amount": 500, "mad_multiplier": 0,
+                "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
+            "continuous_outflow": {"sustain_seconds": 0},
+            "orderbook_imbalance": {"sustain_seconds": 0},
+            "fund_flow_pressure": {
+                "notify": True, "sustain_seconds": 0, "strong_price_drop": 0.01,
+            },
+        }},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    now = datetime(2026, 8, 7, 10, 1)
+    for offset, amount in enumerate([100, 100, 100, 100, 100, 100, 1_000]):
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - offset,
+            "amount": amount, "volume": 1, "direction": -1, "price": 35.0,
+        })
+    service._flow["600036.SH"].append({
+        "ts": now.timestamp() - 61, "amount": 100, "volume": 1,
+        "direction": -1, "price": 36.0,
+    })
+    depth = {
+        "symbol": "600036.SH", "bid_volumes": [10], "ask_volumes": [100],
+        "bid1_price": 35, "bid1_volume": 10, "ask1_price": 35.01,
+        "ask1_volume": 100, "received_at": now.timestamp(),
+    }
+    service._depth["600036.SH"].extend([depth] * 3)
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 35, "timestamp": now.isoformat()},
+        now,
+    )
+
+    event = quotes.alerts[0]
+    assert event["rule_id"] == "fund_flow_pressure"
+    assert event["suggestion_pct"] == 50
+    assert event["risk_score"] == 80
+
+
+def test_fund_pressure_requires_recovery_and_respects_group_cooldown(tmp_path: Path):
+    quotes = _Quotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 82_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 500,
+            "available": 500, "cost_price": 35,
+        }],
+        "template": {"rules": {
+            "large_sell": {
+                "min_samples": 7, "min_amount": 500, "mad_multiplier": 0,
+                "min_z_score": 2.5, "direction_ratio": 0.65,
+            },
+            "continuous_outflow": {"sustain_seconds": 0},
+            "fund_flow_pressure": {
+                "notify": True, "sustain_seconds": 0, "recovery_seconds": 60,
+                "cooldown_seconds": 900,
+            },
+        }},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    started = datetime(2026, 8, 7, 10, 0)
+
+    def set_sell_pressure(now: datetime) -> None:
+        service._flow["600036.SH"].clear()
+        for offset, amount in enumerate([100, 100, 100, 100, 100, 100, 1_000]):
+            service._flow["600036.SH"].append({
+                "ts": now.timestamp() - offset,
+                "amount": amount, "volume": 1, "direction": -1, "price": 35.8,
+            })
+        service._flow["600036.SH"].append({
+            "ts": now.timestamp() - 61,
+            "amount": 100, "volume": 1, "direction": -1, "price": 36,
+        })
+
+    def evaluate(now: datetime) -> None:
+        service._evaluate_position(
+            portfolio, position,
+            {"symbol": "600036.SH", "last_price": 35.8, "timestamp": now.isoformat()},
+            now,
+        )
+
+    set_sell_pressure(started)
+    evaluate(started)
+    assert len(quotes.alerts) == 1
+
+    service._flow["600036.SH"].clear()
+    recovery_started = started.replace(minute=1)
+    evaluate(recovery_started)
+    evaluate(recovery_started.replace(second=59))
+    assert service._rule_states["600036.SH:fund_flow_pressure"]["active"] is True
+    evaluate(recovery_started.replace(minute=2, second=0))
+    assert service._rule_states["600036.SH:fund_flow_pressure"]["active"] is False
+
+    within_cooldown = started.replace(minute=10)
+    set_sell_pressure(within_cooldown)
+    evaluate(within_cooldown)
+    assert len(quotes.alerts) == 1
+
+    service._flow["600036.SH"].clear()
+    evaluate(started.replace(minute=11))
+    evaluate(started.replace(minute=12))
+    after_cooldown = started.replace(minute=16)
+    set_sell_pressure(after_cooldown)
+    evaluate(after_cooldown)
+    assert len(quotes.alerts) == 2
 
 
 def test_sealed_order_shrink_requires_current_seal(tmp_path: Path):
