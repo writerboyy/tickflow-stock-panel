@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Save, X } from 'lucide-react'
+import { Activity, ArrowRight, ChevronDown, Loader2, Save, Settings2, X } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Modal } from '@/components/Modal'
 import { toast } from '@/components/Toast'
@@ -27,6 +27,20 @@ const RULE_LABELS: Record<string, string> = {
   symbol_concentration: '单票仓位上限', clustered_severe_events: '严重事件聚集',
   quote_interruption: '行情中断',
 }
+
+const INDEPENDENT_RULE_GROUPS = [
+  ['成本与趋势', ['stop_loss', 'trailing_drawdown', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['涨跌停', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
+  ['账户总控', ['daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption']],
+] as const
+
+const FUND_EVIDENCE = [
+  ['large_sell', '大单卖出', '异常卖出金额、方向占比和统计强度同时达标'],
+  ['continuous_outflow', '连续净流出', '卖出方向成交额占比持续超过阈值'],
+  ['orderbook_imbalance', '盘口失衡', '五档卖盘持续明显强于买盘'],
+] as const
+
+type DialogTab = 'independent' | 'combined' | 'builtin' | 'custom' | 'monitor'
 
 export type PositionRiskRuleField = {
   key: string
@@ -147,9 +161,17 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
 export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: Props) {
   const queryClient = useQueryClient()
   const [template, setTemplate] = useState(portfolio.template)
+  const [activeTab, setActiveTab] = useState<DialogTab>('independent')
+  const [expandedRule, setExpandedRule] = useState<string | null>(null)
+  const [showAdvancedPressure, setShowAdvancedPressure] = useState(false)
 
   useEffect(() => {
-    if (open) setTemplate(structuredClone(portfolio.template))
+    if (open) {
+      setTemplate(structuredClone(portfolio.template))
+      setActiveTab('independent')
+      setExpandedRule(null)
+      setShowAdvancedPressure(false)
+    }
   }, [open, portfolio.template])
 
   const mutation = useMutation({
@@ -217,132 +239,244 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     }))
   }
 
+  const ruleConfig = (ruleId: string) => template.rules[ruleId] ?? options?.rules[ruleId] ?? {}
+
+  const displayValue = (value: unknown, percent = false) => {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return 0
+    return percent ? Number((numeric * 100).toFixed(6)) : numeric
+  }
+
+  const renderFields = (ruleId: string, fields: PositionRiskRuleField[], className = 'sm:grid-cols-2') => {
+    const config = ruleConfig(ruleId)
+    return (
+      <div className={`grid gap-x-3 gap-y-2 ${className}`}>
+        {fields.map(field => {
+          const value = displayValue(config[field.key] ?? field.defaultValue ?? 0, field.percent)
+          return (
+            <label key={field.key} className="min-w-0 text-[10px] text-muted">
+              <span>{field.label}</span>
+              <span className="mt-1 flex h-8 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
+                <input
+                  type="number"
+                  min={field.min}
+                  max={field.max}
+                  step={field.step}
+                  value={value}
+                  disabled={config.enabled === false}
+                  onChange={event => {
+                    const next = Number(event.target.value)
+                    if (Number.isFinite(next)) updateRuleValue(ruleId, field.key, field.percent ? next / 100 : next)
+                  }}
+                  className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                />
+                {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
+              </span>
+            </label>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const actionLabel = (ruleId: string) => {
+    const config = ruleConfig(ruleId)
+    if (ruleId === 'symbol_concentration') return `降至 ${Number(config.target_pct ?? 30)}%`
+    return Number(config.action_pct ?? 0) > 0 ? `建议 ${config.action_pct}%` : '只提醒'
+  }
+
   if (!open) return null
-  const evidenceRuleIds = new Set(['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'])
-  const rules = Object.entries(options?.rules ?? template.rules).filter(([id]) => id !== 'large_buy' && id !== 'large_sell')
+  const pressureConfig = ruleConfig('fund_flow_pressure')
+  const minimumEvidence = Number(pressureConfig.min_evidence ?? 2)
+  const pressureSustain = Number(pressureConfig.sustain_seconds ?? 30)
+  const pressureAction = Number(pressureConfig.action_pct ?? 25)
+  const strongPressureAction = Number(pressureConfig.strong_action_pct ?? 50)
+  const strongDrop = displayValue(pressureConfig.strong_price_drop ?? 0.01, true)
+  const pressurePrimaryFields = (POSITION_RISK_RULE_FIELDS.fund_flow_pressure ?? []).filter(field => [
+    'min_evidence', 'sustain_seconds', 'price_buffer', 'strong_price_drop', 'action_pct', 'strong_action_pct',
+  ].includes(field.key))
+  const pressureAdvancedFields = (POSITION_RISK_RULE_FIELDS.fund_flow_pressure ?? []).filter(field => [
+    'recovery_seconds', 'cooldown_seconds', 'recovery_sell_ratio', 'recovery_imbalance',
+  ].includes(field.key))
+  const tabs: Array<[DialogTab, string]> = [
+    ['independent', '独立风险'],
+    ['combined', '组合风险'],
+    ['builtin', '系统信号'],
+    ['custom', '自定义信号'],
+    ['monitor', '监控中心规则'],
+  ]
   return (
     <Modal
       onClose={onClose}
       labelledBy="position-risk-rules-title"
-      panelClassName="flex max-h-[88vh] w-[94vw] max-w-4xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl"
+      panelClassName="flex max-h-[90vh] w-[96vw] max-w-6xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl"
     >
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <div>
+        <div className="min-w-0 pr-3">
           <h2 id="position-risk-rules-title" className="text-sm font-semibold">全局风控模板</h2>
-          <p className="mt-0.5 text-[11px] text-muted">这里只修改持仓风控，不会改动公共信号或监控中心原规则；大单、净流出和盘口只作为证据，达到组合条件后由“资金卖压”统一记录和建议</p>
+          <p className="mt-0.5 truncate text-[11px] text-muted">仅影响持仓风控；公共信号和监控中心原规则保持不变</p>
         </div>
         <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <div className="grid gap-6 md:grid-cols-2">
-          <section className="md:col-span-2">
-            <div className="mb-2">
-              <h3 className="text-xs font-semibold text-secondary">大单买入 / 卖出证据标准</h3>
-              <p className="mt-1 break-words text-[11px] leading-5 text-muted">同一方向必须同时满足样本、金额、MAD、Z 分数和同向成交额占比。买卖方向按现价相对上一条报价的涨跌判断。这两项只提供资金证据，不单独写入触发记录、发送通知或生成减仓建议。</p>
+      <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border px-4" aria-label="风控模板分类">
+        {tabs.map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setActiveTab(id)}
+            className={`h-10 shrink-0 border-b-2 px-3 text-xs transition-colors ${activeTab === id ? 'border-accent text-foreground' : 'border-transparent text-muted hover:text-foreground'}`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+        {activeTab === 'independent' && (
+          <div>
+            <div className="mb-5">
+              <h3 className="text-sm font-semibold">独立风险</h3>
+              <p className="mt-1 text-[11px] text-muted">每项规则单独形成风险结论；监控、通知和建议互不依赖。</p>
             </div>
-            <div className="grid divide-y divide-border border-y border-border md:grid-cols-2 md:divide-x md:divide-y-0">
-              {(['large_buy', 'large_sell'] as const).map(ruleId => {
-                const config = template.rules[ruleId] ?? options?.rules[ruleId] ?? {}
-                return (
-                  <section key={ruleId} className="p-3 first:md:pl-0 last:md:pr-0">
-                    <div className="mb-3 flex items-center justify-between gap-3">
-                      <div>
-                        <h4 className="text-xs font-medium">{ruleId === 'large_buy' ? '大单买入' : '大单卖出'}</h4>
-                        <p className="mt-0.5 text-[10px] text-muted">仅作为资金卖压的组合证据</p>
-                      </div>
-                      <span className="flex shrink-0 items-center gap-3 text-[10px] text-muted">
-                        <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} aria-label={`监控${ruleId === 'large_buy' ? '大单买入' : '大单卖出'}`} /><span>监控</span></label>
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-                      {LARGE_ORDER_FIELDS.map(field => {
-                        const rawValue = Number(config[field.key] ?? field.defaultValue ?? 0)
-                        const value = field.percent ? rawValue * 100 : rawValue
-                        return (
-                          <label key={field.key} className="min-w-0 text-[10px] text-muted">
-                            <span>{field.label}</span>
-                            <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
-                              <input
-                                type="number"
-                                min={field.min}
-                                max={field.max}
-                                step={field.step}
-                                value={Number.isFinite(value) ? value : ''}
-                                disabled={config.enabled === false}
-                                onChange={event => {
-                                  const next = Number(event.target.value)
-                                  if (Number.isFinite(next)) updateRuleValue(ruleId, field.key, field.percent ? next / 100 : next)
-                                }}
-                                className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
-                              />
-                              {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
-                            </span>
-                          </label>
-                        )
-                      })}
-                    </div>
-                  </section>
-                )
-              })}
-            </div>
-          </section>
-          <section>
-            <h3 className="mb-2 text-xs font-semibold text-secondary">核心风控</h3>
-            <div className="divide-y divide-border border-y border-border">
-              {rules.map(([id, defaultConfig]) => {
-                const config = template.rules[id] ?? defaultConfig
-                const evidenceOnly = evidenceRuleIds.has(id)
-                const actionLabel = evidenceOnly ? '仅作证据' : id === 'symbol_concentration'
-                  ? `降至 ${Number(config.target_pct ?? 30)}%`
-                  : Number(config.action_pct ?? 0) > 0 ? `建议 ${config.action_pct}%` : '只提醒'
-                return (
-                  <div key={id} className="border-b border-border py-2 last:border-b-0">
-                    <div className="flex min-h-7 items-center justify-between gap-3 text-xs">
-                      <span>{RULE_LABELS[id] ?? id}</span>
-                      <span className="flex items-center gap-4">
-                        <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-muted">{actionLabel}</span>
-                        <span className="flex items-center gap-3">
-                          <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} aria-label={`监控${RULE_LABELS[id] ?? id}`} /><span>监控</span></label>
-                          {!evidenceOnly && <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(id, event.target.checked)} aria-label={`通知${RULE_LABELS[id] ?? id}信号`} /><span>通知</span></label>}
-                        </span>
-                      </span>
-                    </div>
-                    {POSITION_RISK_RULE_FIELDS[id] && (
-                      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2">
-                        {POSITION_RISK_RULE_FIELDS[id].map(field => {
-                          const rawValue = Number(config[field.key] ?? field.defaultValue ?? 0)
-                          const value = field.percent ? rawValue * 100 : rawValue
-                          return (
-                            <label key={field.key} className="min-w-0 text-[10px] text-muted">
-                              <span>{field.label}</span>
-                              <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
-                                <input
-                                  type="number"
-                                  min={field.min}
-                                  max={field.max}
-                                  step={field.step}
-                                  value={Number.isFinite(value) ? value : ''}
-                                  disabled={config.enabled === false}
-                                  onChange={event => {
-                                    const next = Number(event.target.value)
-                                    if (Number.isFinite(next)) updateRuleValue(id, field.key, field.percent ? next / 100 : next)
-                                  }}
-                                  className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
-                                />
-                                {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
-                              </span>
-                            </label>
-                          )
-                        })}
-                      </div>
-                    )}
+            <div className="grid gap-x-8 gap-y-6 lg:grid-cols-3">
+              {INDEPENDENT_RULE_GROUPS.map(([group, ruleIds]) => (
+                <section key={group} className="min-w-0">
+                  <h4 className="mb-2 text-[11px] font-semibold text-secondary">{group}</h4>
+                  <div className="divide-y divide-border border-y border-border">
+                    {ruleIds.filter(id => id in (options?.rules ?? template.rules)).map(id => {
+                      const config = ruleConfig(id)
+                      const expanded = expandedRule === id
+                      return (
+                        <div key={id} className="py-2.5">
+                          <div className="flex min-h-8 items-center gap-2 text-xs">
+                            <button type="button" onClick={() => setExpandedRule(expanded ? null : id)} className="flex min-w-0 flex-1 items-center gap-2 text-left" aria-expanded={expanded}>
+                              <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                              <span className="truncate">{RULE_LABELS[id] ?? id}</span>
+                            </button>
+                            <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{actionLabel(id)}</span>
+                            <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} /><span>监控</span></label>
+                            <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(id, event.target.checked)} /><span>通知</span></label>
+                          </div>
+                          {expanded && POSITION_RISK_RULE_FIELDS[id] && (
+                            <div className="mt-3 pl-5">{renderFields(id, POSITION_RISK_RULE_FIELDS[id])}</div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
-                )
-              })}
+                </section>
+              ))}
             </div>
-          </section>
-          <div className="space-y-6">
-            <section>
+          </div>
+        )}
+
+        {activeTab === 'combined' && (
+          <div className="mx-auto max-w-5xl">
+            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold">资金卖压</h3>
+                  <span className="bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">组合风险</span>
+                </div>
+                <p className="mt-1 text-[11px] text-muted">原始证据不单独告警；同时满足证据、价格和持续时间后，只生成这一条结论。</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-4 text-[11px] text-muted">
+                <span className="bg-elevated px-2 py-1">确认后建议 {pressureAction}%</span>
+                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={pressureConfig.enabled !== false} onChange={event => toggleRule('fund_flow_pressure', event.target.checked)} /><span>监控</span></label>
+                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={pressureConfig.notify === true} onChange={event => toggleRuleNotify('fund_flow_pressure', event.target.checked)} /><span>通知</span></label>
+              </div>
+            </div>
+
+            <div className="grid items-stretch gap-2 border-y border-border bg-elevated/30 p-3 sm:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1.15fr] sm:items-center">
+              <div className="px-2 py-2">
+                <div className="text-[10px] text-muted">卖压证据</div>
+                <div className="mt-1 text-sm font-semibold">至少 {minimumEvidence} / 3 项</div>
+              </div>
+              <ArrowRight className="hidden h-4 w-4 text-muted sm:block" />
+              <div className="px-2 py-2">
+                <div className="text-[10px] text-muted">价格确认</div>
+                <div className="mt-1 text-sm font-semibold">走弱 1 / 3 项</div>
+              </div>
+              <ArrowRight className="hidden h-4 w-4 text-muted sm:block" />
+              <div className="px-2 py-2">
+                <div className="text-[10px] text-muted">稳定过滤</div>
+                <div className="mt-1 text-sm font-semibold">持续 {pressureSustain} 秒</div>
+              </div>
+              <ArrowRight className="hidden h-4 w-4 text-muted sm:block" />
+              <div className="border-l-2 border-warning px-3 py-2">
+                <div className="text-[10px] text-muted">最终结论</div>
+                <div className="mt-1 text-sm font-semibold text-warning">资金卖压</div>
+              </div>
+            </div>
+
+            <section className="mt-6">
+              <div className="mb-2 flex items-end justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-semibold">卖压证据</h4>
+                  <p className="mt-1 text-[10px] text-muted">三项中达到设定数量才进入价格确认；关闭的证据不参与组合。</p>
+                </div>
+                <span className="shrink-0 text-[10px] text-muted">{minimumEvidence} 选 3</span>
+              </div>
+              <div className="divide-y divide-border border-y border-border">
+                {FUND_EVIDENCE.map(([id, label, description]) => {
+                  const config = ruleConfig(id)
+                  const expanded = expandedRule === id
+                  const fields = id === 'large_sell' ? LARGE_ORDER_FIELDS : POSITION_RISK_RULE_FIELDS[id] ?? []
+                  return (
+                    <div key={id} className="py-3">
+                      <div className="flex items-center gap-3">
+                        <Activity className="h-4 w-4 shrink-0 text-muted" />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium">{label}</div>
+                          <div className="mt-0.5 truncate text-[10px] text-muted">{description}</div>
+                        </div>
+                        <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} /><span>参与组合</span></label>
+                        <button type="button" onClick={() => setExpandedRule(expanded ? null : id)} className="grid h-8 w-8 shrink-0 place-items-center hover:bg-elevated" aria-label={`设置${label}`} title={`设置${label}`}><Settings2 className="h-3.5 w-3.5" /></button>
+                      </div>
+                      {expanded && <div className="mt-3 pl-7">{renderFields(id, fields, 'sm:grid-cols-3')}</div>}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+
+            <section className="mt-6 grid gap-6 lg:grid-cols-[1.5fr_1fr]">
+              <div>
+                <h4 className="mb-2 text-xs font-semibold">组合判断与建议</h4>
+                <div className="border-y border-border py-3">
+                  {renderFields('fund_flow_pressure', pressurePrimaryFields, 'sm:grid-cols-3')}
+                </div>
+                <button type="button" onClick={() => setShowAdvancedPressure(value => !value)} className="mt-2 flex h-8 items-center gap-1.5 text-[11px] text-muted hover:text-foreground" aria-expanded={showAdvancedPressure}>
+                  <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvancedPressure ? '' : '-rotate-90'}`} />
+                  恢复与冷却参数
+                </button>
+                {showAdvancedPressure && <div className="mt-2">{renderFields('fund_flow_pressure', pressureAdvancedFields, 'sm:grid-cols-2')}</div>}
+              </div>
+              <div>
+                <h4 className="mb-2 text-xs font-semibold">结果分级</h4>
+                <div className="divide-y divide-border border-y border-border text-[11px]">
+                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">{minimumEvidence} 项证据 + 价格走弱</span><strong>观察</strong></div>
+                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">3 项证据或已破 MA10 / MA20</span><strong>建议 {pressureAction}%</strong></div>
+                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">3 项证据 + 1 分钟跌幅 ≥ {strongDrop}%</span><strong className="text-warning">建议 {strongPressureAction}%</strong></div>
+                </div>
+              </div>
+            </section>
+
+            <section className="mt-6 border-t border-border pt-4">
+              <div className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium">大单买入辅助采样</div>
+                  <p className="mt-1 text-[10px] text-muted">仅保留买方观察数据，不计入“资金卖压”三项证据，也不会单独告警。</p>
+                </div>
+                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={ruleConfig('large_buy').enabled !== false} onChange={event => toggleRule('large_buy', event.target.checked)} /><span>采样</span></label>
+                <button type="button" onClick={() => setExpandedRule(expandedRule === 'large_buy' ? null : 'large_buy')} className="grid h-8 w-8 shrink-0 place-items-center hover:bg-elevated" aria-label="设置大单买入" title="设置大单买入"><Settings2 className="h-3.5 w-3.5" /></button>
+              </div>
+              {expandedRule === 'large_buy' && <div className="mt-3">{renderFields('large_buy', LARGE_ORDER_FIELDS, 'sm:grid-cols-3')}</div>}
+            </section>
+          </div>
+        )}
+
+        {activeTab === 'builtin' && (
+          <section className="mx-auto max-w-4xl">
               <div className="mb-2 flex items-center gap-2">
                 <h3 className="text-xs font-semibold text-secondary">系统信号</h3>
                 <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">方向只读</span>
@@ -372,8 +506,11 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                   )
                 })}
               </div>
-            </section>
-            <section>
+          </section>
+        )}
+
+        {activeTab === 'custom' && (
+          <section className="mx-auto max-w-4xl">
               <h3 className="mb-2 text-xs font-semibold text-secondary">自定义信号</h3>
               <div className="divide-y divide-border border-y border-border">
                 {options?.custom_signals.length ? options.custom_signals.map(signal => {
@@ -397,8 +534,11 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                   )
                 }) : <p className="py-3 text-xs text-muted">暂无已启用自定义信号</p>}
               </div>
-            </section>
-            <section>
+          </section>
+        )}
+
+        {activeTab === 'monitor' && (
+          <section className="mx-auto max-w-4xl">
               <h3 className="mb-2 text-xs font-semibold text-secondary">已有监控规则</h3>
               <div className="divide-y divide-border border-y border-border">
                 {options?.monitor_rules.length ? options.monitor_rules.map(rule => {
@@ -424,9 +564,8 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                   )
                 }) : <p className="py-3 text-xs text-muted">暂无监控中心规则</p>}
               </div>
-            </section>
-          </div>
-        </div>
+          </section>
+        )}
       </div>
       <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
         <button type="button" onClick={onClose} className="h-8 rounded-btn px-3 text-xs hover:bg-elevated">取消</button>
