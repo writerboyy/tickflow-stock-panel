@@ -41,12 +41,20 @@ def default_template() -> dict[str, Any]:
                 "mad_multiplier": 3.0, "min_z_score": 2.5, "direction_ratio": 0.65,
             },
             "large_sell": {
-                "enabled": True, "notify": False, "action_pct": 25, "window_seconds": 60,
+                "enabled": True, "notify": False, "action_pct": 0, "window_seconds": 60,
                 "min_samples": 7, "min_amount": 1_000_000,
                 "mad_multiplier": 3.0, "min_z_score": 2.5, "direction_ratio": 0.65,
             },
-            "continuous_outflow": {"enabled": True, "notify": False, "direction_ratio": 0.65, "sustain_seconds": 10, "action_pct": 25},
-            "orderbook_imbalance": {"enabled": True, "notify": False, "threshold": -0.35, "sustain_seconds": 10, "action_pct": 25},
+            "continuous_outflow": {"enabled": True, "notify": False, "direction_ratio": 0.65, "sustain_seconds": 10, "action_pct": 0},
+            "orderbook_imbalance": {"enabled": True, "notify": False, "threshold": -0.35, "sustain_seconds": 10, "action_pct": 0},
+            "fund_flow_pressure": {
+                "enabled": True, "notify": False, "min_evidence": 2,
+                "sustain_seconds": 30, "recovery_seconds": 60,
+                "cooldown_seconds": 900, "recovery_sell_ratio": 0.55,
+                "recovery_imbalance": -0.15, "price_buffer": 0.002,
+                "strong_price_drop": 0.01,
+                "action_pct": 25, "strong_action_pct": 50,
+            },
             "daily_equity_loss": {"enabled": True, "notify": False, "threshold": 0.03, "action_pct": 50},
             "equity_drawdown": {"enabled": True, "notify": False, "threshold": 0.08, "action_pct": 50},
             "unrealized_loss": {"enabled": True, "notify": False, "threshold": 0.08, "action_pct": 50},
@@ -199,6 +207,18 @@ class PositionRiskStore:
             result = conn.execute(
                 "UPDATE recommendations SET status='stale', updated_at=? WHERE status='pending'",
                 (_now(),),
+            )
+            return int(result.rowcount)
+
+    def stale_pending_rules(self, rule_ids: set[str]) -> int:
+        if not rule_ids:
+            return 0
+        placeholders = ",".join("?" for _ in rule_ids)
+        with self._connect() as conn:
+            result = conn.execute(
+                f"UPDATE recommendations SET status='stale', updated_at=? "
+                f"WHERE status='pending' AND rule_id IN ({placeholders})",
+                (_now(), *sorted(rule_ids)),
             )
             return int(result.rowcount)
 

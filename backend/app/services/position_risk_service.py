@@ -24,6 +24,12 @@ from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
 _ACCOUNT_ID = "position-risk"
 _EVENT_COOLDOWN_SECONDS = 300
+_FUND_EVIDENCE_RULES = {
+    "large_buy",
+    "large_sell",
+    "continuous_outflow",
+    "orderbook_imbalance",
+}
 _NO_COOLDOWN_RULES = {
     "stop_loss",
     "broken_limit_up",
@@ -173,6 +179,14 @@ class PositionRiskService:
             (_finite(value) for value in severe_events if _finite(value) is not None),
             maxlen=20,
         )
+        if not self.store.get_runtime("fund_pressure_noise_v1", False):
+            self.store.stale_pending_rules(_FUND_EVIDENCE_RULES)
+            self._rule_states = {
+                key: value for key, value in self._rule_states.items()
+                if key.rsplit(":", 1)[-1] not in _FUND_EVIDENCE_RULES
+            }
+            self.store.set_runtime("rule_states", self._rule_states)
+            self.store.set_runtime("fund_pressure_noise_v1", True)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -614,6 +628,7 @@ class PositionRiskService:
         active: bool,
         now: datetime | None = None,
         event_token: str | None = None,
+        cooldown_seconds: int | None = None,
     ) -> bool:
         key = f"{symbol}:{rule_id}"
         current = self._rule_states.get(key) or {}
@@ -627,7 +642,8 @@ class PositionRiskService:
         next_state = {**current, "active": active, "changed_at": event_time}
         if should_emit and rule_id not in _NO_COOLDOWN_RULES and not rule_id.startswith("signal:"):
             last_emitted = _finite(current.get("last_emitted_at"))
-            if last_emitted is not None and event_time - last_emitted < _EVENT_COOLDOWN_SECONDS:
+            cooldown = _EVENT_COOLDOWN_SECONDS if cooldown_seconds is None else max(0, cooldown_seconds)
+            if last_emitted is not None and event_time - last_emitted < cooldown:
                 should_emit = False
         if should_emit:
             next_state["last_emitted_at"] = event_time
@@ -867,12 +883,18 @@ class PositionRiskService:
                 portfolio, position, "sealed_order_shrink_50", f"封单减少 {shrink_50_threshold:.0%}", "warn",
                 55, shrink_50_action, [f"买一封单较盘中峰值减少至少 {shrink_50_threshold:.0%}"],
             )
+        snapshot_getter = getattr(self.quote_service, "get_intraday_snapshot", None)
+        asset_type = str(position.get("asset_type") or self._asset_types.get(symbol) or "stock")
+        snapshot = snapshot_getter(
+            {symbol}, asset_type=asset_type, now=now,
+        ) if callable(snapshot_getter) else {}
+        vwap = (snapshot.get("vwap") or {}).get(symbol)
+
         imbalance_cfg = self._rule_config(portfolio, symbol, "orderbook_imbalance")
         imbalance_threshold = _finite(imbalance_cfg.get("threshold"))
         imbalance_threshold = imbalance_threshold if imbalance_threshold is not None else -0.35
         imbalance_sustain = _finite(imbalance_cfg.get("sustain_seconds"))
         imbalance_sustain = imbalance_sustain if imbalance_sustain is not None else 10
-        imbalance_action = _action_pct(imbalance_cfg, 25)
         imbalance_below = bool(
             imbalance_cfg.get("enabled", True)
             and depth_state["imbalance"] is not None
@@ -886,39 +908,15 @@ class PositionRiskService:
             int(imbalance_sustain),
             now,
         ) if not imbalance_suppressed else False
-        if self._set_rule(symbol, "orderbook_imbalance", imbalance_active, now) and not imbalance_suppressed:
-            self._emit(
-                portfolio, position, "orderbook_imbalance", "盘口失衡", "warn", 55, imbalance_action,
-                [
-                    f"卖盘占优：买五档挂单 {depth_state['bid_total']:,.0f}，卖五档挂单 {depth_state['ask_total']:,.0f}；"
-                    f"失衡 {depth_state['imbalance']:.2f}（阈值 < {imbalance_threshold:.2f}）持续 {int(imbalance_sustain)} 秒"
-                ],
-            )
 
         large_buy_cfg = self._rule_config(portfolio, symbol, "large_buy")
         large_sell_cfg = self._rule_config(portfolio, symbol, "large_sell")
         buy_flow = self._flow_state(symbol, now, large_buy_cfg)
         sell_flow = self._flow_state(symbol, now, large_sell_cfg)
         flow = self._flow_state(symbol, now)
-        for rule_id, active, action, label, flow_state in (
-            ("large_buy", buy_flow["large_buy"], _action_pct(large_buy_cfg, 0), "大单买入", buy_flow),
-            ("large_sell", sell_flow["large_sell"], _action_pct(large_sell_cfg, 25), "大单卖出", sell_flow),
-        ):
-            flow_cfg = large_buy_cfg if rule_id == "large_buy" else large_sell_cfg
-            if self._set_rule(symbol, rule_id, bool(flow_cfg.get("enabled", True) and active), now):
-                chosen_action = (
-                    50
-                    if rule_id == "large_sell" and active and action
-                    and depth_state["imbalance"] is not None
-                    and depth_state["imbalance"] < -0.35
-                    else action
-                )
-                self._emit(
-                    portfolio, position, rule_id, label, "warn" if action else "info",
-                    75 if chosen_action >= 50 else _RULE_WEIGHTS["flow"] + (35 if action else 15),
-                    chosen_action,
-                    [flow_state[f"{'buy' if rule_id == 'large_buy' else 'sell'}_summary"]],
-                )
+        large_sell_active = bool(
+            large_sell_cfg.get("enabled", True) and sell_flow["large_sell"]
+        )
         outflow_cfg = self._rule_config(portfolio, symbol, "continuous_outflow")
         outflow_below = bool(
             outflow_cfg.get("enabled", True)
@@ -934,29 +932,146 @@ class PositionRiskService:
             int(outflow_cfg.get("sustain_seconds", 10)),
             now,
         ) if not outflow_suppressed else False
-        if self._set_rule(symbol, "continuous_outflow", outflow_active, now) and not outflow_suppressed:
-            outflow_samples = int(flow["samples"])
-            outflow_sell_ratio = float(flow["sell_ratio"] or 0.0)
-            outflow_threshold = float(outflow_cfg.get("direction_ratio", 0.65))
-            outflow_sustain = int(outflow_cfg.get("sustain_seconds", 10))
-            self._emit(
-                portfolio,
-                position,
-                "continuous_outflow",
-                "连续净流出",
-                "warn",
-                50,
-                int(outflow_cfg.get("action_pct", 25)),
-                [
-                    f"卖方主导：最近 60 秒 {outflow_samples} 笔报价增量中卖方占比 "
-                    f"{outflow_sell_ratio:.0%}（阈值 ≥ {outflow_threshold:.0%}）持续 {outflow_sustain} 秒"
-                ],
-            )
 
         recent_five_minutes = [
             item for item in self._flow.get(symbol, ())
             if item["ts"] >= now.timestamp() - 300 and item["ts"] <= now.timestamp()
         ]
+        pressure_cfg = self._rule_config(portfolio, symbol, "fund_flow_pressure")
+        pressure_state = self._rule_states.get(f"{symbol}:fund_flow_pressure") or {}
+        price_buffer = _finite(pressure_cfg.get("price_buffer"))
+        price_buffer = price_buffer if price_buffer is not None else 0.002
+        minute_points = [
+            item for item in recent_five_minutes
+            if item["ts"] <= now.timestamp() - 60
+        ]
+        minute_reference = max(minute_points, key=lambda item: item["ts"])["price"] if minute_points else None
+        one_minute_return = price / minute_reference - 1 if minute_reference else None
+        earlier_prices = [
+            item["price"] for item in recent_five_minutes
+            if item["ts"] <= now.timestamp() - 60
+        ]
+        previous_low = min(earlier_prices) if earlier_prices else None
+        price_reasons = []
+        if vwap and price <= float(vwap) * (1 - price_buffer):
+            price_reasons.append(f"现价低于分时均价 {(1 - price / float(vwap)):.2%}")
+        if one_minute_return is not None and one_minute_return <= -price_buffer:
+            price_reasons.append(f"最近一分钟价格下跌 {-one_minute_return:.2%}")
+        if previous_low and price <= previous_low * (1 - price_buffer):
+            price_reasons.append(f"现价跌破一分钟前的 5 分钟低点 {previous_low:.3f}")
+        evidence = []
+        if large_sell_active:
+            evidence.append(("large_sell", sell_flow["sell_summary"]))
+        if outflow_active and not outflow_suppressed:
+            evidence.append((
+                "continuous_outflow",
+                f"最近 60 秒 {int(flow['samples'])} 笔报价增量中卖方占比 "
+                f"{float(flow['sell_ratio'] or 0):.0%}",
+            ))
+        if imbalance_active and not imbalance_suppressed:
+            evidence.append((
+                "orderbook_imbalance",
+                f"买五档挂单 {depth_state['bid_total']:,.0f}，卖五档挂单 "
+                f"{depth_state['ask_total']:,.0f}，盘口失衡 {depth_state['imbalance']:.2f}",
+            ))
+        minimum_evidence = max(2, int(_finite(pressure_cfg.get("min_evidence")) or 2))
+        pressure_raw = bool(
+            pressure_cfg.get("enabled", True)
+            and len(evidence) >= minimum_evidence
+            and price_reasons
+        )
+        recovery_sell_ratio = _finite(pressure_cfg.get("recovery_sell_ratio"))
+        recovery_sell_ratio = recovery_sell_ratio if recovery_sell_ratio is not None else 0.55
+        recovery_imbalance = _finite(pressure_cfg.get("recovery_imbalance"))
+        recovery_imbalance = recovery_imbalance if recovery_imbalance is not None else -0.15
+        previous_sources = set(runtime.get("fund_flow_pressure_sources") or [])
+        sell_recovered = flow["sell_ratio"] is None or float(flow["sell_ratio"]) < recovery_sell_ratio
+        depth_recovered = (
+            "orderbook_imbalance" not in previous_sources
+            or depth_state["imbalance"] is None
+            or depth_state["imbalance"] > recovery_imbalance
+        )
+        strong_drop = bool(
+            one_minute_return is not None
+            and one_minute_return <= -float(pressure_cfg.get("strong_price_drop", 0.01))
+        )
+        trend_broken = any(
+            bool((self._rule_states.get(f"{symbol}:ma{days}_breakdown") or {}).get("active"))
+            for days in (10, 20)
+        )
+        pressure_level = 3 if len(evidence) >= 3 and strong_drop else 2 if len(evidence) >= 3 or trend_broken else 1
+        reduction = (
+            _action_pct({"action_pct": pressure_cfg.get("strong_action_pct")}, 50)
+            if pressure_level == 3 else _action_pct(pressure_cfg, 25) if pressure_level == 2 else 0
+        )
+        score = 80 if pressure_level == 3 else 70 if pressure_level == 2 else 50
+        source_ids = [item[0] for item in evidence]
+
+        def emit_pressure() -> None:
+            self._emit(
+                portfolio,
+                position,
+                "fund_flow_pressure",
+                "资金卖压",
+                "warn" if pressure_level >= 2 else "info",
+                score,
+                reduction,
+                [*(item[1] for item in evidence), *price_reasons],
+                source_ids=source_ids,
+            )
+
+        pressure_was_active = bool(pressure_state.get("active"))
+        if pressure_was_active:
+            previous_level = int(_finite(runtime.get("fund_flow_pressure_level")) or 1)
+            if pressure_raw and pressure_level > previous_level:
+                runtime["fund_flow_pressure_level"] = pressure_level
+                runtime["fund_flow_pressure_sources"] = source_ids
+                if self._set_rule(
+                    symbol,
+                    "fund_flow_pressure",
+                    True,
+                    now,
+                    event_token=f"level:{pressure_level}",
+                    cooldown_seconds=0,
+                ):
+                    emit_pressure()
+            configured_recovery = _finite(pressure_cfg.get("recovery_seconds"))
+            recovery_seconds = int(configured_recovery if configured_recovery is not None else 60)
+            recovered = self._sustained(
+                runtime,
+                "fund_flow_pressure_recovery",
+                sell_recovered and depth_recovered and not large_sell_active,
+                recovery_seconds,
+                now,
+            )
+            if recovered:
+                self._set_rule(symbol, "fund_flow_pressure", False, now)
+                runtime.pop("fund_flow_pressure_sources", None)
+                runtime.pop("fund_flow_pressure_level", None)
+        else:
+            runtime.pop("fund_flow_pressure_recovery_since", None)
+            configured_sustain = _finite(pressure_cfg.get("sustain_seconds"))
+            pressure_sustain = int(configured_sustain if configured_sustain is not None else 30)
+            pressure_active = self._sustained(
+                runtime,
+                "fund_flow_pressure",
+                pressure_raw,
+                pressure_sustain,
+                now,
+            )
+            if pressure_active:
+                runtime["fund_flow_pressure_sources"] = source_ids
+                runtime["fund_flow_pressure_level"] = pressure_level
+                configured_cooldown = _finite(pressure_cfg.get("cooldown_seconds"))
+                pressure_cooldown = int(configured_cooldown if configured_cooldown is not None else 900)
+                if self._set_rule(
+                    symbol,
+                    "fund_flow_pressure",
+                    True,
+                    now,
+                    cooldown_seconds=pressure_cooldown,
+                ):
+                    emit_pressure()
         if recent_five_minutes:
             five_minute_high = max(item["price"] for item in recent_five_minutes)
             drawdown_cfg = self._rule_config(portfolio, symbol, "five_minute_drawdown")
@@ -973,12 +1088,6 @@ class PositionRiskService:
                     portfolio, position, "five_minute_drawdown", "5 分钟高点回撤", "warn",
                     45, drawdown_action, [f"从 5 分钟高点回撤 {(1 - price / five_minute_high):.2%}"],
                 )
-        snapshot_getter = getattr(self.quote_service, "get_intraday_snapshot", None)
-        asset_type = str(position.get("asset_type") or self._asset_types.get(symbol) or "stock")
-        snapshot = snapshot_getter(
-            {symbol}, asset_type=asset_type, now=now,
-        ) if callable(snapshot_getter) else {}
-        vwap = (snapshot.get("vwap") or {}).get(symbol)
         vwap_cfg = self._rule_config(portfolio, symbol, "vwap_breakdown")
         vwap_buffer = _finite(vwap_cfg.get("buffer"))
         vwap_buffer = vwap_buffer if vwap_buffer is not None else 0.01
@@ -1474,6 +1583,8 @@ class PositionRiskService:
             "suggestion_pct": reduction_pct,
             "reasons": reasons,
         }
+        if source_ids:
+            event["source_ids"] = list(source_ids)
         if severity == "critical" and rule_id not in {
             "clustered_severe_events", "quote_interruption",
         }:

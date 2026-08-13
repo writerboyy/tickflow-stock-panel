@@ -208,7 +208,12 @@ def list_events(request: Request, days: int = Query(7, ge=1, le=30), limit: int 
             "timeline_origin": "position_risk" if item.get("source") == "position_risk" else "monitor_rule",
         }
         for item in rows
-        if item.get("source") == "position_risk" or item.get("symbol") in positions
+        if (
+            item.get("source") == "position_risk"
+            and item.get("rule_id") not in {
+                "large_buy", "large_sell", "continuous_outflow", "orderbook_imbalance",
+            }
+        ) or (item.get("source") != "position_risk" and item.get("symbol") in positions)
     ][:limit]
     return {"events": rows, "count": len(rows)}
 
