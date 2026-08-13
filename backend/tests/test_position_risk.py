@@ -502,6 +502,14 @@ def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
 
     recommendation = service.store.list_recommendations("pending")
     assert [item["rule_id"] for item in recommendation] == ["vwap_breakdown"]
+    assert recommendation[0]["reasons"] == [
+        "现价 98.000，VWAP 100.000，负偏离 2.00%（阈值 1.00%）持续 30 秒"
+    ]
+    event = next(
+        item for item in alert_store.list_recent(tmp_path, source="position_risk")
+        if item["rule_id"] == "vwap_breakdown"
+    )
+    assert event["rule_name"] == "分时均价负偏离超限"
 
 
 def test_quote_age_excludes_lunch_break():

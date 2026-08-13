@@ -829,8 +829,11 @@ class PositionRiskService:
         ) if not vwap_suppressed else False
         if self._set_rule(symbol, "vwap_breakdown", vwap_active) and not vwap_suppressed:
             self._emit(
-                portfolio, position, "vwap_breakdown", "跌破分时均价", "warn", 45, vwap_action,
-                [f"现价低于 VWAP {(1 - price / vwap):.2%}"],
+                portfolio, position, "vwap_breakdown", "分时均价负偏离超限", "warn", 45, vwap_action,
+                [
+                    f"现价 {price:.3f}，VWAP {vwap:.3f}，负偏离 {(1 - price / vwap):.2%}"
+                    f"（阈值 {vwap_buffer:.2%}）持续 {int(vwap_sustain)} 秒"
+                ],
             )
 
         combined_signals = {**history, **(intraday_signals or {})}

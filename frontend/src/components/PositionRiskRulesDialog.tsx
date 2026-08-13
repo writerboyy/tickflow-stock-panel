@@ -16,7 +16,7 @@ interface Props {
 const RULE_LABELS: Record<string, string> = {
   stop_loss: '成本止损', trailing_drawdown: '盈利后高点回撤',
   ma5_breakdown: '跌破 MA5', ma10_breakdown: '跌破 MA10', ma20_breakdown: '跌破 MA20',
-  five_minute_drawdown: '5 分钟高点回撤', vwap_breakdown: '低于 VWAP',
+  five_minute_drawdown: '5 分钟高点回撤', vwap_breakdown: '分时均价负偏离超限',
   broken_limit_up: '涨停炸板', resealed_limit_up: '涨停回封',
   sealed_order_shrink_50: '封单减少（一级）', sealed_order_shrink_80: '封单减少（二级）',
   limit_down: '跌停', large_buy: '大单买入', large_sell: '大单卖出',
@@ -78,7 +78,7 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
     { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   vwap_breakdown: [
-    { key: 'buffer', label: '低于缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.01 },
+    { key: 'buffer', label: '负偏离阈值', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.01 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 30 },
     { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
