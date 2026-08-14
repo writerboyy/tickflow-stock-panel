@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def default_config() -> dict[str, Any]:
@@ -29,6 +29,7 @@ def default_config() -> dict[str, Any]:
             },
         },
         "selected": [],
+        "board_pool": [],
     }
 
 
@@ -60,6 +61,10 @@ class LimitBoardStore:
             result["settings"].update(raw.get("settings") or {})
             result["selected"] = [
                 item for item in (raw.get("selected") or [])
+                if isinstance(item, dict) and item.get("symbol")
+            ]
+            result["board_pool"] = [
+                item for item in (raw.get("board_pool") or [])
                 if isinstance(item, dict) and item.get("symbol")
             ]
             return result

@@ -411,6 +411,36 @@ def test_qmt_submit_uses_buy_preflight_and_returns_after_acceptance(tmp_path: Pa
     assert calls == ["get_asset", "submit_orders_batch"]
 
 
+def test_qmt_submit_preserves_limit_board_order_source(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+
+    def fake_call(method, params):
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "submit_orders_batch":
+            order = params["orders"][0]
+            assert params["strategy_name"] == "limit_board"
+            assert order["strategy_name"] == "limit_board"
+            assert order["remark"].startswith("limit_board:")
+            return [{"success": True, "accepted": True, "order_sys_id": "board-1"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "limit-board-20260814-600036.SH",
+        "strategy_name": "limit_board",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "volume": 100,
+        "price": 35,
+        "price_type": "LIMIT",
+    })
+
+    assert result["strategy_name"] == "limit_board"
+    assert result["status"] == "accepted_pending"
+
+
 def test_qmt_submit_uses_sell_preflight(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True

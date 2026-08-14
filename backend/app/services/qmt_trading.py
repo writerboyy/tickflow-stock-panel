@@ -446,6 +446,9 @@ class QmtTradingService:
         idempotency_key = str(request.get("idempotency_key") or "").strip()
         if not idempotency_key:
             raise ValueError("缺少委托幂等键")
+        strategy_name = str(request.get("strategy_name") or "position_risk").strip().lower()
+        if strategy_name not in {"position_risk", "limit_board"}:
+            raise ValueError("不支持的委托来源")
         with self._submit_lock:
             existing = self._known_order(idempotency_key)
             if existing:
@@ -453,17 +456,18 @@ class QmtTradingService:
             action = str(request.get("action") or "").upper()
             snapshot = self._order_preflight(action)
             normalized = self._validate_order(request, snapshot)
-            order_tag = f"position-risk:{idempotency_key}"
+            order_tag = f"{strategy_name}:{idempotency_key}"
             params = {
                 "stock_code": normalized["symbol"], "action": normalized["action"],
                 "volume": normalized["volume"], "price": normalized["price"],
                 "price_type": normalized["price_type"], "account_id": self.client.account_id,
-                "strategy_name": "position_risk", "signal_id": idempotency_key,
+                "strategy_name": strategy_name, "signal_id": idempotency_key,
                 "remark": order_tag, "require_idempotency_check": True,
             }
             created_at = _now()
             row = {
                 "idempotency_key": idempotency_key, **normalized,
+                "strategy_name": strategy_name,
                 "status": "submitting", "order_sys_id": None, "user_order_id": order_tag,
                 "created_at": created_at, "updated_at": created_at, "error": None,
             }
@@ -471,7 +475,7 @@ class QmtTradingService:
             try:
                 response = self.client.call(
                     "submit_orders_batch",
-                    {"account_id": self.client.account_id, "strategy_name": "position_risk", "batch_id": idempotency_key, "orders": [params]},
+                    {"account_id": self.client.account_id, "strategy_name": strategy_name, "batch_id": idempotency_key, "orders": [params]},
                 )
             except Exception as exc:
                 row.update(status="unknown", updated_at=_now(), error=str(exc))

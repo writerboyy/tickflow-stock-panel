@@ -1042,6 +1042,14 @@ export interface LimitBoardRow {
   ws_active?: boolean
   source_modes?: string[]
   blacklisted?: boolean
+  source?: 'first_board' | 'selected' | 'manual'
+  auto_trade?: boolean
+  auto_order_key?: string
+  auto_order_status?: string
+  auto_order_sys_id?: string | null
+  auto_order_error?: string | null
+  auto_order_at?: string
+  auto_order_updated_at?: string
 }
 
 export interface LimitBoardView {
@@ -1056,6 +1064,7 @@ export interface LimitBoardView {
   }
   first_board: LimitBoardRow[]
   selected: LimitBoardRow[]
+  board_pool: LimitBoardRow[]
   blacklist: string[]
   events: Array<Record<string, any>>
   runtime: {
@@ -1079,6 +1088,13 @@ export interface LimitBoardConfig {
   revision: number
   settings: LimitBoardView['settings']
   selected: Array<{ symbol: string; name?: string; added_at?: string }>
+  board_pool: Array<{
+    symbol: string
+    name?: string
+    source: 'first_board' | 'selected' | 'manual'
+    auto_trade: boolean
+    added_at?: string
+  }>
 }
 
 export interface AlertEvent {
@@ -2229,6 +2245,19 @@ export const api = {
   limitBoardRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(
       `/api/limit-board/selected/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'selected' | 'manual', revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
+      method: 'POST', body: JSON.stringify({ symbol, source, revision }),
+    }),
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
+      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, revision }),
+    }),
+  limitBoardPoolRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/pool/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),

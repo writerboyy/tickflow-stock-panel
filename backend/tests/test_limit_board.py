@@ -60,9 +60,42 @@ class FakeQuotes:
         self.consumers.pop(consumer_id, None)
 
 
-def make_service(tmp_path):
+class FakeQmt:
+    def __init__(self):
+        self.orders = []
+
+    @staticmethod
+    def status():
+        return {
+            "configured": True,
+            "state": "ready",
+            "trade_enabled": True,
+            "reason": "QMT RPC 在线",
+        }
+
+    def submit_order(self, request):
+        self.orders.append(request)
+        return {**request, "status": "accepted_pending", "order_sys_id": "qmt-1"}
+
+
+class ImmediateExecutor:
+    @staticmethod
+    def submit(callback, *args):
+        callback(*args)
+
+    @staticmethod
+    def shutdown(**_kwargs):
+        pass
+
+
+def make_service(tmp_path, qmt=None):
     quotes = FakeQuotes()
-    service = LimitBoardService(tmp_path, FakeRepo(), quotes, SimpleNamespace(paper_supervisor=None))
+    service = LimitBoardService(
+        tmp_path,
+        FakeRepo(),
+        quotes,
+        SimpleNamespace(paper_supervisor=None, qmt_trading_service=qmt),
+    )
     config = default_config()
     service._history_ready = True
     service._first_board_eligible = {"600000.SH"}
@@ -213,6 +246,48 @@ def test_fourth_break_adds_symbol_to_daily_blacklist(tmp_path):
     assert "第 4 次炸板" in quotes.events[-1]["reasons"][0]
 
 
+def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "source": "first_board",
+        "auto_trade": True,
+    }]
+    runtime = service._runtime_for_today()
+    state = runtime["symbols"].setdefault("600000.SH", {})
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+    service._persist_runtime(runtime)
+    result = service._order_results.get_nowait()
+    service._apply_auto_order_result(result)
+    state = service._runtime_for_today()["symbols"]["600000.SH"]
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["strategy_name"] == "limit_board"
+    assert qmt.orders[0]["volume"] == 100
+    assert qmt.orders[0]["price"] == 11.0
+    assert qmt.orders[0]["price_type"] == "LIMIT"
+    assert state["auto_order_status"] == "accepted_pending"
+    assert state["auto_order_sys_id"] == "qmt-1"
+
+
+def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
+    service, _quotes, config = make_service(tmp_path)
+    config["board_pool"] = [{"symbol": "600000.SH", "auto_trade": True}]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert state["auto_order_status"] == "blocked"
+    assert "QMT" in state["auto_order_error"]
+    assert "auto_order_key" not in state
+
+
 def test_store_revision_conflict_is_fail_closed(tmp_path):
     store = LimitBoardStore(tmp_path)
     saved = store.update(0, lambda value: value["selected"].append({"symbol": "600000.SH"}))
@@ -223,6 +298,19 @@ def test_store_revision_conflict_is_fail_closed(tmp_path):
         assert "revision=1" in str(exc)
     else:
         raise AssertionError("expected revision conflict")
+
+
+def test_store_loads_legacy_config_with_empty_board_pool(tmp_path):
+    store = LimitBoardStore(tmp_path)
+    store.config_path.write_text(
+        '{"schema_version":1,"revision":3,"settings":{},"selected":[]}',
+        encoding="utf-8",
+    )
+
+    config = store.load_config()
+
+    assert config["revision"] == 3
+    assert config["board_pool"] == []
 
 
 def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
@@ -242,6 +330,24 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
     )
     assert added.status_code == 200
     assert added.json()["config"]["revision"] == 1
+
+    pooled = client.post(
+        "/api/limit-board/pool",
+        json={"symbol": "600000.SH", "source": "selected", "revision": 1},
+    )
+    assert pooled.status_code == 200
+    assert pooled.json()["config"]["board_pool"][0]["auto_trade"] is False
+
+    enabled = client.put(
+        "/api/limit-board/pool/600000.SH",
+        json={"auto_trade": True, "revision": 2},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json()["config"]["board_pool"][0]["auto_trade"] is True
+
+    removed = client.delete("/api/limit-board/pool/600000.SH?revision=3")
+    assert removed.status_code == 200
+    assert removed.json()["config"]["board_pool"] == []
 
     stale = client.post(
         "/api/limit-board/selected",

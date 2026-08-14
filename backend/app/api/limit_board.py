@@ -15,6 +15,15 @@ class SelectedWrite(BaseModel):
     symbol: str = Field(min_length=1, max_length=20)
 
 
+class PoolWrite(SelectedWrite):
+    source: str = Field(default="manual", pattern="^(first_board|selected|manual)$")
+
+
+class PoolUpdate(BaseModel):
+    revision: int = Field(ge=0)
+    auto_trade: bool
+
+
 def _service(request: Request):
     service = getattr(request.app.state, "limit_board_service", None)
     if service is None:
@@ -42,6 +51,37 @@ def add_selected(payload: SelectedWrite, request: Request):
 def remove_selected(symbol: str, revision: int, request: Request):
     try:
         config = _service(request).remove_selected(symbol, revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.post("/pool")
+def add_pool(payload: PoolWrite, request: Request):
+    try:
+        config = _service(request).add_pool(payload.symbol, payload.source, payload.revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.put("/pool/{symbol}")
+def update_pool(symbol: str, payload: PoolUpdate, request: Request):
+    try:
+        config = _service(request).update_pool(symbol, payload.auto_trade, payload.revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.delete("/pool/{symbol}")
+def remove_pool(symbol: str, revision: int, request: Request):
+    try:
+        config = _service(request).remove_pool(symbol, revision)
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "config": config}

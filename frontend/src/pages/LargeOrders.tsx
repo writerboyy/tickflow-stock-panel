@@ -19,6 +19,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { PositionRiskImportDialog } from '@/components/PositionRiskImportDialog'
 import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS, PositionRiskRulesDialog } from '@/components/PositionRiskRulesDialog'
+import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toast } from '@/components/Toast'
 import {
   api,
@@ -478,6 +479,7 @@ export function LargeOrders() {
   const [importOpen, setImportOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   const [selected, setSelected] = useState<PositionRiskPosition | null>(null)
+  const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
@@ -565,7 +567,7 @@ export function LargeOrders() {
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
-                <td className="px-3 py-2"><button type="button" onClick={() => setSelected(row)} className="text-left"><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.symbol}</div></button></td>
+                <td className="px-3 py-2"><button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="text-left hover:text-accent" title="查看 K 线与分时"><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.symbol}</div></button></td>
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
@@ -579,10 +581,10 @@ export function LargeOrders() {
           </table>
         </div>
         <div className="divide-y divide-border md:hidden">
-          {rows.map(row => <button key={row.symbol} type="button" onClick={() => setSelected(row)} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <div><div className="font-medium">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div></div>
-            <div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div>
-          </button>)}
+          {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
+            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div></button>
+            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="单股规则与交易"><ChevronRight className="h-4 w-4" /></button></div>
+          </div>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
 
@@ -593,7 +595,7 @@ export function LargeOrders() {
 
       {tab === 'events' && <div className="divide-y divide-border">
         {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_80px] sm:px-5">
-          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time><span>{event.symbol || '组合'} {event.name}</span><span className="min-w-0"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{event.reasons?.length ? <span className="mt-1 block break-words text-[11px] leading-5 text-muted">{event.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</span> : null}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
+          <time className="font-mono text-muted">{new Date(event.ts).toLocaleString('zh-CN')}</time>{event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}<span className="min-w-0"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{event.reasons?.length ? <span className="mt-1 block break-words text-[11px] leading-5 text-muted">{event.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</span> : null}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 
@@ -626,6 +628,7 @@ export function LargeOrders() {
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
       <PositionRiskRulesDialog open={rulesOpen} portfolio={data} options={options.data} onClose={() => setRulesOpen(false)} />
       {selected && <PositionInspector row={selected} options={options.data} onClose={() => setSelected(null)} />}
+      <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )
 }

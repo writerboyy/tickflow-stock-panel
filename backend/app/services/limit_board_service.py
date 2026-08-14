@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as clock_time, timedelta
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,9 @@ class LimitBoardService:
         self.app_state = app_state
         self._lock = threading.RLock()
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=3)
+        self._order_results: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10)
+        self._order_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="limit-board-order")
+        self._order_slots = threading.BoundedSemaphore(4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._polling_lease = False
@@ -83,7 +87,7 @@ class LimitBoardService:
             return
         self._stop.clear()
         self.quote_service.add_fetch_listener(self._on_market_fetch)
-        self._refresh_selected_consumer()
+        self._refresh_symbol_consumer()
         try:
             self.quote_service.acquire_temporary_polling(
                 max(1.0, float(self.quote_service.get_min_interval()))
@@ -119,9 +123,13 @@ class LimitBoardService:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        self._order_executor.shutdown(wait=False, cancel_futures=True)
 
     def _hub(self):
         return getattr(getattr(self.app_state, "paper_supervisor", None), "hub", None)
+
+    def _qmt(self):
+        return getattr(self.app_state, "qmt_trading_service", None)
 
     def _enqueue(self, payload: dict[str, Any]) -> None:
         try:
@@ -162,6 +170,16 @@ class LimitBoardService:
 
     def _worker(self) -> None:
         while not self._stop.is_set():
+            try:
+                order_result = self._order_results.get_nowait()
+            except queue.Empty:
+                order_result = None
+            if order_result is not None:
+                try:
+                    self._apply_auto_order_result(order_result)
+                except Exception:  # noqa: BLE001
+                    logger.exception("打板自动委托结果处理失败")
+                continue
             try:
                 payload = self._queue.get(timeout=1)
             except queue.Empty:
@@ -258,6 +276,7 @@ class LimitBoardService:
         runtime = self._runtime_for_today()
         runtime_symbols = set(runtime.get("symbols") or {})
         selected = {str(item["symbol"]).strip().upper() for item in config["selected"]}
+        board_pool = {str(item["symbol"]).strip().upper() for item in config["board_pool"]}
         now = cn_now()
         updates: dict[str, dict[str, Any]] = {}
         for raw in records:
@@ -276,6 +295,8 @@ class LimitBoardService:
                 continue
             gap = max(0.0, limit_up / price - 1.0)
             source_modes = []
+            if symbol in board_pool:
+                source_modes.append("board_pool")
             if symbol in selected:
                 source_modes.append("selected")
             scan_window = float(config["settings"].get("exit_limit_pct", 0.03))
@@ -354,6 +375,8 @@ class LimitBoardService:
                 state["touched_at"] = now.isoformat()
                 state["status"] = "touched"
                 self._emit("touched", quote, state, config, "首次触及涨停价")
+            if at_limit:
+                self._maybe_auto_trade(symbol, quote, state, config)
             if state.get("sealed") and not at_limit:
                 self._mark_broken(quote, state, runtime, config, "价格离开涨停价")
             elif state.get("sealed"):
@@ -467,6 +490,104 @@ class LimitBoardService:
             reason = f"{reason}；今日第 {state['break_count']} 次炸板"
         self._emit("broken", quote, state, config, reason)
 
+    def _maybe_auto_trade(
+        self,
+        symbol: str,
+        quote: dict[str, Any],
+        state: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        member = next(
+            (item for item in config["board_pool"] if str(item.get("symbol")).strip().upper() == symbol),
+            None,
+        )
+        if not member or not bool(member.get("auto_trade")) or state.get("auto_order_key"):
+            return
+        qmt = self._qmt()
+        qmt_status = qmt.status() if qmt is not None else {}
+        if not (
+            qmt_status.get("configured")
+            and qmt_status.get("state") == "ready"
+            and qmt_status.get("trade_enabled")
+        ):
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = str(
+                qmt_status.get("reason") or "QMT 实盘交易未就绪",
+            )
+            return
+        if not self._order_slots.acquire(blocking=False):
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = "自动委托队列已满"
+            return
+        key = f"limit-board-{cn_today().strftime('%Y%m%d')}-{symbol}"
+        state.update({
+            "auto_order_key": key,
+            "auto_order_status": "submitting",
+            "auto_order_error": None,
+            "auto_order_at": cn_now().isoformat(),
+        })
+        try:
+            self._order_executor.submit(
+                self._submit_auto_order,
+                symbol,
+                float(quote["limit_up"]),
+                key,
+            )
+        except RuntimeError as exc:
+            self._order_slots.release()
+            state["auto_order_status"] = "unknown"
+            state["auto_order_error"] = str(exc)
+
+    def _submit_auto_order(self, symbol: str, limit_up: float, key: str) -> None:
+        qmt = self._qmt()
+        try:
+            if qmt is None:
+                raise RuntimeError("QMT 交易网关未初始化")
+            order = qmt.submit_order({
+                "idempotency_key": key,
+                "strategy_name": "limit_board",
+                "action": "BUY",
+                "symbol": symbol,
+                "volume": 100,
+                "price": limit_up,
+                "price_type": "LIMIT",
+            })
+            result = {
+                "symbol": symbol,
+                "key": key,
+                "status": str(order.get("status") or "unknown"),
+                "order_sys_id": order.get("order_sys_id"),
+                "error": order.get("error"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("打板自动委托提交失败: %s", exc)
+            result = {
+                "symbol": symbol,
+                "key": key,
+                "status": "unknown",
+                "order_sys_id": None,
+                "error": str(exc),
+            }
+        try:
+            self._order_results.put(result)
+        finally:
+            self._order_slots.release()
+
+    def _apply_auto_order_result(self, result: dict[str, Any]) -> None:
+        runtime = self._runtime_for_today()
+        symbol = str(result.get("symbol") or "").strip().upper()
+        state = runtime.setdefault("symbols", {}).setdefault(symbol, {})
+        if state.get("auto_order_key") != result.get("key"):
+            return
+        state.update({
+            "auto_order_status": result.get("status") or "unknown",
+            "auto_order_sys_id": result.get("order_sys_id"),
+            "auto_order_error": result.get("error"),
+            "auto_order_updated_at": cn_now().isoformat(),
+        })
+        self._persist_runtime(runtime)
+        self._notify_updated()
+
     def _sync_websocket(self, runtime: dict[str, Any], config: dict[str, Any]) -> None:
         hub = self._hub()
         if hub is None:
@@ -501,7 +622,8 @@ class LimitBoardService:
             and (float(quote.get("limit_gap_pct") or 1) <= near or symbol in retained)
         ]
         candidates.sort(key=lambda item: (
-            0 if "selected" in item.get("source_modes", []) else 1,
+            0 if "board_pool" in item.get("source_modes", []) else
+            1 if "selected" in item.get("source_modes", []) else 2,
             float(item.get("limit_gap_pct") or 1),
             -float(item.get("amount") or 0),
         ))
@@ -569,9 +691,13 @@ class LimitBoardService:
         if callable(notify):
             notify()
 
-    def _refresh_selected_consumer(self) -> None:
+    def _refresh_symbol_consumer(self) -> None:
         config = self.store.load_config()
-        symbols = {str(item["symbol"]).strip().upper() for item in config["selected"]}
+        symbols = {
+            str(item["symbol"]).strip().upper()
+            for key in ("selected", "board_pool")
+            for item in config[key]
+        }
         self.quote_service.set_symbol_consumer(_ACCOUNT_ID, symbols)
 
     def view(self) -> dict[str, Any]:
@@ -596,6 +722,12 @@ class LimitBoardService:
             row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
             row["name"] = self._resolve_name(symbol, row.get("name"))
             selected.append(row)
+        board_pool = []
+        for item in config["board_pool"]:
+            symbol = str(item["symbol"]).strip().upper()
+            row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
+            row["name"] = self._resolve_name(symbol, row.get("name"))
+            board_pool.append(row)
         events = self.store.events(runtime["trading_date"])
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
         for event in events:
@@ -608,11 +740,25 @@ class LimitBoardService:
                 event["message"] = f"{event['name']}：{label}"
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
+        qmt = self._qmt()
+        qmt_status = qmt.status() if qmt is not None else {}
+        trading_enabled = bool(
+            qmt_status.get("configured")
+            and qmt_status.get("state") == "ready"
+            and qmt_status.get("trade_enabled")
+        )
+        if trading_enabled:
+            trading_reason = "QMT 实盘已就绪"
+        elif qmt_status.get("state") == "ready":
+            trading_reason = "QMT 已连接，实盘模式未开启"
+        else:
+            trading_reason = str(qmt_status.get("reason") or "QMT 交易网关未就绪")
         return {
             "revision": config["revision"],
             "settings": config["settings"],
             "first_board": [item for item in rows if "first_board" in item.get("source_modes", [])],
             "selected": selected,
+            "board_pool": board_pool,
             "blacklist": runtime.get("blacklist", []),
             "events": events,
             "runtime": {
@@ -624,33 +770,37 @@ class LimitBoardService:
                 "websocket_status": "connected" if self._ws_registered else "idle",
                 "websocket_symbols": len(self._ws_symbols),
                 "websocket_capacity": capacity,
-                "trading_enabled": False,
-                "trading_reason": "券商交易接口待接入",
+                "trading_enabled": trading_enabled,
+                "trading_reason": trading_reason,
                 "market_mode": self._market_mode(),
                 "first_board_enabled": self._market_mode() == "full_market" and self._history_ready,
             },
         }
 
     def add_selected(self, symbol: str, revision: int) -> dict[str, Any]:
-        cleaned = str(symbol).strip().upper()
-        names = self.repo.get_name_map([cleaned])
-        if cleaned not in names or self.repo.resolve_asset_type(cleaned) != "stock":
-            raise ValueError("仅支持本地股票主数据中的 A 股标的")
+        cleaned, name = self._validated_stock(symbol)
 
         def update(value: dict[str, Any]) -> None:
             if any(str(item.get("symbol")) == cleaned for item in value["selected"]):
                 return
             value["selected"].append({
                 "symbol": cleaned,
-                "name": names[cleaned],
+                "name": name,
                 "added_at": cn_now().isoformat(),
             })
 
         saved = self.store.update(revision, update)
-        self._refresh_selected_consumer()
+        self._refresh_symbol_consumer()
         self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
         self._notify_updated()
         return saved
+
+    def _validated_stock(self, symbol: str) -> tuple[str, str]:
+        cleaned = str(symbol).strip().upper()
+        names = self.repo.get_name_map([cleaned])
+        if cleaned not in names or self.repo.resolve_asset_type(cleaned) != "stock":
+            raise ValueError("仅支持本地股票主数据中的 A 股标的")
+        return cleaned, str(names[cleaned])
 
     def remove_selected(self, symbol: str, revision: int) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
@@ -660,6 +810,56 @@ class LimitBoardService:
                 "selected", [item for item in value["selected"] if str(item.get("symbol")) != cleaned],
             ),
         )
-        self._refresh_selected_consumer()
+        self._refresh_symbol_consumer()
+        self._notify_updated()
+        return saved
+
+    def add_pool(self, symbol: str, source: str, revision: int) -> dict[str, Any]:
+        cleaned, name = self._validated_stock(symbol)
+
+        def update(value: dict[str, Any]) -> None:
+            if any(str(item.get("symbol")) == cleaned for item in value["board_pool"]):
+                return
+            value["board_pool"].append({
+                "symbol": cleaned,
+                "name": name,
+                "source": source,
+                "auto_trade": False,
+                "added_at": cn_now().isoformat(),
+            })
+
+        saved = self.store.update(revision, update)
+        self._refresh_symbol_consumer()
+        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
+        self._notify_updated()
+        return saved
+
+    def update_pool(self, symbol: str, auto_trade: bool, revision: int) -> dict[str, Any]:
+        cleaned = str(symbol).strip().upper()
+
+        def update(value: dict[str, Any]) -> None:
+            member = next(
+                (item for item in value["board_pool"] if str(item.get("symbol")) == cleaned),
+                None,
+            )
+            if member is None:
+                raise ValueError("打板池中不存在该股票")
+            member["auto_trade"] = bool(auto_trade)
+
+        saved = self.store.update(revision, update)
+        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
+        self._notify_updated()
+        return saved
+
+    def remove_pool(self, symbol: str, revision: int) -> dict[str, Any]:
+        cleaned = str(symbol).strip().upper()
+        saved = self.store.update(
+            revision,
+            lambda value: value.__setitem__(
+                "board_pool",
+                [item for item in value["board_pool"] if str(item.get("symbol")) != cleaned],
+            ),
+        )
+        self._refresh_symbol_consumer()
         self._notify_updated()
         return saved
