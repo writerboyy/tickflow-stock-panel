@@ -205,7 +205,7 @@ class QmtTradingService:
         self.client = QmtRedisRpcClient(settings)
         self.max_order_volume = max(100, int(getattr(settings, "qmt_max_order_lots", 1)) * 100)
         self.trade_authorized = bool(getattr(settings, "qmt_trade_enabled", False))
-        self.trade_enabled = False
+        self.trade_enabled = self.trade_authorized and self.client.configured
         self.account_type = str(getattr(settings, "qmt_account_type", "STOCK") or "STOCK").upper()
         self.auto_sync_enabled = bool(getattr(settings, "qmt_auto_sync", True))
         self.auto_sync_interval = max(10.0, float(getattr(settings, "qmt_auto_sync_interval_seconds", 30.0)))

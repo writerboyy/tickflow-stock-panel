@@ -336,15 +336,19 @@ def test_qmt_trading_service_enforces_one_lot_and_sell_available_volume(tmp_path
     assert service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, snapshot)["volume"] == 100
 
 
-def test_qmt_runtime_trade_switch_starts_off_and_requires_sync(tmp_path: Path):
+def test_qmt_runtime_trade_switch_defaults_to_authorized_state_and_requires_sync_to_reenable(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     assert service.status()["trade_authorized"] is True
-    assert service.status()["trade_enabled"] is False
+    assert service.status()["trade_enabled"] is True
+    assert service.set_trade_enabled(False)["trade_enabled"] is False
     with pytest.raises(QmtRpcError, match="先成功同步"):
         service.set_trade_enabled(True)
     service._last_snapshot = {"synced_at": "2026-08-14T00:00:00+00:00"}
     service._last_status = {"state": "ready"}
     assert service.set_trade_enabled(True)["trade_enabled"] is True
+
+    unauthorized = QmtTradingService(tmp_path / "unauthorized", _qmt_settings(qmt_trade_enabled=False))
+    assert unauthorized.status()["trade_enabled"] is False
 
 
 def test_qmt_auto_sync_starts_immediately_and_stops(tmp_path: Path):
@@ -793,6 +797,16 @@ def test_quote_gap_is_scoped_and_waits_for_every_symbol_to_recover(tmp_path: Pat
     service._mark_quote_recovered({"000001.SZ"})
     assert not service._quote_gap_symbols
     assert service._runtime_status == "websocket"
+    portfolio = service.store.load()
+    for position in portfolio["positions"]:
+        service._evaluate_position(
+            portfolio,
+            position,
+            {"symbol": position["symbol"], "last_price": position["cost_price"], "timestamp": "2026-08-07T10:00:00"},
+            datetime(2026, 8, 7, 10, 0),
+        )
+    assert not service._recovery_pending_symbols
+    assert service._runtime_reason == "持仓池行情连续性已恢复"
 
 
 def test_unrealized_loss_uses_current_equity_denominator(tmp_path: Path):

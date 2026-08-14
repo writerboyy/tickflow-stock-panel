@@ -63,6 +63,12 @@ function qmtOrderStatus(value?: string) {
   return value ? QMT_ORDER_STATUS[value] ?? `状态 ${value}` : '状态未知'
 }
 
+function qmtOrderPrice(value: unknown, priceType?: string) {
+  const numericValue = Number(value)
+  if (value != null && Number.isFinite(numericValue)) return price(numericValue)
+  return priceType === 'LATEST' ? '最新价' : priceType || '—'
+}
+
 const RULE_GROUPS = [
   ['成本趋势', ['stop_loss', 'trailing_drawdown', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['涨跌停', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
@@ -104,7 +110,7 @@ function riskTone(score: number) {
 function StatusDot({ status }: { status: PositionRiskStatus }) {
   const active = status === 'websocket'
   const warning = status === 'polling_degraded' || status === 'reconnecting'
-  return <span className={cn('h-2 w-2 rounded-full', active ? 'bg-bull' : warning ? 'bg-warning' : 'bg-muted')} />
+  return <span className={cn('h-2 w-2 rounded-full', active ? 'bg-bear' : warning ? 'bg-warning' : 'bg-muted')} />
 }
 
 function PositionInspector({ row, options, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; onClose: () => void }) {
@@ -229,9 +235,9 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
           <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <div className="grid grid-cols-3 gap-px border-y border-border bg-border text-xs">
+          <div className="grid grid-cols-5 gap-px border-y border-border bg-border text-xs">
             {[
-              ['风险分', String(row.risk_score)], ['盈亏', pct(row.profit_loss_pct)], ['仓位', pct(row.weight)],
+              ['风险分', String(row.risk_score)], ['仓位', pct(row.weight)],
               ['MA5', price(row.ma5)], ['MA10', price(row.ma10)], ['MA20', price(row.ma20)],
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
@@ -248,9 +254,9 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
               <label className={tradePriceType === 'LATEST' ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={tradePrice} disabled={tradePriceType === 'LATEST'} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
             </div>
             <button type="button" disabled={!qmt.data?.trade_enabled || qmt.data.state !== 'ready' || tradeMutation.isPending} onClick={() => {
-              if (!window.confirm(`确认${tradeAction === 'BUY' ? '买入' : '卖出'} ${row.name} ${tradeVolume} 股？每笔最多 1 手。`)) return
+              if (!window.confirm(`确认${tradeAction === 'BUY' ? '买入' : '卖出'} ${row.name} ${tradeVolume} 股？`)) return
               tradeMutation.mutate()
-            }} className={cn('mt-2 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-danger' : 'bg-bull')}>
+            }} className={cn('mt-2 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
               {tradeMutation.isPending ? '提交中…' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}
             </button>
             {tradeMutation.isError && <p className="mt-2 text-[10px] text-danger">委托失败，请检查 QMT 状态和交易开关。</p>}
@@ -260,7 +266,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
           {orders.data?.orders?.some(order => order.symbol === row.symbol && order.order_sys_id) && <section className="border-b border-border pb-3">
             <h3 className="mb-2 text-xs font-semibold text-secondary">当前委托</h3>
             <div className="space-y-1">
-              {orders.data.orders.filter(order => order.symbol === row.symbol && order.order_sys_id).slice(0, 5).map(order => <div key={order.order_sys_id} className="flex items-center justify-between gap-2 text-[10px] text-muted"><span>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '—'} · {qmtOrderStatus(order.status)}</span><button type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate(order.order_sys_id!)} className="h-6 rounded border border-border px-2 hover:bg-elevated">撤单</button></div>)}
+              {orders.data.orders.filter(order => order.symbol === row.symbol && order.order_sys_id).slice(0, 5).map(order => <div key={order.order_sys_id} className="flex items-center justify-between gap-2 text-[10px] text-muted"><span><span className={order.action === 'SELL' ? 'text-bear' : 'text-bull'}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '—'}</span> · {qmtOrderStatus(order.status)}</span><button type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate(order.order_sys_id!)} className="h-6 rounded border border-border px-2 hover:bg-elevated">撤单</button></div>)}
             </div>
           </section>}
 
@@ -501,10 +507,6 @@ export function LargeOrders() {
     const matchesRisk = risk === 'all' || row.risk_level === risk
     return matchesSearch && matchesRisk
   }), [portfolio.data?.positions, risk, search])
-  const evidenceCoverage = portfolio.data?.positions.length
-    ? portfolio.data.positions.reduce((sum, row) => sum + row.evidence_coverage, 0) / portfolio.data.positions.length
-    : 0
-
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
@@ -527,14 +529,12 @@ export function LargeOrders() {
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
           <span className="font-medium">{data.account.name}</span>
           <span className="text-muted">持仓 <b className="font-mono text-foreground">{data.positions.length}</b></span>
-          <span className="inline-flex items-center gap-1.5"><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
-          <span className="text-muted">证据覆盖 <b className="font-mono text-foreground">{Math.round(evidenceCoverage * 100)}%</b></span>
           <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(data.account.total_asset)}</b></span>
-          <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bull' : 'text-warning')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
-          <span className={qmt.data?.auto_sync_running ? 'text-bull' : 'text-muted'}>{qmt.data?.auto_sync_running ? `自动同步 ${qmt.data.auto_sync_interval_seconds}秒` : '自动同步未运行'}</span>
-          <label className="inline-flex items-center gap-1.5 text-muted" title={!qmt.data?.trade_authorized ? '后端未授权真实交易' : '本次后端运行有效，重启后自动关闭'}><input type="checkbox" checked={qmt.data?.trade_enabled === true} disabled={!qmt.data?.configured || !qmt.data?.trade_authorized || qmtToggle.isPending} onChange={event => qmtToggle.mutate(event.target.checked)} />允许真实交易</label>
-          <button type="button" onClick={() => qmtProbe.mutate()} disabled={qmtProbe.isPending} className="h-7 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">检查连接</button>
-          <span className="text-warning">每笔最多 {qmt.data?.max_order_lots ?? 1} 手</span>
+          <span className={cn('inline-flex items-center gap-1.5', data.runtime.status === 'websocket' ? 'text-bear' : data.runtime.status === 'polling_degraded' || data.runtime.status === 'reconnecting' ? 'text-warning' : 'text-muted')}><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
+          <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bear' : qmt.data?.configured ? 'text-warning' : 'text-muted')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
+          <span className={qmt.data?.auto_sync_running ? 'text-bear' : 'text-muted'}>{qmt.data?.auto_sync_running ? `自动同步 ${qmt.data.auto_sync_interval_seconds}秒` : '自动同步未运行'}</span>
+          <label className="inline-flex items-center gap-1.5 text-muted" title={!qmt.data?.trade_authorized ? '后端未授权实盘交易' : '取消勾选可暂停本次运行的实盘下单'}><input type="checkbox" checked={qmt.data?.trade_enabled === true} disabled={!qmt.data?.configured || !qmt.data?.trade_authorized || qmtToggle.isPending} onChange={event => qmtToggle.mutate(event.target.checked)} />实盘模式</label>
+          <button type="button" onClick={() => qmtProbe.mutate()} disabled={qmtProbe.isPending} className="h-7 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">{qmtProbe.isPending ? '检查中…' : '检查 QMT 连接'}</button>
           <span className="ml-auto max-w-full truncate text-[11px] text-muted" title={data.runtime.reason}>{data.runtime.reason}</span>
         </div>
       </div>
@@ -559,18 +559,16 @@ export function LargeOrders() {
 
       {tab === 'positions' && (rows.length ? <>
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[1120px] text-xs">
+          <table className="w-full min-w-[860px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价', '盈亏', '仓位', 'MA5 / MA10 / MA20', '证据', '信号', '风险', '建议', '交易'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '证据', '信号', '风险', '建议', '交易'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
                 <td className="px-3 py-2"><button type="button" onClick={() => setSelected(row)} className="text-left"><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.symbol}</div></button></td>
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div></td>
-                <td className={cn('px-3 py-2 font-mono', (row.profit_loss ?? 0) >= 0 ? 'text-danger' : 'text-bull')}>{money(row.profit_loss)}<div className="text-[10px]">{pct(row.profit_loss_pct)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
-                <td className="px-3 py-2 font-mono text-muted">{price(row.ma5)} / {price(row.ma10)} / {price(row.ma20)}</td>
                 <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
                 <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
                 <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
@@ -583,7 +581,7 @@ export function LargeOrders() {
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <button key={row.symbol} type="button" onClick={() => setSelected(row)} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <div><div className="font-medium">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div></div>
-            <div className="text-right"><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div><div className={(row.profit_loss ?? 0) >= 0 ? 'text-danger' : 'text-bull'}>{pct(row.profit_loss_pct)}</div></div>
+            <div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div>
           </button>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
@@ -600,8 +598,29 @@ export function LargeOrders() {
       </div>}
 
       {tab === 'positions' && qmtOrders.data?.orders?.length ? <section className="border-t border-border px-4 py-3 sm:px-5">
-        <div className="mb-2 flex items-center gap-2 text-xs font-semibold"><span>QMT委托</span><span className="text-[10px] font-normal text-muted">成交状态以云端 QMT 查询为准</span></div>
-        <div className="grid gap-1 text-[11px] text-muted sm:grid-cols-[130px_100px_90px_120px_1fr]">{qmtOrders.data.orders.slice(0, 20).map((order, index) => <div key={`${order.order_sys_id ?? order.idempotency_key ?? index}`} className="contents"><span>{order.symbol ?? order.stock_code ?? '—'}</span><span className={order.action === 'SELL' ? 'text-bull' : 'text-danger'}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '—'}</span><span>{order.price ?? order.price_type ?? '—'}</span><span>{qmtOrderStatus(order.status)}</span><span className="truncate">{order.order_sys_id ? `委托号 ${order.order_sys_id}` : order.status === 'unknown' ? '请在QMT核对，禁止原单重发' : '等待云端委托号'}</span></div>)}</div>
+        <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1"><h2 className="text-xs font-semibold">QMT 委托</h2><span className="text-[10px] text-muted">成交状态以云端 QMT 查询为准</span></div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] table-fixed text-left text-[11px]">
+            <thead className="border-y border-border bg-elevated/45 text-muted">
+              <tr>
+                <th className="w-[18%] px-3 py-2 font-medium">证券代码</th>
+                <th className="w-[16%] px-3 py-2 font-medium">方向 / 数量</th>
+                <th className="w-[14%] px-3 py-2 font-medium">委托价格</th>
+                <th className="w-[18%] px-3 py-2 font-medium">委托状态</th>
+                <th className="w-[34%] px-3 py-2 font-medium">委托编号 / 说明</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/70 text-muted">
+              {qmtOrders.data.orders.slice(0, 20).map((order, index) => <tr key={`${order.order_sys_id ?? order.idempotency_key ?? index}`} className="hover:bg-elevated/30">
+                <td className="px-3 py-2 font-mono text-secondary">{order.symbol ?? order.stock_code ?? '—'}</td>
+                <td className={cn('px-3 py-2 font-mono font-medium', order.action === 'SELL' ? 'text-bear' : 'text-bull')}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '—'}</td>
+                <td className="px-3 py-2 font-mono">{qmtOrderPrice(order.price, order.price_type)}</td>
+                <td className="px-3 py-2">{qmtOrderStatus(order.status)}</td>
+                <td className="px-3 py-2"><span className="block truncate" title={order.order_sys_id ? `委托号 ${order.order_sys_id}` : undefined}>{order.order_sys_id ? `委托号 ${order.order_sys_id}` : order.status === 'unknown' ? '请在 QMT 核对，禁止原单重发' : '等待云端委托号'}</span></td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
       </section> : null}
 
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />

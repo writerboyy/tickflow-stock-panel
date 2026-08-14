@@ -769,6 +769,9 @@ class PositionRiskService:
         if symbol in self._recovery_pending_symbols:
             runtime["quote_recovery_pending"] = True
             self._recovery_pending_symbols.discard(symbol)
+            if not self._quote_gap_symbols and not self._recovery_pending_symbols:
+                self._runtime_status = "websocket"
+                self._runtime_reason = "持仓池行情连续性已恢复"
         high = max(price, _finite(runtime.get("high_price")) or price)
         runtime["high_price"] = high
         runtime["last_price"] = price
