@@ -44,6 +44,22 @@ const ORDER_STATUS: Record<string, { label: string; tone: string }> = {
   blocked: { label: '交易未就绪', tone: 'text-muted' },
 }
 
+function themes(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : [value]
+  const result: string[] = []
+  for (const raw of values) {
+    for (const item of String(raw ?? '').split(/[、,，;；]/)) {
+      const theme = item.trim()
+      if (theme && !result.includes(theme)) result.push(theme)
+    }
+  }
+  return result
+}
+
+function isStName(name: unknown): boolean {
+  return String(name ?? '').toUpperCase().includes('ST')
+}
+
 interface RowProps {
   row: LimitBoardRow
   mode: TableMode
@@ -69,6 +85,8 @@ function Row({
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
+  const allThemes = themes(row.concept)
+  const visibleThemes = allThemes.slice(0, 3)
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
     : row.auto_order_status
@@ -82,6 +100,11 @@ function Row({
           <div className="font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
         </button>
+      </td>
+      <td className="max-w-[240px] px-2">
+        <div className="truncate text-[10px] text-amber-500" title={allThemes.join('、') || undefined}>
+          {visibleThemes.length ? visibleThemes.join('、') : '--'}
+        </div>
       </td>
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
       <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td>
@@ -162,10 +185,10 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[900px] border-collapse">
+      <table className="w-full min-w-[1100px] border-collapse">
         <thead className="text-left text-[10px] text-muted">
           <tr>
-            <th className="py-2 pl-3 pr-2">标的</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
+            <th className="py-2 pl-3 pr-2">标的</th><th className="px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
             {mode === 'pool' ? <><th className="px-2">自动打板</th><th className="px-2">委托状态</th><th className="px-2" /></> : <><th className="px-2">打板池</th>{mode === 'selected' ? <th className="px-2" /> : null}</>}
           </tr>
         </thead>
@@ -225,6 +248,7 @@ export function LimitBoard() {
 
   const selectedSymbols = useMemo(() => new Set((view.data?.selected ?? []).map(row => row.symbol)), [view.data?.selected])
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
+  const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
   const busy = add.isPending || remove.isPending || addPool.isPending || updatePool.isPending || removePool.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
@@ -241,7 +265,7 @@ export function LimitBoard() {
       <PageHeader
         title="打板专区"
         titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />{runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
-        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入精选" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchQuery.data?.results?.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchQuery.data.results.map((item: any) => <button type="button" key={item.symbol} disabled={selectedSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
+        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入精选" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={selectedSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
@@ -282,7 +306,10 @@ export function LimitBoard() {
           </section>
         ) : (
           <section className="divide-y divide-border overflow-hidden rounded-btn border border-border bg-surface">
-            {data.events.length ? data.events.map((event: any, index: number) => <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button><div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>) : <div className="px-4 py-12 text-center text-xs text-muted">今天还没有触板、炸板或回封记录</div>}
+            {data.events.length ? data.events.map((event: any, index: number) => {
+              const eventThemes = themes(event.concept).slice(0, 3)
+              return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-amber-500">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>
+            }) : <div className="px-4 py-12 text-center text-xs text-muted">今天还没有触板、炸板或回封记录</div>}
           </section>
         )}
       </div>

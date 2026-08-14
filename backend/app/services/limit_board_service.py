@@ -235,6 +235,11 @@ class LimitBoardService:
         )
         instruments = self.repo.get_instruments()
         universe = set(instruments["symbol"].to_list()) if not instruments.is_empty() else set()
+        self._refresh_name_map()
+        universe = {
+            symbol for symbol in universe
+            if not is_risk_warning_name(self._name_map.get(str(symbol).strip().upper()))
+        }
         self._first_board_eligible = universe - blocked
         self._history_ready = True
         self._history_reason = f"已核对前 {lookback} 个交易日"
@@ -290,6 +295,8 @@ class LimitBoardService:
             if price is None or price <= 0:
                 continue
             name = self._resolve_name(symbol, raw.get("name"))
+            if is_risk_warning_name(name):
+                continue
             limit_up = self._limit_up(raw, symbol, name, now.date())
             if limit_up is None:
                 continue
@@ -503,6 +510,10 @@ class LimitBoardService:
         )
         if not member or not bool(member.get("auto_trade")) or state.get("auto_order_key"):
             return
+        if is_risk_warning_name(self._resolve_name(symbol, quote.get("name"))):
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = "ST 风险警示股票已被打板专区过滤"
+            return
         qmt = self._qmt()
         qmt_status = qmt.status() if qmt is not None else {}
         if not (
@@ -698,7 +709,20 @@ class LimitBoardService:
             for key in ("selected", "board_pool")
             for item in config[key]
         }
+        symbols = {
+            symbol for symbol in symbols
+            if not is_risk_warning_name(self._resolve_name(symbol))
+        }
         self.quote_service.set_symbol_consumer(_ACCOUNT_ID, symbols)
+
+    def _enrich_concepts(self, rows: list[dict[str, Any]]) -> None:
+        enrich = getattr(self.quote_service, "enrich_external_alerts", None)
+        if not rows or not callable(enrich):
+            return
+        try:
+            enrich(rows)
+        except Exception:  # noqa: BLE001
+            logger.debug("打板专区题材富化失败", exc_info=True)
 
     def view(self) -> dict[str, Any]:
         config = self.store.load_config()
@@ -710,6 +734,8 @@ class LimitBoardService:
                 continue
             row = {"symbol": symbol, **state, "ws_active": symbol in self._ws_symbols}
             row["name"] = self._resolve_name(symbol, row.get("name"))
+            if is_risk_warning_name(row["name"]):
+                continue
             rows.append(row)
         rows.sort(key=lambda item: (
             0 if item.get("status") == "blacklisted" else 1,
@@ -721,23 +747,31 @@ class LimitBoardService:
             symbol = str(item["symbol"]).strip().upper()
             row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
             row["name"] = self._resolve_name(symbol, row.get("name"))
+            if is_risk_warning_name(row["name"]):
+                continue
             selected.append(row)
         board_pool = []
         for item in config["board_pool"]:
             symbol = str(item["symbol"]).strip().upper()
             row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
             row["name"] = self._resolve_name(symbol, row.get("name"))
+            if is_risk_warning_name(row["name"]):
+                continue
             board_pool.append(row)
-        events = self.store.events(runtime["trading_date"])
+        events = []
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
-        for event in events:
+        for event in self.store.events(runtime["trading_date"]):
             symbol = str(event.get("symbol") or "").strip().upper()
             if not symbol:
                 continue
             event["name"] = self._resolve_name(symbol, event.get("name"))
+            if is_risk_warning_name(event["name"]):
+                continue
             label = str(event.get("rule_name") or labels.get(str(event.get("type"))) or "").strip()
             if label:
                 event["message"] = f"{event['name']}：{label}"
+            events.append(event)
+        self._enrich_concepts([*rows, *selected, *board_pool, *events])
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
         qmt = self._qmt()
@@ -759,7 +793,10 @@ class LimitBoardService:
             "first_board": [item for item in rows if "first_board" in item.get("source_modes", [])],
             "selected": selected,
             "board_pool": board_pool,
-            "blacklist": runtime.get("blacklist", []),
+            "blacklist": [
+                symbol for symbol in runtime.get("blacklist", [])
+                if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
+            ],
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],
@@ -800,7 +837,10 @@ class LimitBoardService:
         names = self.repo.get_name_map([cleaned])
         if cleaned not in names or self.repo.resolve_asset_type(cleaned) != "stock":
             raise ValueError("仅支持本地股票主数据中的 A 股标的")
-        return cleaned, str(names[cleaned])
+        name = str(names[cleaned])
+        if is_risk_warning_name(name):
+            raise ValueError("打板专区已过滤 ST 风险警示股票")
+        return cleaned, name
 
     def remove_selected(self, symbol: str, revision: int) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()

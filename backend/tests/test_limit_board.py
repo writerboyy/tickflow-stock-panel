@@ -2,6 +2,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import polars as pl
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,10 +24,13 @@ class FakeRepo:
         })
 
     def get_instruments(self):
-        return pl.DataFrame({"symbol": ["600000.SH", "600001.SH"], "name": ["浦发银行", "邯郸钢铁"]})
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600001.SH", "600002.SH"],
+            "name": ["浦发银行", "邯郸钢铁", "*ST风险"],
+        })
 
     def get_name_map(self, symbols=None):
-        names = {"600000.SH": "浦发银行", "600001.SH": "邯郸钢铁"}
+        names = {"600000.SH": "浦发银行", "600001.SH": "邯郸钢铁", "600002.SH": "*ST风险"}
         return names.copy() if symbols is None else {symbol: names[symbol] for symbol in symbols if symbol in names}
 
     def resolve_asset_type(self, _symbol):
@@ -154,6 +158,62 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
     assert service._quotes["600000.SH"]["name"] == "浦发银行"
     assert quotes.events[0]["name"] == "浦发银行"
     assert quotes.events[0]["message"] == "浦发银行：触板"
+
+
+def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monkeypatch):
+    service, quotes, config = make_service(tmp_path)
+    config["settings"]["first_board_lookback_days"] = 1
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+
+    service._history_date = None
+    service._refresh_history(config)
+    assert "600002.SH" not in service._first_board_eligible
+    service._first_board_eligible.add("600002.SH")
+
+    service._process_quotes([{
+        "symbol": "600002.SH",
+        "name": "*ST风险",
+        "last_price": 11.0,
+        "limit_up": 11.0,
+        "timestamp": "2026-08-13T10:00:00+08:00",
+    }])
+
+    assert "600002.SH" not in service._quotes
+    assert service._runtime_for_today()["symbols"] == {}
+    assert quotes.events == []
+
+
+def test_manual_tracking_rejects_st_stock(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+
+    with pytest.raises(ValueError, match="已过滤 ST"):
+        service.add_selected("600002.SH", 0)
+
+
+def test_view_enriches_themes_and_hides_legacy_st_rows(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {"name": "浦发银行", "source_modes": ["first_board"]},
+        "600002.SH": {"name": "*ST风险", "source_modes": ["first_board"]},
+    }
+    service.store.save_runtime(runtime)
+
+    view = service.view()
+
+    assert [row["symbol"] for row in view["first_board"]] == ["600000.SH"]
+    assert view["first_board"][0]["concept"] == "银行;金融科技"
 
 
 def test_view_repairs_code_names_in_existing_runtime_and_events(tmp_path, monkeypatch):
@@ -299,6 +359,25 @@ def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
 
     assert state["auto_order_status"] == "blocked"
     assert "QMT" in state["auto_order_error"]
+    assert "auto_order_key" not in state
+
+
+def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{"symbol": "600002.SH", "auto_trade": True}]
+    state = {}
+
+    service._maybe_auto_trade(
+        "600002.SH",
+        {**quote(), "symbol": "600002.SH", "name": "*ST风险"},
+        state,
+        config,
+    )
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "ST 风险警示" in state["auto_order_error"]
     assert "auto_order_key" not in state
 
 

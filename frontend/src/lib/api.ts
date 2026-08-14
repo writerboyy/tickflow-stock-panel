@@ -1031,6 +1031,7 @@ export interface PositionRiskOptions {
 export interface LimitBoardRow {
   symbol: string
   name?: string
+  concept?: string | string[]
   status?: string
   last_price?: number
   limit_up?: number
