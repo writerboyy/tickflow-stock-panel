@@ -417,6 +417,31 @@ class QmtTradingService:
                 raise ValueError("QMT 可用资金不足，已拒绝买入")
         return {"action": action, "symbol": symbol, "volume": volume, "price": price, "price_type": price_type}
 
+    def _order_preflight(self, action: str) -> dict[str, Any]:
+        if action == "BUY":
+            asset = self.client.call("get_asset", {"account_id": self.client.account_id})
+            if not isinstance(asset, dict):
+                raise QmtRpcError("QMT 资产响应格式无效")
+            return {"account": {"cash": _float(asset.get("cash"))}, "positions": []}
+        if action != "SELL":
+            raise ValueError("交易方向必须是买入或卖出")
+        raw_positions = self.client.call("get_positions", {"account_id": self.client.account_id})
+        if not isinstance(raw_positions, dict):
+            raise QmtRpcError("QMT 持仓响应格式无效")
+        positions = []
+        for code, item in raw_positions.items():
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("stock_code") or code or "").strip().upper()
+            try:
+                available = int(item.get("available") or item.get("can_use_volume") or 0)
+            except (TypeError, ValueError) as exc:
+                raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}") from exc
+            if not symbol or available < 0:
+                raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}")
+            positions.append({"symbol": symbol, "available": available})
+        return {"account": {}, "positions": positions}
+
     def submit_order(self, request: dict[str, Any]) -> dict[str, Any]:
         idempotency_key = str(request.get("idempotency_key") or "").strip()
         if not idempotency_key:
@@ -425,7 +450,8 @@ class QmtTradingService:
             existing = self._known_order(idempotency_key)
             if existing:
                 return existing
-            snapshot = self.sync()
+            action = str(request.get("action") or "").upper()
+            snapshot = self._order_preflight(action)
             normalized = self._validate_order(request, snapshot)
             order_tag = f"position-risk:{idempotency_key}"
             params = {
@@ -472,17 +498,6 @@ class QmtTradingService:
                 user_order_id=str(result.get("user_order_id") or order_tag),
                 updated_at=_now(),
             )
-            try:
-                matched = next(
-                    (item for item in self._query_remote_orders() if item.get("user_order_id") == row["user_order_id"]),
-                    None,
-                )
-            except Exception:  # 委托已受理，回查失败不能触发重发
-                matched = None
-            if matched:
-                row.update(matched)
-                row["idempotency_key"] = idempotency_key
-                row["status"] = str(matched.get("status") or "confirmed")
             self._remember_order(row)
             return row
 

@@ -362,11 +362,12 @@ def test_qmt_auto_sync_starts_immediately_and_stops(tmp_path: Path):
 def test_qmt_submit_persists_unknown_before_timeout_and_does_not_retry(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True
-    service.sync = lambda: {"account": {"cash": 100_000}, "positions": []}
     calls = []
 
     def fail_call(method, params):
         calls.append((method, params))
+        if method == "get_asset":
+            return {"cash": 100_000}
         raise QmtRpcError("QMT RPC 超时")
 
     service.client.call = fail_call
@@ -378,24 +379,21 @@ def test_qmt_submit_persists_unknown_before_timeout_and_does_not_retry(tmp_path:
         service.submit_order(request)
     assert service._known_order("same-request-1")["status"] == "unknown"
     assert service.submit_order(request)["status"] == "unknown"
-    assert len(calls) == 1
+    assert [method for method, _params in calls] == ["get_asset", "submit_orders_batch"]
 
 
-def test_qmt_submit_uses_server_idempotency_and_backfills_order_id(tmp_path: Path):
+def test_qmt_submit_uses_buy_preflight_and_returns_after_acceptance(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True
-    service.sync = lambda: {"account": {"cash": 100_000}, "positions": []}
+    calls = []
 
     def fake_call(method, params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 100_000}
         if method == "submit_orders_batch":
             assert params["orders"][0]["require_idempotency_check"] is True
-            return [{"success": True, "accepted": True, "user_order_id": "position-risk:request-2"}]
-        if method == "query_orders":
-            return [{
-                "stock_code": "600036.SH", "action": "BUY", "volume": 100,
-                "price": 35, "status": "50", "order_sys_id": "sys-2",
-                "user_order_id": "position-risk:request-2",
-            }]
+            return [{"success": True, "accepted": True, "order_sys_id": "sys-2", "user_order_id": "position-risk:request-2"}]
         raise AssertionError(method)
 
     service.client.call = fake_call
@@ -403,9 +401,33 @@ def test_qmt_submit_uses_server_idempotency_and_backfills_order_id(tmp_path: Pat
         "idempotency_key": "request-2", "action": "BUY", "symbol": "600036.SH",
         "volume": 100, "price": 35, "price_type": "LIMIT",
     })
-    assert result["status"] == "50"
+    assert result["status"] == "accepted_pending"
     assert result["order_sys_id"] == "sys-2"
     assert result["symbol"] == "600036.SH"
+    assert calls == ["get_asset", "submit_orders_batch"]
+
+
+def test_qmt_submit_uses_sell_preflight(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "get_positions":
+            return {"600036.SH": {"stock_code": "600036.SH", "available": 100}}
+        if method == "submit_orders_batch":
+            return [{"success": True, "accepted": True, "user_order_id": "position-risk:request-3"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "request-3", "action": "SELL", "symbol": "600036.SH",
+        "volume": 100, "price": 35, "price_type": "LIMIT",
+    })
+
+    assert result["status"] == "accepted_pending"
+    assert calls == ["get_positions", "submit_orders_batch"]
 
 
 def test_qmt_snapshot_rejects_available_above_volume():
