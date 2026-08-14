@@ -327,6 +327,56 @@ def _merge_share_history(*frames: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _merge_statement_history(table: str, *frames: pl.DataFrame) -> pl.DataFrame:
+    """合并财务报表历史，同一 PIT 公告键以新拉取的记录为准。"""
+    valid = [frame for frame in frames if not frame.is_empty()]
+    if not valid:
+        return pl.DataFrame()
+    for frame in valid:
+        _validate_pit_rows(table, frame)
+    return (
+        pl.concat(valid, how="diagonal_relaxed")
+        .unique(subset=list(_PIT_KEYS), keep="last", maintain_order=True)
+        .sort(list(_PIT_KEYS))
+    )
+
+
+def _sync_statement_incremental(
+    table: str,
+    symbols: list[str],
+    data_dir: Path,
+    capset: CapabilitySet,
+    publication: _FinancialPublication | None = None,
+) -> int:
+    """已有标的只拉最新公告，新标的补全历史后合并入 PIT 表。"""
+    existing = get_financial_df(data_dir, table)
+    if existing.is_empty() or not set(_PIT_KEYS) <= set(existing.columns):
+        return _sync_table(
+            table,
+            symbols,
+            data_dir,
+            capset,
+            latest_only=False,
+            publication=publication,
+        )
+
+    existing_symbols = set(existing["symbol"].drop_nulls().to_list())
+    missing_symbols = [symbol for symbol in symbols if symbol not in existing_symbols]
+    current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
+    missing_history = (
+        _fetch_table(table, missing_symbols, capset, latest_only=False)
+        if missing_symbols
+        else pl.DataFrame()
+    )
+    latest = (
+        _fetch_table(table, current_symbols, capset, latest_only=True)
+        if current_symbols
+        else pl.DataFrame()
+    )
+    merged = _merge_statement_history(table, existing, missing_history, latest)
+    return _write_table(table, merged, data_dir, publication=publication)
+
+
 def _sync_shares_for_symbols(
     symbols: list[str],
     data_dir: Path,
@@ -426,6 +476,39 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
     return results
 
 
+def sync_incremental(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
+    """盘后增量同步财务表，首次或新标的自动补全历史。"""
+    if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
+        logger.info("incremental financial sync skipped: no FINANCIAL capability")
+        return {}
+
+    symbols = _get_symbols(data_dir)
+    results: dict[str, int] = {}
+    publication = _FinancialPublication(data_dir)
+    try:
+        for table in FINANCIAL_TABLES:
+            results[table] = (
+                _sync_shares_for_symbols(
+                    symbols, data_dir, capset, publication=publication
+                )
+                if table == "shares"
+                else _sync_statement_incremental(
+                    table, symbols, data_dir, capset, publication=publication
+                )
+            )
+
+        from app.services.daily_valuation import build_daily_valuation
+
+        results["valuation_daily"] = build_daily_valuation(data_dir)["rows"]
+        publication.publish()
+    except Exception as exc:
+        publication.rollback(exc)
+        raise
+
+    _refresh_financials_views(data_dir)
+    return results
+
+
 # ================================================================
 # DuckDB 视图
 # ================================================================
@@ -465,7 +548,7 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
 # ================================================================
 
 class FinancialScheduler:
-    """独立调度器: 每周同步 metrics, 财务表支持手动同步。"""
+    """财务同步调度状态：支持手动全量与盘后增量同步。"""
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -657,6 +740,15 @@ class FinancialScheduler:
         _refresh_financials_views(self._data_dir)
         return result
 
+    def _run_incremental_body(self) -> dict[str, int]:
+        """执行盘后增量同步并刷新仓库视图。"""
+        result = sync_incremental(self._data_dir, self._capset)
+        self._refresh_views()
+        for table, rows in result.items():
+            if rows:
+                self._record_sync(table)
+        return result
+
     def run_now(self, table: str | None = None) -> dict[str, int]:
         """同步执行一次同步(阻塞调用线程)。
 
@@ -713,6 +805,36 @@ class FinancialScheduler:
         t = threading.Thread(target=_bg, name="financial-sync", daemon=True)
         t.start()
         logger.info("financial sync triggered in background: table=%s", table or "all")
+        return {"started": True}
+
+    def trigger_incremental(self) -> dict[str, int]:
+        """后台触发盘后增量同步，与手动同步共用单飞锁。"""
+        if not self._capset or (
+            not self._capset.has(Cap.FINANCIAL) and not _financial_is_custom()
+        ):
+            return {"started": False, "reason": "no FINANCIAL capability"}
+        with self._lock:
+            if self._is_syncing:
+                logger.info("incremental financial sync skipped: already running")
+                return {"started": False, "reason": "already running"}
+            self._is_syncing = True
+
+        def _bg() -> None:
+            try:
+                self._run_incremental_body()
+            except Exception as e:  # noqa: BLE001
+                logger.exception("background incremental financial sync failed: %s", e)
+            finally:
+                with self._lock:
+                    self._is_syncing = False
+
+        thread = threading.Thread(
+            target=_bg,
+            name="financial-incremental-sync",
+            daemon=True,
+        )
+        thread.start()
+        logger.info("incremental financial sync triggered in background")
         return {"started": True}
 
     @property

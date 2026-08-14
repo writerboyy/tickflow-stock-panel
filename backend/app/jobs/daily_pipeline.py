@@ -55,6 +55,22 @@ def _invalidate(table: str | None = None) -> None:
     invalidate_data_cache(table)
 
 
+def _trigger_financial_incremental(app_state) -> None:
+    """盘后管道收尾后触发财务增量同步，失败不影响行情管道。"""
+    scheduler = getattr(app_state, "financial_scheduler", None)
+    if scheduler is None:
+        return
+    try:
+        result = scheduler.trigger_incremental()
+        if not result.get("started"):
+            logger.info(
+                "after-close financial sync skipped: %s",
+                result.get("reason", "not started"),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("after-close financial sync trigger failed: %s", e)
+
+
 def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
     """解析标的池 — 以 CN_Equity_A (沪深京A股 ~5522只) 为主。
 
@@ -1031,6 +1047,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             # 仍需刷进内存缓存, 否则 live_agg 基准列停留在旧交易日。放 finally 保证部分
             # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
             repo.refresh_cache()
+            _trigger_financial_incremental(app_state)
         return result
 
     scheduler.add_job(

@@ -72,6 +72,28 @@ def _iso_ago(**delta) -> str:
     return (datetime.now(timezone.utc) - timedelta(**delta)).isoformat()
 
 
+def test_after_close_pipeline_triggers_incremental_financial_sync():
+    financial_scheduler = SimpleNamespace(
+        trigger_incremental=MagicMock(return_value={"started": True})
+    )
+
+    daily_pipeline._trigger_financial_incremental(
+        SimpleNamespace(financial_scheduler=financial_scheduler)
+    )
+
+    financial_scheduler.trigger_incremental.assert_called_once_with()
+
+
+def test_after_close_financial_trigger_failure_is_isolated():
+    financial_scheduler = SimpleNamespace(
+        trigger_incremental=MagicMock(side_effect=RuntimeError("upstream unavailable"))
+    )
+
+    daily_pipeline._trigger_financial_incremental(
+        SimpleNamespace(financial_scheduler=financial_scheduler)
+    )
+
+
 def test_job_activity_timestamp_has_subsecond_precision():
     """竞态检查依赖时间戳能区分同一秒内的两次进度更新。"""
     assert re.search(r"\.\d{6}Z$", pipeline_jobs._utc_now_iso())

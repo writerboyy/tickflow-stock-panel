@@ -217,8 +217,8 @@ async def lifespan(app: FastAPI):
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
 
-    # 财务数据 (需 Expert 套餐): 仅初始化调度器供 /api/financials/sync/* 手动同步,
-    # 不启动自动调度——用户在「财务分析」页点「同步」手动拉取。
+    # 财务数据 (需 Expert 套餐): 初始化同步状态供手动同步；
+    # 定时盘后管道结束后会通过 app.state 后台触发增量同步。
     from app.services.financial_sync import financial_scheduler
     financial_scheduler.start(store.data_dir, capset, repo)
     app.state.financial_scheduler = financial_scheduler
