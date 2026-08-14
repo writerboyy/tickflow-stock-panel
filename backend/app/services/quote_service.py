@@ -911,10 +911,21 @@ class QuoteService:
             parts.append(name)
         if event.get("source") == "limit_board":
             concept = event.get("concept")
-            if isinstance(concept, (list, tuple, set)):
-                concept = "、".join(str(item) for item in concept if str(item).strip())
-            if str(concept or "").strip():
-                parts.append(f"概念：{str(concept).strip()}")
+            concept_values = concept if isinstance(concept, (list, tuple, set)) else [concept]
+            concepts: list[str] = []
+            for value in concept_values:
+                for item in str(value or "").replace("；", ";").replace(",", ";").replace("，", ";").replace("、", ";").split(";"):
+                    item = item.strip()
+                    if item and item not in concepts:
+                        concepts.append(item)
+                    if len(concepts) == 3:
+                        break
+                if len(concepts) == 3:
+                    break
+            body = " ".join(parts)
+            if concepts:
+                return f"{body}\n概念：{'、'.join(concepts)}"
+            return body
         return " ".join(parts)
 
     def publish_external_alerts(self, alerts: list[dict]) -> None:

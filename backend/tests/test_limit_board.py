@@ -212,7 +212,21 @@ def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
 
     assert event["ext_gn_ths__所属概念"] == "银行;金融科技"
     assert event["concept"] == "银行;金融科技"
-    assert body == "600000.SH 浦发银行：触板 概念：银行;金融科技"
+    assert body == "600000.SH 浦发银行：触板\n概念：银行、金融科技"
+
+
+def test_limit_board_notification_body_limits_and_deduplicates_concepts():
+    event = {
+        "source": "limit_board",
+        "symbol": "300985.SZ",
+        "name": "致远新能",
+        "message": "致远新能：炸板",
+        "concept": "石墨烯;天然气;石墨烯;氢能源;锂电池概念;燃料电池",
+    }
+
+    body = QuoteService._format_alert_notification_body(event)
+
+    assert body == "300985.SZ 致远新能：炸板\n概念：石墨烯、天然气、氢能源"
 
 
 def test_stale_quote_does_not_trigger_touch(tmp_path, monkeypatch):
