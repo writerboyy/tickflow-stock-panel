@@ -86,7 +86,7 @@ function Row({
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
   const allThemes = themes(row.concept)
-  const visibleThemes = allThemes.slice(0, 3)
+  const visibleThemes = allThemes.slice(0, 2)
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
     : row.auto_order_status
@@ -307,7 +307,7 @@ export function LimitBoard() {
         ) : (
           <section className="divide-y divide-border overflow-hidden rounded-btn border border-border bg-surface">
             {data.events.length ? data.events.map((event: any, index: number) => {
-              const eventThemes = themes(event.concept).slice(0, 3)
+              const eventThemes = themes(event.concept).slice(0, 2)
               return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-amber-500">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>
             }) : <div className="px-4 py-12 text-center text-xs text-muted">今天还没有触板、炸板或回封记录</div>}
           </section>
