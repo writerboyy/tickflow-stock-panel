@@ -10,6 +10,7 @@ from app.free_strategy.entry_analysis import build_mainline_entry_analysis
 from app.free_strategy.mainline_momentum import (
     _append_minute,
     _combined_model_hit,
+    _entry_candidates,
     _model_hits,
 )
 from app.free_strategy.mainline_snapshot import MainlineSnapshotCache, _industry_key
@@ -66,6 +67,23 @@ def test_sparse_minutes_create_one_closed_bucket_and_raw_vwap():
     bucket = state["five_bars"]["X"][0]
     assert (bucket["open"], bucket["high"], bucket["low"], bucket["close"]) == (10, 13, 9, 12)
     assert bucket["vwap"] == pytest.approx(340_000 / (300 * 100))
+
+
+def test_discarded_zero_volume_bucket_is_not_used_as_entry_bar():
+    state = {
+        "five_bars": {},
+        "candidate_meta": {"X": {"l1_key": "L1"}},
+        "pending_entries": {},
+        "position_meta": {},
+    }
+    context = SimpleNamespace(
+        now=datetime(2026, 8, 13, 10, 0),
+        portfolio=SimpleNamespace(positions={}),
+    )
+
+    _entry_candidates(context, state, {"X"})
+
+    assert state["pending_entries"] == {}
 
 
 def _signal_state(rows):

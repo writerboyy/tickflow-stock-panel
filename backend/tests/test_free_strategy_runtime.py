@@ -152,6 +152,73 @@ def on_bar(context, bars):
     assert result["state"]["before"] == [("09:29", 1_000), ("09:29", 1_000)]
 
 
+def test_default_fill_rejects_buy_at_limit_up():
+    source = """
+def on_bar(context, bars):
+    if not context.portfolio.positions:
+        context.buy('X', quantity=100)
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+        ),
+    ).run([
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 31), 11, 11, 11, 11,
+            raw_open=11, raw_high=11, raw_low=11, raw_close=11,
+            limit_up=11,
+        ),
+    ])
+
+    assert result["fills"] == []
+    assert result["orders"][0]["status"] == "rejected"
+    assert result["orders"][0]["reason"] == "涨停，买入未成交"
+
+
+def test_limit_up_touch_fill_is_exact_and_survives_later_board_break():
+    source = """
+def initialize(context):
+    context.state['ordered'] = False
+
+def on_bar(context, bars):
+    if not context.state['ordered']:
+        context.buy('X', quantity=100)
+        context.state['ordered'] = True
+"""
+    result = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=20,
+            fill_policy="close",
+            limit_up_touch_fill=True,
+        ),
+    ).run([
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 31), 10.8, 11, 10.5, 10.6,
+            raw_open=10.8, raw_high=11, raw_low=10.5, raw_close=10.6,
+            limit_up=11,
+        ),
+        Bar(
+            "X", datetime(2024, 1, 2, 9, 32), 10.5, 10.6, 10.2, 10.3,
+            raw_open=10.5, raw_high=10.6, raw_low=10.2, raw_close=10.3,
+            limit_up=11,
+        ),
+    ])
+
+    assert len(result["fills"]) == 1
+    assert result["fills"][0]["price"] == 11
+    assert result["fills"][0]["timestamp"] == "2024-01-02T09:31:00"
+    assert result["positions"] == {"X": 100}
+
+
 def test_intraday_backtest_adds_completed_sessions_to_daily_history():
     source = """
 def initialize(context):

@@ -487,6 +487,7 @@ class BacktestWrite(BaseModel):
     t0_symbols: list[str] = Field(default_factory=list)
     allow_stale_fills: bool = False
     fill_policy: Literal["next_open", "close"] = "next_open"
+    limit_up_touch_fill: bool = False
     benchmark_symbol: str = "510300.SH"
 
 

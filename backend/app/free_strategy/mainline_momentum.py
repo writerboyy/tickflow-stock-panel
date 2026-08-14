@@ -364,6 +364,9 @@ def _entry_candidates(context, state, completed_symbols):
         meta = state["candidate_meta"][symbol]
         if meta.get("l1_key") in held_l1 or meta.get("l1_key") in pending_l1:
             continue
+        rows = state["five_bars"].get(symbol) or []
+        if not rows:
+            continue
         metrics = _industry_metrics(state, symbol)
         hits = _model_hits(state, symbol, metrics)
         matched = hits.get(ENTRY_MODEL, False)
@@ -371,7 +374,7 @@ def _entry_candidates(context, state, completed_symbols):
             matched = _combined_model_hit(state, symbol, hits, context.now)
         if not matched:
             continue
-        current = state["five_bars"][symbol][-1]
+        current = rows[-1]
         score = float(meta.get("stock_score") or 0) + float(metrics.get("excess15") or 0) * 100
         signals.append((score, symbol, meta, metrics, hits, current))
     signals.sort(reverse=True, key=lambda item: (item[0], item[1]))

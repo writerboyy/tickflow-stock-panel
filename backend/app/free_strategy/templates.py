@@ -47,6 +47,7 @@ SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encodi
 SMALL_CAP_LIMITUP_SOURCE = Path(__file__).with_name("small_cap_limitup.py").read_text(encoding="utf-8")
 PERFORMANCE_SMALL_CAP_SOURCE = Path(__file__).with_name("performance_small_cap.py").read_text(encoding="utf-8")
 MAINLINE_MOMENTUM_SOURCE = Path(__file__).with_name("mainline_momentum.py").read_text(encoding="utf-8")
+LARGE_AMOUNT_FIRST_BOARD_SOURCE = Path(__file__).with_name("large_amount_first_board.py").read_text(encoding="utf-8")
 
 
 def _mainline_momentum_template(model: str, name: str) -> dict:
@@ -138,6 +139,29 @@ def on_bar(context, bars):
     "mainline_momentum_combined": _mainline_momentum_template(
         "combined", "主线动量·组合门禁",
     ),
+    "large_amount_first_board": {
+        "name": "大成交首板·上午打板",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "stock",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0002,
+            "commission_pct": 0.0002,
+            "sell_commission_pct": 0.0002,
+            "min_commission": 5,
+            "stamp_tax_pct": 0.0005,
+            "transfer_fee_pct": 0.00001,
+            "slippage_bps": 0,
+            "price_tick": 0.01,
+            "lot_size": 100,
+            "max_exposure_pct": 0.9,
+            "benchmark_symbol": "000905.SH",
+            "settlement": "t1",
+            "fill_policy": "close",
+            "limit_up_touch_fill": True,
+        },
+        "source": LARGE_AMOUNT_FIRST_BOARD_SOURCE,
+    },
     "five_fortunes": {
         "name": "五福策略",
         "config": {

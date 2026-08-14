@@ -1681,6 +1681,7 @@ export interface FreeBacktestConfig {
   t0_symbols?: string[]
   allow_stale_fills?: boolean
   fill_policy: 'next_open' | 'close'
+  limit_up_touch_fill?: boolean
   benchmark_symbol: string
 }
 

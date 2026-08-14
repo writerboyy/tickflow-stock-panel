@@ -50,6 +50,7 @@ class FreeStrategyConfig:
     asset_type: str = "stock"
     benchmark_symbol: str = "510300.SH"
     callback_timeout_seconds: float = 30.0
+    limit_up_touch_fill: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,7 @@ class Context:
         self._extra_history_requirements: set[str] = set()
         self._readiness_requirements: list[ReadinessRequirement] = []
         self._mainline_snapshot_requirement: dict[str, Any] | None = None
+        self._limit_board_snapshot_requirement: dict[str, Any] | None = None
 
     @property
     def universe(self) -> list[str]:
@@ -286,6 +288,28 @@ class Context:
         return (
             dict(self._mainline_snapshot_requirement)
             if self._mainline_snapshot_requirement is not None else None
+        )
+
+    def require_limit_board_snapshot(
+        self,
+        *,
+        lookback_days: int = 30,
+        min_cumulative_amount: float = 1_000_000_000.0,
+    ) -> None:
+        if isinstance(lookback_days, bool) or lookback_days < 20:
+            raise ValueError("首板扫描至少需要 20 个交易日")
+        if float(min_cumulative_amount) <= 0:
+            raise ValueError("首板成交额门槛必须大于 0")
+        self._limit_board_snapshot_requirement = {
+            "lookback_days": int(lookback_days),
+            "min_cumulative_amount": float(min_cumulative_amount),
+        }
+
+    @property
+    def limit_board_snapshot_requirement(self) -> dict[str, Any] | None:
+        return (
+            dict(self._limit_board_snapshot_requirement)
+            if self._limit_board_snapshot_requirement is not None else None
         )
 
     def reference_asset(
@@ -440,6 +464,27 @@ class Context:
         loader = self._engine._mainline_snapshot_loader
         if loader is None:
             raise ValueError("缺少 PIT 主线快照加载器")
+        return loader(requested)
+
+    def limit_board_snapshot(
+        self,
+        as_of: date | datetime | str | None = None,
+    ) -> dict[str, Any]:
+        if self.now is None:
+            return {}
+        if isinstance(as_of, datetime):
+            requested = as_of.date()
+        elif isinstance(as_of, date):
+            requested = as_of
+        elif as_of is not None:
+            requested = date.fromisoformat(str(as_of)[:10])
+        else:
+            requested = self.now.date()
+        if requested > self.now.date():
+            raise ValueError("首板扫描日期不能晚于当前策略时间")
+        loader = self._engine._limit_board_snapshot_loader
+        if loader is None:
+            raise ValueError("缺少首板扫描快照加载器")
         return loader(requested)
 
     def dividend_ratio_ranked(
@@ -894,6 +939,7 @@ class FreeStrategyEngine:
             dict[str, dict[str, Any]],
         ] | None = None
         self._mainline_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
+        self._limit_board_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
@@ -969,6 +1015,10 @@ class FreeStrategyEngine:
     @property
     def mainline_snapshot_requirement(self) -> dict[str, Any] | None:
         return self.context.mainline_snapshot_requirement
+
+    @property
+    def limit_board_snapshot_requirement(self) -> dict[str, Any] | None:
+        return self.context.limit_board_snapshot_requirement
 
     @property
     def extra_history_requirements(self) -> set[str]:
@@ -1172,6 +1222,12 @@ class FreeStrategyEngine:
         loader: Callable[[date], dict[str, Any]] | None,
     ) -> None:
         self._mainline_snapshot_loader = loader
+
+    def set_limit_board_snapshot_loader(
+        self,
+        loader: Callable[[date], dict[str, Any]] | None,
+    ) -> None:
+        self._limit_board_snapshot_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
@@ -1428,7 +1484,21 @@ class FreeStrategyEngine:
             order.status = "rejected"
             order.reason = "证券停牌或不可交易"
             return
-        if side == "buy" and bar.limit_up is not None and raw_price >= bar.limit_up - 0.005:
+        raw_high = float(bar.raw_high if bar.raw_high is not None else bar.high)
+        limit_up_touch_fill = bool(
+            side == "buy"
+            and self.config.limit_up_touch_fill
+            and bar.limit_up is not None
+            and raw_high >= bar.limit_up - 0.005
+        )
+        if limit_up_touch_fill:
+            raw_price = float(bar.limit_up)
+        if (
+            side == "buy"
+            and bar.limit_up is not None
+            and raw_price >= bar.limit_up - 0.005
+            and not limit_up_touch_fill
+        ):
             order.status = "rejected"
             order.reason = "涨停，买入未成交"
             return
@@ -1436,7 +1506,11 @@ class FreeStrategyEngine:
             order.status = "rejected"
             order.reason = "跌停，卖出未成交"
             return
-        price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
+        price = (
+            raw_price
+            if limit_up_touch_fill
+            else raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
+        )
         if self.config.price_tick is not None:
             tick = self.config.price_tick
             price = math.floor(price / tick + 0.5 + 1e-10) * tick

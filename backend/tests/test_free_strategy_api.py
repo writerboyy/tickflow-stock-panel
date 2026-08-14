@@ -81,6 +81,7 @@ def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_pat
             sell_commission_pct=0.0001,
             t0_symbols=["513310.SH"],
             allow_stale_fills=True,
+            limit_up_touch_fill=True,
         ),
         strategy,
         request,
@@ -90,6 +91,7 @@ def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_pat
     assert payload["config"]["sell_commission_pct"] == 0.0001
     assert payload["config"]["t0_symbols"] == ["513310.SH"]
     assert payload["config"]["allow_stale_fills"] is True
+    assert payload["config"]["limit_up_touch_fill"] is True
 
 
 def test_backtest_request_can_leave_universe_to_strategy_source(tmp_path):

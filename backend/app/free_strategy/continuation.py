@@ -30,6 +30,7 @@ _EXECUTION_CONFIG_KEYS = (
     "t0_symbols",
     "allow_stale_fills",
     "fill_policy",
+    "limit_up_touch_fill",
     "benchmark_symbol",
 )
 

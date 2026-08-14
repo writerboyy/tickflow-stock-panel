@@ -29,6 +29,7 @@ from .bars import Bar, group_bars
 from .entry_analysis import build_mainline_entry_analysis
 from .engine import FreeStrategyConfig, FreeStrategyEngine
 from .financial_pit import load_financial_periods
+from .first_board_snapshot import configure_first_board_snapshot
 from .industry import load_industry_history
 from .mainline_snapshot import configure_mainline_snapshot
 from .readiness import (
@@ -36,6 +37,7 @@ from .readiness import (
     build_readiness_manifest,
     persist_readiness_report,
 )
+from .research_periods import build_research_periods
 
 logger = logging.getLogger(__name__)
 
@@ -1297,16 +1299,16 @@ def _prepare_market_data(
     }
 
 
-def _prepare_mainline_market_data(
+def _prepare_dynamic_market_data(
     repo: Any,
     engine: FreeStrategyEngine,
     start: date,
     end: date,
 ) -> tuple[MarketData, dict[str, Any]]:
-    """主线策略只预载基准，股票日线元数据按当日候选滚动加载。"""
+    """动态股票池策略只预载基准，股票日线元数据按当日候选滚动加载。"""
     benchmark = str(engine.config.benchmark_symbol or "").strip()
     if not benchmark:
-        raise ValueError("主线策略必须配置基准指数")
+        raise ValueError("动态股票池策略必须配置基准指数")
     market = _load_market_data(
         repo,
         [benchmark],
@@ -1319,7 +1321,7 @@ def _prepare_mainline_market_data(
         if symbol == benchmark and start <= day <= end
     ]
     if not dates:
-        raise ValueError(f"主线策略基准 {benchmark} 在回测区间没有日线")
+        raise ValueError(f"动态股票池策略基准 {benchmark} 在回测区间没有日线")
     engine.preload_market_history(
         _daily_bars([benchmark], min(dates), max(dates), "index", market),
         "1d",
@@ -1327,9 +1329,17 @@ def _prepare_mainline_market_data(
     return market, {
         "enabled": True,
         "timeframe": "1d",
-        "mode": "pit_mainline_snapshot",
+        "mode": (
+            "pit_mainline_snapshot"
+            if engine.mainline_snapshot_requirement is not None
+            else "pit_first_board_snapshot"
+        ),
         "requested_bars": int(
-            (engine.mainline_snapshot_requirement or {}).get("lookback_days", 60)
+            (
+                engine.mainline_snapshot_requirement
+                or engine.limit_board_snapshot_requirement
+                or {}
+            ).get("lookback_days", 60)
         ),
         "rows": len(dates),
         "symbols": 1,
@@ -2158,6 +2168,8 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             end,
         )
         mainline_cache = configure_mainline_snapshot(engine, repo, start, end)
+        first_board_cache = configure_first_board_snapshot(engine, repo, start, end)
+        dynamic_cache = mainline_cache or first_board_cache
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data
@@ -2174,8 +2186,8 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         market_symbols = _market_symbols(engine, symbols)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
-        if mainline_cache is not None:
-            market_data, warmup_metadata = _prepare_mainline_market_data(
+        if dynamic_cache is not None:
+            market_data, warmup_metadata = _prepare_dynamic_market_data(
                 repo, engine, start, end,
             )
         else:
@@ -2321,7 +2333,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             while cursor <= end:
                 if cursor.weekday() < 5:
                     session_symbols = market_symbols
-                    if engine.market_history_requirements or mainline_cache is not None:
+                    if engine.market_history_requirements or dynamic_cache is not None:
                         if not engine.has_market_date(cursor):
                             cursor += timedelta(days=1)
                             days_seen += 1
@@ -2332,16 +2344,16 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                             if float(quantity) > 0
                         ]
                         dynamic_symbols = engine.universe
-                        if mainline_cache is not None:
+                        if dynamic_cache is not None:
                             dynamic_symbols = [
                                 str(row["symbol"])
-                                for row in mainline_cache.snapshot(cursor).get("candidates", [])
+                                for row in dynamic_cache.snapshot(cursor).get("candidates", [])
                             ]
                         session_symbols = _market_symbols(
                             engine,
                             list(dict.fromkeys([*dynamic_symbols, *held_symbols])),
                         )
-                        if mainline_cache is not None:
+                        if dynamic_cache is not None:
                             _ensure_scheduled_market_data(
                                 repo,
                                 market_data,
@@ -2395,7 +2407,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 raise ValueError("没有可用的分钟K历史数据，请先同步后重试")
             get_minute_symbols = getattr(repo, "get_minute_symbols", None)
             stored_symbols = (
-                set(get_minute_symbols(payload["asset_type"], start, end))
+                set(dynamic_cache.all_symbols) | symbols_seen
+                if dynamic_cache is not None
+                else set(get_minute_symbols(payload["asset_type"], start, end))
                 if callable(get_minute_symbols) else symbols_seen
             )
             missing = [symbol for symbol in requested_symbols if symbol not in stored_symbols]
@@ -2418,6 +2432,8 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 Path(payload["data_dir"]),
                 config.benchmark_symbol,
             )
+        if dynamic_cache is not None:
+            result["research_performance"] = build_research_periods(result, start, end)
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
         five_fortunes_v2 = result.get("state", {}).get("five_fortunes_v2", {})
         strategy_metadata = five_fortunes or five_fortunes_v2
@@ -2426,7 +2442,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         else:
             get_minute_symbols = getattr(repo, "get_minute_symbols", None)
             available_symbols = (
-                set(get_minute_symbols(payload["asset_type"], start, end))
+                set(dynamic_cache.all_symbols) | symbols_seen
+                if dynamic_cache is not None
+                else set(get_minute_symbols(payload["asset_type"], start, end))
                 if callable(get_minute_symbols) else symbols_seen
             )
         missing_symbols = [symbol for symbol in requested_symbols if symbol not in available_symbols]
@@ -2453,6 +2471,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     "mode": "pit_daily_dynamic_universe",
                 }
                 if mainline_cache is not None else {"enabled": False}
+            ),
+            "first_board_snapshot": (
+                {
+                    "enabled": True,
+                    "candidate_symbols": len(first_board_cache.all_symbols),
+                    "mode": "daily_high_limit_touch_io_index",
+                }
+                if first_board_cache is not None else {"enabled": False}
             ),
             "readiness": readiness_manifest,
             "fund_nav": fund_nav_data,
