@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.api.limit_board import router
 from app.services.limit_board_service import LimitBoardService
 from app.services.limit_board_store import LimitBoardStore, default_config
+from app.services.quote_service import QuoteService
 
 
 class FakeRepo:
@@ -24,8 +25,9 @@ class FakeRepo:
     def get_instruments(self):
         return pl.DataFrame({"symbol": ["600000.SH", "600001.SH"], "name": ["浦发银行", "邯郸钢铁"]})
 
-    def get_name_map(self, symbols):
-        return {"600000.SH": "浦发银行", "600001.SH": "邯郸钢铁"}.copy()
+    def get_name_map(self, symbols=None):
+        names = {"600000.SH": "浦发银行", "600001.SH": "邯郸钢铁"}
+        return names.copy() if symbols is None else {symbol: names[symbol] for symbol in symbols if symbol in names}
 
     def resolve_asset_type(self, _symbol):
         return "stock"
@@ -38,6 +40,12 @@ class FakeQuotes:
 
     def publish_external_alerts(self, events):
         self.events.extend(events)
+
+    @staticmethod
+    def enrich_external_alerts(events):
+        for event in events:
+            event["ext_gn_ths__所属概念"] = "银行;金融科技"
+            event["concept"] = "银行;金融科技"
 
     def get_latest_quotes(self, _symbols=None):
         return []
@@ -87,6 +95,91 @@ def test_first_touch_emits_once_and_records_source(tmp_path, monkeypatch):
     assert runtime["symbols"]["600000.SH"]["status"] == "touched"
     assert len(quotes.events) == 1
     assert quotes.events[0]["type"] == "touched"
+    assert quotes.events[0]["concept"] == "银行;金融科技"
+
+
+def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monkeypatch):
+    service, quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service._history_date = datetime(2026, 8, 13).date()
+
+    service._process_quotes([{
+        "symbol": "600000.SH",
+        "name": "600000.SH",
+        "last_price": 11.0,
+        "limit_up": 11.0,
+        "timestamp": "2026-08-13T10:00:00+08:00",
+    }])
+
+    assert service._quotes["600000.SH"]["name"] == "浦发银行"
+    assert quotes.events[0]["name"] == "浦发银行"
+    assert quotes.events[0]["message"] == "浦发银行：触板"
+
+
+def test_view_repairs_code_names_in_existing_runtime_and_events(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {
+        "name": "600000.SH",
+        "source_modes": ["first_board"],
+        "status": "resealed",
+    }
+    service.store.save_runtime(runtime)
+    service.store.append_event({
+        "ts": 1,
+        "trading_date": "2026-08-13",
+        "source": "limit_board",
+        "type": "resealed",
+        "rule_name": "回封",
+        "symbol": "600000.SH",
+        "name": "600000.SH",
+        "message": "600000.SH：回封",
+        "reasons": ["连续 3 个五档快照确认回封"],
+    })
+
+    view = service.view()
+
+    assert view["first_board"][0]["name"] == "浦发银行"
+    assert view["events"][0]["name"] == "浦发银行"
+    assert view["events"][0]["message"] == "浦发银行：回封"
+
+
+def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
+    service = QuoteService.__new__(QuoteService)
+    service._app_state = object()
+    service._repo = object()
+    monkeypatch.setattr(
+        "app.services.preferences.get_monitor_ext_fields",
+        lambda: {"concept": {"field": "ext_gn_ths.所属概念"}, "industry": None},
+    )
+    monkeypatch.setattr(
+        "app.api.screener._load_ext_value_maps",
+        lambda _repo, _columns: {"ext_gn_ths__所属概念": {"600000.SH": "银行;金融科技"}},
+    )
+    event = {
+        "source": "limit_board",
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "message": "浦发银行：触板",
+    }
+
+    service.enrich_external_alerts([event])
+    body = QuoteService._format_alert_notification_body(event)
+
+    assert event["ext_gn_ths__所属概念"] == "银行;金融科技"
+    assert event["concept"] == "银行;金融科技"
+    assert body == "600000.SH 浦发银行：触板 概念：银行;金融科技"
 
 
 def test_stale_quote_does_not_trigger_touch(tmp_path, monkeypatch):

@@ -893,10 +893,35 @@ class QuoteService:
     def push_alerts(self, alerts: list[dict]) -> None:
         self._broadcast_alerts(alerts)
 
+    def enrich_external_alerts(self, alerts: list[dict]) -> None:
+        """为外部服务生成的告警补全监控中心配置的概念和行业。"""
+        self._enrich_alerts_ext(alerts)
+
+    @staticmethod
+    def _format_alert_notification_body(event: dict) -> str:
+        symbol = str(event.get("symbol") or "").strip()
+        name = str(event.get("name") or "").strip()
+        message = str(event.get("message") or "").strip()
+        parts = [symbol] if symbol else []
+        if name and name not in message:
+            parts.append(name)
+        if message:
+            parts.append(message)
+        elif name:
+            parts.append(name)
+        if event.get("source") == "limit_board":
+            concept = event.get("concept")
+            if isinstance(concept, (list, tuple, set)):
+                concept = "、".join(str(item) for item in concept if str(item).strip())
+            if str(concept or "").strip():
+                parts.append(f"概念：{str(concept).strip()}")
+        return " ".join(parts)
+
     def publish_external_alerts(self, alerts: list[dict]) -> None:
         """发布已由外部服务持久化的告警，并复用系统/IM通知通道。"""
         if not alerts:
             return
+        self.enrich_external_alerts(alerts)
         self._broadcast_alerts(alerts)
         self._maybe_send_system_notifications(alerts)
         try:
@@ -911,9 +936,7 @@ class QuoteService:
                     if event.get("source") == "limit_board"
                     else "TickFlow · 持仓风控"
                 )
-                body = str(event.get("message") or "")
-                if event.get("symbol"):
-                    body = f"{event['symbol']} {body}".strip()
+                body = self._format_alert_notification_body(event)
                 if feishu_url:
                     _WEBHOOK_EXECUTOR.submit(
                         webhook_adapter.send_feishu, feishu_url, title, body, feishu_secret,
@@ -1842,12 +1865,20 @@ class QuoteService:
             fields = preferences.get_monitor_ext_fields()
             # 新结构 {field, maxTags, hiddenIndices}, 后端只需 .field
             parts = []
+            aliases: dict[str, str] = {}
             for key in ("concept", "industry"):
                 item = fields.get(key)
                 if isinstance(item, dict) and item.get("field"):
-                    parts.append(item["field"])
+                    field = item["field"]
+                    parts.append(field)
                 elif isinstance(item, str) and item:
-                    parts.append(item)  # 兼容旧格式
+                    field = item
+                    parts.append(field)  # 兼容旧格式
+                else:
+                    continue
+                if "." in field:
+                    config_id, field_name = field.split(".", 1)
+                    aliases[f"{config_id}__{field_name}"] = key
             if not parts:
                 return
             ext_columns = ",".join(parts)
@@ -1860,7 +1891,10 @@ class QuoteService:
                 if not sym:
                     continue
                 for out_col, vmap in value_maps.items():
-                    ev[out_col] = vmap.get(str(sym))
+                    value = vmap.get(str(sym))
+                    ev[out_col] = value
+                    if aliases.get(out_col) == "concept" and value not in (None, ""):
+                        ev["concept"] = value
         except Exception as e:  # noqa: BLE001
             logger.debug("告警 ext 富化失败 (不影响推送): %s", e)
 
@@ -2041,17 +2075,10 @@ class QuoteService:
                     "strategy": "策略", "signal": "信号",
                     "price": "价格", "market": "异动", "sector": "板块",
                     "position_risk": "持仓风控",
+                    "limit_board": "打板专区",
                 }.get(source, source or "通知")
 
-                name = ev.get("name") or ""
-                symbol = ev.get("symbol") or ""
-                message = ev.get("message") or ""
-
-                # 正文: 优先用现成 message, 拼上 symbol/name 让用户一眼定位
-                if symbol:
-                    body = f"{symbol} {name} {message}".strip()
-                else:
-                    body = message or name
+                body = self._format_alert_notification_body(ev)
 
                 title = f"TickFlow · {source_label}"
                 notify_adapter.notify(title, body)

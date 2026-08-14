@@ -70,6 +70,8 @@ class LimitBoardService:
         self._quotes: dict[str, dict[str, Any]] = {}
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=3))
         self._history_date: date | None = None
+        self._name_map_date: date | None = None
+        self._name_map: dict[str, str] = {}
         self._first_board_eligible: set[str] = set()
         self._history_ready = False
         self._history_reason = "正在读取近 10 个交易日涨停记录"
@@ -219,6 +221,36 @@ class LimitBoardService:
         self._history_ready = True
         self._history_reason = f"已核对前 {lookback} 个交易日"
 
+    def _refresh_name_map(self) -> None:
+        today = cn_today()
+        if self._name_map_date == today:
+            return
+        try:
+            names = self.repo.get_name_map()
+        except Exception:  # noqa: BLE001
+            logger.warning("打板专区读取本地证券名称失败", exc_info=True)
+            names = {}
+        self._name_map = {
+            str(symbol).strip().upper(): str(name).strip()
+            for symbol, name in names.items()
+            if str(symbol).strip() and str(name).strip()
+        }
+        self._name_map_date = today
+
+    @staticmethod
+    def _is_display_name(value: object, symbol: str) -> bool:
+        name = str(value or "").strip()
+        return bool(name) and name.upper() not in {symbol, symbol.split(".", 1)[0]}
+
+    def _resolve_name(self, symbol: str, quote_name: object = None) -> str:
+        self._refresh_name_map()
+        authoritative = self._name_map.get(symbol)
+        if self._is_display_name(authoritative, symbol):
+            return str(authoritative)
+        if self._is_display_name(quote_name, symbol):
+            return str(quote_name).strip()
+        return symbol
+
     def _process_quotes(self, records: list[dict[str, Any]]) -> None:
         config = self.store.load_config()
         self._refresh_history(config)
@@ -226,7 +258,6 @@ class LimitBoardService:
         runtime = self._runtime_for_today()
         runtime_symbols = set(runtime.get("symbols") or {})
         selected = {str(item["symbol"]).strip().upper() for item in config["selected"]}
-        names = self.repo.get_name_map(list(selected)) if selected else {}
         now = cn_now()
         updates: dict[str, dict[str, Any]] = {}
         for raw in records:
@@ -239,7 +270,7 @@ class LimitBoardService:
             price = _finite(raw.get("last_price", raw.get("close")))
             if price is None or price <= 0:
                 continue
-            name = str(raw.get("name") or names.get(symbol) or symbol)
+            name = self._resolve_name(symbol, raw.get("name"))
             limit_up = self._limit_up(raw, symbol, name, now.date())
             if limit_up is None:
                 continue
@@ -498,6 +529,7 @@ class LimitBoardService:
     ) -> None:
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
         now = cn_now()
+        name = self._resolve_name(str(quote["symbol"]), quote.get("name"))
         event = {
             "ts": int(now.timestamp() * 1000),
             "trading_date": now.date().isoformat(),
@@ -506,8 +538,8 @@ class LimitBoardService:
             "rule_id": f"limit_board_{event_type}",
             "rule_name": labels[event_type],
             "symbol": quote["symbol"],
-            "name": quote["name"],
-            "message": f"{quote['name']}：{labels[event_type]}",
+            "name": name,
+            "message": f"{name}：{labels[event_type]}",
             "severity": "critical" if event_type == "broken" else "warn",
             "price": quote["last_price"],
             "limit_up": quote["limit_up"],
@@ -516,6 +548,9 @@ class LimitBoardService:
             "blacklisted": state.get("status") == "blacklisted",
             "reasons": [reason],
         }
+        enrich = getattr(self.quote_service, "enrich_external_alerts", None)
+        if callable(enrich):
+            enrich([event])
         self.store.append_event(event)
         alert_store.append(self.store.root.parents[1], event)
         enabled = bool(config["settings"].get("notifications", {}).get(event_type, True))
@@ -547,7 +582,9 @@ class LimitBoardService:
             modes = state.get("source_modes") or []
             if not modes:
                 continue
-            rows.append({"symbol": symbol, **state, "ws_active": symbol in self._ws_symbols})
+            row = {"symbol": symbol, **state, "ws_active": symbol in self._ws_symbols}
+            row["name"] = self._resolve_name(symbol, row.get("name"))
+            rows.append(row)
         rows.sort(key=lambda item: (
             0 if item.get("status") == "blacklisted" else 1,
             float(item.get("limit_gap_pct") or 1),
@@ -556,7 +593,19 @@ class LimitBoardService:
         runtime_by_symbol = runtime.get("symbols", {})
         for item in config["selected"]:
             symbol = str(item["symbol"]).strip().upper()
-            selected.append({**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols})
+            row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
+            row["name"] = self._resolve_name(symbol, row.get("name"))
+            selected.append(row)
+        events = self.store.events(runtime["trading_date"])
+        labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
+        for event in events:
+            symbol = str(event.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            event["name"] = self._resolve_name(symbol, event.get("name"))
+            label = str(event.get("rule_name") or labels.get(str(event.get("type"))) or "").strip()
+            if label:
+                event["message"] = f"{event['name']}：{label}"
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
         return {
@@ -565,7 +614,7 @@ class LimitBoardService:
             "first_board": [item for item in rows if "first_board" in item.get("source_modes", [])],
             "selected": selected,
             "blacklist": runtime.get("blacklist", []),
-            "events": self.store.events(runtime["trading_date"]),
+            "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],
                 "history_ready": self._history_ready,
