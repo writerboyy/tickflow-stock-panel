@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from app.api.position_risk import _collapse_timeline_events
 from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
@@ -612,6 +613,53 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     assert any(alert["source"] == "position_risk" for alert in quotes.alerts)
 
 
+def test_stop_loss_hysteresis_ignores_one_tick_threshold_noise(tmp_path: Path):
+    service = PositionRiskService(
+        tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None),
+    )
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 1000,
+            "available": 1000, "cost_price": 9.7808,
+        }],
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    def evaluate(price: float, second: int) -> None:
+        service._evaluate_position(
+            portfolio,
+            position,
+            {
+                "symbol": "600036.SH", "last_price": price,
+                "timestamp": f"2026-08-07T14:00:{second:02d}",
+            },
+            datetime(2026, 8, 7, 14, 0, second),
+        )
+
+    evaluate(8.80, 0)
+    evaluate(8.81, 1)
+    evaluate(8.80, 2)
+    stop_events = [
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
+        if item["rule_id"] == "stop_loss"
+    ]
+    assert len(stop_events) == 1
+    assert service._rule_states["600036.SH:stop_loss"]["active"] is True
+
+    evaluate(8.86, 3)
+    assert service._rule_states["600036.SH:stop_loss"]["active"] is False
+    evaluate(8.80, 4)
+    stop_events = [
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
+        if item["rule_id"] == "stop_loss"
+    ]
+    assert len(stop_events) == 2
+    assert len(service._severe_events) == 1
+
+
 def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
@@ -680,7 +728,7 @@ def test_default_rule_notification_off_still_records_event_and_recommendation(tm
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
     assert [item["rule_id"] for item in service.store.list_recommendations("pending")] == ["stop_loss"]
-    events = alert_store.list_recent(tmp_path, source="position_risk")
+    events = alert_store.list_recent(tmp_path, days=30, source="position_risk")
     assert any(item["rule_id"] == "stop_loss" for item in events)
     assert quotes.alerts == []
 
@@ -732,7 +780,7 @@ def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
         "现价 98.000，VWAP 100.000，负偏离 2.00%（阈值 1.00%）持续 30 秒"
     ]
     event = next(
-        item for item in alert_store.list_recent(tmp_path, source="position_risk")
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
         if item["rule_id"] == "vwap_breakdown"
     )
     assert event["rule_name"] == "分时均价负偏离超限"
@@ -780,7 +828,7 @@ def test_account_rule_state_survives_service_restart(tmp_path: Path):
     first._evaluate_account(portfolio, datetime(2026, 8, 7, 10, 0))
     assert any(
         item["rule_id"] == "total_exposure"
-        for item in alert_store.list_recent(tmp_path, source="position_risk")
+        for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
     )
 
     restarted = PositionRiskService(
@@ -789,7 +837,7 @@ def test_account_rule_state_survives_service_restart(tmp_path: Path):
     restarted._latest_quotes["600036.SH"] = {"last_price": 36}
     restarted._evaluate_account(portfolio, datetime(2026, 8, 7, 10, 1))
     assert len([
-        item for item in alert_store.list_recent(tmp_path, source="position_risk")
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
         if item["rule_id"] == "total_exposure"
     ]) == 1
 
@@ -801,6 +849,57 @@ def test_normal_event_cooldown_survives_recovery_within_five_minutes(tmp_path: P
     assert not service._set_rule("600036.SH", "large_buy", True, datetime(2026, 8, 7, 10, 4, 59))
     assert not service._set_rule("600036.SH", "large_buy", False, datetime(2026, 8, 7, 10, 5))
     assert service._set_rule("600036.SH", "large_buy", True, datetime(2026, 8, 7, 10, 5, 1))
+
+
+def test_quote_interruption_requires_stable_recovery_and_obeys_cooldown(tmp_path: Path):
+    service = PositionRiskService(
+        tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None),
+    )
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 1000,
+            "available": 1000, "cost_price": 36,
+        }],
+    }, 0)
+    service._latest_quotes["600036.SH"] = {
+        "symbol": "600036.SH", "last_price": 36,
+        "timestamp": "2026-08-07T09:59:00",
+    }
+
+    service._check_quote_staleness(datetime(2026, 8, 7, 10, 0))
+    service._latest_quotes["600036.SH"]["timestamp"] = "2026-08-07T10:00:01"
+    service._check_quote_staleness(datetime(2026, 8, 7, 10, 0, 1))
+    service._latest_quotes["600036.SH"]["timestamp"] = "2026-08-07T10:00:30"
+    service._check_quote_staleness(datetime(2026, 8, 7, 10, 0, 30))
+    assert service._rule_states["__portfolio__:quote_interruption"]["active"] is True
+
+    service._latest_quotes["600036.SH"]["timestamp"] = "2026-08-07T10:01:02"
+    service._check_quote_staleness(datetime(2026, 8, 7, 10, 1, 2))
+    assert service._rule_states["__portfolio__:quote_interruption"]["active"] is False
+
+    service._check_quote_staleness(datetime(2026, 8, 7, 10, 1, 40))
+    interruptions = [
+        item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
+        if item["rule_id"] == "quote_interruption"
+    ]
+    assert len(interruptions) == 1
+    assert service._rule_states["__portfolio__:quote_interruption"]["active"] is True
+
+
+def test_position_risk_timeline_collapses_duplicate_fingerprints():
+    rows = _collapse_timeline_events([
+        {"ts": 200, "fingerprint": "same", "rule_id": "stop_loss"},
+        {"ts": 100, "fingerprint": "same", "rule_id": "stop_loss"},
+        {"ts": 150, "rule_id": "ma5_breakdown"},
+    ])
+
+    assert len(rows) == 2
+    grouped = next(item for item in rows if item.get("fingerprint") == "same")
+    assert grouped["ts"] == 200
+    assert grouped["first_ts"] == 100
+    assert grouped["last_ts"] == 200
+    assert grouped["occurrence_count"] == 2
 
 
 def test_quote_gap_is_scoped_and_waits_for_every_symbol_to_recover(tmp_path: Path):
@@ -859,7 +958,7 @@ def test_unrealized_loss_uses_current_equity_denominator(tmp_path: Path):
 
     assert any(
         item["rule_id"] == "unrealized_loss"
-        for item in alert_store.list_recent(tmp_path, source="position_risk")
+        for item in service.store.list_recommendations("pending")
     )
 
 

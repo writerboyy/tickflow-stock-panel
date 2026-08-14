@@ -215,11 +215,40 @@ def dismiss_recommendation(recommendation_id: str, payload: RevisionPayload, req
     return _set_recommendation(recommendation_id, "dismissed", payload, request)
 
 
+def _collapse_timeline_events(rows: list[dict]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for index, item in enumerate(rows):
+        timestamp = int(item.get("ts") or 0)
+        fingerprint = str(item.get("fingerprint") or "")
+        key = f"{item.get('source')}:{fingerprint}" if fingerprint else f"row:{index}"
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = {
+                **item,
+                "occurrence_count": 1,
+                "first_ts": timestamp,
+                "last_ts": timestamp,
+            }
+            continue
+        occurrence_count = int(current["occurrence_count"]) + 1
+        first_ts = min(int(current["first_ts"]), timestamp)
+        last_ts = max(int(current["last_ts"]), timestamp)
+        latest = item if timestamp > int(current["last_ts"]) else current
+        grouped[key] = {
+            **latest,
+            "occurrence_count": occurrence_count,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "ts": last_ts,
+        }
+    return sorted(grouped.values(), key=lambda item: int(item.get("last_ts") or 0), reverse=True)
+
+
 @router.get("/events")
 def list_events(request: Request, days: int = Query(7, ge=1, le=30), limit: int = Query(500, ge=1, le=5000)):
     service = _service(request)
     positions = {item["symbol"] for item in service.store.load()["positions"]}
-    rows = alert_store.list_recent(service.store.root.parents[1], days=days, limit=limit * 3)
+    rows = alert_store.list_recent(service.store.root.parents[1], days=days, limit=5000)
     rows = [
         {
             **item,
@@ -234,7 +263,8 @@ def list_events(request: Request, days: int = Query(7, ge=1, le=30), limit: int 
                 "large_buy", "large_sell", "continuous_outflow", "orderbook_imbalance",
             }
         ) or (item.get("source") != "position_risk" and item.get("symbol") in positions)
-    ][:limit]
+    ]
+    rows = _collapse_timeline_events(rows)[:limit]
     return {"events": rows, "count": len(rows)}
 
 

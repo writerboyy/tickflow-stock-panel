@@ -24,6 +24,8 @@ from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
 _ACCOUNT_ID = "position-risk"
 _EVENT_COOLDOWN_SECONDS = 300
+_STOP_LOSS_RECOVERY_BUFFER = 0.005
+_QUOTE_INTERRUPTION_RECOVERY_SECONDS = 60
 _FUND_EVIDENCE_RULES = {
     "large_buy",
     "large_sell",
@@ -34,7 +36,6 @@ _NO_COOLDOWN_RULES = {
     "stop_loss",
     "broken_limit_up",
     "limit_down",
-    "quote_interruption",
 }
 _BUILTIN_SIGNAL_DIRECTIONS = {
     "signal_ma_golden_5_20": "entry",
@@ -179,6 +180,23 @@ class PositionRiskService:
             (_finite(value) for value in severe_events if _finite(value) is not None),
             maxlen=20,
         )
+        self._severe_event_date = str(self.store.get_runtime("severe_event_date", "") or "")
+        self._severe_event_fingerprints = {
+            str(value)
+            for value in (self.store.get_runtime("severe_event_fingerprints", []) or [])
+            if value
+        }
+        self._quote_interruption_recovery_started_at = _finite(
+            self.store.get_runtime("quote_interruption_recovery_started_at"),
+        )
+        if not self.store.get_runtime("risk_event_noise_guard_v1", False):
+            self._severe_events.clear()
+            self._severe_event_date = ""
+            self._severe_event_fingerprints.clear()
+            self.store.set_runtime("severe_events", [])
+            self.store.set_runtime("severe_event_date", "")
+            self.store.set_runtime("severe_event_fingerprints", [])
+            self.store.set_runtime("risk_event_noise_guard_v1", True)
         if not self.store.get_runtime("fund_pressure_noise_v1", False):
             self.store.stale_pending_rules(_FUND_EVIDENCE_RULES)
             self._rule_states = {
@@ -781,9 +799,18 @@ class PositionRiskService:
         stop_threshold = _finite(stop_cfg.get("threshold"))
         stop_threshold = stop_threshold if stop_threshold is not None else -0.10
         stop_action = _action_pct(stop_cfg, 100)
-        stop_active = bool(stop_cfg.get("enabled", True) and cost and price / cost - 1 <= stop_threshold)
+        stop_return = price / cost - 1 if cost else None
+        stop_was_active = bool(
+            (self._rule_states.get(f"{symbol}:stop_loss") or {}).get("active"),
+        )
+        stop_limit = stop_threshold + (_STOP_LOSS_RECOVERY_BUFFER if stop_was_active else 0)
+        stop_active = bool(
+            stop_cfg.get("enabled", True)
+            and stop_return is not None
+            and stop_return <= stop_limit
+        )
         if self._set_rule(symbol, "stop_loss", stop_active, now):
-            self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {(price / cost - 1) * 100:.2f}%"])
+            self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {stop_return * 100:.2f}%"])
 
         trailing_cfg = self._rule_config(portfolio, symbol, "trailing_drawdown")
         activation_gain = _finite(trailing_cfg.get("activation_gain"))
@@ -1381,8 +1408,8 @@ class PositionRiskService:
             ),
         }
 
-    def _check_quote_staleness(self) -> None:
-        now = cn_now().replace(tzinfo=None)
+    def _check_quote_staleness(self, now: datetime | None = None) -> None:
+        now = (now or cn_now()).replace(tzinfo=None)
         if not _is_continuous_trading(now):
             return
         portfolio = self.store.load()
@@ -1403,8 +1430,31 @@ class PositionRiskService:
                 f"持仓行情超过 {int(threshold)} 秒未更新，等待恢复后重新建立基线",
                 set(stale_symbols),
             )
+        enabled = bool(config.get("enabled", True))
+        was_active = bool(
+            (self._rule_states.get("__portfolio__:quote_interruption") or {}).get("active"),
+        )
+        interruption_active = enabled and stale
+        recovery_started_at = self._quote_interruption_recovery_started_at
+        if not enabled or stale:
+            recovery_started_at = None
+        elif was_active:
+            recovery_started_at = recovery_started_at or now.timestamp()
+            interruption_active = (
+                now.timestamp() - recovery_started_at
+                < _QUOTE_INTERRUPTION_RECOVERY_SECONDS
+            )
+            if not interruption_active:
+                recovery_started_at = None
+        else:
+            recovery_started_at = None
+        if recovery_started_at != self._quote_interruption_recovery_started_at:
+            self._quote_interruption_recovery_started_at = recovery_started_at
+            self.store.set_runtime(
+                "quote_interruption_recovery_started_at", recovery_started_at,
+            )
         if self._set_rule(
-            "__portfolio__", "quote_interruption", bool(config.get("enabled", True) and stale),
+            "__portfolio__", "quote_interruption", interruption_active,
             now,
         ):
             self._emit(
@@ -1591,8 +1641,20 @@ class PositionRiskService:
         if severity == "critical" and rule_id not in {
             "clustered_severe_events", "quote_interruption",
         }:
-            self._severe_events.append(event_time.timestamp())
-            self.store.set_runtime("severe_events", list(self._severe_events))
+            event_date = event_time.date().isoformat()
+            if self._severe_event_date != event_date:
+                self._severe_events.clear()
+                self._severe_event_date = event_date
+                self._severe_event_fingerprints.clear()
+            if fingerprint not in self._severe_event_fingerprints:
+                self._severe_events.append(event_time.timestamp())
+                self._severe_event_fingerprints.add(fingerprint)
+                self.store.set_runtime("severe_events", list(self._severe_events))
+                self.store.set_runtime("severe_event_date", self._severe_event_date)
+                self.store.set_runtime(
+                    "severe_event_fingerprints",
+                    sorted(self._severe_event_fingerprints),
+                )
         alert_store.append(self.store.root.parents[1], event)
         if notify is True:
             publish = getattr(self.quote_service, "publish_external_alerts", None)
@@ -1773,6 +1835,12 @@ class PositionRiskService:
         self.store.set_runtime("rule_states", {})
         self._severe_events.clear()
         self.store.set_runtime("severe_events", [])
+        self._severe_event_date = ""
+        self._severe_event_fingerprints.clear()
+        self.store.set_runtime("severe_event_date", "")
+        self.store.set_runtime("severe_event_fingerprints", [])
+        self._quote_interruption_recovery_started_at = None
+        self.store.set_runtime("quote_interruption_recovery_started_at", None)
         self._recent_exit_signals.clear()
         self.store.set_runtime("recent_exit_signals", {})
         self.store.set_runtime("account", {

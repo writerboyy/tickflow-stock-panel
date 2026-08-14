@@ -24,6 +24,17 @@ class PoolUpdate(BaseModel):
     auto_trade: bool
 
 
+class NotificationSettings(BaseModel):
+    touched: bool
+    broken: bool
+    resealed: bool
+
+
+class NotificationSettingsWrite(BaseModel):
+    revision: int = Field(ge=0)
+    notifications: NotificationSettings
+
+
 def _service(request: Request):
     service = getattr(request.app.state, "limit_board_service", None)
     if service is None:
@@ -34,6 +45,17 @@ def _service(request: Request):
 @router.get("")
 def view(request: Request):
     return _service(request).view()
+
+
+@router.put("/settings/notifications")
+def update_notifications(payload: NotificationSettingsWrite, request: Request):
+    try:
+        config = _service(request).update_notifications(
+            payload.notifications.model_dump(), payload.revision,
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
 
 
 @router.post("/selected")

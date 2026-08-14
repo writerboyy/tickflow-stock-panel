@@ -1100,6 +1100,10 @@ export interface LimitBoardConfig {
 
 export interface AlertEvent {
   ts: number
+  fingerprint?: string
+  first_ts?: number
+  last_ts?: number
+  occurrence_count?: number
   rule_id?: string
   rule_name?: string
   source: string
@@ -2239,6 +2243,11 @@ export const api = {
   qmtCancelOrder: (order_sys_id: string) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
   limitBoard: () => request<LimitBoardView>('/api/limit-board'),
+  limitBoardNotificationsUpdate: (
+    notifications: LimitBoardView['settings']['notifications'], revision: number,
+  ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {
+    method: 'PUT', body: JSON.stringify({ notifications, revision }),
+  }),
   limitBoardAdd: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/selected', {
       method: 'POST', body: JSON.stringify({ symbol, revision }),

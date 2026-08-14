@@ -814,6 +814,21 @@ class LimitBoardService:
             },
         }
 
+    def update_notifications(
+        self, notifications: dict[str, Any], revision: int,
+    ) -> dict[str, Any]:
+        values = {
+            key: bool(notifications[key])
+            for key in ("touched", "broken", "resealed")
+        }
+
+        def update(config: dict[str, Any]) -> None:
+            config["settings"]["notifications"] = values
+
+        saved = self.store.update(revision, update)
+        self._notify_updated()
+        return saved
+
     def add_selected(self, symbol: str, revision: int) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)
 

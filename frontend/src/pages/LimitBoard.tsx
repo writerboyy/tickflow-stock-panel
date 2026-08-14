@@ -17,13 +17,15 @@ import {
   Wifi,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
+import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
-import { api, type LimitBoardRow } from '@/lib/api'
+import { api, type LimitBoardRow, type LimitBoardView } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 type Tab = 'first' | 'selected' | 'pool' | 'events'
 type TableMode = Exclude<Tab, 'events'>
+type NotificationSettings = LimitBoardView['settings']['notifications']
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   watching: { label: '观察中', tone: 'text-muted' },
@@ -211,11 +213,37 @@ function Table(props: TableProps) {
   )
 }
 
+function NotificationDialog({
+  value,
+  pending,
+  onClose,
+  onSave,
+}: {
+  value: NotificationSettings
+  pending: boolean
+  onClose: () => void
+  onSave: (value: NotificationSettings) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  return <Modal labelledBy="limit-board-notification-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl">
+    <div className="border-b border-border px-4 py-3"><h2 id="limit-board-notification-title" className="text-sm font-semibold">通知设置</h2></div>
+    <div className="divide-y divide-border px-4">
+      {([
+        ['touched', '触板'],
+        ['broken', '炸板'],
+        ['resealed', '回封'],
+      ] as const).map(([key, label]) => <label key={key} className="flex items-center justify-between py-3 text-xs"><span>{label}</span><input type="checkbox" checked={draft[key]} disabled={pending} onChange={event => setDraft(current => ({ ...current, [key]: event.target.checked }))} /></label>)}
+    </div>
+    <div className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" onClick={onClose} disabled={pending} className="h-8 rounded-btn border border-border px-3 text-xs text-muted disabled:opacity-50">取消</button><button type="button" onClick={() => onSave(draft)} disabled={pending} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white disabled:opacity-50"><Check className="h-3.5 w-3.5" />{pending ? '保存中…' : '保存'}</button></div>
+  </Modal>
+}
+
 export function LimitBoard() {
   const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('first')
   const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<LimitBoardRow | null>(null)
+  const [notificationOpen, setNotificationOpen] = useState(false)
   const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
   const searchQuery = useQuery({
     queryKey: QK.instrumentSearch(search, 'stock'),
@@ -243,11 +271,20 @@ export function LimitBoard() {
     mutationFn: (row: LimitBoardRow) => api.limitBoardPoolRemove(row.symbol, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
+  const updateNotifications = useMutation({
+    mutationFn: (notifications: NotificationSettings) => (
+      api.limitBoardNotificationsUpdate(notifications, view.data?.revision ?? 0)
+    ),
+    onSuccess: async () => {
+      await refresh()
+      setNotificationOpen(false)
+    },
+  })
 
   const selectedSymbols = useMemo(() => new Set((view.data?.selected ?? []).map(row => row.symbol)), [view.data?.selected])
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || remove.isPending || addPool.isPending || updatePool.isPending || removePool.isPending
+  const busy = add.isPending || remove.isPending || addPool.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
@@ -263,12 +300,11 @@ export function LimitBoard() {
       <PageHeader
         title="打板专区"
         titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />{runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
-        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入精选" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={selectedSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
+        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入精选" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={selectedSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
         <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '行情已接入 WS' : '等待 WS 候选'}</span>
-        <span>默认通知：触板、炸板、回封</span>
         <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
         {!runtime.first_board_enabled ? <span className="text-warning">首板扫描暂不可用：需要全市场实时行情和历史涨停校验</span> : <span>{runtime.history_reason}</span>}
       </div>
@@ -313,6 +349,7 @@ export function LimitBoard() {
       </div>
 
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
+      {notificationOpen ? <NotificationDialog value={data.settings.notifications} pending={updateNotifications.isPending} onClose={() => setNotificationOpen(false)} onSave={value => updateNotifications.mutate(value)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )

@@ -447,3 +447,36 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
         json={"symbol": "600001.SH", "revision": 0},
     )
     assert stale.status_code == 409
+
+
+def test_limit_board_api_updates_notification_settings(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    updated = client.put(
+        "/api/limit-board/settings/notifications",
+        json={
+            "revision": 0,
+            "notifications": {
+                "touched": False,
+                "broken": True,
+                "resealed": False,
+            },
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["config"]["revision"] == 1
+    assert updated.json()["config"]["settings"]["notifications"] == {
+        "touched": False,
+        "broken": True,
+        "resealed": False,
+    }
+    assert service.store.load_config()["settings"]["notifications"] == {
+        "touched": False,
+        "broken": True,
+        "resealed": False,
+    }
