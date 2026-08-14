@@ -42,6 +42,24 @@ const STATUS_LABEL: Record<PositionRiskStatus, string> = {
   data_unavailable: '行情不可用',
 }
 
+const RUNTIME_REASON_LABELS: Record<string, string> = {
+  '行情已恢复，正在重新建立连续性基线': '基线重建中',
+  '正在建立持仓行情连续性基线': '建立行情基线',
+  '持仓池已整体接入共享 TickFlow WS': 'WS 已接入',
+  '持仓池行情连续性已恢复': '行情已恢复',
+  'WS 能力不可用，全部持仓已转行情轮询': '已转行情轮询',
+}
+
+function compactRuntimeReason(reason: unknown): string {
+  const text = String(reason ?? '').trim()
+  if (!text) return ''
+  const known = RUNTIME_REASON_LABELS[text]
+  if (known) return known
+  const interrupted = text.match(/^仍有 (\d+) 只持仓行情中断/)
+  if (interrupted) return `${interrupted[1]} 只行情中断`
+  return text.length > 12 ? `${text.slice(0, 12)}…` : text
+}
+
 const QMT_ORDER_STATUS: Record<string, string> = {
   submitting: '提交中',
   unknown: '状态待人工核对',
@@ -513,6 +531,7 @@ export function LargeOrders() {
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
   const namesBySymbol = new Map(data.positions.map(row => [row.symbol, row.name]))
+  const runtimeReason = compactRuntimeReason(data.runtime.reason)
 
   return (
     <div className="min-h-full bg-background">
@@ -537,7 +556,7 @@ export function LargeOrders() {
           <span className={qmt.data?.auto_sync_running ? 'text-bear' : 'text-muted'}>{qmt.data?.auto_sync_running ? `自动同步 ${qmt.data.auto_sync_interval_seconds}秒` : '自动同步未运行'}</span>
           <label className="inline-flex items-center gap-1.5 text-muted" title={!qmt.data?.trade_authorized ? '后端未授权实盘交易' : '取消勾选可暂停本次运行的实盘下单'}><input type="checkbox" checked={qmt.data?.trade_enabled === true} disabled={!qmt.data?.configured || !qmt.data?.trade_authorized || qmtToggle.isPending} onChange={event => qmtToggle.mutate(event.target.checked)} />实盘模式</label>
           <button type="button" onClick={() => qmtProbe.mutate()} disabled={qmtProbe.isPending} className="h-7 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">{qmtProbe.isPending ? '检查中…' : '检查 QMT 连接'}</button>
-          <span className="ml-auto max-w-full truncate text-[11px] text-muted" title={data.runtime.reason}>{data.runtime.reason}</span>
+          {runtimeReason && <span className="ml-auto max-w-[10rem] truncate text-[11px] text-muted" title={data.runtime.reason}>{runtimeReason}</span>}
         </div>
       </div>
 
