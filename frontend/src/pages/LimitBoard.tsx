@@ -101,7 +101,7 @@ function Row({
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
         </button>
       </td>
-      <td className="max-w-[240px] px-2">
+      <td className="w-[160px] max-w-[160px] px-2">
         <div className="truncate text-[10px] text-amber-500" title={allThemes.join('、') || undefined}>
           {visibleThemes.length ? visibleThemes.join('、') : '--'}
         </div>
@@ -188,7 +188,7 @@ function Table(props: TableProps) {
       <table className="w-full min-w-[1100px] border-collapse">
         <thead className="text-left text-[10px] text-muted">
           <tr>
-            <th className="py-2 pl-3 pr-2">标的</th><th className="px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
+            <th className="py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
             {mode === 'pool' ? <><th className="px-2">自动打板</th><th className="px-2">委托状态</th><th className="px-2" /></> : <><th className="px-2">打板池</th>{mode === 'selected' ? <th className="px-2" /> : null}</>}
           </tr>
         </thead>
