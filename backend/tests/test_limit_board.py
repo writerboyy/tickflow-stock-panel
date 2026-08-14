@@ -248,6 +248,58 @@ def test_view_repairs_code_names_in_existing_runtime_and_events(tmp_path, monkey
     assert view["events"][0]["message"] == "浦发银行：回封"
 
 
+def test_view_builds_ranked_candidate_pool_without_board_members(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {
+            "name": "浦发银行",
+            "source_modes": ["first_board"],
+            "status": "near_limit",
+            "limit_gap_pct": 0.004,
+            "bid1_volume": 10000,
+        },
+        "600001.SH": {
+            "name": "邯郸钢铁",
+            "source_modes": ["first_board"],
+            "status": "near_limit",
+            "limit_gap_pct": 0.015,
+            "bid1_volume": 100,
+        },
+    }
+    service.store.save_runtime(runtime)
+    service.store.update(0, lambda value: value["board_pool"].append({"symbol": "600001.SH", "name": "邯郸钢铁", "auto_trade": False}))
+
+    view = service.view()
+
+    assert [row["symbol"] for row in view["candidate_pool"]] == ["600000.SH"]
+    assert view["candidate_pool"][0]["candidate_rank"] == 1
+    assert view["candidate_pool"][0]["candidate_score"] > 0
+    assert "首板候选" in view["candidate_pool"][0]["candidate_reasons"]
+
+
+def test_candidate_pool_marks_selected_rows_without_runtime_quotes(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.store.update(0, lambda value: value["selected"].append({"symbol": "600000.SH", "name": "浦发银行"}))
+
+    view = service.view()
+
+    assert view["candidate_pool"][0]["source"] == "selected"
+    assert "精选跟踪" in view["candidate_pool"][0]["candidate_reasons"]
+
+
+def test_add_pool_enables_auto_trade_by_default(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+
+    saved = service.add_pool("600000.SH", "first_board", 0)
+
+    assert saved["board_pool"][0]["auto_trade"] is True
+
+
 def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
     service = QuoteService.__new__(QuoteService)
     service._app_state = object()
@@ -429,7 +481,7 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
         json={"symbol": "600000.SH", "source": "selected", "revision": 1},
     )
     assert pooled.status_code == 200
-    assert pooled.json()["config"]["board_pool"][0]["auto_trade"] is False
+    assert pooled.json()["config"]["board_pool"][0]["auto_trade"] is True
 
     enabled = client.put(
         "/api/limit-board/pool/600000.SH",

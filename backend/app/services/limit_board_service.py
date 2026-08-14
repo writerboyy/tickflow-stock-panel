@@ -724,6 +724,92 @@ class LimitBoardService:
         except Exception:  # noqa: BLE001
             logger.debug("打板专区题材富化失败", exc_info=True)
 
+    @staticmethod
+    def _candidate_pool(
+        first_board: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        board_pool: list[dict[str, Any]],
+        near_limit_pct: float,
+    ) -> list[dict[str, Any]]:
+        """Build the user-approval queue without enabling orders implicitly."""
+        pool_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in board_pool
+        }
+        candidates: dict[str, dict[str, Any]] = {}
+        for row, origin in [
+            *((item, "first_board") for item in first_board),
+            *((item, "selected") for item in selected),
+        ]:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol or symbol in pool_symbols:
+                continue
+            current = candidates.get(symbol)
+            if current is None:
+                modes = sorted(set(row.get("source_modes") or []) | {origin})
+                current = {
+                    **row,
+                    "source": "first_board" if "first_board" in modes else "selected",
+                    "source_modes": modes,
+                }
+                candidates[symbol] = current
+            else:
+                modes = set(current.get("source_modes") or [])
+                modes.update(row.get("source_modes") or [])
+                modes.add(origin)
+                current["source_modes"] = sorted(modes)
+                if current.get("name") in (None, "", symbol):
+                    current["name"] = row.get("name")
+
+        scored: list[dict[str, Any]] = []
+        near = max(float(near_limit_pct), 0.0001)
+        status_bonus = {
+            "sealed": 18.0,
+            "resealed": 16.0,
+            "touched": 14.0,
+            "near_limit": 8.0,
+            "broken": 2.0,
+        }
+        for row in candidates.values():
+            gap = _finite(row.get("limit_gap_pct"))
+            proximity = 0.0 if gap is None else max(0.0, min(1.0, 1.0 - gap / near))
+            source_modes = set(row.get("source_modes") or [])
+            source_bonus = 12.0 if "first_board" in source_modes else 8.0
+            if "selected" in source_modes:
+                source_bonus += 2.0
+            bid_volume = max(0.0, _finite(row.get("bid1_volume")) or 0.0)
+            liquidity_bonus = min(8.0, (bid_volume ** 0.5) / 10.0)
+            break_penalty = min(18.0, float(row.get("break_count") or 0) * 6.0)
+            score = round(proximity * 60.0 + source_bonus + status_bonus.get(row.get("status"), 0.0) + liquidity_bonus - break_penalty, 2)
+            reasons: list[str] = []
+            if "first_board" in source_modes:
+                reasons.append("首板候选")
+            if "selected" in source_modes:
+                reasons.append("精选跟踪")
+            if gap is None:
+                reasons.append("等待实时行情")
+            else:
+                reasons.append(f"距涨停 {(gap * 100):.2f}%")
+            if row.get("status") in {"sealed", "resealed", "touched"}:
+                reasons.append({
+                    "sealed": "已封板",
+                    "resealed": "回封",
+                    "touched": "已触板",
+                }[row["status"]])
+            if row.get("break_count"):
+                reasons.append(f"炸板 {int(row['break_count'])} 次")
+            row["candidate_score"] = score
+            row["candidate_reasons"] = [reason for reason in reasons if reason]
+            scored.append(row)
+        scored.sort(key=lambda row: (
+            -float(row.get("candidate_score") or 0.0),
+            float(row.get("limit_gap_pct") or 1.0),
+            str(row.get("symbol") or ""),
+        ))
+        for rank, row in enumerate(scored, start=1):
+            row["candidate_rank"] = rank
+        return scored
+
     def view(self) -> dict[str, Any]:
         config = self.store.load_config()
         runtime = self._runtime_for_today()
@@ -758,6 +844,12 @@ class LimitBoardService:
             if is_risk_warning_name(row["name"]):
                 continue
             board_pool.append(row)
+        candidate_pool = self._candidate_pool(
+            [item for item in rows if "first_board" in item.get("source_modes", [])],
+            selected,
+            board_pool,
+            float(config["settings"].get("near_limit_pct", 0.02)),
+        )
         events = []
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
         for event in self.store.events(runtime["trading_date"]):
@@ -771,7 +863,7 @@ class LimitBoardService:
             if label:
                 event["message"] = f"{event['name']}：{label}"
             events.append(event)
-        self._enrich_concepts([*rows, *selected, *board_pool, *events])
+        self._enrich_concepts([*rows, *selected, *board_pool, *candidate_pool, *events])
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
         qmt = self._qmt()
@@ -792,6 +884,7 @@ class LimitBoardService:
             "settings": config["settings"],
             "first_board": [item for item in rows if "first_board" in item.get("source_modes", [])],
             "selected": selected,
+            "candidate_pool": candidate_pool,
             "board_pool": board_pool,
             "blacklist": [
                 symbol for symbol in runtime.get("blacklist", [])
@@ -879,7 +972,7 @@ class LimitBoardService:
                 "symbol": cleaned,
                 "name": name,
                 "source": source,
-                "auto_trade": False,
+                "auto_trade": True,
                 "added_at": cn_now().isoformat(),
             })
 

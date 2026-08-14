@@ -8,6 +8,7 @@ import {
   CircleDot,
   Crosshair,
   Flame,
+  ListFilter,
   Plus,
   Radio,
   RefreshCw,
@@ -23,7 +24,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { api, type LimitBoardRow, type LimitBoardView } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type Tab = 'first' | 'selected' | 'pool' | 'events'
+type Tab = 'first' | 'selected' | 'candidate' | 'pool' | 'events'
 type TableMode = Exclude<Tab, 'events'>
 type NotificationSettings = LimitBoardView['settings']['notifications']
 
@@ -111,6 +112,11 @@ function Row({
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
       <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td>
       <td className="px-2 font-mono tabular-nums text-warning">{gap}</td>
+      {mode === 'candidate' ? (
+        <td className="px-2 font-mono tabular-nums text-accent" title={(row.candidate_reasons || []).join('；')}>
+          #{row.candidate_rank ?? '--'} <span className="text-[10px] text-muted">{row.candidate_score?.toFixed(1) ?? '--'}</span>
+        </td>
+      ) : null}
       <td className="px-2">
         <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
           <CircleDot className="h-3 w-3" />{status.label}
@@ -154,7 +160,7 @@ function Row({
               className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-60`}
             >
               {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
-              {inPool ? '已加入' : '加入'}
+              {inPool ? '已加入' : mode === 'candidate' ? '加入并启用' : '加入'}
             </button>
             {mode === 'selected' ? (
               <button type="button" title="移除精选跟踪" disabled={busy} onClick={onRemoveSelected} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
@@ -188,7 +194,7 @@ function Table(props: TableProps) {
       <table className="w-full min-w-[980px] border-collapse">
         <thead className="text-left text-[10px] text-muted">
           <tr>
-            <th className="sticky left-0 z-20 w-[128px] bg-surface py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
+            <th className="sticky left-0 z-20 w-[128px] bg-surface py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th>{mode === 'candidate' ? <th className="px-2">排序</th> : null}<th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-20 w-[128px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-20 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>
@@ -288,12 +294,14 @@ export function LimitBoard() {
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
-  const rows = tab === 'first' ? data.first_board : tab === 'selected' ? data.selected : data.board_pool
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'selected' ? 'selected' : 'first'
-  const tableTitle = tab === 'first' ? '全市场首板候选' : tab === 'selected' ? '手工精选股票' : '实盘打板池'
+  const rows = tab === 'first' ? data.first_board : tab === 'selected' ? data.selected : tab === 'candidate' ? data.candidate_pool : data.board_pool
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'selected' ? 'selected' : tab === 'candidate' ? 'candidate' : 'first'
+  const tableTitle = tab === 'first' ? '全市场首板候选' : tab === 'selected' ? '手工精选股票' : tab === 'candidate' ? '算法备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
-    ? '自动打板默认关闭；开启后在新鲜行情首次触及涨停价时提交 1 手限价委托'
-    : '临近涨停后自动进入 WS，可手动加入打板池'
+    ? '加入时默认开启自动打板；关闭后仅跟踪，不提交实盘委托'
+    : tab === 'candidate'
+    ? '按触板接近度、首板/精选来源、封单和炸板次数排序；加入后自动打板'
+    : '临近涨停后自动进入 WS，可加入算法备选池或打板池'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -313,6 +321,7 @@ export function LimitBoard() {
         {([
           ['first', '首板扫描', data.first_board.length, Flame],
           ['selected', '精选跟踪', data.selected.length, CheckCircle2],
+          ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
@@ -332,7 +341,7 @@ export function LimitBoard() {
               poolSymbols={poolSymbols}
               busy={busy}
               onOpen={setPreview}
-              onAddPool={row => addPool.mutate({ row, source: tableMode === 'selected' ? 'selected' : 'first_board' })}
+              onAddPool={row => addPool.mutate({ row, source: tableMode === 'selected' || row.source === 'selected' ? 'selected' : 'first_board' })}
               onRemoveSelected={row => remove.mutate(row)}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled })}
               onRemovePool={row => removePool.mutate(row)}

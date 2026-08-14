@@ -1051,6 +1051,9 @@ export interface LimitBoardRow {
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
+  candidate_score?: number
+  candidate_rank?: number
+  candidate_reasons?: string[]
 }
 
 export interface LimitBoardView {
@@ -1065,6 +1068,7 @@ export interface LimitBoardView {
   }
   first_board: LimitBoardRow[]
   selected: LimitBoardRow[]
+  candidate_pool: LimitBoardRow[]
   board_pool: LimitBoardRow[]
   blacklist: string[]
   events: Array<Record<string, any>>
