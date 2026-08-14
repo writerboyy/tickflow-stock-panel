@@ -94,15 +94,15 @@ function Row({
     : { label: '等待触板', tone: 'text-muted' }
 
   return (
-    <tr className="border-t border-border/70 text-[11px] hover:bg-elevated/30">
-      <td className="py-2.5 pl-3 pr-2">
-        <button type="button" onClick={onOpen} className="text-left hover:text-accent" title="查看 K 线与分时">
-          <div className="font-medium">{row.name || row.symbol}</div>
+    <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
+      <td className="sticky left-0 z-10 w-[128px] min-w-[128px] max-w-[128px] bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
+        <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
+          <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
         </button>
       </td>
       <td className="w-[160px] max-w-[160px] px-2">
-        <div className="truncate text-[10px] text-amber-500" title={allThemes.join('、') || undefined}>
+        <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
           {visibleThemes.length ? visibleThemes.join('、') : '--'}
         </div>
       </td>
@@ -121,29 +121,29 @@ function Row({
       </td>
       {mode === 'pool' ? (
         <>
-          <td className="px-2">
-            <label className="inline-flex items-center gap-1.5 whitespace-nowrap text-secondary">
-              <input
-                type="checkbox"
-                checked={row.auto_trade === true}
-                disabled={busy}
-                onChange={event => onToggleAuto(event.target.checked)}
-              />
-              {row.auto_trade ? '已开启' : '已关闭'}
-            </label>
-          </td>
           <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
             {orderStatus.label}
           </td>
-          <td className="pr-3 text-right">
-            <button type="button" title="移出打板池" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
+          <td className="sticky right-0 z-10 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
+            <div className="flex items-center justify-end gap-1.5">
+              <label className="inline-flex items-center gap-1 whitespace-nowrap text-secondary" title="自动打板">
+                <input
+                  type="checkbox"
+                  checked={row.auto_trade === true}
+                  disabled={busy}
+                  onChange={event => onToggleAuto(event.target.checked)}
+                />
+                {row.auto_trade ? '已开启' : '已关闭'}
+              </label>
+              <button type="button" title="移出打板池" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </td>
         </>
       ) : (
-        <>
-          <td className="px-2">
+        <td className="sticky right-0 z-10 border-l border-border bg-surface px-2 group-hover:bg-elevated">
+          <div className="flex items-center justify-end gap-1">
             <button
               type="button"
               title={inPool ? '已在打板池' : '加入打板池'}
@@ -154,15 +154,13 @@ function Row({
               {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
               {inPool ? '已加入' : '加入'}
             </button>
-          </td>
-          {mode === 'selected' ? (
-            <td className="pr-3 text-right">
+            {mode === 'selected' ? (
               <button type="button" title="移除精选跟踪" disabled={busy} onClick={onRemoveSelected} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
-            </td>
-          ) : null}
-        </>
+            ) : null}
+          </div>
+        </td>
       )}
     </tr>
   )
@@ -184,12 +182,12 @@ function Table(props: TableProps) {
   const { rows, mode } = props
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[1100px] border-collapse">
+    <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
+      <table className="w-full min-w-[980px] border-collapse">
         <thead className="text-left text-[10px] text-muted">
           <tr>
-            <th className="py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
-            {mode === 'pool' ? <><th className="px-2">自动打板</th><th className="px-2">委托状态</th><th className="px-2" /></> : <><th className="px-2">打板池</th>{mode === 'selected' ? <th className="px-2" /> : null}</>}
+            <th className="sticky left-0 z-20 w-[128px] bg-surface py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
+            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-20 w-[128px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-20 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>
         <tbody>
@@ -288,7 +286,7 @@ export function LimitBoard() {
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-5">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5">
         {tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex items-center justify-between border-b border-border px-3 py-2.5"><div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>{runtime.last_error ? <span className="text-[10px] text-warning">{runtime.last_error}</span> : null}</div>
@@ -308,7 +306,7 @@ export function LimitBoard() {
           <section className="divide-y divide-border overflow-hidden rounded-btn border border-border bg-surface">
             {data.events.length ? data.events.map((event: any, index: number) => {
               const eventThemes = themes(event.concept).slice(0, 2)
-              return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-amber-500">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>
+              return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-secondary">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>
             }) : <div className="px-4 py-12 text-center text-xs text-muted">今天还没有触板、炸板或回封记录</div>}
           </section>
         )}
