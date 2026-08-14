@@ -160,7 +160,7 @@ function Row({
               className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-60`}
             >
               {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
-              {inPool ? '已加入' : mode === 'candidate' ? '加入并启用' : '加入'}
+              {inPool ? '已加入' : mode === 'candidate' ? '打板' : '加入'}
             </button>
             {mode === 'selected' ? (
               <button type="button" title="移除精选跟踪" disabled={busy} onClick={onRemoveSelected} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
