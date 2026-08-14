@@ -202,6 +202,7 @@ class Context:
         self._market_history_requirements: dict[tuple[str, str], int] = {}
         self._extra_history_requirements: set[str] = set()
         self._readiness_requirements: list[ReadinessRequirement] = []
+        self._mainline_snapshot_requirement: dict[str, Any] | None = None
 
     @property
     def universe(self) -> list[str]:
@@ -255,6 +256,36 @@ class Context:
         key = (asset, period)
         self._market_history_requirements[key] = max(
             bars, self._market_history_requirements.get(key, 0),
+        )
+
+    def require_mainline_snapshot(
+        self,
+        *,
+        lookback_days: int = 60,
+        industry_standard: str = "申银万国行业分类标准",
+        industry_levels: tuple[int, int] = (1, 2),
+        min_coverage: float = 0.95,
+    ) -> None:
+        """声明盘前 PIT 主线快照需求。"""
+        if isinstance(lookback_days, bool) or lookback_days < 20:
+            raise ValueError("主线快照至少需要 20 个交易日")
+        levels = tuple(int(value) for value in industry_levels)
+        if len(levels) != 2 or levels[0] == levels[1]:
+            raise ValueError("主线快照必须声明两个不同行业层级")
+        if not 0 < float(min_coverage) <= 1:
+            raise ValueError("行业覆盖率门槛必须介于 0 和 1 之间")
+        self._mainline_snapshot_requirement = {
+            "lookback_days": int(lookback_days),
+            "industry_standard": str(industry_standard).strip(),
+            "industry_levels": levels,
+            "min_coverage": float(min_coverage),
+        }
+
+    @property
+    def mainline_snapshot_requirement(self) -> dict[str, Any] | None:
+        return (
+            dict(self._mainline_snapshot_requirement)
+            if self._mainline_snapshot_requirement is not None else None
         )
 
     def reference_asset(
@@ -365,6 +396,8 @@ class Context:
         as_of: date | datetime | str,
         standard: str,
         level: str | int | None = None,
+        *,
+        allow_missing: bool = False,
     ) -> dict[str, dict[str, Any]]:
         normalized = list(dict.fromkeys(
             self._normalize_symbol(symbol)
@@ -379,10 +412,35 @@ class Context:
             cutoff = date.fromisoformat(str(as_of)[:10])
         if self.now is not None and cutoff > self.now.date():
             raise ValueError("PIT 行业查询日期不能晚于当前策略时间")
-        loader = self._engine._industry_history_loader
+        loader = (
+            self._engine._industry_partial_history_loader
+            if allow_missing else self._engine._industry_history_loader
+        )
         if loader is None:
-            raise ValueError("缺少 TickFlow PIT 行业历史加载器")
+            mode = "容许缺失的" if allow_missing else ""
+            raise ValueError(f"缺少{mode} TickFlow PIT 行业历史加载器")
         return loader(normalized, cutoff, standard, level)
+
+    def mainline_snapshot(
+        self,
+        as_of: date | datetime | str | None = None,
+    ) -> dict[str, Any]:
+        if self.now is None:
+            return {}
+        if isinstance(as_of, datetime):
+            requested = as_of.date()
+        elif isinstance(as_of, date):
+            requested = as_of
+        elif as_of is not None:
+            requested = date.fromisoformat(str(as_of)[:10])
+        else:
+            requested = self.now.date()
+        if requested > self.now.date():
+            raise ValueError("主线快照日期不能晚于当前策略时间")
+        loader = self._engine._mainline_snapshot_loader
+        if loader is None:
+            raise ValueError("缺少 PIT 主线快照加载器")
+        return loader(requested)
 
     def dividend_ratio_ranked(
         self,
@@ -831,6 +889,11 @@ class FreeStrategyEngine:
             [list[str], date, str, str | int | None],
             dict[str, dict[str, Any]],
         ] | None = None
+        self._industry_partial_history_loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None = None
+        self._mainline_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
@@ -902,6 +965,10 @@ class FreeStrategyEngine:
     @property
     def market_history_requirements(self) -> dict[tuple[str, str], int]:
         return self.context.market_history_requirements
+
+    @property
+    def mainline_snapshot_requirement(self) -> dict[str, Any] | None:
+        return self.context.mainline_snapshot_requirement
 
     @property
     def extra_history_requirements(self) -> set[str]:
@@ -1091,8 +1158,20 @@ class FreeStrategyEngine:
             [list[str], date, str, str | int | None],
             dict[str, dict[str, Any]],
         ] | None,
+        *,
+        partial_loader: Callable[
+            [list[str], date, str, str | int | None],
+            dict[str, dict[str, Any]],
+        ] | None = None,
     ) -> None:
         self._industry_history_loader = loader
+        self._industry_partial_history_loader = partial_loader
+
+    def set_mainline_snapshot_loader(
+        self,
+        loader: Callable[[date], dict[str, Any]] | None,
+    ) -> None:
+        self._mainline_snapshot_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""

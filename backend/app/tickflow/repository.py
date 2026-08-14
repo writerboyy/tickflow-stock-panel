@@ -1611,7 +1611,10 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            lf = scan_parquet_compat(self._minute_glob_for(asset_type))
+            parts = self._minute_parts(asset_type, start, end)
+            if not parts:
+                return pl.DataFrame()
+            lf = scan_parquet_compat(parts)
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             predicate = (

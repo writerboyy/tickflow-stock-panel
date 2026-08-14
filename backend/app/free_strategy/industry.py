@@ -18,6 +18,8 @@ def load_industry_history(
     as_of: date,
     standard: str,
     level: str | int | None = None,
+    *,
+    allow_missing: bool = False,
 ) -> dict[str, dict[str, Any]]:
     normalized = list(dict.fromkeys(
         str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
@@ -72,7 +74,7 @@ def load_industry_history(
         )
     found = set(selected["member_symbol"].to_list())
     gaps = [symbol for symbol in normalized if symbol not in found]
-    if gaps:
+    if gaps and not allow_missing:
         raise IndustryHistoryUnavailable(
             f"PIT 行业区间缺口 ({classification}, {as_of.isoformat()}): "
             f"{', '.join(gaps[:8])}"

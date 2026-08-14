@@ -26,9 +26,11 @@ from app.services.security_dimensions import (
 )
 
 from .bars import Bar, group_bars
+from .entry_analysis import build_mainline_entry_analysis
 from .engine import FreeStrategyConfig, FreeStrategyEngine
 from .financial_pit import load_financial_periods
 from .industry import load_industry_history
+from .mainline_snapshot import configure_mainline_snapshot
 from .readiness import (
     ReadinessUnavailable,
     build_readiness_manifest,
@@ -665,7 +667,15 @@ def configure_strategy_data_loaders(
             cutoff,
             standard,
             level,
-        )
+        ),
+        partial_loader=lambda symbols, cutoff, standard, level: load_industry_history(
+            data_dir,
+            symbols,
+            cutoff,
+            standard,
+            level,
+            allow_missing=True,
+        ),
     )
     engine.set_dividend_ratio_loader(
         lambda symbols, cutoff: _load_dividend_ratio_ranked(
@@ -1285,6 +1295,63 @@ def _prepare_market_data(
         "start": min(dates).isoformat() if dates else None,
         "end": max(dates).isoformat() if dates else None,
     }
+
+
+def _prepare_mainline_market_data(
+    repo: Any,
+    engine: FreeStrategyEngine,
+    start: date,
+    end: date,
+) -> tuple[MarketData, dict[str, Any]]:
+    """主线策略只预载基准，股票日线元数据按当日候选滚动加载。"""
+    benchmark = str(engine.config.benchmark_symbol or "").strip()
+    if not benchmark:
+        raise ValueError("主线策略必须配置基准指数")
+    market = _load_market_data(
+        repo,
+        [benchmark],
+        start - timedelta(days=45),
+        end,
+        _market_asset_type(repo, benchmark, "index"),
+    )
+    dates = [
+        day for (symbol, day) in market.daily
+        if symbol == benchmark and start <= day <= end
+    ]
+    if not dates:
+        raise ValueError(f"主线策略基准 {benchmark} 在回测区间没有日线")
+    engine.preload_market_history(
+        _daily_bars([benchmark], min(dates), max(dates), "index", market),
+        "1d",
+    )
+    return market, {
+        "enabled": True,
+        "timeframe": "1d",
+        "mode": "pit_mainline_snapshot",
+        "requested_bars": int(
+            (engine.mainline_snapshot_requirement or {}).get("lookback_days", 60)
+        ),
+        "rows": len(dates),
+        "symbols": 1,
+        "start": min(dates).isoformat(),
+        "end": max(dates).isoformat(),
+    }
+
+
+def _prime_dynamic_minute_metadata(
+    market: MarketData,
+    symbols: Iterable[str],
+    day: date,
+) -> None:
+    """为首次进入候选池的股票建立前收盘和复权基线。"""
+    for symbol in symbols:
+        previous = _previous_daily_row(market, symbol, day)
+        close = float(previous.get("close") or 0)
+        raw_close = float(previous.get("raw_close") or close or 0)
+        if close <= 0 or raw_close <= 0:
+            continue
+        market.previous_scale[symbol] = raw_close / close
+        market.previous_adjusted_close[symbol] = close
 
 
 def _preload_tradable_dates(engine: FreeStrategyEngine, market: MarketData) -> None:
@@ -2090,6 +2157,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             start,
             end,
         )
+        mainline_cache = configure_mainline_snapshot(engine, repo, start, end)
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data
@@ -2106,10 +2174,15 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         market_symbols = _market_symbols(engine, symbols)
         if payload.get("checkpoint"):
             engine.restore_checkpoint(payload["checkpoint"])
-        market_data, warmup_metadata = _prepare_market_data(
-            repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
-            include_benchmark=True,
-        )
+        if mainline_cache is not None:
+            market_data, warmup_metadata = _prepare_mainline_market_data(
+                repo, engine, start, end,
+            )
+        else:
+            market_data, warmup_metadata = _prepare_market_data(
+                repo, engine, symbols, start, end, payload["asset_type"], payload["timeframe"],
+                include_benchmark=True,
+            )
         engine.set_trading_calendar(
             day
             for symbol, day in market_data.daily
@@ -2248,13 +2321,43 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             while cursor <= end:
                 if cursor.weekday() < 5:
                     session_symbols = market_symbols
-                    if engine.market_history_requirements:
+                    if engine.market_history_requirements or mainline_cache is not None:
                         if not engine.has_market_date(cursor):
                             cursor += timedelta(days=1)
                             days_seen += 1
                             continue
                         engine.begin_session(cursor)
-                        session_symbols = _market_symbols(engine, engine.universe)
+                        held_symbols = [
+                            symbol for symbol, quantity in engine.account.positions.items()
+                            if float(quantity) > 0
+                        ]
+                        dynamic_symbols = engine.universe
+                        if mainline_cache is not None:
+                            dynamic_symbols = [
+                                str(row["symbol"])
+                                for row in mainline_cache.snapshot(cursor).get("candidates", [])
+                            ]
+                        session_symbols = _market_symbols(
+                            engine,
+                            list(dict.fromkeys([*dynamic_symbols, *held_symbols])),
+                        )
+                        if mainline_cache is not None:
+                            _ensure_scheduled_market_data(
+                                repo,
+                                market_data,
+                                session_symbols,
+                                cursor - timedelta(days=45),
+                                cursor,
+                                payload["asset_type"],
+                            )
+                            _prime_dynamic_minute_metadata(
+                                market_data,
+                                (
+                                    symbol for symbol in session_symbols
+                                    if symbol != engine.config.benchmark_symbol
+                                ),
+                                cursor,
+                            )
                         for symbol in session_symbols:
                             if symbol != engine.config.benchmark_symbol and symbol not in requested_symbols:
                                 requested_symbols.append(symbol)
@@ -2301,6 +2404,20 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             engine.state = engine.context.state.copy()
             result = engine.result()
             trading_days = days_with_bars
+        if mainline_cache is not None:
+            output.put({
+                "type": "progress",
+                "message": "计算买点评估与 D-1 资金流匹配样本",
+                "progress": 0.92,
+            })
+            result["entry_analysis"] = build_mainline_entry_analysis(
+                repo,
+                result,
+                start,
+                end,
+                Path(payload["data_dir"]),
+                config.benchmark_symbol,
+            )
         five_fortunes = result.get("state", {}).get("five_fortunes", {})
         five_fortunes_v2 = result.get("state", {}).get("five_fortunes_v2", {})
         strategy_metadata = five_fortunes or five_fortunes_v2
@@ -2313,6 +2430,10 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 if callable(get_minute_symbols) else symbols_seen
             )
         missing_symbols = [symbol for symbol in requested_symbols if symbol not in available_symbols]
+        requested_symbol_set = set(requested_symbols)
+        coverage_seen_symbols = sorted(
+            symbol for symbol in symbols_seen if symbol in requested_symbol_set
+        )
         minute_table = "kline_etf_minute" if payload["asset_type"] == "etf" else "kline_minute"
         result["metadata"] = {
             "strategy_id": payload.get("strategy_id"), "strategy_name": payload.get("strategy_name"),
@@ -2325,6 +2446,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,
+            "mainline_snapshot": (
+                {
+                    "enabled": True,
+                    "candidate_symbols": len(mainline_cache.all_symbols),
+                    "mode": "pit_daily_dynamic_universe",
+                }
+                if mainline_cache is not None else {"enabled": False}
+            ),
             "readiness": readiness_manifest,
             "fund_nav": fund_nav_data,
             "execution_mode": engine.execution_mode,
@@ -2340,7 +2469,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 "last_bar": last_bar.isoformat() if last_bar else None,
                 "trading_days": trading_days,
                 "requested_symbols": requested_symbols,
-                "seen_symbols": sorted(symbols_seen),
+                "seen_symbols": coverage_seen_symbols,
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),
                 "storage": (

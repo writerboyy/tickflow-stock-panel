@@ -46,6 +46,32 @@ FIVE_FORTUNES_V2_SOURCE = Path(__file__).with_name("five_fortunes_v2.py").read_t
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
 SMALL_CAP_LIMITUP_SOURCE = Path(__file__).with_name("small_cap_limitup.py").read_text(encoding="utf-8")
 PERFORMANCE_SMALL_CAP_SOURCE = Path(__file__).with_name("performance_small_cap.py").read_text(encoding="utf-8")
+MAINLINE_MOMENTUM_SOURCE = Path(__file__).with_name("mainline_momentum.py").read_text(encoding="utf-8")
+
+
+def _mainline_momentum_template(model: str, name: str) -> dict:
+    return {
+        "name": name,
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "stock",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0002,
+            "commission_pct": 0.0002,
+            "sell_commission_pct": 0.0002,
+            "min_commission": 5,
+            "stamp_tax_pct": 0.0005,
+            "transfer_fee_pct": 0.00001,
+            "slippage_bps": 10,
+            "price_tick": 0.01,
+            "lot_size": 100,
+            "max_exposure_pct": 0.9,
+            "benchmark_symbol": "000905.SH",
+            "settlement": "t1",
+            "fill_policy": "next_open",
+        },
+        "source": f'ENTRY_MODEL = "{model}"\n{MAINLINE_MOMENTUM_SOURCE}',
+    }
 
 
 TEMPLATES = {
@@ -100,6 +126,18 @@ def on_bar(context, bars):
     context.log(f"候选 {winner}，相关性/NAV 数据缺失时跳过对应过滤")
 ''',
     },
+    "mainline_momentum_breakout": _mainline_momentum_template(
+        "breakout", "主线动量·突破买点",
+    ),
+    "mainline_momentum_pullback": _mainline_momentum_template(
+        "pullback", "主线动量·VWAP回踩",
+    ),
+    "mainline_momentum_resonance": _mainline_momentum_template(
+        "resonance", "主线动量·行业共振",
+    ),
+    "mainline_momentum_combined": _mainline_momentum_template(
+        "combined", "主线动量·组合门禁",
+    ),
     "five_fortunes": {
         "name": "五福策略",
         "config": {

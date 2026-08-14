@@ -1871,6 +1871,55 @@ export interface FreeBacktestResult {
     fills_over_5_pct: number
     fills_over_10_pct: number
   }
+  entry_analysis?: {
+    model: string
+    training_period: { start: string; end: string }
+    out_of_sample_period: { start: string; end: string }
+    parameters_frozen_after: string
+    benchmark_symbol: string
+    intraday_benchmark_available: boolean
+    summaries: Array<{
+      segment: 'all' | 'train' | 'out_of_sample'
+      signal_count: number
+      average_mfe_pct: number | null
+      average_mae_pct: number | null
+      horizons: Array<{
+        horizon: '30m' | 'close' | 'next_day' | '3d' | '5d'
+        count: number
+        average_return_pct: number | null
+        average_excess_pct: number | null
+        win_rate_pct: number | null
+      }>
+    }>
+    events: Array<{
+      id: string
+      timestamp: string
+      symbol: string
+      model: string
+      entry_price: number
+      l1_name?: string | null
+      l2_name?: string | null
+      segment: 'train' | 'out_of_sample'
+      returns: Record<string, number | null>
+      excess: Record<string, number | null>
+      mfe_pct: number | null
+      mae_pct: number | null
+    }>
+    money_flow: {
+      mode: 'prior_trading_day_matched_sample'
+      changes_primary_universe: false
+      excluded_sources: string[]
+      sources: Array<{
+        source: string
+        matched_signals: number
+        groups: Array<{
+          confirmed: boolean
+          signal_count: number
+          horizons: Array<{ horizon: string; count: number; average_return_pct: number | null }>
+        }>
+      }>
+    }
+  } | null
   equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
   daily_equity_curve?: Array<{
     date: string

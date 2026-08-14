@@ -1,17 +1,18 @@
 import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, CalendarDays, ChartNoAxesCombined, ClipboardList, ScrollText } from 'lucide-react'
+import { Activity, CalendarDays, ChartNoAxesCombined, ClipboardList, Crosshair, ScrollText } from 'lucide-react'
 import { api, type FreeBacktestResult } from '@/lib/api'
 import { formatInstrumentLabel, priceColorClass } from '@/lib/format'
 import { FiveFortunesProcessChart, type FiveFortunesDailyReport } from './charts/FiveFortunesProcessChart'
 import { FreeStrategyDailyReturnChart } from './charts/FreeStrategyDailyReturnChart'
 import { FreeStrategyPerformanceChart } from './charts/FreeStrategyPerformanceChart'
 
-type ResultTab = 'performance' | 'orders' | 'daily' | 'decisions' | 'logs'
+type ResultTab = 'performance' | 'entry' | 'orders' | 'daily' | 'decisions' | 'logs'
 type InstrumentLabel = (symbol: unknown) => string
 
 const TABS: Array<{ id: ResultTab; label: string; icon: typeof Activity }> = [
   { id: 'performance', label: '绩效', icon: ChartNoAxesCombined },
+  { id: 'entry', label: '买点评估', icon: Crosshair },
   { id: 'orders', label: '订单与成交', icon: ClipboardList },
   { id: 'daily', label: '逐日资产', icon: CalendarDays },
   { id: 'decisions', label: '每日决策', icon: Activity },
@@ -195,6 +196,37 @@ function DailyView({ result, instrumentLabel }: { result: FreeBacktestResult; in
   return <div className="space-y-4"><div className="border-b border-border pb-3"><FreeStrategyDailyReturnChart result={result} /></div><TableWrap><table className="w-full min-w-[1040px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">日期</th><th>总资产</th><th>现金</th><th>仓位</th><th>日收益</th><th>基准日收益</th><th>超额</th><th>回撤</th><th>持仓</th></tr></thead><tbody>{rows.map(row => <tr key={row.date} className="border-t border-border"><td className="whitespace-nowrap py-2">{row.date}</td><td>{number(row.equity)}</td><td>{number(row.cash)}</td><td>{percent(row.exposure_pct, 1)}</td><td className={priceColorClass(row.daily_return_pct)}>{percent(row.daily_return_pct)}</td><td className={priceColorClass(row.benchmark_daily_return_pct)}>{percent(row.benchmark_daily_return_pct)}</td><td className={priceColorClass(row.excess_daily_return_pct)}>{percent(row.excess_daily_return_pct)}</td><td className={priceColorClass(-Math.abs(row.drawdown_pct))}>{percent(row.drawdown_pct)}</td><td className="max-w-96 whitespace-nowrap font-mono text-[10px]">{Object.entries(row.positions).filter(([, quantity]) => quantity > 0).map(([symbol, quantity]) => `${instrumentLabel(symbol)} ${number(quantity, 0)}`).join(' · ') || '空仓'}</td></tr>)}</tbody></table></TableWrap></div>
 }
 
+const SEGMENT_LABELS = { all: '全样本', train: '研究期', out_of_sample: '样本外' }
+const HORIZON_LABELS: Record<string, string> = {
+  '30m': '30 分钟', close: '收盘', next_day: '次日', '3d': '3 日', '5d': '5 日',
+}
+const MODEL_LABELS: Record<string, string> = {
+  breakout: '突破', pullback: 'VWAP 回踩', resonance: '行业共振', combined: '组合',
+}
+
+function EntryAnalysisView({ result }: { result: FreeBacktestResult }) {
+  const analysis = result.entry_analysis
+  if (!analysis) return <div className="py-8 text-center text-xs text-muted">本次回测没有买点评估数据</div>
+  return <div className="space-y-5">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border pb-3 text-[11px]">
+      <div><span className="font-medium">{MODEL_LABELS[analysis.model] ?? analysis.model}</span><span className="ml-2 text-muted">参数冻结于 {analysis.parameters_frozen_after}</span></div>
+      <div className="text-muted">研究期 {analysis.training_period.start} 至 {analysis.training_period.end} · 样本外 {analysis.out_of_sample_period.start} 至 {analysis.out_of_sample_period.end}</div>
+    </div>
+    {!analysis.intraday_benchmark_available ? <div className="border-l-2 border-warning px-3 py-1.5 text-[10px] text-muted">本地缺少 {analysis.benchmark_symbol} 分钟行情，30 分钟和收盘超额不估算；日线超额仍按基准收盘计算。</div> : null}
+    <div className="space-y-4 md:hidden">{analysis.summaries.map(summary => <section key={summary.segment} className="border-y border-border py-3">
+      <div className="flex items-start justify-between gap-3"><div><div className="text-xs font-medium">{SEGMENT_LABELS[summary.segment]}</div><div className="mt-1 text-[10px] text-muted">{summary.signal_count} 个信号</div></div><div className="grid grid-cols-2 gap-x-4 text-right text-[10px]"><span className="text-muted">MFE</span><span className={priceColorClass(summary.average_mfe_pct)}>{percent(summary.average_mfe_pct)}</span><span className="text-muted">MAE</span><span className={priceColorClass(summary.average_mae_pct)}>{percent(summary.average_mae_pct)}</span></div></div>
+      <div className="mt-3 grid grid-cols-[62px_repeat(3,minmax(0,1fr))] gap-x-2 border-b border-border pb-1 text-right text-[9px] text-muted"><span className="text-left">周期</span><span>收益</span><span>超额</span><span>胜率</span></div>
+      {summary.horizons.map(horizon => <div key={horizon.horizon} className="grid grid-cols-[62px_repeat(3,minmax(0,1fr))] gap-x-2 border-b border-border py-1.5 text-right text-[10px]"><span className="text-left">{HORIZON_LABELS[horizon.horizon] ?? horizon.horizon}</span><span className={priceColorClass(horizon.average_return_pct)}>{percent(horizon.average_return_pct)}</span><span className={priceColorClass(horizon.average_excess_pct)}>{percent(horizon.average_excess_pct)}</span><span>{percent(horizon.win_rate_pct)}</span></div>)}
+    </section>)}</div>
+    <div className="hidden md:block"><TableWrap><table className="w-full min-w-[980px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">样本</th><th>信号数</th><th>平均 MFE</th><th>平均 MAE</th><th>持有周期</th><th>有效样本</th><th>平均收益</th><th>平均超额</th><th>胜率</th></tr></thead><tbody>{analysis.summaries.flatMap(summary => summary.horizons.map((horizon, index) => <tr key={`${summary.segment}-${horizon.horizon}`} className="border-t border-border"><td className="py-2 font-medium">{index === 0 ? SEGMENT_LABELS[summary.segment] : ''}</td><td>{index === 0 ? summary.signal_count : ''}</td><td className={priceColorClass(summary.average_mfe_pct)}>{index === 0 ? percent(summary.average_mfe_pct) : ''}</td><td className={priceColorClass(summary.average_mae_pct)}>{index === 0 ? percent(summary.average_mae_pct) : ''}</td><td>{HORIZON_LABELS[horizon.horizon] ?? horizon.horizon}</td><td>{horizon.count}</td><td className={priceColorClass(horizon.average_return_pct)}>{percent(horizon.average_return_pct)}</td><td className={priceColorClass(horizon.average_excess_pct)}>{percent(horizon.average_excess_pct)}</td><td>{percent(horizon.win_rate_pct)}</td></tr>))}</tbody></table></TableWrap></div>
+    <div>
+      <div className="mb-2 text-xs font-medium">D-1 资金流匹配 <span className="font-normal text-muted">仅做独立样本分析，不改变主回测股票池</span></div>
+      <div className="border-y border-border md:hidden"><div className="grid grid-cols-[72px_repeat(3,minmax(0,1fr))] gap-x-2 border-b border-border py-1 text-right text-[9px] text-muted"><span className="text-left">分组/样本</span><span>次日</span><span>3 日</span><span>5 日</span></div><div className="divide-y divide-border">{analysis.money_flow.sources.map(source => <section key={source.source} className="py-3"><div className="flex justify-between gap-3 text-[11px]"><span className="font-medium">{source.source}</span><span className="text-muted">匹配 {source.matched_signals}</span></div>{source.groups.map(group => { const byHorizon = Object.fromEntries(group.horizons.map(item => [item.horizon, item])); return <div key={String(group.confirmed)} className="mt-2 grid grid-cols-[72px_repeat(3,minmax(0,1fr))] gap-x-2 text-right text-[10px]"><span className="text-left text-muted">{group.confirmed ? '资金确认' : '未确认'} {group.signal_count}</span><span className={priceColorClass(byHorizon.next_day?.average_return_pct)}>{percent(byHorizon.next_day?.average_return_pct)}</span><span className={priceColorClass(byHorizon['3d']?.average_return_pct)}>{percent(byHorizon['3d']?.average_return_pct)}</span><span className={priceColorClass(byHorizon['5d']?.average_return_pct)}>{percent(byHorizon['5d']?.average_return_pct)}</span></div>})}</section>)}</div></div>
+      <div className="hidden md:block"><TableWrap><table className="w-full min-w-[760px] text-[11px]"><thead className="text-left text-muted"><tr><th className="pb-2">数据源</th><th>匹配信号</th><th>分组</th><th>样本数</th><th>次日</th><th>3 日</th><th>5 日</th></tr></thead><tbody>{analysis.money_flow.sources.flatMap(source => source.groups.map((group, index) => { const byHorizon = Object.fromEntries(group.horizons.map(item => [item.horizon, item])); return <tr key={`${source.source}-${String(group.confirmed)}`} className="border-t border-border"><td className="py-2">{index === 0 ? source.source : ''}</td><td>{index === 0 ? source.matched_signals : ''}</td><td>{group.confirmed ? '资金确认' : '未确认'}</td><td>{group.signal_count}</td><td className={priceColorClass(byHorizon.next_day?.average_return_pct)}>{percent(byHorizon.next_day?.average_return_pct)}</td><td className={priceColorClass(byHorizon['3d']?.average_return_pct)}>{percent(byHorizon['3d']?.average_return_pct)}</td><td className={priceColorClass(byHorizon['5d']?.average_return_pct)}>{percent(byHorizon['5d']?.average_return_pct)}</td></tr> }))}</tbody></table></TableWrap></div>
+    </div>
+  </div>
+}
+
 function DecisionsView({ reports, fills, instrumentLabel }: { reports: FiveFortunesDailyReport[]; fills: Record<string, any>[]; instrumentLabel: InstrumentLabel }) {
   const activity = useMemo(() => {
     const byDay = new Map<string, { buy: number; sell: number }>()
@@ -219,6 +251,7 @@ export function FreeStrategyResult({ result, title }: { result: FreeBacktestResu
   const reports = useMemo(() => (
     (result.state?.five_fortunes?.daily_reports ?? []) as FiveFortunesDailyReport[]
   ), [result])
+  const tabs = useMemo(() => TABS.filter(item => item.id !== 'entry' || Boolean(result.entry_analysis)), [result.entry_analysis])
   const metadata = result.metadata ?? {}
   const coverage = metadata.data_coverage as Record<string, any> | undefined
   const instrumentSymbols = useMemo(() => {
@@ -232,6 +265,7 @@ export function FreeStrategyResult({ result, title }: { result: FreeBacktestResu
     result.fills.forEach(fill => add(fill.symbol))
     Object.keys(result.positions ?? {}).forEach(add)
     result.daily_equity_curve?.forEach(row => Object.keys(row.positions).forEach(add))
+    result.entry_analysis?.events.forEach(event => add(event.symbol))
     reports.forEach(report => {
       report.target.forEach(add)
       report.holdings?.forEach(add)
@@ -257,7 +291,7 @@ export function FreeStrategyResult({ result, title }: { result: FreeBacktestResu
   return <section className="shrink-0 overflow-hidden rounded-md border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5"><div><div className="text-xs font-medium">{title || '回测结果'}</div><div className="mt-0.5 text-[10px] text-muted">{String(metadata.strategy_name ?? '')}{metadata.start ? ` · ${metadata.start} 至 ${metadata.end}` : ''}</div></div><div className="flex flex-wrap gap-1 text-[10px] text-muted"><span>{String(metadata.asset_type ?? '').toUpperCase()} {String(metadata.timeframe ?? '')}</span>{executionMode ? <><span>·</span><span>{executionMode}</span></> : null}<span>·</span><span>{Number(metadata.data_days ?? result.daily_equity_curve?.length ?? 0)} 个交易日</span>{metadata.nav_filter === 'skipped_no_data' ? <><span>·</span><span>NAV 过滤已跳过</span></> : null}</div></div>
     {coverage ? <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2 text-[10px] text-muted"><span>数据源 {String(coverage.configured_provider ?? '—')}</span><span>表 {String(coverage.storage ?? '—')}</span><span>{number(coverage.rows, 0)} {metadata.execution_mode === 'scheduled' ? '次行情读取' : '根 bar'}</span>{metadata.execution_mode === 'scheduled' ? <span>{number(metadata.callbacks_executed, 0)} 次定时回调</span> : null}<span>{String(coverage.first_bar ?? '—')} 至 {String(coverage.last_bar ?? '—')}</span><span className={seenCount === requestedCount ? '' : 'text-danger'}>{seenCount}/{requestedCount} 标的</span>{Array.isArray(coverage.missing_symbols) && coverage.missing_symbols.length ? <span className="text-danger">缺失 {coverage.missing_symbols.map(instrumentLabel).join(', ')}</span> : null}</div> : null}
-    <div className="flex overflow-x-auto border-b border-border px-2" role="tablist">{TABS.map(item => { const Icon = item.icon; const active = item.id === tab; return <button key={item.id} type="button" role="tab" aria-selected={active} onClick={() => setTab(item.id)} className={`inline-flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-3 text-[11px] transition-colors ${active ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{item.label}{item.id === 'decisions' && reports.length ? <span className="tabular-nums">{reports.length}</span> : null}</button> })}</div>
-    <div className="p-3">{tab === 'performance' && <PerformanceView result={result} />}{tab === 'orders' && <OrdersView result={result} instrumentLabel={instrumentLabel} />}{tab === 'daily' && <DailyView result={result} instrumentLabel={instrumentLabel} />}{tab === 'decisions' && <DecisionsView reports={reports} fills={result.fills} instrumentLabel={instrumentLabel} />}{tab === 'logs' && <LogsView result={result} />}</div>
+    <div className="flex overflow-x-auto border-b border-border px-2" role="tablist">{tabs.map(item => { const Icon = item.icon; const active = item.id === tab; return <button key={item.id} type="button" role="tab" aria-selected={active} onClick={() => setTab(item.id)} className={`inline-flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-3 text-[11px] transition-colors ${active ? 'border-accent text-accent' : 'border-transparent text-muted hover:text-foreground'}`}><Icon className="h-3.5 w-3.5" />{item.label}{item.id === 'entry' && result.entry_analysis ? <span className="tabular-nums">{result.entry_analysis.events.length}</span> : null}{item.id === 'decisions' && reports.length ? <span className="tabular-nums">{reports.length}</span> : null}</button> })}</div>
+    <div className="p-3">{tab === 'performance' && <PerformanceView result={result} />}{tab === 'entry' && <EntryAnalysisView result={result} />}{tab === 'orders' && <OrdersView result={result} instrumentLabel={instrumentLabel} />}{tab === 'daily' && <DailyView result={result} instrumentLabel={instrumentLabel} />}{tab === 'decisions' && <DecisionsView reports={reports} fills={result.fills} instrumentLabel={instrumentLabel} />}{tab === 'logs' && <LogsView result={result} />}</div>
   </section>
 }
