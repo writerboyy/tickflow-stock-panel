@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   BellRing,
   Check,
+  ChevronDown,
   ChevronRight,
   FileClock,
   ImagePlus,
@@ -25,6 +26,7 @@ import {
   api,
   type PositionRiskOptions,
   type PositionRiskPosition,
+  type PositionRiskPortfolio,
   type PositionRiskRecommendation,
   type PositionRiskStatus,
 } from '@/lib/api'
@@ -88,15 +90,21 @@ function qmtOrderPrice(value: unknown, priceType?: string) {
   return priceType === 'LATEST' ? '最新价' : priceType || '—'
 }
 
-const RULE_GROUPS = [
-  ['止盈', ['take_profit', 'trailing_drawdown']],
-  ['止损', ['stop_loss', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown', 'broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
-  ['做T', ['t_trading']],
-  ['高级风控', ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption']],
+const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown'] as const
+const STOP_LOSS_RULE_GROUPS = [
+  ['成本与趋势', ['stop_loss', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
+const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
+const INTRADAY_RULE_TAB: Array<['take_profit' | 'stop_loss' | 't_trading', string]> = [
+  ['take_profit', '止盈'],
+  ['stop_loss', '止损'],
+  ['t_trading', '做 T'],
+]
 
 const RULE_LABELS: Record<string, string> = {
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利回撤', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
+  t_trading: '做 T',
   five_minute_drawdown: '5 分钟回撤', vwap_breakdown: '分时均价负偏离超限', broken_limit_up: '炸板', resealed_limit_up: '回封',
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
@@ -118,6 +126,87 @@ function price(value: number | null | undefined) {
 
 function pct(value: number | null | undefined) {
   return value == null ? '—' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
+}
+
+function percentage(value: unknown, sign = false) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '—'
+  return `${sign && numeric >= 0 ? '+' : ''}${(numeric * 100).toFixed(0)}%`
+}
+
+function actionLabel(value: unknown) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return '提醒'
+  if (numeric >= 100) return '清仓'
+  return `减仓${numeric}%`
+}
+
+function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
+  return {
+    ...(portfolio.template.rules[ruleId] ?? {}),
+    ...(portfolio.overrides[symbol]?.rules?.[ruleId] ?? {}),
+  }
+}
+
+function hasRuleOverride(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
+  const rules = portfolio.overrides[symbol]?.rules ?? {}
+  return ruleIds.some(ruleId => Object.keys(rules[ruleId] ?? {}).length > 0)
+}
+
+function hasSignalOverride(portfolio: PositionRiskPortfolio, symbol: string, group: string, signalIds?: readonly string[]) {
+  const values = portfolio.overrides[symbol]?.signals?.[group] ?? {}
+  if (!signalIds) return Object.keys(values).length > 0
+  return signalIds.some(signalId => Object.keys(values[signalId] ?? {}).length > 0)
+}
+
+function moduleSource(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[], signalGroups: readonly string[] = []) {
+  const covered = hasRuleOverride(portfolio, symbol, ruleIds)
+    || signalGroups.some(group => hasSignalOverride(portfolio, symbol, group))
+  return covered ? '已覆盖' : '默认'
+}
+
+function enabledRuleLabels(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
+  return ruleIds.filter(ruleId => effectiveRule(portfolio, symbol, ruleId).enabled !== false).map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
+}
+
+function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions }) {
+  const takeProfit = TAKE_PROFIT_RULES.map(ruleId => effectiveRule(portfolio, symbol, ruleId))
+  const fixedTakeProfit = takeProfit[0]
+  const trailingTakeProfit = takeProfit[1]
+  const takeProfitEnabled = takeProfit.some(config => config.enabled !== false)
+  const takeProfitText = takeProfitEnabled
+    ? [
+        fixedTakeProfit.enabled !== false ? `固定 ${percentage(fixedTakeProfit.threshold, true)} · ${actionLabel(fixedTakeProfit.action_pct)}` : null,
+        trailingTakeProfit.enabled !== false ? `回撤 ${percentage(trailingTakeProfit.threshold)} · ${actionLabel(trailingTakeProfit.action_pct)}` : null,
+      ].filter(Boolean).join(' / ')
+    : '未启用'
+
+  const stopLoss = effectiveRule(portfolio, symbol, 'stop_loss')
+  const stopLossLabels = enabledRuleLabels(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules)).filter(label => label !== RULE_LABELS.stop_loss)
+  const stopLossText = [
+    stopLoss.enabled !== false ? `成本 ${percentage(stopLoss.threshold)} · ${actionLabel(stopLoss.action_pct)}` : null,
+    stopLossLabels.length ? `${stopLossLabels.slice(0, 3).join(' / ')}${stopLossLabels.length > 3 ? ` +${stopLossLabels.length - 3}` : ''}` : null,
+  ].filter(Boolean).join(' · ') || '未启用'
+
+  const tTrading = effectiveRule(portfolio, symbol, 't_trading')
+  const tTradingText = tTrading.enabled !== false ? `买 ${percentage(Number(tTrading.buy_pct) / 100)} / 卖 ${percentage(Number(tTrading.sell_pct) / 100)}` : '未启用'
+  const intradaySignalIds = options?.builtin_signals.filter(signal => signal.group === 'intraday').map(signal => signal.id) ?? []
+  const tTradingSource = hasRuleOverride(portfolio, symbol, ['t_trading']) || hasSignalOverride(portfolio, symbol, 'builtin', intradaySignalIds) ? '已覆盖' : '默认'
+  return (
+    <div className="min-w-[225px] space-y-1 text-[10px] leading-4">
+      {[
+        ['止盈', moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), takeProfitText],
+        ['止损', moduleSource(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules), ['builtin', 'custom', 'monitor_rules']), stopLossText],
+        ['做 T', tTradingSource, tTradingText],
+      ].map(([label, source, value]) => (
+        <div key={label} className="grid grid-cols-[32px_38px_minmax(0,1fr)] items-baseline gap-1">
+          <span className="text-secondary">{label}</span>
+          <span className={cn('text-[9px]', source === '已覆盖' ? 'text-accent' : 'text-muted')}>{source}</span>
+          <span className={cn('min-w-0 break-words', value === '未启用' ? 'text-muted' : 'text-foreground')} title={value}>{value}</span>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function riskTone(score: number) {
@@ -148,6 +237,9 @@ function PositionInspector({ row, options, onClose, tradePreset, onTradeSubmitte
   const [tradePrice, setTradePrice] = useState(String(tradePreset?.price ?? row.price ?? row.cost_price ?? ''))
   const [tradePriceType, setTradePriceType] = useState<'LIMIT' | 'LATEST'>('LIMIT')
   const [tradeVolume, setTradeVolume] = useState(tradePreset?.volume ?? 100)
+  const [activeRuleTab, setActiveRuleTab] = useState<'take_profit' | 'stop_loss' | 't_trading'>('stop_loss')
+  const [expandedRule, setExpandedRule] = useState<string | null>(null)
+  const [showAdvancedRules, setShowAdvancedRules] = useState(false)
   useEffect(() => {
     setTradeAction(tradePreset?.action ?? 'SELL')
     setTradePrice(String(tradePreset?.price ?? row.price ?? row.cost_price ?? ''))
@@ -250,13 +342,119 @@ function PositionInspector({ row, options, onClose, tradePreset, onTradeSubmitte
       },
     })
   }
-  const signalGroups = [
+  const signalGroups: Array<[string, Array<{ id: string; label: string; direction: string; available?: boolean }>, 'builtin' | 'custom']> = [
     ['入场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'entry'), 'builtin'],
     ['出场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'exit'), 'builtin'],
     ['双向信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'both'), 'builtin'],
     ['分时信号', (options?.builtin_signals ?? []).filter(signal => signal.group === 'intraday'), 'builtin'],
     ['自定义信号', options?.custom_signals ?? [], 'custom'],
-  ] as const
+  ]
+  const renderRuleRows = (rules: readonly string[]) => rules.map(ruleId => {
+    const evidenceOnly = ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'].includes(ruleId)
+    const inherited = portfolio?.template.rules[ruleId]?.enabled !== false
+    const explicit = override.rules?.[ruleId]?.enabled
+    const enabled = explicit ?? inherited
+    const hasOverride = Object.keys(override.rules?.[ruleId] ?? {}).length > 0
+    const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
+      ? LARGE_ORDER_FIELDS
+      : POSITION_RISK_RULE_FIELDS[ruleId] ?? []
+    const expanded = expandedRule === ruleId
+    return (
+      <div key={ruleId} className="py-2 text-xs">
+        <div className="flex min-h-8 items-center gap-2">
+          <button type="button" onClick={() => setExpandedRule(expanded ? null : ruleId)} className="flex min-w-0 flex-1 items-center gap-2 text-left" aria-expanded={expanded}>
+            <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', expanded ? '' : '-rotate-90')} />
+            <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
+          </button>
+          <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{hasOverride ? '已覆盖' : '默认'}</span>
+          <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
+          {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
+        </div>
+        {expanded && fields.length > 0 && (
+          <div className="mt-2 grid grid-cols-2 gap-2 pl-5">
+            {fields.map(field => {
+              const inheritedValue = portfolio?.template.rules[ruleId]?.[field.key] ?? field.defaultValue ?? 0
+              const storedValue = override.rules?.[ruleId]?.[field.key] ?? inheritedValue
+              const displayValue = field.percent ? Number(storedValue) * 100 : Number(storedValue)
+              return (
+                <label key={field.key} className="min-w-0 text-[10px] text-muted">
+                  <span>{field.label}</span>
+                  <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
+                    <input
+                      key={`${ruleId}-${field.key}-${displayValue}`}
+                      type="number"
+                      min={field.min}
+                      max={field.max}
+                      step={field.step}
+                      defaultValue={displayValue}
+                      disabled={mutation.isPending || !enabled}
+                      onBlur={event => {
+                        const next = Number(event.target.value)
+                        const stored = field.percent ? next / 100 : next
+                        if (Number.isFinite(next) && stored !== Number(storedValue)) setRuleValue(ruleId, field.key, stored)
+                      }}
+                      className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                    />
+                    {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    )
+  })
+  const renderSignalGroups = (groups: Array<[string, Array<{ id: string; label: string; direction: string; available?: boolean }>, 'builtin' | 'custom']>) => groups.map(([title, signals, storageGroup]) => (
+    <section key={title}>
+      <h3 className="mb-2 text-xs font-semibold text-secondary">{title}</h3>
+      <div className="divide-y divide-border border-y border-border">
+        {signals.length ? signals.map(signal => {
+          const explicit = override.signals?.[storageGroup]?.[signal.id]?.enabled
+          const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
+          const available = signal.available !== false
+          const directionReadonly = storageGroup === 'builtin'
+          const hasOverride = Object.keys(override.signals?.[storageGroup]?.[signal.id] ?? {}).length > 0
+          const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
+          const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
+          const explicitDirection = directionReadonly ? undefined : override.signals?.[storageGroup]?.[signal.id]?.direction
+          const explicitAction = override.signals?.[storageGroup]?.[signal.id]?.action_pct
+          const explicitNotify = override.signals?.[storageGroup]?.[signal.id]?.notify
+          const inheritedNotify = portfolio?.template.signals[storageGroup]?.[signal.id]?.notify === true
+          return (
+            <div key={signal.id} className={cn('py-2 text-xs', available ? '' : 'opacity-50')}>
+              <div className="flex min-h-7 items-center justify-between gap-3">
+                <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  <span className="text-[10px] text-muted">{hasOverride ? '已覆盖' : '默认'}</span>
+                  <input type="checkbox" checked={available && (explicit ?? inherited)} disabled={mutation.isPending || !available} onChange={event => setSignal(storageGroup, signal, event.target.checked)} aria-label={`监控${signal.label}`} />
+                  <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <label className="text-[10px] text-muted">信号方向{directionReadonly ? '（只读）' : ''}
+                  <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available || directionReadonly} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" title={directionReadonly ? '系统信号方向由公共信号定义，只读' : undefined}>
+                    <option value="inherit">继承（{inheritedDirection === 'exit' ? '出场' : inheritedDirection === 'entry' ? '入场' : '双向'}）</option>
+                    <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
+                  </select>
+                </label>
+                {title === '分时信号' ? (
+                  <div className="text-[10px] text-muted"><span>建议比例</span><span className="mt-1 flex h-7 items-center border border-border bg-elevated px-2">由做T模块控制</span></div>
+                ) : (
+                  <label className="text-[10px] text-muted">建议比例
+                    <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
+                      <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
+                      <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            </div>
+          )
+        }) : <p className="py-2 text-xs text-muted">暂无可用信号</p>}
+      </div>
+    </section>
+  ))
   return (
     <div className="fixed inset-0 z-40 bg-black/35" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <aside className="absolute inset-y-0 right-0 flex w-full max-w-md flex-col border-l border-border bg-surface shadow-xl">
@@ -303,169 +501,89 @@ function PositionInspector({ row, options, onClose, tradePreset, onTradeSubmitte
             </div>
           </section>}
 
-          <div className="mt-5 space-y-5">
-            {RULE_GROUPS.map(([group, rules]) => (
-              <section key={group}>
-                <h3 className="mb-2 text-xs font-semibold text-secondary">{group}</h3>
-                <div className="divide-y divide-border border-y border-border">
-                  {rules.map(ruleId => {
-                    const evidenceOnly = ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'].includes(ruleId)
-                    const inherited = portfolio?.template.rules[ruleId]?.enabled !== false
-                    const explicit = override.rules?.[ruleId]?.enabled
-                    const enabled = explicit ?? inherited
-                    const hasOverride = Object.keys(override.rules?.[ruleId] ?? {}).length > 0
-                    const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
-                      ? LARGE_ORDER_FIELDS
-                      : POSITION_RISK_RULE_FIELDS[ruleId] ?? []
-                    return (
-                      <div key={ruleId} className="py-2 text-xs">
-                        <div className="flex min-h-7 items-center justify-between gap-3">
-                          <span>{RULE_LABELS[ruleId] ?? ruleId}</span>
-                          <span className="flex items-center gap-2">
-                            <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
-                            <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
-                            {!evidenceOnly && <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
-                          </span>
-                        </div>
-                        {fields.length > 0 && (
-                          <div className="mt-2 grid grid-cols-2 gap-2">
-                            {fields.map(field => {
-                              const inheritedValue = portfolio?.template.rules[ruleId]?.[field.key] ?? field.defaultValue ?? 0
-                              const storedValue = override.rules?.[ruleId]?.[field.key] ?? inheritedValue
-                              const displayValue = field.percent ? Number(storedValue) * 100 : Number(storedValue)
-                              return (
-                                <label key={field.key} className="min-w-0 text-[10px] text-muted">
-                                  <span>{field.label}</span>
-                                  <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
-                                    <input
-                                      key={`${ruleId}-${field.key}-${displayValue}`}
-                                      type="number"
-                                      min={field.min}
-                                      max={field.max}
-                                      step={field.step}
-                                      defaultValue={displayValue}
-                                      disabled={mutation.isPending || !enabled}
-                                      onBlur={event => {
-                                        const next = Number(event.target.value)
-                                        const stored = field.percent ? next / 100 : next
-                                        if (Number.isFinite(next) && stored !== Number(storedValue)) setRuleValue(ruleId, field.key, stored)
-                                      }}
-                                      className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
-                                    />
-                                    {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
-                                  </span>
-                                </label>
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              </section>
+          <nav className="mt-5 flex border-b border-border" aria-label="单股风控模块">
+            {INTRADAY_RULE_TAB.map(([id, label]) => (
+              <button key={id} type="button" onClick={() => { setActiveRuleTab(id); setExpandedRule(null) }} className={cn('h-9 flex-1 border-b-2 text-xs', activeRuleTab === id ? 'border-accent text-foreground' : 'border-transparent text-muted hover:text-foreground')}>
+                {label}
+              </button>
             ))}
-            {signalGroups.map(([title, signals, storageGroup]) => (
-              <section key={title}>
-                <h3 className="mb-2 text-xs font-semibold text-secondary">{title}</h3>
-                <div className="divide-y divide-border border-y border-border">
-                  {signals.length ? signals.map(signal => {
-                    const explicit = override.signals?.[storageGroup]?.[signal.id]?.enabled
-                    const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
-                    const available = !('available' in signal) || signal.available
-                    const directionReadonly = storageGroup === 'builtin'
-                    const hasOverride = Object.keys(override.signals?.[storageGroup]?.[signal.id] ?? {}).length > 0
-                    const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
-                    const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
-                    const explicitDirection = directionReadonly ? undefined : override.signals?.[storageGroup]?.[signal.id]?.direction
-                    const explicitAction = override.signals?.[storageGroup]?.[signal.id]?.action_pct
-                    const explicitNotify = override.signals?.[storageGroup]?.[signal.id]?.notify
-                    const inheritedNotify = portfolio?.template.signals[storageGroup]?.[signal.id]?.notify === true
-                    return (
-                      <div key={signal.id} className={cn('py-2 text-xs', available ? '' : 'opacity-50')}>
-                        <div className="flex min-h-7 items-center justify-between gap-3">
-                        <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
-                        <span className="flex shrink-0 items-center gap-2">
-                          <span className="text-[10px] text-muted">{hasOverride ? '单股覆盖' : '继承模板'}</span>
-                          <input
-                            type="checkbox"
-                            checked={available && (explicit ?? inherited)}
-                            disabled={mutation.isPending || !available}
-                            onChange={event => setSignal(storageGroup, signal, event.target.checked)}
-                          />
-                          <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
-                        </span>
-                        </div>
-                        <div className="mt-2 grid grid-cols-2 gap-2">
-                          <label className="text-[10px] text-muted">信号方向{directionReadonly ? '（只读）' : ''}
-                            <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available || directionReadonly} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" title={directionReadonly ? '系统信号方向由公共信号定义，只读' : undefined}>
-                              <option value="inherit">继承（{inheritedDirection === 'exit' ? '出场' : inheritedDirection === 'entry' ? '入场' : '双向'}）</option>
-                              <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
-                            </select>
-                          </label>
-                          {title === '分时信号' ? (
-                            <div className="text-[10px] text-muted"><span>建议比例</span><span className="mt-1 flex h-7 items-center border border-border bg-elevated px-2">由做T模块控制</span></div>
-                          ) : (
-                            <label className="text-[10px] text-muted">建议比例
-                              <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
-                                <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
-                                <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
+          </nav>
+
+          {activeRuleTab === 'take_profit' && (
+            <section className="mt-4">
+              <div className="mb-2 flex items-end justify-between gap-3">
+                <div><h3 className="text-xs font-semibold text-secondary">止盈规则</h3><p className="mt-1 text-[10px] text-muted">固定目标和盈利后高点回撤分别判断。</p></div>
+                <span className="text-[10px] text-muted">{portfolio && hasRuleOverride(portfolio, row.symbol, TAKE_PROFIT_RULES) ? '本股覆盖' : '继承模板'}</span>
+              </div>
+              <div className="divide-y divide-border border-y border-border">{renderRuleRows(TAKE_PROFIT_RULES)}</div>
+            </section>
+          )}
+
+          {activeRuleTab === 'stop_loss' && (
+            <div className="mt-4 space-y-5">
+              {STOP_LOSS_RULE_GROUPS.map(([group, rules]) => (
+                <section key={group}>
+                  <h3 className="mb-2 text-xs font-semibold text-secondary">{group}</h3>
+                  <div className="divide-y divide-border border-y border-border">{renderRuleRows(rules)}</div>
+                </section>
+              ))}
+              <button type="button" onClick={() => setShowAdvancedRules(value => !value)} className="flex h-9 w-full items-center justify-between border-y border-border px-1 text-left text-xs text-secondary hover:text-foreground" aria-expanded={showAdvancedRules}>
+                <span className="flex items-center gap-2"><ChevronDown className={cn('h-3.5 w-3.5 transition-transform', showAdvancedRules ? '' : '-rotate-90')} />高级风控与信号</span>
+                <span className="text-[10px] text-muted">账户、资金、系统信号和监控中心</span>
+              </button>
+              {showAdvancedRules && (
+                <div className="space-y-5">
+                  <section>
+                    <h3 className="mb-2 text-xs font-semibold text-secondary">账户与资金</h3>
+                    <div className="divide-y divide-border border-y border-border">{renderRuleRows(ADVANCED_RULES)}</div>
+                  </section>
+                  {renderSignalGroups(signalGroups.filter(([title]) => title !== '分时信号'))}
+                  <section>
+                    <h3 className="mb-2 text-xs font-semibold text-secondary">已有监控规则</h3>
+                    <div className="divide-y divide-border border-y border-border">
+                      {options?.monitor_rules.length ? options.monitor_rules.map(rule => {
+                        const explicit = override.signals?.monitor_rules?.[rule.id]?.action_pct
+                        const inherited = portfolio?.template.signals.monitor_rules[rule.id]?.action_pct ?? 0
+                        const explicitNotify = override.signals?.monitor_rules?.[rule.id]?.notify
+                        const inheritedNotify = portfolio?.template.signals.monitor_rules[rule.id]?.notify === true
+                        return (
+                          <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
+                            <span className="min-w-0 truncate">{rule.name}</span>
+                            <span className="flex shrink-0 items-center gap-2">
+                              <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
+                              <select value={explicit == null ? 'inherit' : String(explicit)} disabled={mutation.isPending} onChange={event => setMonitorAction(rule.id, event.target.value === 'inherit' ? null : Number(event.target.value))} className="h-7 rounded border border-border bg-surface px-2 text-[11px]" aria-label={`${rule.name}建议比例`}>
+                                <option value="inherit">继承模板（{inherited ? `${inherited}%` : '时间线'}）</option><option value="0">只进时间线</option><option value="25">建议减仓 25%</option><option value="50">建议减仓 50%</option><option value="100">建议清仓</option>
                               </select>
-                            </label>
-                          )}
-                        </div>
-                      </div>
-                    )
-                  }) : <p className="py-2 text-xs text-muted">暂无可用信号</p>}
-                </div>
-              </section>
-            ))}
-            <section>
-              <h3 className="mb-2 text-xs font-semibold text-secondary">已有监控规则</h3>
-              <div className="divide-y divide-border border-y border-border">
-                {options?.monitor_rules.length ? options.monitor_rules.map(rule => {
-                  const explicit = override.signals?.monitor_rules?.[rule.id]?.action_pct
-                  const inherited = portfolio?.template.signals.monitor_rules[rule.id]?.action_pct ?? 0
-                  const explicitNotify = override.signals?.monitor_rules?.[rule.id]?.notify
-                  const inheritedNotify = portfolio?.template.signals.monitor_rules[rule.id]?.notify === true
-                  return (
-                    <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
-                      <span className="min-w-0 truncate">{rule.name}</span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
-                        <select
-                          value={explicit == null ? 'inherit' : String(explicit)}
-                          disabled={mutation.isPending}
-                          onChange={event => setMonitorAction(rule.id, event.target.value === 'inherit' ? null : Number(event.target.value))}
-                          className="h-7 rounded border border-border bg-surface px-2 text-[11px]"
-                          aria-label={`${rule.name}建议比例`}
-                        >
-                          <option value="inherit">继承模板（{inherited ? `${inherited}%` : '时间线'}）</option>
-                          <option value="0">只进时间线</option>
-                          <option value="25">建议减仓 25%</option>
-                          <option value="50">建议减仓 50%</option>
-                          <option value="100">建议清仓</option>
-                        </select>
-                      </span>
+                            </span>
+                          </div>
+                        )
+                      }) : <p className="py-2 text-xs text-muted">暂无监控中心规则</p>}
                     </div>
-                  )
-                }) : <p className="py-2 text-xs text-muted">暂无监控中心规则</p>}
-              </div>
-            </section>
-            <section>
-              <h3 className="mb-2 text-xs font-semibold text-secondary">证据状态</h3>
-              <div className="border-y border-border py-2 text-xs">
-                <div className="flex justify-between"><span className="text-muted">最新命中</span><span>{row.latest_signal ? cnSignal(row.latest_signal) : '暂无'}</span></div>
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {Object.entries(row.evidence).map(([key, ready]) => (
-                    <span key={key} className={cn('rounded px-1.5 py-0.5 text-[10px]', ready ? 'bg-bull/10 text-bull' : 'bg-elevated text-muted')}>
-                      {({ cost: '成本', history: '历史', quote: '实时价', depth: '五档', flow: '资金' } as Record<string, string>)[key]}
-                    </span>
-                  ))}
+                  </section>
+                  <section>
+                    <h3 className="mb-2 text-xs font-semibold text-secondary">证据状态</h3>
+                    <div className="border-y border-border py-2 text-xs">
+                      <div className="flex justify-between"><span className="text-muted">最新命中</span><span>{row.latest_signal ? cnSignal(row.latest_signal) : '暂无'}</span></div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {Object.entries(row.evidence).map(([key, ready]) => <span key={key} className={cn('rounded px-1.5 py-0.5 text-[10px]', ready ? 'bg-bull/10 text-bull' : 'bg-elevated text-muted')}>{({ cost: '成本', history: '历史', quote: '实时价', depth: '五档', flow: '资金' } as Record<string, string>)[key]}</span>)}
+                      </div>
+                    </div>
+                  </section>
                 </div>
+              )}
+            </div>
+          )}
+
+          {activeRuleTab === 't_trading' && (
+            <section className="mt-4 space-y-5">
+              <div className="flex flex-col gap-2 border-y border-border py-3 sm:flex-row sm:items-start sm:justify-between">
+                <div><h3 className="text-xs font-semibold text-secondary">做 T 参数</h3><p className="mt-1 text-[10px] text-muted">入场信号生成买入建议，出场信号生成卖出建议；不会自动下单。</p></div>
+                <span className={cn('text-[10px]', options?.capabilities.intraday.available ? 'text-bull' : 'text-warning')}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
               </div>
+              <div className="divide-y divide-border border-y border-border">{renderRuleRows(['t_trading'])}</div>
+              <div>{renderSignalGroups(signalGroups.filter(([title]) => title === '分时信号'))}</div>
             </section>
-          </div>
+          )}
         </div>
         <div className="flex items-center justify-between border-t border-border px-4 py-3">
           <span className="text-[11px] text-muted">{Object.keys(override).length ? '存在单股覆盖' : '全部继承全局模板'}</span>
@@ -617,10 +735,10 @@ export function LargeOrders() {
       </div>
 
       {tab === 'positions' && (rows.length ? <>
-        <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[860px] text-xs">
+          <div className="hidden overflow-x-auto md:block">
+          <table className="w-full min-w-[1120px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '证据', '信号', '风险', '建议', '交易'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '证据', '信号', '风险', '建议', '交易'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -628,6 +746,7 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
+                <td className="px-3 py-2"><div className="flex items-start gap-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /><button type="button" onClick={() => setSelected(row)} className="grid h-7 w-7 shrink-0 place-items-center rounded hover:bg-elevated" title="编辑单股风控与交易" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-3.5 w-3.5" /></button></div></td>
                 <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
                 <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
                 <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
@@ -639,8 +758,8 @@ export function LargeOrders() {
         </div>
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div></button>
-            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="单股规则与交易"><ChevronRight className="h-4 w-4" /></button></div>
+            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
+            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="编辑单股风控与交易" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-4 w-4" /></button></div>
           </div>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
