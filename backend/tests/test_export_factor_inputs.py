@@ -83,6 +83,9 @@ def test_financial_fields_obey_announcement_date_and_metadata_is_written(tmp_pat
     after_row = pl.read_parquet(
         tmp_path / "ext_data/ext_factor_inputs/timeseries/date=2024-04-02/part.parquet"
     ).row(0, named=True)
+    after_output = pl.read_parquet(
+        tmp_path / "ext_data/ext_factor_inputs/timeseries/date=2024-04-02/part.parquet"
+    )
     assert round(after_row["roa"], 6) == round(10 / 120 * 100, 6)
     assert round(after_row["assets_yoy"], 6) == 20.0
     assert after_row["stock_basic"] == "平安银行"
@@ -92,6 +95,10 @@ def test_financial_fields_obey_announcement_date_and_metadata_is_written(tmp_pat
     config = ExtConfigStore(tmp_path).get("ext_factor_inputs")
     assert config is not None
     assert config.primary_key == ["symbol", "date"]
+    assert {field.name: field.dtype for field in config.fields}["date"] == "date"
+    assert {field.name: field.dtype for field in config.fields}["listing_date"] == "date"
+    assert after_output.schema["date"] == pl.Date
+    assert after_output.schema["listing_date"] == pl.Date
     manifest = json.loads(
         (tmp_path / "ext_data/_ingestion/factor_inputs_export/ext_factor_inputs/pit.json").read_text(
             encoding="utf-8"

@@ -566,10 +566,10 @@ def _join_extensions(base: pl.DataFrame, data_dir: Path, start: date, end: date,
 
 
 def _factor_config() -> ExtConfig:
-    fields = [ExtField("symbol", "string", "标的代码"), ExtField("date", "string", "交易日 (Date)")]
+    fields = [ExtField("symbol", "string", "标的代码"), ExtField("date", "date", "交易日 (Date)")]
     fields.extend(ExtField(field, "float", field) for field in SUPPORTED_FLOAT_FIELDS)
     fields.extend(ExtField(field, "string", field) for field in SUPPORTED_STRING_FIELDS)
-    fields.extend(ExtField(field, "string", field) for field in SUPPORTED_DATE_FIELDS)
+    fields.extend(ExtField(field, "date", field) for field in SUPPORTED_DATE_FIELDS)
     fields.extend(ExtField(field, "bool", field) for field in SUPPORTED_BOOL_FIELDS)
     return ExtConfig(
         id=TABLE_ID,

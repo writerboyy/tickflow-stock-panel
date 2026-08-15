@@ -24,7 +24,7 @@ class ExtField:
 
     def __init__(self, name: str, dtype: str = "string", label: str = "") -> None:
         self.name = name
-        self.dtype = dtype      # string | int | float | bool
+        self.dtype = dtype      # string | int | float | bool | date
         self.label = label or name
 
     def to_dict(self) -> dict:
@@ -360,6 +360,7 @@ _POLARS_DTYPE_MAP = {
     "int": pl.Int64,
     "float": pl.Float64,
     "bool": pl.Boolean,
+    "date": pl.Date,
 }
 
 _POLARS_TYPE_MAP = {
@@ -368,7 +369,7 @@ _POLARS_TYPE_MAP = {
     "Float64": "float", "Float32": "float",
     "Boolean": "bool",
     "Utf8": "string", "String": "string",
-    "Date": "string", "Datetime": "string", "Duration": "string",
+    "Date": "date", "Datetime": "string", "Duration": "string",
     "Categorical": "string",
 }
 
