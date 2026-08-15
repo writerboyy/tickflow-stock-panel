@@ -37,17 +37,22 @@ SUPPORTED_FLOAT_FIELDS = (
     "assets_yoy",
     "margin_balance",
     "short_balance",
+    "margin_ratio",
+    "margin_buy_ratio",
     "main_net",
+    "net_mf_amount",
     "main_buy",
     "main_sell",
     "holding_amount",
     "holding_shares",
     "holding_ratio",
+    "north_ratio",
     "market_ratio",
     "shareholder_change_pct",
     "float_holding_ratio",
     "chip_concentration",
     "buy_in_amount",
+    "top_list_net_buy",
     "listings_count",
     "turnover",
     "turnover_pct",
@@ -71,12 +76,7 @@ SUPPORTED_BOOL_FIELDS = (
     "sse50_member",
 )
 UNSUPPORTED_FIELDS = {
-    "net_mf_amount": "没有与开盘啦 main_net 等价的统一资金流口径",
-    "north_ratio": "北向数据只有季度原始持仓，不生成日度比例别名",
     "holder_num": "股东人数原始表未转成统一的 PIT 股东人数",
-    "margin_ratio": "两融余额单位和公式未确认",
-    "margin_buy_ratio": "两融买入额单位和公式未确认",
-    "top_list_net_buy": "开盘啦 buy_in_amount 保留自身龙虎榜口径，不冒充统一净买额",
     "fc_surprise": "没有可靠的预期值来源",
     "express_yoy": "EasyTDX 业绩快报没有可靠的同比数值字段",
     "i_*": "本阶段不推断分钟因子公式，只输出分钟覆盖元数据",
@@ -195,7 +195,19 @@ def _read_valuation(
     if source is None:
         return pl.DataFrame()
     schema = source.collect_schema()
-    selected = [column for column in ("symbol", "date", "pe_ttm", "pb", "ps_ttm", "net_income_ttm") if column in schema]
+    selected = [
+        column
+        for column in (
+            "symbol",
+            "date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "net_income_ttm",
+            "float_market_cap",
+        )
+        if column in schema
+    ]
     if not {"symbol", "date"}.issubset(selected):
         return pl.DataFrame()
     frame = (
@@ -547,8 +559,9 @@ def _join_extensions(base: pl.DataFrame, data_dir: Path, start: date, end: date,
         margin = margin.with_columns([
             (pl.col("margin_balance_10k") * 10000).alias("margin_balance") if "margin_balance_10k" in margin.columns else pl.lit(None, dtype=pl.Float64).alias("margin_balance"),
             (pl.col("short_balance_10k") * 10000).alias("short_balance") if "short_balance_10k" in margin.columns else pl.lit(None, dtype=pl.Float64).alias("short_balance"),
+            (pl.col("margin_purchase_10k") * 10000).alias("margin_purchase_cny") if "margin_purchase_10k" in margin.columns else pl.lit(None, dtype=pl.Float64).alias("margin_purchase_cny"),
         ])
-    base = _join_by_date(base, margin, ["margin_balance", "short_balance"])
+    base = _join_by_date(base, margin, ["margin_balance", "short_balance", "margin_purchase_cny"])
 
     forecast = _prepare_partitioned(_read_partitioned(data_dir, "ext_tdx_forecast"), date_column="announcement_date", start=start, end=end, symbols=symbols)
     base = _join_by_date(base, forecast, ["forecast_type", "net_profit_low_10k", "net_profit_high_10k", "net_profit_yoy_low_pct", "net_profit_yoy_high_pct", "summary"])
@@ -562,7 +575,56 @@ def _join_extensions(base: pl.DataFrame, data_dir: Path, start: date, end: date,
     lhb = _prepare_partitioned(_read_partitioned(data_dir, "ext_kpl_lhb"), date_column="_partition_date", start=start, end=end, symbols=symbols)
     if not lhb.is_empty():
         lhb = lhb.with_columns(pl.lit(True).alias("top_list_flag"))
-    return _join_by_date(base, lhb, ["buy_in_amount", "listings_count", "turnover", "turnover_pct", "top_list_flag"])
+    base = _join_by_date(base, lhb, ["buy_in_amount", "listings_count", "turnover", "turnover_pct", "top_list_flag"])
+
+    lhb_detail = _read_partitioned(data_dir, "ext_kpl_lhb_detail")
+    if not lhb_detail.is_empty():
+        lhb_detail = _filter_symbols(lhb_detail, symbols)
+        lhb_detail = _with_date(lhb_detail, "_partition_date", "_factor_date").filter(
+            (pl.col("_factor_date") >= start) & (pl.col("_factor_date") <= end)
+        )
+    if not lhb_detail.is_empty() and {"buy_amount", "sell_amount"}.issubset(lhb_detail.columns):
+        detail_net = (
+            lhb_detail.with_columns(
+                pl.col("buy_amount").cast(pl.Float64, strict=False),
+                pl.col("sell_amount").cast(pl.Float64, strict=False),
+            )
+            .group_by(["symbol", "_factor_date"])
+            .agg(
+                (
+                    pl.col("buy_amount").sum() - pl.col("sell_amount").sum()
+                ).alias("top_list_net_buy")
+            )
+        )
+        base = _join_by_date(base, detail_net, ["top_list_net_buy"])
+
+    return base.with_columns(
+        pl.col("main_net").alias("net_mf_amount") if "main_net" in base.columns else pl.lit(None, dtype=pl.Float64).alias("net_mf_amount"),
+        pl.col("holding_ratio").alias("north_ratio") if "holding_ratio" in base.columns else pl.lit(None, dtype=pl.Float64).alias("north_ratio"),
+        (
+            pl.when(
+                pl.col("margin_balance").is_not_null()
+                & pl.col("short_balance").is_not_null()
+                & (pl.col("float_market_cap") > 0)
+            )
+            .then((pl.col("margin_balance") + pl.col("short_balance")) / pl.col("float_market_cap") * 100)
+            .otherwise(None)
+            .alias("margin_ratio")
+            if {"margin_balance", "short_balance", "float_market_cap"}.issubset(base.columns)
+            else pl.lit(None, dtype=pl.Float64).alias("margin_ratio")
+        ),
+        (
+            pl.when(
+                pl.col("margin_purchase_cny").is_not_null()
+                & (pl.col("amount") > 0)
+            )
+            .then(pl.col("margin_purchase_cny") / pl.col("amount") * 100)
+            .otherwise(None)
+            .alias("margin_buy_ratio")
+            if {"margin_purchase_cny", "amount"}.issubset(base.columns)
+            else pl.lit(None, dtype=pl.Float64).alias("margin_buy_ratio")
+        ),
+    )
 
 
 def _factor_config() -> ExtConfig:
@@ -587,10 +649,15 @@ def _factor_config() -> ExtConfig:
             "assets_yoy": "percent",
             "margin_balance": "CNY",
             "short_balance": "CNY",
+            "margin_ratio": "percent",
+            "margin_buy_ratio": "percent",
             "main_net": "source_defined",
+            "net_mf_amount": "source_defined",
             "holding_ratio": "source_defined",
+            "north_ratio": "source_defined",
             "shareholder_change_pct": "source_defined",
             "buy_in_amount": "source_defined",
+            "top_list_net_buy": "CNY",
         },
     )
 
@@ -631,7 +698,10 @@ def _field_manifest(frame: pl.DataFrame) -> dict[str, dict[str, Any]]:
         "listing_date": ("instruments.instruments.parquet", "date"),
         "margin_balance": ("ext_tdx_margin.margin_balance_10k", "CNY"),
         "short_balance": ("ext_tdx_margin.short_balance_10k", "CNY"),
+        "margin_ratio": ("derived: ext_tdx_margin / valuation_daily.float_market_cap", "percent"),
+        "margin_buy_ratio": ("derived: ext_tdx_margin.margin_purchase_10k / kline_daily_enriched.amount", "percent"),
         "top_list_flag": ("ext_kpl_lhb", "bool"),
+        "top_list_net_buy": ("derived: ext_kpl_lhb_detail.buy_amount - sell_amount", "CNY"),
         "csi300_member": ("index_membership_history", "bool"),
         "csi500_member": ("index_membership_history", "bool"),
         "sse50_member": ("unavailable", "bool"),
@@ -640,11 +710,13 @@ def _field_manifest(frame: pl.DataFrame) -> dict[str, dict[str, Any]]:
         "listing_date": ("instruments.instruments.parquet", "date"),
         "namechange": ("instrument_name_history/part.parquet", "name"),
         "main_net": ("ext_kpl_funds", "source_defined"),
+        "net_mf_amount": ("ext_kpl_funds.main_net (explicit source alias)", "source_defined"),
         "main_buy": ("ext_kpl_funds", "source_defined"),
         "main_sell": ("ext_kpl_funds", "source_defined"),
         "holding_amount": ("ext_kpl_northbound_stock", "source_defined"),
         "holding_shares": ("ext_kpl_northbound_stock", "source_defined"),
         "holding_ratio": ("ext_kpl_northbound_stock", "source_defined"),
+        "north_ratio": ("ext_kpl_northbound_stock.holding_ratio (quarterly)", "source_defined"),
         "market_ratio": ("ext_kpl_northbound_stock", "source_defined"),
         "shareholder_change_pct": ("ext_kpl_shareholder_counts", "source_defined"),
         "float_holding_ratio": ("ext_kpl_shareholder_counts", "source_defined"),
