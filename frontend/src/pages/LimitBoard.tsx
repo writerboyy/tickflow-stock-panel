@@ -85,6 +85,7 @@ function Row({
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
+  const rebound = row.source === 'rebound_board' || row.source_modes?.includes('rebound_board')
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
   const orderStatus = !row.auto_trade && !row.auto_order_key
@@ -99,6 +100,7 @@ function Row({
         <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
           <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
+          {mode !== 'pool' && rebound ? <div className="mt-0.5 text-[10px] text-warning">反包候选</div> : null}
         </button>
       </td>
       <td className="w-[160px] max-w-[160px] px-2">
@@ -252,7 +254,7 @@ export function LimitBoard() {
     onSuccess: () => { setSearch(''); refresh() },
   })
   const addPool = useMutation({
-    mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'manual' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
+    mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
   const updatePool = useMutation({
@@ -285,12 +287,12 @@ export function LimitBoard() {
   const runtime = data.runtime
   const rows = tab === 'first' ? data.first_board : tab === 'candidate' ? data.candidate_pool : data.board_pool
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
-  const tableTitle = tab === 'first' ? '全市场首板候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
+  const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? '加入时默认开启自动打板；关闭后仅跟踪，不提交实盘委托'
     : tab === 'candidate'
-    ? '自动合并首板候选和手工加入的股票，按触板接近度、封单和炸板次数排序'
-    : '首板候选会自动进入备选池，临近涨停后自动接入 WS'
+    ? '自动合并首板、反包候选和手工加入的股票，按触板接近度、封单和炸板次数排序'
+    : '首板与反包候选会自动进入备选池，临近涨停后自动接入 WS'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -303,12 +305,12 @@ export function LimitBoard() {
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
         <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '行情已接入 WS' : '等待 WS 候选'}</span>
         <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
-        {!runtime.first_board_enabled ? <span className="text-warning">首板扫描暂不可用：需要全市场实时行情和历史涨停校验</span> : <span>{runtime.history_reason}</span>}
+        {!runtime.first_board_enabled ? <span className="text-warning">首板/反包扫描暂不可用：需要全市场实时行情和历史涨停校验</span> : <span>{runtime.history_reason}</span>}
       </div>
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
-          ['first', '首板扫描', data.first_board.length, Flame],
+          ['first', '首板/反包', data.first_board.length, Flame],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
@@ -329,7 +331,12 @@ export function LimitBoard() {
               poolSymbols={poolSymbols}
               busy={busy}
               onOpen={setPreview}
-              onAddPool={row => addPool.mutate({ row, source: row.source === 'manual' || row.source === 'selected' ? 'manual' : 'first_board' })}
+              onAddPool={row => addPool.mutate({
+                row,
+                source: row.source === 'manual' || row.source === 'selected'
+                  ? 'manual'
+                  : row.source === 'rebound_board' ? 'rebound_board' : 'first_board',
+              })}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled })}
               onRemovePool={row => removePool.mutate(row)}
             />

@@ -190,6 +190,63 @@ def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monke
     assert quotes.events == []
 
 
+def test_history_separates_clean_first_board_from_rebound_setup(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    config["settings"]["first_board_lookback_days"] = 3
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    dates = [datetime(2026, 8, day).date() for day in (10, 11, 12)]
+    history = pl.DataFrame({
+        "symbol": ["600000.SH"] * 3 + ["600001.SH"] * 3,
+        "date": dates + dates,
+        "signal_limit_up": [True, False, False, False, False, False],
+        "signal_broken_limit_up": [False, True, False, False, False, False],
+    })
+    service.repo.get_enriched_latest = lambda: (history, dates[-1])
+    service.repo.get_enriched_range = lambda *_args, **_kwargs: history
+    service._history_date = None
+
+    service._refresh_history(config)
+
+    assert "600001.SH" in service._first_board_eligible
+    assert "600000.SH" not in service._first_board_eligible
+    assert service._rebound_board_eligible == {"600000.SH"}
+
+
+def test_rebound_quote_enters_candidate_pool_with_rebound_source(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service._history_date = datetime(2026, 8, 13).date()
+    service._first_board_eligible = set()
+    service._rebound_board_eligible = {"600000.SH"}
+
+    service._process_quotes([{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "last_price": 10.8,
+        "limit_up": 11.0,
+        "timestamp": "2026-08-13T10:00:00+08:00",
+    }])
+
+    view = service.view()
+    assert view["first_board"][0]["source_modes"] == ["rebound_board"]
+    assert view["candidate_pool"][0]["source"] == "rebound_board"
+    assert "反包候选" in view["candidate_pool"][0]["candidate_reasons"]
+
+
 def test_manual_candidate_rejects_st_stock(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
 

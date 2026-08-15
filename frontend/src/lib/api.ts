@@ -1097,7 +1097,7 @@ export interface LimitBoardRow {
   ws_active?: boolean
   source_modes?: string[]
   blacklisted?: boolean
-  source?: 'first_board' | 'selected' | 'manual'
+  source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
   auto_order_key?: string
   auto_order_status?: string
@@ -1121,6 +1121,7 @@ export interface LimitBoardView {
     notifications: { touched: boolean; broken: boolean; resealed: boolean }
   }
   first_board: LimitBoardRow[]
+  rebound_board: LimitBoardRow[]
   selected: LimitBoardRow[]
   candidate_pool: LimitBoardRow[]
   board_pool: LimitBoardRow[]
@@ -1150,7 +1151,7 @@ export interface LimitBoardConfig {
   board_pool: Array<{
     symbol: string
     name?: string
-    source: 'first_board' | 'selected' | 'manual'
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     auto_trade: boolean
     added_at?: string
   }>
@@ -2368,7 +2369,7 @@ export const api = {
       `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
-  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'selected' | 'manual', revision: number) =>
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
       method: 'POST', body: JSON.stringify({ symbol, source, revision }),
     }),

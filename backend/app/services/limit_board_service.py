@@ -77,8 +77,9 @@ class LimitBoardService:
         self._name_map_date: date | None = None
         self._name_map: dict[str, str] = {}
         self._first_board_eligible: set[str] = set()
+        self._rebound_board_eligible: set[str] = set()
         self._history_ready = False
-        self._history_reason = "正在读取近 10 个交易日涨停记录"
+        self._history_reason = "正在读取近 10 个交易日涨停与断板记录"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
 
@@ -211,18 +212,19 @@ class LimitBoardService:
         self._history_date = today
         self._history_ready = False
         self._first_board_eligible.clear()
+        self._rebound_board_eligible.clear()
         lookback = max(1, int(config["settings"].get("first_board_lookback_days", 10)))
         latest, latest_date = self.repo.get_enriched_latest()
         if latest_date is None:
-            self._history_reason = "历史指标缓存尚未就绪，首板扫描已暂停"
+            self._history_reason = "历史指标缓存尚未就绪，首板/反包扫描已暂停"
             return
         end = min(latest_date, today - timedelta(days=1))
         start = end - timedelta(days=max(30, lookback * 3))
         history = self.repo.get_enriched_range(
-            start, end, columns=["symbol", "date", "signal_limit_up"],
+            start, end, columns=["symbol", "date", "signal_limit_up", "signal_broken_limit_up"],
         )
         if history is None or history.is_empty() or "signal_limit_up" not in history.columns:
-            self._history_reason = "近 10 个交易日涨停记录不足，首板扫描已暂停"
+            self._history_reason = "近 10 个交易日涨停记录不足，首板/反包扫描已暂停"
             return
         dates = history["date"].unique().sort().to_list()
         if len(dates) < lookback:
@@ -233,6 +235,24 @@ class LimitBoardService:
         blocked = set(
             scoped.filter(pl.col("signal_limit_up").fill_null(False).cast(pl.Boolean))["symbol"].to_list()
         )
+        rebound = set()
+        if "signal_broken_limit_up" not in scoped.columns:
+            scoped = scoped.with_columns(pl.lit(False).alias("signal_broken_limit_up"))
+        # 反包要求窗口内先有涨停，随后至少出现一天炸板或断板，且最近一天不能仍是涨停。
+        for symbol, rows in scoped.sort(["symbol", "date"]).group_by("symbol", maintain_order=True):
+            saw_limit = False
+            had_break_after_limit = False
+            last_was_limit = False
+            for row in rows.iter_rows(named=True):
+                is_limit = bool(row.get("signal_limit_up"))
+                is_broken = bool(row.get("signal_broken_limit_up"))
+                if saw_limit and (is_broken or not is_limit):
+                    had_break_after_limit = True
+                if is_limit:
+                    saw_limit = True
+                last_was_limit = is_limit
+            if saw_limit and had_break_after_limit and not last_was_limit:
+                rebound.add(symbol[0] if isinstance(symbol, tuple) else symbol)
         instruments = self.repo.get_instruments()
         universe = set(instruments["symbol"].to_list()) if not instruments.is_empty() else set()
         self._refresh_name_map()
@@ -241,8 +261,9 @@ class LimitBoardService:
             if not is_risk_warning_name(self._name_map.get(str(symbol).strip().upper()))
         }
         self._first_board_eligible = universe - blocked
+        self._rebound_board_eligible = (rebound & universe) - self._first_board_eligible
         self._history_ready = True
-        self._history_reason = f"已核对前 {lookback} 个交易日"
+        self._history_reason = f"已核对前 {lookback} 个交易日（含反包判定）"
 
     def _refresh_name_map(self) -> None:
         today = cn_today()
@@ -310,10 +331,16 @@ class LimitBoardService:
             if (
                 full_market
                 and self._history_ready
-                and symbol in self._first_board_eligible
+                and (
+                    symbol in self._first_board_eligible
+                    or symbol in self._rebound_board_eligible
+                )
                 and (gap <= scan_window or symbol in runtime_symbols)
             ):
-                source_modes.append("first_board")
+                if symbol in self._first_board_eligible:
+                    source_modes.append("first_board")
+                if symbol in self._rebound_board_eligible:
+                    source_modes.append("rebound_board")
             if not source_modes:
                 continue
             quote = {
@@ -727,6 +754,7 @@ class LimitBoardService:
     @staticmethod
     def _candidate_pool(
         first_board: list[dict[str, Any]],
+        rebound_board: list[dict[str, Any]],
         selected: list[dict[str, Any]],
         board_pool: list[dict[str, Any]],
         near_limit_pct: float,
@@ -739,6 +767,7 @@ class LimitBoardService:
         candidates: dict[str, dict[str, Any]] = {}
         for row, origin in [
             *((item, "first_board") for item in first_board),
+            *((item, "rebound_board") for item in rebound_board),
             *((item, "selected") for item in selected),
         ]:
             symbol = str(row.get("symbol") or "").strip().upper()
@@ -749,7 +778,11 @@ class LimitBoardService:
                 modes = sorted(set(row.get("source_modes") or []) | {origin})
                 current = {
                     **row,
-                    "source": "first_board" if "first_board" in modes else "manual",
+                    "source": (
+                        "first_board" if "first_board" in modes
+                        else "rebound_board" if "rebound_board" in modes
+                        else "manual"
+                    ),
                     "source_modes": modes,
                 }
                 candidates[symbol] = current
@@ -774,7 +807,11 @@ class LimitBoardService:
             gap = _finite(row.get("limit_gap_pct"))
             proximity = 0.0 if gap is None else max(0.0, min(1.0, 1.0 - gap / near))
             source_modes = set(row.get("source_modes") or [])
-            source_bonus = 12.0 if "first_board" in source_modes else 8.0
+            source_bonus = (
+                12.0 if "first_board" in source_modes
+                else 11.0 if "rebound_board" in source_modes
+                else 8.0
+            )
             if "selected" in source_modes:
                 source_bonus += 2.0
             bid_volume = max(0.0, _finite(row.get("bid1_volume")) or 0.0)
@@ -784,6 +821,8 @@ class LimitBoardService:
             reasons: list[str] = []
             if "first_board" in source_modes:
                 reasons.append("首板候选")
+            if "rebound_board" in source_modes:
+                reasons.append("反包候选")
             if "selected" in source_modes:
                 reasons.append("手工加入")
             if gap is None:
@@ -846,6 +885,7 @@ class LimitBoardService:
             board_pool.append(row)
         candidate_pool = self._candidate_pool(
             [item for item in rows if "first_board" in item.get("source_modes", [])],
+            [item for item in rows if "rebound_board" in item.get("source_modes", [])],
             selected,
             board_pool,
             float(config["settings"].get("near_limit_pct", 0.02)),
@@ -882,7 +922,11 @@ class LimitBoardService:
         return {
             "revision": config["revision"],
             "settings": config["settings"],
-            "first_board": [item for item in rows if "first_board" in item.get("source_modes", [])],
+            "first_board": [
+                item for item in rows
+                if {"first_board", "rebound_board"} & set(item.get("source_modes", []))
+            ],
+            "rebound_board": [item for item in rows if "rebound_board" in item.get("source_modes", [])],
             "selected": selected,
             "candidate_pool": candidate_pool,
             "board_pool": board_pool,

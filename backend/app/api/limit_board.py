@@ -16,7 +16,7 @@ class SelectedWrite(BaseModel):
 
 
 class PoolWrite(SelectedWrite):
-    source: str = Field(default="manual", pattern="^(first_board|selected|manual)$")
+    source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
 
 
 class PoolUpdate(BaseModel):
