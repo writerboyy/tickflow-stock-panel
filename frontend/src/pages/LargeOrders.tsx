@@ -131,19 +131,6 @@ function pct(value: number | null | undefined) {
   return value == null ? '—' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
 }
 
-function percentage(value: unknown, sign = false) {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric)) return '—'
-  return `${sign && numeric >= 0 ? '+' : ''}${(numeric * 100).toFixed(0)}%`
-}
-
-function actionLabel(value: unknown) {
-  const numeric = Number(value)
-  if (!Number.isFinite(numeric) || numeric <= 0) return '提醒'
-  if (numeric >= 100) return '清仓'
-  return `减仓${numeric}%`
-}
-
 function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
   return {
     ...(portfolio.template.rules[ruleId] ?? {}),
@@ -172,46 +159,24 @@ function moduleSource(portfolio: PositionRiskPortfolio, symbol: string, ruleIds:
   return covered ? '已覆盖' : '默认'
 }
 
-function enabledRuleLabels(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
-  return ruleIds.filter(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))).map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
-}
-
 function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions }) {
-  const takeProfit = TAKE_PROFIT_RULES.map(ruleId => effectiveRule(portfolio, symbol, ruleId))
-  const fixedTakeProfit = takeProfit[0]
-  const trailingTakeProfit = takeProfit[1]
-  const ladderTakeProfit = takeProfit[2]
-  const takeProfitEnabled = TAKE_PROFIT_RULES.some((ruleId, index) => effectiveRuleEnabled(ruleId, takeProfit[index]))
-  const takeProfitText = takeProfitEnabled
-    ? [
-        effectiveRuleEnabled('take_profit', fixedTakeProfit) ? `固定 ${percentage(fixedTakeProfit.threshold, true)} · ${actionLabel(fixedTakeProfit.action_pct)}` : null,
-        effectiveRuleEnabled('trailing_drawdown', trailingTakeProfit) ? `回撤 ${percentage(trailingTakeProfit.threshold)} · ${actionLabel(trailingTakeProfit.action_pct)}` : null,
-        effectiveRuleEnabled('take_profit_ladder', ladderTakeProfit) ? `分批 ${Number(ladderTakeProfit.first_r ?? 1).toFixed(1)}R/${Number(ladderTakeProfit.second_r ?? 2).toFixed(1)}R` : null,
-      ].filter(Boolean).join(' / ')
-    : '未启用'
-
-  const stopLoss = effectiveRule(portfolio, symbol, 'stop_loss')
-  const stopLossLabels = enabledRuleLabels(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules)).filter(label => label !== RULE_LABELS.stop_loss)
-  const stopLossText = [
-    stopLoss.enabled !== false ? `成本 ${percentage(stopLoss.threshold)} · ${actionLabel(stopLoss.action_pct)}` : null,
-    stopLossLabels.length ? `${stopLossLabels.slice(0, 3).join(' / ')}${stopLossLabels.length > 3 ? ` +${stopLossLabels.length - 3}` : ''}` : null,
-  ].filter(Boolean).join(' · ') || '未启用'
-
-  const tTrading = effectiveRule(portfolio, symbol, 't_trading')
-  const tTradingText = tTrading.enabled !== false ? `买 ${percentage(Number(tTrading.buy_pct) / 100)} / 卖 ${percentage(Number(tTrading.sell_pct) / 100)}` : '未启用'
+  const takeProfitEnabled = TAKE_PROFIT_RULES.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId)))
+  const stopLossEnabled = STOP_LOSS_RULE_GROUPS.some(([, rules]) => rules.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))))
+  const tTradingEnabled = effectiveRuleEnabled('t_trading', effectiveRule(portfolio, symbol, 't_trading'))
   const intradaySignalIds = options?.builtin_signals.filter(signal => signal.group === 'intraday').map(signal => signal.id) ?? []
   const tTradingSource = hasRuleOverride(portfolio, symbol, ['t_trading']) || hasSignalOverride(portfolio, symbol, 'builtin', intradaySignalIds) ? '已覆盖' : '默认'
+  const status = (enabled: boolean) => enabled ? '已启用' : '未启用'
   return (
-    <div className="min-w-[225px] space-y-1 text-[10px] leading-4">
+    <div className="w-full min-w-0 space-y-1 text-[10px] leading-4">
       {[
-        ['止盈', moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), takeProfitText],
-        ['止损', moduleSource(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules), ['builtin', 'custom', 'monitor_rules']), stopLossText],
-        ['做 T', tTradingSource, tTradingText],
+        ['止盈', moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), status(takeProfitEnabled)],
+        ['止损', moduleSource(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules), ['builtin', 'custom', 'monitor_rules']), status(stopLossEnabled)],
+        ['做 T', tTradingSource, status(tTradingEnabled)],
       ].map(([label, source, value]) => (
-        <div key={label} className="grid grid-cols-[32px_38px_minmax(0,1fr)] items-baseline gap-1">
+        <div key={label} className="grid grid-cols-[24px_30px_minmax(0,1fr)] items-baseline gap-1">
           <span className="text-secondary">{label}</span>
           <span className={cn('text-[9px]', source === '已覆盖' ? 'text-accent' : 'text-muted')}>{source}</span>
-          <span className={cn('min-w-0 break-words', value === '未启用' ? 'text-muted' : 'text-foreground')} title={value}>{value}</span>
+          <span className={cn('min-w-0 whitespace-nowrap', value === '未启用' ? 'text-muted' : 'text-foreground')} title={`${label}${source}，${value}，点击设置查看详细参数`}>{value}</span>
         </div>
       ))}
     </div>
@@ -804,9 +769,9 @@ export function LargeOrders() {
 
       {tab === 'positions' && (rows.length ? <>
           <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[1120px] text-xs">
+          <table className="w-full min-w-[1040px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '证据', '信号', '风险', '建议', '交易'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '证据', '信号', '风险', '建议', '操作'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -814,12 +779,12 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
-                <td className="px-3 py-2"><div className="flex items-start gap-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /><button type="button" onClick={() => setSelected(row)} className="grid h-7 w-7 shrink-0 place-items-center rounded hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-3.5 w-3.5" /></button></div></td>
+                <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
                 <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
                 <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
                 <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
                 <td className="px-3 py-2">{row.suggestion ? <span className="text-warning">{row.suggestion.action} {row.suggestion.reduction_pct}%</span> : <span className="text-muted">观察</span>}</td>
-                <td className="px-3 py-2"><button type="button" onClick={() => openTradeForRow(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button></td>
+                <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-3.5 w-3.5" /></button><button type="button" onClick={() => openTradeForRow(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button></div></td>
               </tr>)}
             </tbody>
           </table>
@@ -827,7 +792,7 @@ export function LargeOrders() {
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
-            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => openTradeForRow(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-4 w-4" /></button></div>
+            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-4 w-4" /></button><button type="button" onClick={() => openTradeForRow(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button></div>
           </div>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
