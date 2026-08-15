@@ -32,6 +32,7 @@ from .financial_pit import load_financial_periods
 from .first_board_snapshot import configure_first_board_snapshot
 from .industry import load_industry_history
 from .mainline_snapshot import configure_mainline_snapshot
+from .strong_momentum_snapshot import configure_strong_momentum_snapshot
 from .readiness import (
     ReadinessUnavailable,
     build_readiness_manifest,
@@ -1347,11 +1348,14 @@ def _prepare_dynamic_market_data(
             "pit_mainline_snapshot"
             if engine.mainline_snapshot_requirement is not None
             else "pit_first_board_snapshot"
+            if engine.limit_board_snapshot_requirement is not None
+            else "pit_strong_momentum_snapshot"
         ),
         "requested_bars": int(
             (
                 engine.mainline_snapshot_requirement
                 or engine.limit_board_snapshot_requirement
+                or engine.strong_momentum_snapshot_requirement
                 or {}
             ).get("lookback_days", 60)
         ),
@@ -2183,7 +2187,8 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         )
         mainline_cache = configure_mainline_snapshot(engine, repo, start, end)
         first_board_cache = configure_first_board_snapshot(engine, repo, start, end)
-        dynamic_cache = mainline_cache or first_board_cache
+        strong_momentum_cache = configure_strong_momentum_snapshot(engine, repo, start, end)
+        dynamic_cache = mainline_cache or first_board_cache or strong_momentum_cache
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data
@@ -2545,6 +2550,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     "mode": "daily_high_limit_touch_io_index",
                 }
                 if first_board_cache is not None else {"enabled": False}
+            ),
+            "strong_momentum_snapshot": (
+                {
+                    "enabled": True,
+                    "candidate_symbols": len(strong_momentum_cache.all_symbols),
+                    "mode": "pit_d1_strong_stock_dynamic_universe",
+                }
+                if strong_momentum_cache is not None else {"enabled": False}
             ),
             "readiness": readiness_manifest,
             "fund_nav": fund_nav_data,

@@ -45,6 +45,14 @@ MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256 = frozenset({
     "04a7fe514b041e99f76943d96e5e25e8413205fb212ed02d011f42a8cd22e577",
     "7f68c888943f0349362e4551d13fa7cf348d59b40bbfb50e7531f49a4c3230b2",
 })
+LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_MARKERS = (
+    "Clone source: https://www.joinquant.com/post/59883",
+    "Title: first-board large turnover tick strategy",
+    "from jqdata import *",
+)
+LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256 = frozenset({
+    "7723c47f14618ebc4e96a94bea2ec729b889e3e05449a131e76dda877389c3c9",
+})
 FIVE_FORTUNES_SOURCE = Path(__file__).with_name("five_fortunes.py").read_text(encoding="utf-8")
 FIVE_FORTUNES_V2_SOURCE = Path(__file__).with_name("five_fortunes_v2.py").read_text(encoding="utf-8")
 SEVEN_STARS_SOURCE = Path(__file__).with_name("seven_stars.py").read_text(encoding="utf-8")
@@ -147,22 +155,22 @@ def on_bar(context, bars):
     "strong_momentum": {
         "name": "强者恒强·项目适配",
         "config": {
-            "timeframe": "1d",
+            "timeframe": "1m",
             "asset_type": "stock",
             "initial_capital": 100_000,
-            "fees_pct": 0.0002,
-            "commission_pct": 0.0002,
-            "sell_commission_pct": 0.0002,
+            "fees_pct": 0.0003,
+            "commission_pct": 0.0003,
+            "sell_commission_pct": 0.0003,
             "min_commission": 5,
-            "stamp_tax_pct": 0.0005,
+            "stamp_tax_pct": 0.001,
             "transfer_fee_pct": 0.00001,
             "slippage_bps": 10,
             "price_tick": 0.01,
             "lot_size": 100,
             "max_exposure_pct": 0.9,
-            "benchmark_symbol": "000905.SH",
+            "benchmark_symbol": "000300.SH",
             "settlement": "t1",
-            "fill_policy": "next_open",
+            "fill_policy": "close",
         },
         "source": STRONG_MOMENTUM_SOURCE,
     },

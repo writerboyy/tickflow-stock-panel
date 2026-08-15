@@ -205,6 +205,7 @@ class Context:
         self._readiness_requirements: list[ReadinessRequirement] = []
         self._mainline_snapshot_requirement: dict[str, Any] | None = None
         self._limit_board_snapshot_requirement: dict[str, Any] | None = None
+        self._strong_momentum_snapshot_requirement: dict[str, Any] | None = None
 
     @property
     def universe(self) -> list[str]:
@@ -310,6 +311,21 @@ class Context:
         return (
             dict(self._limit_board_snapshot_requirement)
             if self._limit_board_snapshot_requirement is not None else None
+        )
+
+    def require_strong_momentum_snapshot(self, *, lookback_days: int = 30) -> None:
+        """声明“强者恒强”盘前 PIT 候选快照需求。"""
+        if isinstance(lookback_days, bool) or lookback_days < 20:
+            raise ValueError("强者恒强快照至少需要 20 个交易日")
+        self._strong_momentum_snapshot_requirement = {
+            "lookback_days": int(lookback_days),
+        }
+
+    @property
+    def strong_momentum_snapshot_requirement(self) -> dict[str, Any] | None:
+        return (
+            dict(self._strong_momentum_snapshot_requirement)
+            if self._strong_momentum_snapshot_requirement is not None else None
         )
 
     def reference_asset(
@@ -485,6 +501,27 @@ class Context:
         loader = self._engine._limit_board_snapshot_loader
         if loader is None:
             raise ValueError("缺少首板扫描快照加载器")
+        return loader(requested)
+
+    def strong_momentum_snapshot(
+        self,
+        as_of: date | datetime | str | None = None,
+    ) -> dict[str, Any]:
+        if self.now is None:
+            return {}
+        if isinstance(as_of, datetime):
+            requested = as_of.date()
+        elif isinstance(as_of, date):
+            requested = as_of
+        elif as_of is not None:
+            requested = date.fromisoformat(str(as_of)[:10])
+        else:
+            requested = self.now.date()
+        if requested > self.now.date():
+            raise ValueError("强者恒强快照日期不能晚于当前策略时间")
+        loader = self._engine._strong_momentum_snapshot_loader
+        if loader is None:
+            raise ValueError("缺少强者恒强 PIT 快照加载器")
         return loader(requested)
 
     def dividend_ratio_ranked(
@@ -940,6 +977,7 @@ class FreeStrategyEngine:
         ] | None = None
         self._mainline_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self._limit_board_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
+        self._strong_momentum_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self.context = Context(self)
         namespace: dict[str, Any] = {
             "__name__": "free_strategy_snapshot",
@@ -1019,6 +1057,10 @@ class FreeStrategyEngine:
     @property
     def limit_board_snapshot_requirement(self) -> dict[str, Any] | None:
         return self.context.limit_board_snapshot_requirement
+
+    @property
+    def strong_momentum_snapshot_requirement(self) -> dict[str, Any] | None:
+        return self.context.strong_momentum_snapshot_requirement
 
     @property
     def extra_history_requirements(self) -> set[str]:
@@ -1228,6 +1270,12 @@ class FreeStrategyEngine:
         loader: Callable[[date], dict[str, Any]] | None,
     ) -> None:
         self._limit_board_snapshot_loader = loader
+
+    def set_strong_momentum_snapshot_loader(
+        self,
+        loader: Callable[[date], dict[str, Any]] | None,
+    ) -> None:
+        self._strong_momentum_snapshot_loader = loader
 
     def preload_history(self, bars: Iterable[Bar], timeframe: str = "1d") -> int:
         """注入只读历史，不触发生命周期、下单或资金变动。"""
