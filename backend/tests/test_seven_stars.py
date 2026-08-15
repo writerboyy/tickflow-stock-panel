@@ -105,7 +105,7 @@ def test_initialize_registers_reference_universe_and_schedule():
     assert callable(seven.on_bar)
 
 
-def test_weighted_momentum_matches_joinquant_polyfit():
+def test_weighted_momentum_matches_reference_polyfit():
     prices = [100.0]
     changes = (0.01, -0.004, 0.007, -0.002, 0.012, -0.006)
     for index in range(1, 46):

@@ -179,18 +179,6 @@ def _read_partitioned(root: Path) -> pl.DataFrame:
 
 def _flow_maps(data_dir: Path) -> dict[str, dict[tuple[str, date], bool]]:
     specs = {
-        "FactorZen资金流": (
-            _read_source(data_dir / "pit_reference/joinquant/factorzen_moneyflow/part.parquet"),
-            "net_mf_amount",
-        ),
-        "FactorZen融资": (
-            _read_source(data_dir / "pit_reference/joinquant/factorzen_margin_detail/part.parquet"),
-            ("rzmre", "rzche"),
-        ),
-        "FactorZen龙虎榜": (
-            _read_source(data_dir / "pit_reference/joinquant/factorzen_top_list/part.parquet"),
-            "net_amount",
-        ),
         "Tushare资金流": (
             _read_partitioned(data_dir / "ext_data/ext_tushare_moneyflow/timeseries"),
             "net_mf_amount",

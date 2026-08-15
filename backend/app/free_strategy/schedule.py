@@ -1,4 +1,4 @@
-"""Deterministic JoinQuant-compatible scheduling rules for free strategies."""
+"""Deterministic scheduling rules for free strategies."""
 from __future__ import annotations
 
 import re

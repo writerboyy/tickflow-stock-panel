@@ -27,7 +27,7 @@
 
 `main_net`（区间主力净额）、`capital_net_close`（分时大单净额末值）和
 `main_net_amount_over_300k`（特大单加大单净额）是不同上游口径。它们不映射为
-Tushare/FactorZen 的 `net_mf_amount`，也不使用名称相同的字段做静默替换。
+其他来源的 `net_mf_amount`，也不使用名称相同的字段做静默替换。
 
 参考数据按各自的报告期或交易日落独立表，不与资金流、竞价或通用财务指标混用：
 

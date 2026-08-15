@@ -37,7 +37,7 @@ def test_weekly_and_monthly_rules_use_actual_trade_day_ordinals():
     assert not ScheduleRule("monthly", "09:30", 6).matches_date(date(2024, 1, 8), dates)
 
 
-def test_joinquant_schedule_functions_run_in_registration_order():
+def test_schedule_functions_run_in_registration_order():
     source = """
 def initialize(context):
     run_daily(first, time='open-30m')

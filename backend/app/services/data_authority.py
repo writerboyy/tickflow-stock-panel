@@ -327,6 +327,13 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
         "f10_summary_context_not_tickflow_financial_statement",
         (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
     ),
+    "ext_factor_inputs": ExtensionAuthority(
+        "ext_factor_inputs",
+        "derived",
+        "factor_input_export",
+        "audited_local_factor_export; unsupported_fields_remain_null",
+        (FACTOR_USAGE, DISPLAY_USAGE, FILTER_USAGE),
+    ),
     "ext_tdx_dividend_history": ExtensionAuthority(
         "ext_tdx_dividend_history",
         "deprecated-overlap",

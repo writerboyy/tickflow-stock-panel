@@ -346,7 +346,7 @@ def on_bar(context, bars):
         FreeStrategyEngine(source)
 
 
-def test_initialize_defines_universe_and_normalizes_joinquant_suffixes():
+def test_initialize_defines_universe_and_normalizes_exchange_suffixes():
     source = """
 def initialize(context):
     context.set_universe(['510300.XSHG', '159915.XSHE', '510300.SH'])
