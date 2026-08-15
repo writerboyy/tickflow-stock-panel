@@ -18,28 +18,36 @@ def _config() -> FreeStrategyConfig:
     return FreeStrategyConfig(**raw)
 
 
-def _snapshot(day: date) -> dict:
+def _snapshot(day: date, candidate_overrides: dict | None = None) -> dict:
+    candidate = {
+        "symbol": SYMBOL,
+        "name": "平安银行",
+        "limit_price": 11.0,
+        "previous_raw_close": 10.0,
+        "ret5_d1": -0.06,
+        "ret20_d1": -0.05,
+        "above_ma20_d1": False,
+        "amount_expansion_d1": 1.2,
+        "amount_median20_d1": 300_000_000.0,
+        "market_cap_d1": 20_000_000_000.0,
+        "prior_limit_close_5d": 0,
+        "limit_up_count_d1": 4,
+        "next_day_red_rate_d1": 0.80,
+        "first_board_broken_rate_d1": 0.75,
+    }
+    candidate.update(candidate_overrides or {})
     return {
         "date": day.isoformat(),
         "as_of": (day - timedelta(days=1)).isoformat(),
         "scan_index_only": "daily_high_limit_touch",
-        "candidates": [{
-            "symbol": SYMBOL,
-            "name": "平安银行",
-            "limit_price": 11.0,
-            "previous_raw_close": 10.0,
-            "ret5_d1": -0.06,
-            "ret20_d1": -0.05,
-            "above_ma20_d1": False,
-            "amount_expansion_d1": 1.2,
-            "amount_median20_d1": 300_000_000.0,
-            "market_cap_d1": 20_000_000_000.0,
-            "prior_limit_close_5d": 0,
-        }],
+        "candidates": [candidate],
     }
 
 
-def _engine(snapshot_day: date) -> FreeStrategyEngine:
+def _engine(
+    snapshot_day: date,
+    candidate_overrides: dict | None = None,
+) -> FreeStrategyEngine:
     engine = FreeStrategyEngine(
         TEMPLATES["large_amount_first_board"]["source"],
         timeframe="1m",
@@ -52,7 +60,7 @@ def _engine(snapshot_day: date) -> FreeStrategyEngine:
         }],
     )
     engine.set_limit_board_snapshot_loader(
-        lambda day: _snapshot(day) if day == snapshot_day else {
+        lambda day: _snapshot(day, candidate_overrides) if day == snapshot_day else {
             "date": day.isoformat(), "as_of": None, "candidates": [],
         }
     )
@@ -83,6 +91,16 @@ def test_daily_gate_requires_five_day_pullback_of_at_least_five_percent():
     assert not _passes_daily_gate({**meta, "ret5_d1": -0.0499})
 
 
+def test_daily_gate_requires_premium_gene_thresholds_and_rejects_missing_data():
+    meta = _snapshot(date(2026, 8, 14))["candidates"][0]
+
+    assert _passes_daily_gate(meta)
+    assert not _passes_daily_gate({**meta, "limit_up_count_d1": 3})
+    assert not _passes_daily_gate({**meta, "next_day_red_rate_d1": 0.7999})
+    assert not _passes_daily_gate({**meta, "first_board_broken_rate_d1": 0.7501})
+    assert not _passes_daily_gate({**meta, "next_day_red_rate_d1": None})
+
+
 def test_first_touch_fills_at_limit_and_later_break_does_not_undo_fill():
     day = date(2026, 8, 14)
     result = _engine(day).run([
@@ -102,6 +120,16 @@ def test_first_touch_below_amount_threshold_is_not_reconsidered_later():
     result = _engine(day).run([
         _bar(day, 10, 0, high=11.0, close=10.8, amount=900_000_000),
         _bar(day, 10, 1, high=11.0, close=11.0, amount=200_000_000),
+    ])
+
+    assert result["fills"] == []
+    assert result["strategy_signals"] == []
+
+
+def test_premium_gene_gate_blocks_order_after_large_first_touch():
+    day = date(2026, 8, 14)
+    result = _engine(day, {"limit_up_count_d1": 3}).run([
+        _bar(day, 10, 0, high=11.0, close=11.0, amount=1_100_000_000),
     ])
 
     assert result["fills"] == []

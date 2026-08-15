@@ -6,6 +6,9 @@ import math
 STRATEGY_KIND = "large_amount_first_board"
 MIN_CUMULATIVE_AMOUNT = 1_000_000_000.0
 MIN_MARKET_CAP = 10_000_000_000.0
+MIN_LIMIT_UP_COUNT = 4
+MIN_NEXT_DAY_RED_RATE = 0.80
+MAX_FIRST_BOARD_BROKEN_RATE = 0.75
 MAX_POSITIONS = 5
 TARGET_POSITION_PCT = 0.18
 ENTRY_END = time(11, 30)
@@ -36,7 +39,7 @@ def initialize(context):
         raise ValueError("大成交首板策略没有可用的股票分钟标的")
     context.set_universe([str(instruments[0]["symbol"])])
     context.require_limit_board_snapshot(
-        lookback_days=30,
+        lookback_days=200,
         min_cumulative_amount=MIN_CUMULATIVE_AMOUNT,
     )
     _state(context)
@@ -99,10 +102,18 @@ def _factor_score(meta, cumulative_amount):
 
 
 def _passes_daily_gate(meta):
+    limit_up_count = meta.get("limit_up_count_d1")
+    next_day_red_rate = meta.get("next_day_red_rate_d1")
+    first_board_broken_rate = meta.get("first_board_broken_rate_d1")
+    if None in (limit_up_count, next_day_red_rate, first_board_broken_rate):
+        return False
     return bool(
         int(meta.get("prior_limit_close_5d") or 0) == 0
         and float(meta.get("ret5_d1") or 0) <= -0.05
         and float(meta.get("market_cap_d1") or 0) >= MIN_MARKET_CAP
+        and int(limit_up_count) >= MIN_LIMIT_UP_COUNT
+        and float(next_day_red_rate) >= MIN_NEXT_DAY_RED_RATE
+        and float(first_board_broken_rate) <= MAX_FIRST_BOARD_BROKEN_RATE
     )
 
 
@@ -152,6 +163,9 @@ def _entry_candidates(context, state, bars):
             "amount_expansion_d1": meta.get("amount_expansion_d1"),
             "market_cap_d1": meta.get("market_cap_d1"),
             "prior_limit_close_5d": meta.get("prior_limit_close_5d"),
+            "limit_up_count_d1": meta.get("limit_up_count_d1"),
+            "next_day_red_rate_d1": meta.get("next_day_red_rate_d1"),
+            "first_board_broken_rate_d1": meta.get("first_board_broken_rate_d1"),
             "as_of": state["snapshot"].get("as_of"),
         }
         state["pending_entries"][symbol] = {

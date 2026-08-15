@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import polars as pl
 
-from app.free_strategy.first_board_snapshot import FirstBoardSnapshotCache
+from app.free_strategy.first_board_snapshot import (
+    FirstBoardSnapshotCache,
+    _with_premium_gene_features,
+)
 
 
 class _SnapshotRepo:
@@ -95,3 +98,28 @@ def test_first_board_snapshot_excludes_symbol_without_minute_rows(tmp_path):
     cache = FirstBoardSnapshotCache(repo, target, target, {"lookback_days": 30})
 
     assert cache.snapshot(target)["candidates"] == []
+
+
+def test_premium_gene_features_use_only_previous_day_history():
+    start = date(2026, 1, 5)
+    limit_close = [False, True, False, True, False, False,
+                   False, True, False, True, True]
+    touched = [False, True, False, True, False, True,
+               False, True, False, True, True]
+    closes = [10.0, 11.0, 11.1, 12.0, 12.1, 12.0,
+              12.1, 13.0, 13.1, 14.0, 14.1]
+    frame = pl.DataFrame({
+        "symbol": ["000001.SZ"] * len(closes),
+        "date": [start + timedelta(days=index) for index in range(len(closes))],
+        "close": closes,
+        "_raw_high": [100.0 if value else 1.0 for value in touched],
+        "limit_price": [100.0] * len(closes),
+        "limit_close": limit_close,
+    })
+
+    row = _with_premium_gene_features(frame).row(-1, named=True)
+
+    # 当日第五次涨停不进入 D-1 口径；D-1 的第四次涨停也尚无次日观察值。
+    assert row["limit_up_count_d1"] == 4
+    assert row["next_day_red_rate_d1"] == 1.0
+    assert row["first_board_broken_rate_d1"] == 0.2

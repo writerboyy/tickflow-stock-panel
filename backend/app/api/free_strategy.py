@@ -30,6 +30,7 @@ from app.free_strategy.templates import (
     LEGACY_FIVE_FORTUNES_SOURCE,
     MANAGED_ETF_NAV_ALIGNMENT_SHA256,
     MANAGED_FIVE_FORTUNES_SHA256,
+    MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256,
     TEMPLATES,
 )
 from app.market_time import cn_naive_now, cn_today
@@ -352,6 +353,30 @@ def migrate_legacy_five_fortunes_strategies(data_dir: Path) -> list[str]:
             strategy["name"],
             replacement,
             _migrate_five_fortunes_config(strategy.get("config", {})),
+        )
+        migrated.append(str(strategy["id"]))
+    return migrated
+
+
+def migrate_managed_large_amount_first_board(data_dir: Path) -> list[str]:
+    """Upgrade unmodified managed first-board strategies to the latest gates."""
+    store = FreeStrategyStore(data_dir)
+    replacement = TEMPLATES["large_amount_first_board"]["source"]
+    replacement_hash = sha256(replacement.encode("utf-8")).hexdigest()
+    migrated: list[str] = []
+    for summary in store.list():
+        strategy = store.get(str(summary["id"]))
+        source = str(strategy["source"])
+        source_hash = sha256(source.encode("utf-8")).hexdigest()
+        if source_hash == replacement_hash:
+            continue
+        if source_hash not in MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256:
+            continue
+        store.save(
+            strategy["id"],
+            strategy["name"],
+            replacement,
+            strategy.get("config", {}),
         )
         migrated.append(str(strategy["id"]))
     return migrated

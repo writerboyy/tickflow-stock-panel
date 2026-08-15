@@ -65,6 +65,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("legacy five-fortunes strategy migration failed: %s", e)
     try:
+        migrated = free_strategy.migrate_managed_large_amount_first_board(store.data_dir)
+        if migrated:
+            logger.info(
+                "migrated %d managed large-amount first-board strategies",
+                len(migrated),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("managed large-amount first-board migration failed: %s", e)
+    try:
         migrated = free_strategy.migrate_managed_etf_nav_alignment(store.data_dir)
         if migrated["strategies"] or migrated["accounts"]:
             logger.info(

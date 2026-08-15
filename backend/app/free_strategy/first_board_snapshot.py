@@ -17,9 +17,94 @@ from app.price_limits import (
 
 from .mainline_snapshot import _name_events
 
+PREMIUM_GENE_WINDOW_DAYS = 200
+
 
 def _calendar_start(day: date, lookback_days: int) -> date:
     return day - timedelta(days=max(90, lookback_days * 3))
+
+
+def _with_premium_gene_features(
+    frame: pl.DataFrame,
+    *,
+    window_days: int = PREMIUM_GENE_WINDOW_DAYS,
+) -> pl.DataFrame:
+    """Add D-1-only premium-gene gates matching the post-close calculation."""
+    observation_window = max(window_days - 1, 1)
+    frame = frame.with_columns(
+        pl.col("limit_close").fill_null(0).cast(pl.Boolean).alias("_gene_is_limit"),
+        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1)
+        .alias("_gene_change_pct"),
+    ).with_columns(
+        (
+            ~pl.col("_gene_is_limit")
+            & (pl.col("_raw_high") >= pl.col("limit_price") - 0.005)
+        ).fill_null(False).alias("_gene_is_broken"),
+        (~pl.col("_gene_is_limit")).cast(pl.UInt32).cum_sum().over("symbol")
+        .alias("_gene_limit_group"),
+    ).with_columns(
+        pl.when(pl.col("_gene_is_limit"))
+        .then(
+            pl.col("_gene_is_limit").cast(pl.UInt32).cum_sum()
+            .over("symbol", "_gene_limit_group")
+        )
+        .otherwise(0)
+        .cast(pl.Int64)
+        .alias("_gene_consecutive"),
+    ).with_columns(
+        pl.col("_gene_consecutive").shift(1).over("symbol").fill_null(0)
+        .alias("_gene_prev_consecutive"),
+        pl.col("_gene_is_limit").shift(1).over("symbol").fill_null(False)
+        .alias("_gene_prev_is_limit"),
+    ).with_columns(
+        (
+            (pl.col("_gene_prev_consecutive") <= 0)
+            & (pl.col("_gene_is_limit") | pl.col("_gene_is_broken"))
+        ).alias("_gene_first_board_attempt"),
+        (
+            pl.col("_gene_prev_is_limit")
+            & pl.col("_gene_change_pct").is_not_null()
+        ).alias("_gene_next_day_observed"),
+    ).with_columns(
+        pl.col("_gene_is_limit").cast(pl.Int64)
+        .rolling_sum(window_days, min_samples=1).over("symbol")
+        .alias("_gene_limit_up_count"),
+        pl.col("_gene_first_board_attempt").cast(pl.Int64)
+        .rolling_sum(window_days, min_samples=1).over("symbol")
+        .alias("_gene_first_board_attempt_count"),
+        (pl.col("_gene_first_board_attempt") & pl.col("_gene_is_broken"))
+        .cast(pl.Int64).rolling_sum(window_days, min_samples=1).over("symbol")
+        .alias("_gene_first_board_broken_count"),
+        pl.col("_gene_next_day_observed").cast(pl.Int64)
+        .rolling_sum(observation_window, min_samples=1).over("symbol")
+        .alias("_gene_next_day_observation_count"),
+        (
+            pl.col("_gene_next_day_observed")
+            & (pl.col("_gene_change_pct") > 0)
+        ).cast(pl.Int64).rolling_sum(observation_window, min_samples=1).over("symbol")
+        .alias("_gene_next_day_red_count"),
+    ).with_columns(
+        pl.when(pl.col("_gene_next_day_observation_count") > 0)
+        .then(
+            pl.col("_gene_next_day_red_count")
+            / pl.col("_gene_next_day_observation_count")
+        ).otherwise(0.0).alias("_gene_next_day_red_rate"),
+        pl.when(pl.col("_gene_first_board_attempt_count") > 0)
+        .then(
+            pl.col("_gene_first_board_broken_count")
+            / pl.col("_gene_first_board_attempt_count")
+        ).otherwise(0.0).alias("_gene_first_board_broken_rate"),
+    ).with_columns(
+        pl.col("_gene_limit_up_count").shift(1).over("symbol")
+        .alias("limit_up_count_d1"),
+        pl.col("_gene_next_day_red_rate").shift(1).over("symbol")
+        .alias("next_day_red_rate_d1"),
+        pl.col("_gene_first_board_broken_rate").shift(1).over("symbol")
+        .alias("first_board_broken_rate_d1"),
+    )
+    return frame.drop([
+        column for column in frame.columns if column.startswith("_gene_")
+    ])
 
 
 class FirstBoardSnapshotCache:
@@ -188,7 +273,9 @@ class FirstBoardSnapshotCache:
                     up=True,
                 ) - 0.005
             ).cast(pl.Int8).alias("limit_close"),
-        ).with_columns(
+        )
+        frame = _with_premium_gene_features(frame)
+        frame = frame.with_columns(
             pl.col("ret5").shift(1).over("symbol").alias("ret5_d1"),
             pl.col("ret20").shift(1).over("symbol").alias("ret20_d1"),
             (pl.col("close") > pl.col("ma20")).shift(1).over("symbol").alias("above_ma20_d1"),
@@ -226,6 +313,18 @@ class FirstBoardSnapshotCache:
                     "amount_median20_d1": float(row.get("amount_median20_d1") or 0),
                     "market_cap_d1": float(row.get("market_cap_d1") or 0),
                     "prior_limit_close_5d": int(row.get("prior_limit_close_5d") or 0),
+                    "limit_up_count_d1": (
+                        int(row["limit_up_count_d1"])
+                        if row.get("limit_up_count_d1") is not None else None
+                    ),
+                    "next_day_red_rate_d1": (
+                        float(row["next_day_red_rate_d1"])
+                        if row.get("next_day_red_rate_d1") is not None else None
+                    ),
+                    "first_board_broken_rate_d1": (
+                        float(row["first_board_broken_rate_d1"])
+                        if row.get("first_board_broken_rate_d1") is not None else None
+                    ),
                 })
             candidates.sort(key=lambda item: item["symbol"])
             self._all_symbols.update(row["symbol"] for row in candidates)

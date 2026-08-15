@@ -15,6 +15,7 @@ from app.api.free_strategy import (
     cleanup_incomplete_backtests,
     migrate_legacy_five_fortunes_strategies,
     migrate_managed_etf_nav_alignment,
+    migrate_managed_large_amount_first_board,
     router,
 )
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
@@ -292,6 +293,36 @@ def test_managed_etf_nav_alignment_migrates_strategy_and_paper_snapshot(
     ]
     assert len(migration_events) == 1
     assert migration_events[0]["to_source_hash"] == new_hash
+
+
+def test_managed_large_amount_first_board_migrates_only_unchanged_source(
+    monkeypatch,
+    tmp_path,
+):
+    old_source = "# old managed first-board source\n"
+    old_hash = sha256(old_source.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(
+        free_strategy,
+        "MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256",
+        frozenset({old_hash}),
+    )
+    store = FreeStrategyStore(tmp_path)
+    managed = store.save(
+        "managed", "大成交首板", old_source, {"timeframe": "1m"},
+    )
+    custom = store.save(
+        "custom", "自定义首板", f"{old_source}# customized\n", {"timeframe": "1m"},
+    )
+
+    migrated = migrate_managed_large_amount_first_board(tmp_path)
+    repeated = migrate_managed_large_amount_first_board(tmp_path)
+
+    assert migrated == [managed["id"]]
+    assert repeated == []
+    loaded = store.get(managed["id"])
+    assert loaded["source"] == TEMPLATES["large_amount_first_board"]["source"]
+    assert loaded["revision"] == 2
+    assert store.get(custom["id"])["revision"] == 1
 
 
 def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeypatch, tmp_path):
