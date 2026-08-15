@@ -656,6 +656,7 @@ export function LargeOrders() {
   const [tab, setTab] = useState<Tab>('positions')
   const [search, setSearch] = useState('')
   const [risk, setRisk] = useState<'all' | 'medium' | 'high'>('all')
+  const [positionSort, setPositionSort] = useState<'asc' | 'desc' | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   const [selected, setSelected] = useState<PositionRiskPosition | null>(null)
@@ -694,11 +695,19 @@ export function LargeOrders() {
     () => Object.fromEntries((options.data?.custom_signals ?? []).map(signal => [signal.id, signal.label])),
     [options.data?.custom_signals],
   )
-  const rows = useMemo(() => (portfolio.data?.positions ?? []).filter(row => {
-    const matchesSearch = !search || row.symbol.toLowerCase().includes(search.toLowerCase()) || row.name.includes(search)
-    const matchesRisk = risk === 'all' || row.risk_level === risk
-    return matchesSearch && matchesRisk
-  }), [portfolio.data?.positions, risk, search])
+  const rows = useMemo(() => {
+    const filtered = (portfolio.data?.positions ?? []).filter(row => {
+      const matchesSearch = !search || row.symbol.toLowerCase().includes(search.toLowerCase()) || row.name.includes(search)
+      const matchesRisk = risk === 'all' || row.risk_level === risk
+      return matchesSearch && matchesRisk
+    })
+    if (!positionSort) return filtered
+    return [...filtered].sort((left, right) => {
+      if (left.weight == null) return right.weight == null ? 0 : 1
+      if (right.weight == null) return -1
+      return positionSort === 'asc' ? left.weight - right.weight : right.weight - left.weight
+    })
+  }, [portfolio.data?.positions, positionSort, risk, search])
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
@@ -771,7 +780,7 @@ export function LargeOrders() {
           <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[1040px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '证据', '信号', '风险', '建议', '操作'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '操作', '证据', '信号', '风险', '建议'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -780,11 +789,11 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
                 <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
+                <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
                 <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
                 <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
                 <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
                 <td className="px-3 py-2">{row.suggestion ? <span className="text-warning">{row.suggestion.action} {row.suggestion.reduction_pct}%</span> : <span className="text-muted">观察</span>}</td>
-                <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-3.5 w-3.5" /></button><button type="button" onClick={() => openTradeForRow(row)} className="grid h-7 w-7 place-items-center rounded hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button></div></td>
               </tr>)}
             </tbody>
           </table>
@@ -792,7 +801,7 @@ export function LargeOrders() {
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
-            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}><Settings2 className="h-4 w-4" /></button><button type="button" onClick={() => openTradeForRow(row)} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" title="打开交易面板" aria-label={`打开${row.name}交易面板`}><ChevronRight className="h-4 w-4" /></button></div>
+            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
