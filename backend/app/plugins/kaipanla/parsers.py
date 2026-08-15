@@ -1,4 +1,4 @@
-"""八个开盘啦接口的严格响应解析。"""
+"""开盘啦接口的严格响应解析。"""
 
 from __future__ import annotations
 
@@ -594,6 +594,23 @@ def parse_limitup(payload: dict) -> list[dict]:
         }
         for item in merged.values()
     ]
+
+
+def parse_premium_gene(payload: dict, code: str) -> dict:
+    """解析开盘啦 /76 涨停基因六项数组，保留百分比单位。"""
+    values = _rows(payload, "List")
+    if len(values) != 6:
+        raise ResponseShapeError("List 必须恰好包含 6 列")
+    return {
+        "symbol": code,
+        "code": code,
+        "limit_up_count": _int(values[0], "List[0]"),
+        "premium_5_count": _int(values[1], "List[1]"),
+        "next_day_red_rate_pct": _float(values[2], "List[2]"),
+        "first_board_seal_rate_pct": _float(values[3], "List[3]"),
+        "first_board_broken_rate_pct": _float(values[4], "List[4]"),
+        "consecutive_rate_pct": _float(values[5], "List[5]"),
+    }
 
 
 def parse_lhb_list(payload: dict) -> tuple[date | None, list[dict]]:

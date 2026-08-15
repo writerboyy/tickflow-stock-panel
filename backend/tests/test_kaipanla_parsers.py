@@ -19,6 +19,7 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_detail,
     parse_lhb_list,
     parse_limitup,
+    parse_premium_gene,
     parse_northbound_sector,
     parse_northbound_stocks,
     parse_regulatory_anomaly,
@@ -166,6 +167,25 @@ def test_limitup_parser_flattens_nested_plates_to_one_row_per_stock():
     assert rows[0]["plate_names"] == "核电;聚变"
     assert rows[0]["reason_detail"] == "详细原因"
     assert rows[0]["market_limitup_count"] == 97
+
+
+def test_premium_gene_parser_maps_documented_six_values_as_percentages():
+    row = parse_premium_gene(
+        {"List": [9, 3, 100, 88.8889, 11.1111, 12.5]},
+        "001330",
+    )
+    assert row == {
+        "symbol": "001330",
+        "code": "001330",
+        "limit_up_count": 9,
+        "premium_5_count": 3,
+        "next_day_red_rate_pct": 100.0,
+        "first_board_seal_rate_pct": 88.8889,
+        "first_board_broken_rate_pct": 11.1111,
+        "consecutive_rate_pct": 12.5,
+    }
+    with pytest.raises(ResponseShapeError, match="6 列"):
+        parse_premium_gene({"List": [9]}, "001330")
 
 
 def test_lhb_object_and_detail_parsers_keep_daily_grain_with_summaries():

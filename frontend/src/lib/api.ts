@@ -177,6 +177,25 @@ export interface StockLevels {
   series?: LevelSeries
 }
 
+export interface PremiumGene {
+  available: boolean
+  symbol: string
+  as_of: string | null
+  window_days: number
+  limit_up_count?: number
+  premium_5_count?: number
+  next_day_observation_count?: number
+  next_day_red_count?: number
+  next_day_red_rate?: number
+  first_board_attempt_count?: number
+  first_board_sealed_count?: number
+  first_board_broken_count?: number
+  first_board_seal_rate?: number
+  first_board_broken_rate?: number
+  consecutive_limit_up_count?: number
+  consecutive_rate?: number
+}
+
 export interface AiStockReport {
   id: string
   symbol: string
@@ -3204,6 +3223,8 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+  stockAnalysisPremiumGene: (symbol: string) =>
+    request<PremiumGene>(`/api/stock-analysis/premium-gene?symbol=${encodeURIComponent(symbol)}`),
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),
@@ -3619,6 +3640,7 @@ export interface PipelineJob {
     pit_reference_crosschecked_snapshots?: number
     pit_reference_baostock_lifecycle_rows?: number
     minute_rows: number
+    premium_gene_rows?: number
     skipped_stages?: string[]
   } | null
   error: string | null

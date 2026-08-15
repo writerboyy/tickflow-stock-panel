@@ -4,6 +4,7 @@
 
 端点:
   GET  /levels?symbol=         11 类关键价位(图表 markLine 数据源)
+  GET  /premium-gene?symbol=   近 200 个交易日溢价基因统计
   POST /analyze                AI 流式四维分析(NDJSON)
   GET  /reports                历史报告列表
   POST /reports                保存一条报告
@@ -21,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
+from app.services import premium_gene
 from app.services import stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
 
@@ -143,6 +145,18 @@ def get_levels(
         "dates": [str(d) for d in dates],
         "series": series,
     }
+
+
+@router.get("/premium-gene")
+async def get_premium_gene(
+    request: Request,
+    symbol: str = Query(..., description="标的代码,如 000001.SZ"),
+):
+    """返回个股近 200 个交易日的涨停/溢价基因统计。"""
+    symbol = symbol.strip()
+    if not symbol:
+        raise HTTPException(400, "symbol 不能为空")
+    return await premium_gene.get_for_symbol_async(request.app.state.repo, symbol)
 
 
 class AnalyzeRequest(BaseModel):

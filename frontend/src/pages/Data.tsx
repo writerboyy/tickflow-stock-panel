@@ -313,6 +313,9 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      if (job.data.status === 'succeeded') {
+        qc.invalidateQueries({ queryKey: ['stock-premium-gene'] })
+      }
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
     }

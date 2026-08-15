@@ -8,7 +8,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
-import { api } from '@/lib/api'
+import { api, type PremiumGene } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -189,6 +189,13 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     staleTime: 60_000,
   })
 
+  const premiumGeneQ = useQuery({
+    queryKey: QK.stockPremiumGene(symbol),
+    queryFn: () => api.stockAnalysisPremiumGene(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  })
+
   if (kline.isLoading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
   }
@@ -217,34 +224,73 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
   return (
-    <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
-      <div className="px-4 py-3 border-b border-border/40">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
-            <span className="text-sm font-medium text-foreground">关键价位分析</span>
-          </div>
-          <div className="flex items-baseline gap-2 shrink-0">
-            <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
-            <span className="text-[10px] text-muted/60">·</span>
-            <span className="text-[10px] text-muted">当前价</span>
-            <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
-              {curClose?.toFixed(2) ?? '—'}
-            </span>
+    <div className="space-y-3">
+      <PremiumGenePanel data={premiumGeneQ.data} loading={premiumGeneQ.isLoading} />
+      <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+        <div className="px-4 py-3 border-b border-border/40">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="text-sm font-medium text-foreground">关键价位分析</span>
+            </div>
+            <div className="flex items-baseline gap-2 shrink-0">
+              <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
+              <span className="text-[10px] text-muted/60">·</span>
+              <span className="text-[10px] text-muted">当前价</span>
+              <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
+                {curClose?.toFixed(2) ?? '—'}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
-      <div className="p-3">
-        <AnalysisKChart
-          rows={rows}
-          levels={levels}
-          series={levelsQ.data?.series}
-          seriesDates={levelsQ.data?.dates}
-          defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
-          height={480}
-        />
+        <div className="p-3">
+          <AnalysisKChart
+            rows={rows}
+            levels={levels}
+            series={levelsQ.data?.series}
+            seriesDates={levelsQ.data?.dates}
+            defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+            height={480}
+          />
+        </div>
       </div>
     </div>
+  )
+}
+
+function PremiumGenePanel({
+  data,
+  loading,
+}: {
+  data?: PremiumGene
+  loading: boolean
+}) {
+  const count = (value?: number) => loading ? '—' : (value == null ? '—' : String(value))
+  const rate = (value?: number) => loading ? '—' : (value == null ? '—' : `${(value * 100).toFixed(2)}%`)
+  const metrics = [
+    ['涨停次数', count(data?.limit_up_count)],
+    ['溢价5%次数', count(data?.premium_5_count)],
+    ['次日红盘率', rate(data?.next_day_red_rate)],
+    ['首板封板率', rate(data?.first_board_seal_rate)],
+    ['首板破板率', rate(data?.first_board_broken_rate)],
+    ['连板率', rate(data?.consecutive_rate)],
+  ] as const
+
+  return (
+    <section className="rounded-card border border-border/60 bg-surface/40 px-4 py-3">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <span className="text-sm font-medium text-foreground">溢价基因</span>
+        <span className="text-[10px] text-muted">近{data?.window_days ?? 200}个交易日</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2.5">
+        {metrics.map(([label, value]) => (
+          <div key={label} className="flex items-baseline justify-between gap-3 min-w-0">
+            <span className="text-xs text-muted truncate">{label}</span>
+            <span className="text-sm font-mono font-semibold text-bear shrink-0">{value}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 

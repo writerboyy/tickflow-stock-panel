@@ -75,6 +75,17 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
             "c": "DailyLimitResumption",
         },
     ),
+    76: (
+        "POST",
+        "apphwhq.longhuvip.com",
+        {
+            "a": "GetZhangTingGene",
+            "apiv": "w42",
+            "c": "StockL2Data",
+            "PhoneOSNew": "1",
+            "VerSion": "5.21.0.0",
+        },
+    ),
     100: (
         "POST",
         "applhb.longhuvip.com",

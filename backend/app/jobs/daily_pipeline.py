@@ -665,6 +665,19 @@ def run_now(
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
 
+    # Step 4: 盘后生成个股溢价基因快照。该指标依赖 enriched 的动态涨停信号，
+    # 因此必须放在 enriched 落盘和视图刷新之后；失败不阻断行情管道，但会在日志中可见。
+    premium_gene_rows = 0
+    try:
+        emit("compute_premium_gene", 97, "计算溢价基因…")
+        from app.services import premium_gene
+
+        premium_gene_rows = premium_gene.refresh(repo, force=True).height
+        emit("compute_premium_gene", 99, f"溢价基因完成,{premium_gene_rows} 只个股")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("compute_premium_gene failed (soft): %s", exc)
+        skipped.append("premium_gene")
+
     emit("done", 100, "完成")
     _invalidate(None)  # 兜底:全清
 
@@ -686,6 +699,7 @@ def run_now(
         "minute_rows": written_minute,
         "etf_minute_rows": written_etf_minute,
         "regime_days": regime_days,
+        "premium_gene_rows": premium_gene_rows,
         "lagging_symbols": len(lagging_symbols),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
