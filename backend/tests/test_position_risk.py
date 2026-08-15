@@ -273,7 +273,13 @@ def test_portfolio_store_adds_new_large_order_defaults_to_existing_rule(tmp_path
 def test_position_risk_notifications_default_to_off(tmp_path: Path):
     portfolio = PositionRiskStore(tmp_path).load()
 
-    assert all(rule["enabled"] is True for rule in portfolio["template"]["rules"].values())
+    legacy_rules = {
+        key: rule for key, rule in portfolio["template"]["rules"].items()
+        if key not in {"take_profit", "t_trading"}
+    }
+    assert all(rule["enabled"] is True for rule in legacy_rules.values())
+    assert portfolio["template"]["rules"]["take_profit"]["enabled"] is False
+    assert portfolio["template"]["rules"]["t_trading"]["enabled"] is False
     assert all(rule["notify"] is False for rule in portfolio["template"]["rules"].values())
 
 
@@ -674,6 +680,63 @@ def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
 
     stop = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "stop_loss")
     assert stop["reduction_pct"] == 25
+
+
+def test_take_profit_uses_private_threshold_and_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"take_profit": {"enabled": True, "threshold": 0.10, "action_pct": 50}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    service._evaluate_position(
+        portfolio,
+        position,
+        {"symbol": "600036.SH", "last_price": 11.2, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+    )
+
+    take_profit = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "take_profit")
+    assert take_profit["reduction_pct"] == 50
+    assert take_profit["action"] == "减仓建议"
+
+
+def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 500, "cost_price": 10}],
+        "template": {"rules": {"t_trading": {"enabled": True, "buy_pct": 10, "sell_pct": 25}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    service._evaluate_position(
+        portfolio,
+        position,
+        {"symbol": "600036.SH", "last_price": 10, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+        {"signal_intraday_avg_cross_up": True},
+    )
+
+    recommendation = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "t:signal_intraday_avg_cross_up")
+    assert recommendation["trade_action"] == "BUY"
+    assert recommendation["suggested_price"] == 10
+    assert recommendation["suggested_volume"] == 100
+
+
+def test_t_trade_volume_is_lot_rounded_and_fail_closed():
+    portfolio = {"account": {"cash": 500}}
+    position = {"quantity": 1000, "available": 550}
+    assert PositionRiskService._t_trade_volume(portfolio, position, 10, "SELL", 25) == 100
+    assert PositionRiskService._t_trade_volume(portfolio, position, 10, "BUY", 10) == 0
 
 
 def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Path):

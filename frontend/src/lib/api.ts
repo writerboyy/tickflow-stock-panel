@@ -878,6 +878,9 @@ export interface PositionRiskRecommendation {
   risk_score: number
   action: string
   reduction_pct: number
+  trade_action?: 'BUY' | 'SELL' | null
+  suggested_price?: number | null
+  suggested_volume?: number | null
   reasons: string[]
   source_ids: string[]
   status: PositionRiskRecommendationStatus

@@ -197,11 +197,17 @@ def _set_recommendation(recommendation_id: str, status: str, payload: RevisionPa
     except (FileNotFoundError, ValueError) as exc:
         raise _map_error(exc) from exc
     service._notify_updated()  # noqa: SLF001
+    if status == "confirmed" and item.get("trade_action"):
+        message = "做T建议已标记为已处理；委托结果以 QMT 云端回报为准"
+    elif status == "confirmed":
+        message = "已记录确认，不会修改持仓、模拟盘或发送券商委托"
+    else:
+        message = "已忽略建议"
     return {
         "ok": True,
         "recommendation": item,
         "holding_changed": False,
-        "message": "已记录确认，不会修改持仓、模拟盘或发送券商委托" if status == "confirmed" else "已忽略建议",
+        "message": message,
     }
 
 

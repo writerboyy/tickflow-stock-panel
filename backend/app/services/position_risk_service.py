@@ -113,6 +113,13 @@ def _action_pct(config: dict[str, Any], default: int) -> int:
     return max(0, min(100, int(round(value))))
 
 
+def _trade_pct(config: dict[str, Any], key: str, default: int) -> int:
+    value = _finite(config.get(key))
+    if value is None:
+        value = default
+    return max(0, min(100, int(round(value))))
+
+
 def _timestamp(value: object) -> datetime | None:
     if isinstance(value, datetime):
         return value.astimezone().replace(tzinfo=None) if value.tzinfo else value
@@ -812,6 +819,27 @@ class PositionRiskService:
         if self._set_rule(symbol, "stop_loss", stop_active, now):
             self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {stop_return * 100:.2f}%"])
 
+        take_cfg = self._rule_config(portfolio, symbol, "take_profit")
+        take_threshold = _finite(take_cfg.get("threshold"))
+        take_threshold = take_threshold if take_threshold is not None else 0.10
+        take_action = _action_pct(take_cfg, 100)
+        take_active = bool(
+            take_cfg.get("enabled", False)
+            and stop_return is not None
+            and stop_return >= take_threshold
+        )
+        if self._set_rule(symbol, "take_profit", take_active, now) and stop_return is not None:
+            self._emit(
+                portfolio,
+                position,
+                "take_profit",
+                "固定止盈",
+                "info",
+                55,
+                take_action,
+                [f"现价较成本盈利 {stop_return * 100:.2f}%（目标 {take_threshold:.2%}）"],
+            )
+
         trailing_cfg = self._rule_config(portfolio, symbol, "trailing_drawdown")
         activation_gain = _finite(trailing_cfg.get("activation_gain"))
         activation_gain = activation_gain if activation_gain is not None else 0.05
@@ -1194,6 +1222,27 @@ class PositionRiskService:
                 or self._custom_signal_directions.get(signal_id)
                 or self._signal_direction(signal_id)
             ) if is_custom else self._signal_direction(signal_id)
+            t_config = self._rule_config(portfolio, symbol, "t_trading")
+            if signal_id in INTRADAY_SIGNAL_LABELS and t_config.get("enabled", False):
+                trade_action = "BUY" if direction == "entry" else "SELL"
+                trade_pct = _trade_pct(t_config, "buy_pct" if trade_action == "BUY" else "sell_pct", 10 if trade_action == "BUY" else 25)
+                suggested_volume = self._t_trade_volume(portfolio, position, price, trade_action, trade_pct)
+                if suggested_volume:
+                    self._emit(
+                        portfolio,
+                        position,
+                        f"t:{signal_id}",
+                        f"做T{'买入' if trade_action == 'BUY' else '卖出'}",
+                        "info",
+                        45,
+                        trade_pct,
+                        [f"分时信号：{self._signal_label(signal_id, configured)}"],
+                        source_ids=[signal_id],
+                        trade_action=trade_action,
+                        suggested_price=price,
+                        suggested_volume=suggested_volume,
+                    )
+                continue
             configured_action = _finite(configured.get("action_pct"))
             action = int(round(configured_action)) if configured_action is not None else (25 if direction == "exit" else 0)
             action = max(0, min(100, action))
@@ -1228,6 +1277,26 @@ class PositionRiskService:
             runtime.pop("quote_recovery_pending", None)
             runtime.pop("quote_recovery_guards", None)
         self.store.set_runtime(runtime_key, runtime)
+
+    @staticmethod
+    def _t_trade_volume(
+        portfolio: dict[str, Any],
+        position: dict[str, Any],
+        price: float,
+        action: str,
+        trade_pct: int,
+    ) -> int:
+        if price <= 0 or trade_pct <= 0:
+            return 0
+        if action == "SELL":
+            base = int(_finite(position.get("available")) or 0)
+            return max(0, math.floor(base * trade_pct / 100 / 100) * 100)
+        cash = _finite((portfolio.get("account") or {}).get("cash"))
+        quantity = _finite(position.get("quantity"))
+        if cash is None or cash <= 0 or quantity is None or quantity <= 0:
+            return 0
+        notional = min(cash, price * quantity) * trade_pct / 100
+        return max(0, math.floor(notional / price / 100) * 100)
 
     @staticmethod
     def _signal_direction(signal_id: str) -> str:
@@ -1594,6 +1663,9 @@ class PositionRiskService:
         *,
         source_ids: list[str] | None = None,
         occurred_at: datetime | None = None,
+        trade_action: str | None = None,
+        suggested_price: float | None = None,
+        suggested_volume: int | None = None,
     ) -> None:
         symbol = position.get("symbol") if position else None
         config_symbol = symbol or "__portfolio__"
@@ -1601,6 +1673,8 @@ class PositionRiskService:
             signal_id = rule_id.removeprefix("signal:")
             signal_group = "custom" if signal_id.startswith("csg_") else "builtin"
             notify = self._signal_config(portfolio, config_symbol, signal_group, signal_id).get("notify", False)
+        elif rule_id.startswith("t:"):
+            notify = self._rule_config(portfolio, config_symbol, "t_trading").get("notify", False)
         elif rule_id.startswith("monitor:"):
             notify = self._signal_config(
                 portfolio, config_symbol, "monitor_rules", rule_id.removeprefix("monitor:"),
@@ -1673,6 +1747,9 @@ class PositionRiskService:
                 reasons=reasons,
                 source_ids=source_ids or [rule_id],
                 fingerprint=fingerprint,
+                trade_action=trade_action,
+                suggested_price=suggested_price,
+                suggested_volume=suggested_volume,
             )
 
     def _create_recommendation(
@@ -1687,7 +1764,16 @@ class PositionRiskService:
         reasons: list[str],
         source_ids: list[str],
         fingerprint: str,
+        trade_action: str | None = None,
+        suggested_price: float | None = None,
+        suggested_volume: int | None = None,
     ) -> dict[str, Any]:
+        if trade_action == "BUY":
+            action = "做T买入建议"
+        elif trade_action == "SELL":
+            action = "做T卖出建议"
+        else:
+            action = "清仓建议" if reduction_pct >= 100 else "减仓建议"
         return self.store.add_recommendation({
             "fingerprint": fingerprint,
             "symbol": symbol,
@@ -1695,11 +1781,14 @@ class PositionRiskService:
             "rule_id": rule_id,
             "severity": severity,
             "risk_score": risk_score,
-            "action": "清仓建议" if reduction_pct >= 100 else "减仓建议",
+            "action": action,
             "reduction_pct": reduction_pct,
             "reasons": reasons,
             "source_ids": source_ids,
             "portfolio_revision": portfolio["revision"],
+            "trade_action": trade_action,
+            "suggested_price": suggested_price,
+            "suggested_volume": suggested_volume,
         })
 
     def _notify_updated(self) -> None:

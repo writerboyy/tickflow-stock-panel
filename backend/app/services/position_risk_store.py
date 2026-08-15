@@ -24,7 +24,9 @@ def default_template() -> dict[str, Any]:
     return {
         "rules": {
             "stop_loss": {"enabled": True, "notify": False, "threshold": -0.10, "action_pct": 100},
+            "take_profit": {"enabled": False, "notify": False, "threshold": 0.10, "action_pct": 100},
             "trailing_drawdown": {"enabled": True, "notify": False, "activation_gain": 0.05, "threshold": 0.08, "action_pct": 50},
+            "t_trading": {"enabled": False, "notify": False, "buy_pct": 10, "sell_pct": 25},
             "ma5_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 0},
             "ma10_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 25},
             "ma20_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 50},
@@ -133,6 +135,14 @@ class PositionRiskStore:
                 CREATE INDEX IF NOT EXISTS idx_recommendations_status
                     ON recommendations(status, created_at DESC);
             """)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(recommendations)").fetchall()}
+            for name, column_type in (
+                ("trade_action", "TEXT"),
+                ("suggested_price", "REAL"),
+                ("suggested_volume", "INTEGER"),
+            ):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE recommendations ADD COLUMN {name} {column_type}")
 
     @staticmethod
     def _merge_defaults(value: dict[str, Any]) -> dict[str, Any]:
@@ -247,8 +257,9 @@ class PositionRiskStore:
             pending = conn.execute(
                 """SELECT * FROM recommendations
                    WHERE status='pending' AND scope=? AND COALESCE(symbol, '')=COALESCE(?, '')
+                     AND COALESCE(trade_action, '')=COALESCE(?, '')
                    ORDER BY risk_score DESC, created_at DESC LIMIT 1""",
-                (item.get("scope", "symbol"), item.get("symbol")),
+                (item.get("scope", "symbol"), item.get("symbol"), item.get("trade_action")),
             ).fetchone()
             if pending:
                 stronger = (
@@ -267,14 +278,14 @@ class PositionRiskStore:
                 """INSERT INTO recommendations(
                     id, fingerprint, symbol, scope, rule_id, severity, risk_score, action,
                     reduction_pct, reasons_json, source_ids_json, status, portfolio_revision,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                    created_at, updated_at, trade_action, suggested_price, suggested_volume
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
                 (
                     recommendation_id, item["fingerprint"], item.get("symbol"), item.get("scope", "symbol"),
                     item["rule_id"], item["severity"], int(item["risk_score"]), item["action"],
                     int(item["reduction_pct"]), json.dumps(item.get("reasons", []), ensure_ascii=False),
                     json.dumps(item.get("source_ids", []), ensure_ascii=False), int(item["portfolio_revision"]),
-                    now, now,
+                    now, now, item.get("trade_action"), item.get("suggested_price"), item.get("suggested_volume"),
                 ),
             )
             row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()

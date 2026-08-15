@@ -14,7 +14,8 @@ interface Props {
 }
 
 const RULE_LABELS: Record<string, string> = {
-  stop_loss: '成本止损', trailing_drawdown: '盈利后高点回撤',
+  stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利后高点回撤',
+  t_trading: '做T',
   ma5_breakdown: '跌破 MA5', ma10_breakdown: '跌破 MA10', ma20_breakdown: '跌破 MA20',
   five_minute_drawdown: '5 分钟高点回撤', vwap_breakdown: '分时均价负偏离超限',
   broken_limit_up: '涨停炸板', resealed_limit_up: '涨停回封',
@@ -40,7 +41,7 @@ const FUND_EVIDENCE = [
   ['orderbook_imbalance', '盘口失衡', '五档卖盘持续明显强于买盘'],
 ] as const
 
-type DialogTab = 'independent' | 'combined' | 'builtin' | 'custom' | 'monitor'
+type DialogTab = 'take_profit' | 'stop_loss' | 't_trading'
 
 export type PositionRiskRuleField = {
   key: string
@@ -66,6 +67,14 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
   stop_loss: [
     { key: 'threshold', label: '亏损阈值', suffix: '%', min: -100, max: 0, step: 1, percent: true, defaultValue: -0.10 },
     { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
+  ],
+  take_profit: [
+    { key: 'threshold', label: '目标收益率', suffix: '%', min: 0, max: 500, step: 1, percent: true, defaultValue: 0.10 },
+    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
+  ],
+  t_trading: [
+    { key: 'buy_pct', label: '买入比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 10 },
+    { key: 'sell_pct', label: '卖出比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 25 },
   ],
   trailing_drawdown: [
     { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.05 },
@@ -161,16 +170,18 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
 export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: Props) {
   const queryClient = useQueryClient()
   const [template, setTemplate] = useState(portfolio.template)
-  const [activeTab, setActiveTab] = useState<DialogTab>('independent')
+  const [activeTab, setActiveTab] = useState<DialogTab>('stop_loss')
   const [expandedRule, setExpandedRule] = useState<string | null>(null)
   const [showAdvancedPressure, setShowAdvancedPressure] = useState(false)
+  const [showAdvancedRules, setShowAdvancedRules] = useState(false)
 
   useEffect(() => {
     if (open) {
       setTemplate(structuredClone(portfolio.template))
-      setActiveTab('independent')
+      setActiveTab('stop_loss')
       setExpandedRule(null)
       setShowAdvancedPressure(false)
+      setShowAdvancedRules(false)
     }
   }, [open, portfolio.template])
 
@@ -299,11 +310,9 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     'recovery_seconds', 'cooldown_seconds', 'recovery_sell_ratio', 'recovery_imbalance',
   ].includes(field.key))
   const tabs: Array<[DialogTab, string]> = [
-    ['independent', '独立风险'],
-    ['combined', '组合风险'],
-    ['builtin', '系统信号'],
-    ['custom', '自定义信号'],
-    ['monitor', '监控中心规则'],
+    ['take_profit', '止盈'],
+    ['stop_loss', '止损'],
+    ['t_trading', '做 T'],
   ]
   return (
     <Modal
@@ -331,11 +340,85 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
         ))}
       </nav>
       <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-        {activeTab === 'independent' && (
+        {activeTab === 'take_profit' && (
+          <section className="mx-auto max-w-4xl">
+            <div className="mb-5">
+              <h3 className="text-sm font-semibold">止盈</h3>
+              <p className="mt-1 text-[11px] text-muted">全局规则作为默认值；单股检查器可以单独覆盖目标和建议比例。</p>
+            </div>
+            <div className="divide-y divide-border border-y border-border">
+              {(['take_profit', 'trailing_drawdown'] as const).map(ruleId => {
+                const config = ruleConfig(ruleId)
+                const expanded = expandedRule === ruleId
+                return (
+                  <div key={ruleId} className="py-3">
+                    <div className="flex min-h-8 items-center gap-2 text-xs">
+                      <button type="button" onClick={() => setExpandedRule(expanded ? null : ruleId)} className="flex min-w-0 flex-1 items-center gap-2 text-left" aria-expanded={expanded}>
+                        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-muted transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                        <span className="truncate">{RULE_LABELS[ruleId]}</span>
+                      </button>
+                      <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{actionLabel(ruleId)}</span>
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} /><span>启用</span></label>
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} /><span>通知</span></label>
+                    </div>
+                    {expanded && <div className="mt-3 pl-5">{renderFields(ruleId, POSITION_RISK_RULE_FIELDS[ruleId])}</div>}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        )}
+
+        {activeTab === 't_trading' && (
+          <section className="mx-auto max-w-4xl">
+            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 className="text-sm font-semibold">做 T</h3>
+                <p className="mt-1 text-[11px] text-muted">复用分时价格/均价和 0 轴穿越信号，只生成半自动建议，不会自动下单。</p>
+              </div>
+              <div className="flex items-center gap-3 text-[11px] text-muted">
+                <span className={options?.capabilities.intraday.available ? 'text-bull' : 'text-warning'}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
+                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={ruleConfig('t_trading').enabled !== false} onChange={event => toggleRule('t_trading', event.target.checked)} /><span>启用</span></label>
+                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={ruleConfig('t_trading').notify === true} onChange={event => toggleRuleNotify('t_trading', event.target.checked)} /><span>通知</span></label>
+              </div>
+            </div>
+            <div className="border-y border-border py-3">
+              {renderFields('t_trading', POSITION_RISK_RULE_FIELDS.t_trading, 'sm:grid-cols-2')}
+              <p className="mt-2 text-[10px] text-muted">卖出按可用持仓比例，买入按当前持仓市值比例计算；数量统一向下取整到 100 股/份，并受可用资金限制。</p>
+            </div>
+            <div className="mt-6">
+              <div className="mb-2 flex items-end justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-semibold">分时穿越信号</h4>
+                  <p className="mt-1 text-[10px] text-muted">入场信号生成买入建议，出场信号生成卖出建议；每次边沿只生成一条建议。</p>
+                </div>
+                <span className="text-[10px] text-muted">方向由系统定义</span>
+              </div>
+              <div className="divide-y divide-border border-y border-border">
+                {(options?.builtin_signals ?? []).filter(signal => signal.group === 'intraday').map(signal => {
+                  const saved = template.signals.builtin[signal.id]
+                  const enabled = saved?.enabled !== false
+                  return (
+                    <div key={signal.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
+                      <span className="min-w-0 truncate">{signal.label}</span>
+                      <span className="flex shrink-0 items-center gap-3">
+                        <span className="bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{signal.direction === 'entry' ? '买入' : '卖出'}</span>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={enabled} disabled={!options?.capabilities.intraday.available || ruleConfig('t_trading').enabled === false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} /><span>启用</span></label>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.notify === true} disabled={!options?.capabilities.intraday.available || ruleConfig('t_trading').enabled === false} onChange={event => updateSignal('builtin', signal.id, { notify: event.target.checked })} aria-label={`通知${signal.label}`} /><span>通知</span></label>
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'stop_loss' && (
           <div>
             <div className="mb-5">
-              <h3 className="text-sm font-semibold">独立风险</h3>
-              <p className="mt-1 text-[11px] text-muted">每项规则单独形成风险结论；监控、通知和建议互不依赖。</p>
+              <h3 className="text-sm font-semibold">个股退出规则</h3>
+              <p className="mt-1 text-[11px] text-muted">成本、趋势和涨跌停规则按当前持仓独立形成退出建议；未设置单股覆盖时继承全局模板。</p>
             </div>
             <div className="grid gap-x-8 gap-y-6 lg:grid-cols-3">
               {INDEPENDENT_RULE_GROUPS.map(([group, ruleIds]) => (
@@ -369,7 +452,14 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           </div>
         )}
 
-        {activeTab === 'combined' && (
+        {activeTab === 'stop_loss' && (
+          <button type="button" onClick={() => setShowAdvancedRules(value => !value)} className="mt-6 flex h-9 w-full items-center justify-between border-y border-border px-1 text-left text-xs text-secondary hover:text-foreground" aria-expanded={showAdvancedRules}>
+            <span className="flex items-center gap-2"><ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvancedRules ? '' : '-rotate-90'}`} />高级风控与信号</span>
+            <span className="text-[10px] text-muted">组合风险、系统信号、自定义信号、监控中心</span>
+          </button>
+        )}
+
+        {activeTab === 'stop_loss' && showAdvancedRules && (
           <div className="mx-auto max-w-5xl">
             <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
@@ -475,14 +565,14 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           </div>
         )}
 
-        {activeTab === 'builtin' && (
+        {activeTab === 'stop_loss' && showAdvancedRules && (
           <section className="mx-auto max-w-4xl">
               <div className="mb-2 flex items-center gap-2">
                 <h3 className="text-xs font-semibold text-secondary">系统信号</h3>
                 <span className="rounded bg-elevated px-1.5 py-0.5 text-[10px] text-muted">方向只读</span>
               </div>
               <div className="max-h-64 divide-y divide-border overflow-y-auto border-y border-border">
-                {options?.builtin_signals.map(signal => {
+                {options?.builtin_signals.filter(signal => signal.group !== 'intraday').map(signal => {
                   const saved = template.signals.builtin[signal.id]
                   const direction = signal.direction
                   const actionPct = saved?.action_pct ?? (direction === 'exit' ? 25 : 0)
@@ -509,7 +599,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           </section>
         )}
 
-        {activeTab === 'custom' && (
+        {activeTab === 'stop_loss' && showAdvancedRules && (
           <section className="mx-auto max-w-4xl">
               <h3 className="mb-2 text-xs font-semibold text-secondary">自定义信号</h3>
               <div className="divide-y divide-border border-y border-border">
@@ -537,7 +627,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           </section>
         )}
 
-        {activeTab === 'monitor' && (
+        {activeTab === 'stop_loss' && showAdvancedRules && (
           <section className="mx-auto max-w-4xl">
               <h3 className="mb-2 text-xs font-semibold text-secondary">已有监控规则</h3>
               <div className="divide-y divide-border border-y border-border">
