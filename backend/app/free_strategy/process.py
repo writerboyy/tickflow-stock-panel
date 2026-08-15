@@ -1304,6 +1304,7 @@ def _prepare_dynamic_market_data(
     engine: FreeStrategyEngine,
     start: date,
     end: date,
+    dynamic_cache: Any | None = None,
 ) -> tuple[MarketData, dict[str, Any]]:
     """动态股票池策略只预载基准，股票日线元数据按当日候选滚动加载。"""
     benchmark = str(engine.config.benchmark_symbol or "").strip()
@@ -1316,6 +1317,19 @@ def _prepare_dynamic_market_data(
         end,
         _market_asset_type(repo, benchmark, "index"),
     )
+    if engine.timeframe == "1d" and dynamic_cache is not None:
+        candidate_symbols = list(dynamic_cache.all_symbols)
+        if candidate_symbols:
+            _merge_market_data(
+                market,
+                _load_market_data(
+                    repo,
+                    candidate_symbols,
+                    start - timedelta(days=45),
+                    end,
+                    "stock",
+                ),
+            )
     dates = [
         day for (symbol, day) in market.daily
         if symbol == benchmark and start <= day <= end
@@ -2188,7 +2202,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             engine.restore_checkpoint(payload["checkpoint"])
         if dynamic_cache is not None:
             market_data, warmup_metadata = _prepare_dynamic_market_data(
-                repo, engine, start, end,
+                repo, engine, start, end, dynamic_cache,
             )
         else:
             market_data, warmup_metadata = _prepare_market_data(
@@ -2317,14 +2331,66 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             engine.state = engine.context.state.copy()
             result = engine.result()
         elif payload["timeframe"] == "1d":
-            bars = _read_rows(repo, market_symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
-            output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
-            replayed_rows = len(bars)
-            symbols_seen.update(bar.symbol for bar in bars)
-            trading_days = len({bar.timestamp.date() for bar in bars})
-            first_bar = min(bar.timestamp for bar in bars)
-            last_bar = max(bar.timestamp for bar in bars)
-            result = engine.run(bars)
+            if dynamic_cache is None:
+                bars = _read_rows(repo, market_symbols, start, end, payload["asset_type"], payload["timeframe"], market_data=market_data)
+                output.put({"type": "progress", "message": f"回放 {len(bars)} 根日K", "progress": 0.35})
+                replayed_rows = len(bars)
+                symbols_seen.update(bar.symbol for bar in bars)
+                trading_days = len({bar.timestamp.date() for bar in bars})
+                first_bar = min(bar.timestamp for bar in bars)
+                last_bar = max(bar.timestamp for bar in bars)
+                result = engine.run(bars)
+            else:
+                output.put({
+                    "type": "progress",
+                    "message": "按交易日回放 PIT 强势候选日K",
+                    "progress": 0.35,
+                })
+                dynamic_dates = sorted({
+                    day for symbol, day in market_data.daily
+                    if symbol == config.benchmark_symbol and start <= day <= end
+                })
+                for index, trading_day in enumerate(dynamic_dates, start=1):
+                    held_symbols = [
+                        symbol for symbol, quantity in engine.account.positions.items()
+                        if float(quantity) > 0
+                    ]
+                    candidate_symbols = [
+                        str(row["symbol"])
+                        for row in dynamic_cache.snapshot(trading_day).get("candidates", [])
+                    ]
+                    session_symbols = _market_symbols(
+                        engine,
+                        list(dict.fromkeys([*candidate_symbols, *held_symbols])),
+                    )
+                    rows = _daily_bars(
+                        session_symbols,
+                        trading_day,
+                        trading_day,
+                        payload["asset_type"],
+                        market_data,
+                    )
+                    if not rows:
+                        continue
+                    replayed_rows += len(rows)
+                    trading_days += 1
+                    symbols_seen.update(bar.symbol for bar in rows)
+                    for symbol in candidate_symbols:
+                        if symbol not in requested_symbols:
+                            requested_symbols.append(symbol)
+                    first_bar = rows[0].timestamp if first_bar is None else min(first_bar, rows[0].timestamp)
+                    last_bar = rows[-1].timestamp if last_bar is None else max(last_bar, rows[-1].timestamp)
+                    engine.run(rows, return_result=False)
+                    if index % 20 == 0:
+                        output.put({
+                            "type": "progress",
+                            "message": f"已回放 {index} 个交易日的强势候选",
+                            "progress": min(0.9, 0.35 + 0.55 * index / len(dynamic_dates)),
+                        })
+                if not trading_days:
+                    raise ValueError("回测区间没有可用的 PIT 强势候选日K")
+                engine.state = engine.context.state.copy()
+                result = engine.result()
         else:
             output.put({"type": "progress", "message": "按交易日读取并回放分钟K", "progress": 0.35})
             cursor = start
