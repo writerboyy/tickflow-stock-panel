@@ -14,6 +14,8 @@
 
 分钟K、财务、深度盘口暂时仍走 TickFlow。
 
+> 这里的“自定义数据源”是后端 provider/HTTP 映射契约, 不等同于独立 StockDB 服务的浏览器 SDK。StockDB 当前不注册为项目 provider, `gp`/`bk`/`zb`/`tu` 只能在其本地服务启动且已有数据时单独调用, 具体边界见[StockDB 独立数据源接入限制](./plugin-development.md#stockdb-独立数据源接入限制)。
+
 ## 辅助维度与主数据源的边界
 
 不能替换 `daily`、`minute`、`realtime` 等标准行情数据集的辅助维度，不进入
