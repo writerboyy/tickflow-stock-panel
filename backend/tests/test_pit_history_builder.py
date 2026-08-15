@@ -622,6 +622,13 @@ def test_read_raw_rows_supports_csv(tmp_path):
     assert read_raw_rows(path) == [{"品种代码": "600519", "纳入日期": "2005-04-08"}]
 
 
+def test_read_raw_rows_supports_gb18030_csv_fallback(tmp_path):
+    path = tmp_path / "index-gb18030.csv"
+    path.write_bytes("品种代码,品种名称\n600519,贵州茅台\n".encode("gb18030"))
+
+    assert read_raw_rows(path) == [{"品种代码": "600519", "品种名称": "贵州茅台"}]
+
+
 def test_read_raw_rows_supports_html_history_table(tmp_path):
     path = tmp_path / "index.html"
     path.write_text(

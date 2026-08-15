@@ -65,7 +65,14 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-## 5. Commit Every Code Change
+## 5. Data Computation and Performance
+
+- Batch computation, filtering, joins, grouping, windows, and aggregations use Polars expressions or LazyFrame first; do not convert to Python lists/dicts or row loops before computing.
+- Use DataFrame/record-level processing only for stateful logic that cannot be expressed in batch, external-library boundaries, serialization, or UI adaptation. Keep the boundary small and document why it is necessary.
+- pandas is allowed only at a dependency-required boundary (currently vectorbt backtesting); prepare and batch-compute in Polars and convert once at the boundary.
+- For optimization reviews, locate the real hot path first and prioritize removing full scans, repeated conversions, N+1 requests, and work while holding locks. Do not claim a performance gain without same-scale, same-environment timing or request-count evidence.
+
+## 6. Commit Every Code Change
 
 **Make completed code changes traceable in Git.**
 
@@ -77,7 +84,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Do not push commits or open a pull request unless the user explicitly asks.
 - If a commit cannot be created safely, explain the blocker instead of silently leaving verified code uncommitted.
 
-## 6. Parallel Development Workflow
+## 7. Parallel Development Workflow
 
 **When parallel development is detected in the current repository, isolate the task by default. Do not wait for the user to call it out.**
 

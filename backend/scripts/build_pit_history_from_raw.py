@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 import gzip
 from html.parser import HTMLParser
+from io import StringIO
 import json
+import math
 from pathlib import Path
 import re
 
-import pandas as pd
 import polars as pl
 
 from app.config import settings
@@ -133,18 +134,24 @@ def _rows_from_html(html_text: str) -> list[dict]:
     return fallback
 
 
-def _clean_frame(frame: pd.DataFrame) -> list[dict]:
-    frame = frame.dropna(how="all")
-    frame.columns = [str(col).strip() for col in frame.columns]
-    return json.loads(
-        frame.astype(object)
-        .where(pd.notnull(frame), None)
-        .to_json(
-            orient="records",
-            force_ascii=False,
-            date_format="iso",
-        )
-    )
+def _clean_frame(frame: pl.DataFrame) -> list[dict]:
+    """Normalize tabular input with Polars before row-level serialization."""
+    if frame.is_empty():
+        return []
+    frame = frame.rename({column: str(column).strip() for column in frame.columns})
+    frame = frame.filter(pl.any_horizontal(pl.all().is_not_null()))
+    rows: list[dict] = []
+    for row in frame.to_dicts():
+        clean: dict = {}
+        for key, value in row.items():
+            if isinstance(value, (date, datetime)):
+                clean[key] = value.isoformat()
+            elif isinstance(value, float) and not math.isfinite(value):
+                clean[key] = None
+            else:
+                clean[key] = value
+        rows.append(clean)
+    return rows
 
 
 def _read_csv(path: Path, encoding: str) -> list[dict]:
@@ -154,7 +161,8 @@ def _read_csv(path: Path, encoding: str) -> list[dict]:
     last_error: Exception | None = None
     for item in encodings:
         try:
-            return _clean_frame(pd.read_csv(path, dtype=object, encoding=item))
+            text = path.read_bytes().decode(item)
+            return _clean_frame(pl.read_csv(StringIO(text), infer_schema=False))
         except UnicodeDecodeError as exc:
             last_error = exc
     if last_error:
@@ -167,7 +175,7 @@ def read_raw_rows(path: Path, *, encoding: str = "utf-8") -> list[dict]:
     if suffix in {".csv", ".txt"}:
         return _read_csv(path, encoding)
     if suffix in {".xlsx", ".xls"}:
-        return _clean_frame(pd.read_excel(path, dtype=object))
+        return _clean_frame(pl.read_excel(path, infer_schema_length=0))
     if suffix == ".parquet":
         return pl.read_parquet(path).to_dicts()
     if suffix in {".html", ".htm"}:
