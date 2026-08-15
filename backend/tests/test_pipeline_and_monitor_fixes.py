@@ -163,6 +163,10 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
         lambda *_: {"rows": 0, "trading_days": 0},
     )
     monkeypatch.setattr(daily_pipeline.kline_sync, "sync_and_persist_minute", sync_minute)
+    premium_refresh = MagicMock(
+        return_value=pl.DataFrame({"symbol": ["000001.SZ"]})
+    )
+    monkeypatch.setattr("app.services.premium_gene.refresh", premium_refresh)
     monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_a_share", lambda: False)
     monkeypatch.setattr(daily_pipeline._prefs, "get_adj_factor_provider", lambda: "tickflow")
     monkeypatch.setattr(daily_pipeline._prefs, "get_pipeline_pull_index", lambda: False)
@@ -193,6 +197,8 @@ def test_daily_pipeline_syncs_etf_minute_when_enabled(monkeypatch, tmp_path):
     assert result["pit_reference_crosschecked_snapshots"] == 2
     assert result["pit_reference_baostock_lifecycle_rows"] == 12
     assert result["pit_reference_instrument_appended_symbols"] == 2
+    assert result["premium_gene_rows"] == 1
+    premium_refresh.assert_called_once_with(repo, force=True)
     assert "sync_pit_reference" not in result["skipped_stages"]
     assert "sync_etf_minute" not in result["skipped_stages"]
     assert len(sync_calls) == 1
