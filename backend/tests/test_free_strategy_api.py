@@ -13,6 +13,7 @@ from app.api.free_strategy import (
     PaperWrite,
     _job_payload,
     cleanup_incomplete_backtests,
+    migrate_legacy_external_large_amount_first_board,
     migrate_legacy_five_fortunes_strategies,
     migrate_managed_etf_nav_alignment,
     migrate_managed_large_amount_first_board,
@@ -321,6 +322,39 @@ def test_managed_large_amount_first_board_migrates_only_unchanged_source(
     assert repeated == []
     loaded = store.get(managed["id"])
     assert loaded["source"] == TEMPLATES["large_amount_first_board"]["source"]
+    assert loaded["revision"] == 2
+    assert store.get(custom["id"])["revision"] == 1
+
+
+def test_legacy_external_large_amount_first_board_uses_native_minute_template_once(
+    monkeypatch,
+    tmp_path,
+):
+    source = """# Clone source: https://www.joinquant.com/post/59883
+# Title: first-board large turnover tick strategy
+from jqdata import *
+"""
+    store = FreeStrategyStore(tmp_path)
+    legacy = store.save(
+        "legacy", "首板大成交", source, {"timeframe": "1d", "asset_type": "etf"},
+    )
+    custom = store.save(
+        "custom", "首板大成交", f"{source}\n# user change\n", {"timeframe": "1d"},
+    )
+    monkeypatch.setattr(
+        free_strategy,
+        "LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256",
+        frozenset({sha256(source.encode("utf-8")).hexdigest()}),
+    )
+
+    migrated = migrate_legacy_external_large_amount_first_board(tmp_path)
+    repeated = migrate_legacy_external_large_amount_first_board(tmp_path)
+
+    assert migrated == [legacy["id"]]
+    assert repeated == []
+    loaded = store.get(legacy["id"])
+    assert loaded["source"] == TEMPLATES["large_amount_first_board"]["source"]
+    assert loaded["config"] == TEMPLATES["large_amount_first_board"]["config"]
     assert loaded["revision"] == 2
     assert store.get(custom["id"])["revision"] == 1
 

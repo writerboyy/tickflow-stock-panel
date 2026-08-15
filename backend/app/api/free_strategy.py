@@ -28,6 +28,8 @@ from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
 from app.free_strategy.templates import (
     LEGACY_FIVE_FORTUNES_SOURCE,
+    LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_MARKERS,
+    LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256,
     MANAGED_ETF_NAV_ALIGNMENT_SHA256,
     MANAGED_FIVE_FORTUNES_SHA256,
     MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256,
@@ -377,6 +379,35 @@ def migrate_managed_large_amount_first_board(data_dir: Path) -> list[str]:
             strategy["name"],
             replacement,
             strategy.get("config", {}),
+        )
+        migrated.append(str(strategy["id"]))
+    return migrated
+
+
+def migrate_legacy_external_large_amount_first_board(data_dir: Path) -> list[str]:
+    """Replace the untouched JoinQuant first-board import with the native minute strategy."""
+    store = FreeStrategyStore(data_dir)
+    template = TEMPLATES["large_amount_first_board"]
+    replacement = str(template["source"])
+    replacement_hash = sha256(replacement.encode("utf-8")).hexdigest()
+    migrated: list[str] = []
+    for summary in store.list():
+        strategy = store.get(str(summary["id"]))
+        source = str(strategy["source"])
+        if str(strategy.get("name") or "").strip() != "首板大成交":
+            continue
+        source_hash = sha256(source.encode("utf-8")).hexdigest()
+        if source_hash not in LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256:
+            continue
+        if not all(marker in source for marker in LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_MARKERS):
+            continue
+        if source_hash == replacement_hash:
+            continue
+        store.save(
+            strategy["id"],
+            strategy["name"],
+            replacement,
+            dict(template["config"]),
         )
         migrated.append(str(strategy["id"]))
     return migrated
