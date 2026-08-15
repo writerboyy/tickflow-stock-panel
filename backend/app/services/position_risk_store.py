@@ -26,7 +26,30 @@ def default_template() -> dict[str, Any]:
             "stop_loss": {"enabled": True, "notify": False, "threshold": -0.10, "action_pct": 100},
             "take_profit": {"enabled": False, "notify": False, "threshold": 0.10, "action_pct": 100},
             "trailing_drawdown": {"enabled": True, "notify": False, "activation_gain": 0.05, "threshold": 0.08, "action_pct": 50},
-            "t_trading": {"enabled": False, "notify": False, "buy_pct": 10, "sell_pct": 25},
+            "take_profit_ladder": {
+                "enabled": True, "active": False, "notify": False,
+                "first_r": 1.0, "first_action_pct": 30,
+                "second_r": 2.0, "second_action_pct": 30,
+                "runner_pct": 40, "fees_buffer": 0.002,
+                "runner_atr_multiple": 2.0,
+            },
+            "t_trading": {
+                "enabled": False, "notify": False, "buy_pct": 10, "sell_pct": 25,
+                "confirm_bars": 2, "cooldown_minutes": 10,
+                "min_expected_return": 0.005, "max_daily_trades": 3,
+            },
+            "structure_stop": {
+                "enabled": True, "active": False, "notify": False, "reference": "vwap",
+                "buffer": 0.002, "confirm_bars": 2, "action_pct": 50,
+            },
+            "atr_protection": {
+                "enabled": True, "active": False, "notify": False, "activation_gain": 0.02,
+                "atr_multiple": 2.0, "action_pct": 50,
+            },
+            "time_stop": {
+                "enabled": True, "active": False, "notify": False, "max_minutes": 120,
+                "min_gain": 0.0, "close_before_minutes": 15, "action_pct": 25,
+            },
             "ma5_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 0},
             "ma10_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 25},
             "ma20_breakdown": {"enabled": True, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 50},
@@ -140,6 +163,10 @@ class PositionRiskStore:
                 ("trade_action", "TEXT"),
                 ("suggested_price", "REAL"),
                 ("suggested_volume", "INTEGER"),
+                ("stage", "TEXT"),
+                ("r_multiple", "REAL"),
+                ("effective_stop_price", "REAL"),
+                ("feature_snapshot_at", "TEXT"),
             ):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE recommendations ADD COLUMN {name} {column_type}")
@@ -278,14 +305,17 @@ class PositionRiskStore:
                 """INSERT INTO recommendations(
                     id, fingerprint, symbol, scope, rule_id, severity, risk_score, action,
                     reduction_pct, reasons_json, source_ids_json, status, portfolio_revision,
-                    created_at, updated_at, trade_action, suggested_price, suggested_volume
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
+                    created_at, updated_at, trade_action, suggested_price, suggested_volume,
+                    stage, r_multiple, effective_stop_price, feature_snapshot_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     recommendation_id, item["fingerprint"], item.get("symbol"), item.get("scope", "symbol"),
                     item["rule_id"], item["severity"], int(item["risk_score"]), item["action"],
                     int(item["reduction_pct"]), json.dumps(item.get("reasons", []), ensure_ascii=False),
                     json.dumps(item.get("source_ids", []), ensure_ascii=False), int(item["portfolio_revision"]),
                     now, now, item.get("trade_action"), item.get("suggested_price"), item.get("suggested_volume"),
+                    item.get("stage"), item.get("r_multiple"), item.get("effective_stop_price"),
+                    item.get("feature_snapshot_at"),
                 ),
             )
             row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()

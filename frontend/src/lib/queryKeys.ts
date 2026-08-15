@@ -24,6 +24,7 @@ export const QK = {
   largeOrders:   ['large-orders'] as const,
   largeOrdersAnalysis: (symbol: string) => ['large-orders', 'analysis', symbol] as const,
   positionRisk:  ['position-risk'] as const,
+  positionRiskFeatures: (symbols?: string) => ['position-risk', 'features', symbols ?? 'all'] as const,
   positionRiskOptions: ['position-risk', 'options'] as const,
   positionRiskRecommendations: (status?: string) => ['position-risk', 'recommendations', status ?? 'all'] as const,
   positionRiskEvents: ['position-risk', 'events'] as const,

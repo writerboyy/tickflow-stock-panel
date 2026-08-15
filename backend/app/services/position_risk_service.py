@@ -11,7 +11,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from copy import deepcopy
-from datetime import datetime, time as clock_time
+from datetime import datetime, timedelta, time as clock_time
 from typing import Any
 
 import polars as pl
@@ -118,6 +118,11 @@ def _trade_pct(config: dict[str, Any], key: str, default: int) -> int:
     if value is None:
         value = default
     return max(0, min(100, int(round(value))))
+
+
+def _advanced_rule_enabled(config: dict[str, Any]) -> bool:
+    """新短线规则以 active 作为显式确认开关，旧配置合并后默认保持关闭。"""
+    return config.get("enabled", True) is not False and config.get("active", False) is True
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -724,6 +729,9 @@ class PositionRiskService:
         intraday_signals = self._intraday_signals(
             {item["symbol"] for item in portfolio["positions"]}, current_time,
         )
+        intraday_features = self._intraday_features(
+            {item["symbol"] for item in portfolio["positions"]}, current_time,
+        )
         for position in portfolio["positions"]:
             symbol = position["symbol"]
             quote = self._latest_quotes.get(symbol)
@@ -735,6 +743,7 @@ class PositionRiskService:
                 quote,
                 current_time,
                 intraday_signals.get(symbol, {}),
+                intraday_features.get(symbol, {}),
             )
         self._evaluate_account(portfolio, current_time)
 
@@ -768,6 +777,94 @@ class PositionRiskService:
             ))
         return result
 
+    def _intraday_features(
+        self,
+        symbols: set[str],
+        now: datetime,
+    ) -> dict[str, dict[str, Any]]:
+        getter = getattr(self.quote_service, "get_intraday_features", None)
+        if not callable(getter):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for asset_type in ("stock", "etf"):
+            asset_symbols = {
+                symbol for symbol in symbols
+                if self._asset_types.get(symbol, "stock") == asset_type
+            }
+            if not asset_symbols:
+                continue
+            try:
+                result.update(getter(asset_symbols, asset_type=asset_type, now=now))
+            except (TypeError, ValueError, RuntimeError):
+                logger.warning("持仓风控分时特征获取失败", exc_info=True)
+            for symbol in asset_symbols:
+                feature = result.get(symbol)
+                if feature is None:
+                    continue
+                flow = self._flow_state(symbol, now)
+                feature.update({
+                    "buy_ratio": flow.get("buy_ratio"),
+                    "sell_ratio": flow.get("sell_ratio"),
+                    "flow_samples": flow.get("samples", 0),
+                })
+                snapshots = list(self._depth.get(symbol, ()))
+                if snapshots:
+                    latest = snapshots[-1]
+                    bids = latest.get("bid_volumes") or [
+                        _finite(latest.get("bid1_volume", latest.get("bid_volume1"))) or 0.0
+                    ]
+                    asks = latest.get("ask_volumes") or [
+                        _finite(latest.get("ask1_volume", latest.get("ask_volume1"))) or 0.0
+                    ]
+                    bid_total = sum(_finite(value) or 0 for value in bids)
+                    ask_total = sum(_finite(value) or 0 for value in asks)
+                    feature["orderbook_imbalance"] = (
+                        (bid_total - ask_total) / (bid_total + ask_total)
+                        if bid_total + ask_total > 0 else None
+                    )
+        return result
+
+    def feature_snapshot(
+        self,
+        symbols: set[str] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """返回 API 使用的特征快照，并附带持仓状态和实际保护价。"""
+        portfolio = self.store.load()
+        selected = symbols or {
+            str(item.get("symbol") or "").strip().upper()
+            for item in portfolio.get("positions", [])
+        }
+        selected = {symbol for symbol in selected if symbol}
+        self._preload_history_if_missing()
+        current_time = (now or cn_now()).replace(tzinfo=None)
+        features = self._intraday_features(selected, current_time)
+        result: dict[str, dict[str, Any]] = {}
+        positions = {str(item.get("symbol")): item for item in portfolio.get("positions", [])}
+        for symbol in selected:
+            position = positions.get(symbol) or {}
+            runtime = self.store.get_runtime(f"position:{symbol}", {}) or {}
+            cost = _finite(position.get("cost_price"))
+            stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
+            threshold = _finite(stop_cfg.get("threshold"))
+            hard_stop = cost * (1 + threshold) if cost is not None and threshold is not None else None
+            item = dict(features.get(symbol) or {
+                "symbol": symbol, "available": False, "fresh": False,
+                "reason": "分时特征不可用", "source": None, "as_of": None,
+            })
+            item.update({
+                "stage": runtime.get("stage", "initial"),
+                "r_multiple": runtime.get("r_multiple"),
+                "effective_stop_price": runtime.get("effective_stop_price") or hard_stop,
+                "hard_stop_price": hard_stop,
+                "feature_snapshot_at": runtime.get("feature_snapshot_at") or item.get("as_of"),
+                "position_started_at": runtime.get("position_started_at"),
+                "t_trade_count": int((runtime.get("t_trade") or {}).get("count") or 0),
+                "t_trade_date": (runtime.get("t_trade") or {}).get("date"),
+            })
+            result[symbol] = item
+        return result
+
     def _evaluate_position(
         self,
         portfolio: dict[str, Any],
@@ -775,6 +872,7 @@ class PositionRiskService:
         quote: dict[str, Any],
         now: datetime,
         intraday_signals: dict[str, Any] | None = None,
+        intraday_features: dict[str, Any] | None = None,
     ) -> None:
         symbol = position["symbol"]
         price = _finite(quote.get("last_price"))
@@ -801,6 +899,18 @@ class PositionRiskService:
         runtime["high_price"] = high
         runtime["last_price"] = price
         runtime["last_quote_at"] = quote.get("timestamp")
+        if cost is not None:
+            previous_cost = _finite(runtime.get("position_cost"))
+            if previous_cost is None or abs(previous_cost - cost) > 1e-9:
+                runtime.update({
+                    "position_cost": cost,
+                    "position_started_at": now.timestamp(),
+                    "stage": "initial",
+                    "triggered_stages": [],
+                    "initial_stop_price": None,
+                    "initial_r": None,
+                    "effective_stop_price": None,
+                })
 
         stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
         stop_threshold = _finite(stop_cfg.get("threshold"))
@@ -818,6 +928,92 @@ class PositionRiskService:
         )
         if self._set_rule(symbol, "stop_loss", stop_active, now):
             self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {stop_return * 100:.2f}%"])
+
+        initial_stop_price = cost * (1 + stop_threshold) if cost and stop_threshold < 0 else None
+        if initial_stop_price and _finite(runtime.get("initial_stop_price")) is None:
+            runtime["initial_stop_price"] = initial_stop_price
+            runtime["initial_r"] = max(cost - initial_stop_price, cost * 0.0001)
+            runtime["effective_stop_price"] = initial_stop_price
+        initial_r = _finite(runtime.get("initial_r"))
+        r_multiple = (price - cost) / initial_r if cost and initial_r and initial_r > 0 else None
+        if r_multiple is not None:
+            runtime["r_multiple"] = r_multiple
+
+        features = intraday_features or {}
+        features_available = bool(features.get("available") and features.get("fresh"))
+        if features.get("as_of"):
+            runtime["feature_snapshot_at"] = features.get("as_of")
+
+        structure_cfg = self._rule_config(portfolio, symbol, "structure_stop")
+        if _advanced_rule_enabled(structure_cfg) and features_available:
+            reference_name = str(structure_cfg.get("reference") or "vwap")
+            reference_map = {
+                "opening_range_low": features.get("opening_range_low"),
+                "five_minute_low": features.get("five_minute_low"),
+                "vwap": features.get("session_vwap"),
+                "ema20": features.get("ema20_1m"),
+            }
+            reference = _finite(reference_map.get(reference_name))
+            buffer = _finite(structure_cfg.get("buffer")) or 0.002
+            confirm_bars = max(1, int(_finite(structure_cfg.get("confirm_bars")) or 2))
+            closed_bars = features.get("closed_bars_5m") or []
+            structure_broken = bool(
+                reference and len(closed_bars) >= confirm_bars
+                and all(
+                    (_finite(item.get("close")) or price) <= reference * (1 - buffer)
+                    for item in closed_bars[-confirm_bars:]
+                )
+            )
+            if self._set_rule(symbol, "structure_stop", structure_broken, now):
+                self._emit(
+                    portfolio, position, "structure_stop", "分时结构止损", "critical", 75,
+                    _action_pct(structure_cfg, 50),
+                    [f"连续 {confirm_bars} 根闭合 5 分钟 K 跌破 {reference_name} {reference:.3f}"],
+                    feature_snapshot_at=features.get("as_of"),
+                    effective_stop_price=reference * (1 - buffer) if reference else None,
+                )
+
+        atr_cfg = self._rule_config(portfolio, symbol, "atr_protection")
+        atr = _finite(features.get("atr14_5m")) if features_available else None
+        atr_multiple = _finite(atr_cfg.get("atr_multiple")) or 2.0
+        activation_gain = _finite(atr_cfg.get("activation_gain")) or 0.02
+        atr_stop = high - atr * atr_multiple if atr and high > 0 else None
+        if _advanced_rule_enabled(atr_cfg) and atr_stop and cost and stop_return is not None and stop_return >= activation_gain:
+            effective_stop = max(_finite(runtime.get("effective_stop_price")) or 0, atr_stop)
+            runtime["effective_stop_price"] = effective_stop
+            atr_active = price <= effective_stop
+            if self._set_rule(symbol, "atr_protection", atr_active, now):
+                self._emit(
+                    portfolio, position, "atr_protection", "ATR 移动保护", "warn", 65,
+                    _action_pct(atr_cfg, 50),
+                    [f"现价 {price:.3f} 低于动态保护价 {effective_stop:.3f}（5 分钟 ATR {atr:.3f}）"],
+                    feature_snapshot_at=features.get("as_of"),
+                    effective_stop_price=effective_stop,
+                )
+
+        time_cfg = self._rule_config(portfolio, symbol, "time_stop")
+        started_at = _finite(runtime.get("position_started_at"))
+        max_minutes = _finite(time_cfg.get("max_minutes")) or 120
+        min_gain = _finite(time_cfg.get("min_gain")) or 0.0
+        close_before = max(0.0, _finite(time_cfg.get("close_before_minutes")) or 15)
+        close_cutoff = datetime.combine(now.date(), clock_time(15, 0)) - timedelta(minutes=close_before)
+        near_close = close_cutoff <= now <= datetime.combine(now.date(), clock_time(15, 0))
+        time_active = bool(
+            _advanced_rule_enabled(time_cfg) and started_at is not None
+            and (now.timestamp() - started_at >= max_minutes * 60 or near_close)
+            and stop_return is not None and stop_return < min_gain
+        )
+        if _advanced_rule_enabled(time_cfg) and self._set_rule(symbol, "time_stop", time_active, now):
+            time_reason = (
+                f"距离收盘不足 {int(close_before)} 分钟且收益 {stop_return:.2%} 未达到 {min_gain:.2%}"
+                if near_close and (now.timestamp() - (started_at or now.timestamp())) < max_minutes * 60
+                else f"持仓超过 {int(max_minutes)} 分钟且收益 {stop_return:.2%} 未达到 {min_gain:.2%}"
+            )
+            self._emit(
+                portfolio, position, "time_stop", "时间止损", "warn", 55,
+                _action_pct(time_cfg, 25),
+                [time_reason],
+            )
 
         take_cfg = self._rule_config(portfolio, symbol, "take_profit")
         take_threshold = _finite(take_cfg.get("threshold"))
@@ -852,6 +1048,62 @@ class PositionRiskService:
         )
         if self._set_rule(symbol, "trailing_drawdown", trailing_active, now):
             self._emit(portfolio, position, "trailing_drawdown", "盈利回撤", "warn", 60, trailing_action, [f"从持仓高点回撤 {(1 - price / high) * 100:.2f}%"])
+
+        ladder_cfg = self._rule_config(portfolio, symbol, "take_profit_ladder")
+        if _advanced_rule_enabled(ladder_cfg) and r_multiple is not None:
+            triggered = set(runtime.get("triggered_stages") or [])
+            stage_specs = (
+                ("tp_1", _finite(ladder_cfg.get("first_r")) or 1.0, _action_pct({"action_pct": ladder_cfg.get("first_action_pct")}, 30)),
+                ("tp_2", _finite(ladder_cfg.get("second_r")) or 2.0, _action_pct({"action_pct": ladder_cfg.get("second_action_pct")}, 30)),
+            )
+            for stage, threshold_r, action_pct in stage_specs:
+                if r_multiple < threshold_r or stage in triggered:
+                    continue
+                triggered.add(stage)
+                runtime["stage"] = stage
+                if stage == "tp_1":
+                    fee_buffer = max(0.0, _finite(ladder_cfg.get("fees_buffer")) or 0.002)
+                    runtime["effective_stop_price"] = max(
+                        _finite(runtime.get("effective_stop_price")) or 0,
+                        cost * (1 + fee_buffer) if cost else 0,
+                    )
+                else:
+                    runtime["stage"] = "runner"
+                    runner_atr = _finite(features.get("atr14_5m")) if features_available else None
+                    runner_multiple = _finite(ladder_cfg.get("runner_atr_multiple")) or 2.0
+                    if runner_atr:
+                        runtime["effective_stop_price"] = max(
+                            _finite(runtime.get("effective_stop_price")) or 0,
+                            high - runner_atr * runner_multiple,
+                        )
+                if self._set_rule(
+                    symbol, "take_profit_ladder", True, now,
+                    event_token=f"stage:{stage}", cooldown_seconds=0,
+                ):
+                    self._emit(
+                        portfolio, position, "take_profit_ladder", f"分批止盈 {stage}", "info", 58 if stage == "tp_1" else 68,
+                        action_pct,
+                        [f"收益达到 {r_multiple:.2f}R（阶段阈值 {threshold_r:.2f}R）"],
+                        source_ids=[stage], stage=stage, r_multiple=r_multiple,
+                        effective_stop_price=runtime.get("effective_stop_price"),
+                        feature_snapshot_at=features.get("as_of"),
+                    )
+            runtime["triggered_stages"] = sorted(triggered)
+            if runtime.get("stage") == "runner" and runtime.get("effective_stop_price"):
+                runner_active = price <= float(runtime["effective_stop_price"])
+                if self._set_rule(
+                    symbol, "take_profit_runner", runner_active, now,
+                    event_token="runner" if runner_active else None,
+                    cooldown_seconds=0,
+                ):
+                    self._emit(
+                        portfolio, position, "take_profit_runner", "剩余仓位移动保护", "warn", 65,
+                        _action_pct({"action_pct": ladder_cfg.get("runner_pct")}, 40),
+                        [f"剩余仓位触及移动保护价 {float(runtime['effective_stop_price']):.3f}"],
+                        source_ids=["runner"], stage="runner", r_multiple=r_multiple,
+                        effective_stop_price=runtime.get("effective_stop_price"),
+                        feature_snapshot_at=features.get("as_of"),
+                    )
 
         history = self._history.get(symbol) or {}
         raw_close = _finite(history.get("raw_close"))
@@ -1226,8 +1478,72 @@ class PositionRiskService:
             if signal_id in INTRADAY_SIGNAL_LABELS and t_config.get("enabled", False):
                 trade_action = "BUY" if direction == "entry" else "SELL"
                 trade_pct = _trade_pct(t_config, "buy_pct" if trade_action == "BUY" else "sell_pct", 10 if trade_action == "BUY" else 25)
+                t_allowed = bool(features and features.get("available") and features.get("fresh"))
+                if t_allowed:
+                    closed_bars = features.get("closed_bars") or []
+                    confirm_bars = max(1, int(_finite(t_config.get("confirm_bars")) or 2))
+                    vwap_value = _finite(features.get("session_vwap"))
+                    ema9_1m = _finite(features.get("ema9_1m"))
+                    ema20_1m = _finite(features.get("ema20_1m"))
+                    ema9_5m = _finite(features.get("ema9_5m"))
+                    ema20_5m = _finite(features.get("ema20_5m"))
+                    if t_allowed and (
+                        len(closed_bars) < confirm_bars or features.get("bars_5m", 0) < 2
+                        or vwap_value is None or ema9_1m is None or ema20_1m is None
+                        or ema9_5m is None or ema20_5m is None
+                    ):
+                        t_allowed = False
+                    if t_allowed:
+                        recent_closes = [
+                            _finite(item.get("close")) for item in closed_bars[-confirm_bars:]
+                        ]
+                        recent_closes = [value for value in recent_closes if value is not None]
+                        if trade_action == "BUY":
+                            t_allowed = bool(
+                                len(recent_closes) == confirm_bars
+                                and all(value >= vwap_value for value in recent_closes)
+                                and ema9_1m > ema20_1m and ema9_5m >= ema20_5m
+                            )
+                        else:
+                            t_allowed = bool(
+                                len(recent_closes) == confirm_bars
+                                and all(value <= vwap_value for value in recent_closes)
+                                and ema9_1m < ema20_1m and ema9_5m <= ema20_5m
+                            )
+                        expected_return = abs(price - vwap_value) / price if price else 0.0
+                        minimum_return = _finite(t_config.get("min_expected_return")) or 0.0
+                        t_allowed = t_allowed and expected_return >= minimum_return
+                        flow_ratio = _finite(features.get("buy_ratio" if trade_action == "BUY" else "sell_ratio"))
+                        relative_volume = _finite(features.get("relative_volume"))
+                        t_allowed = t_allowed and flow_ratio is not None and flow_ratio >= 0.5
+                        t_allowed = t_allowed and relative_volume is not None and relative_volume >= 0.5
+                        if features.get("orderbook_imbalance") is not None:
+                            imbalance = float(features["orderbook_imbalance"])
+                            t_allowed = t_allowed and (imbalance >= -0.2 if trade_action == "BUY" else imbalance <= 0.2)
+                    t_state = runtime.setdefault("t_trade", {})
+                    trading_date = now.date().isoformat()
+                    if t_state.get("date") != trading_date:
+                        t_state.clear()
+                        t_state["date"] = trading_date
+                    daily_limit = max(0, int(_finite(t_config.get("max_daily_trades")) or 3))
+                    cooldown = max(0, int(_finite(t_config.get("cooldown_minutes")) or 10))
+                    last_trade = _finite(t_state.get("last_at"))
+                    if int(t_state.get("count") or 0) >= daily_limit or (
+                        last_trade is not None and now.timestamp() - last_trade < cooldown * 60
+                    ):
+                        t_allowed = False
+                if not t_allowed:
+                    self._set_rule(symbol, signal_rule_id, False, now)
+                    continue
                 suggested_volume = self._t_trade_volume(portfolio, position, price, trade_action, trade_pct)
-                if suggested_volume:
+                event_token = f"{signal_id}:{features.get('as_of')}" if features else None
+                if suggested_volume and self._set_rule(
+                    symbol, signal_rule_id, True, now, event_token=event_token,
+                ):
+                    if features:
+                        t_state = runtime.setdefault("t_trade", {})
+                        t_state["last_at"] = now.timestamp()
+                        t_state["count"] = int(t_state.get("count") or 0) + 1
                     self._emit(
                         portfolio,
                         position,
@@ -1241,6 +1557,7 @@ class PositionRiskService:
                         trade_action=trade_action,
                         suggested_price=price,
                         suggested_volume=suggested_volume,
+                        feature_snapshot_at=features.get("as_of") if features else None,
                     )
                 continue
             configured_action = _finite(configured.get("action_pct"))
@@ -1295,7 +1612,7 @@ class PositionRiskService:
         quantity = _finite(position.get("quantity"))
         if cash is None or cash <= 0 or quantity is None or quantity <= 0:
             return 0
-        notional = min(cash, price * quantity) * trade_pct / 100
+        notional = min(cash, price * quantity * trade_pct / 100)
         return max(0, math.floor(notional / price / 100) * 100)
 
     @staticmethod
@@ -1666,6 +1983,10 @@ class PositionRiskService:
         trade_action: str | None = None,
         suggested_price: float | None = None,
         suggested_volume: int | None = None,
+        stage: str | None = None,
+        r_multiple: float | None = None,
+        effective_stop_price: float | None = None,
+        feature_snapshot_at: str | None = None,
     ) -> None:
         symbol = position.get("symbol") if position else None
         config_symbol = symbol or "__portfolio__"
@@ -1712,6 +2033,14 @@ class PositionRiskService:
         }
         if source_ids:
             event["source_ids"] = list(source_ids)
+        if stage is not None:
+            event["stage"] = stage
+        if r_multiple is not None:
+            event["r_multiple"] = r_multiple
+        if effective_stop_price is not None:
+            event["effective_stop_price"] = effective_stop_price
+        if feature_snapshot_at:
+            event["feature_snapshot_at"] = feature_snapshot_at
         if severity == "critical" and rule_id not in {
             "clustered_severe_events", "quote_interruption",
         }:
@@ -1750,6 +2079,10 @@ class PositionRiskService:
                 trade_action=trade_action,
                 suggested_price=suggested_price,
                 suggested_volume=suggested_volume,
+                stage=stage,
+                r_multiple=r_multiple,
+                effective_stop_price=effective_stop_price,
+                feature_snapshot_at=feature_snapshot_at,
             )
 
     def _create_recommendation(
@@ -1767,6 +2100,10 @@ class PositionRiskService:
         trade_action: str | None = None,
         suggested_price: float | None = None,
         suggested_volume: int | None = None,
+        stage: str | None = None,
+        r_multiple: float | None = None,
+        effective_stop_price: float | None = None,
+        feature_snapshot_at: str | None = None,
     ) -> dict[str, Any]:
         if trade_action == "BUY":
             action = "做T买入建议"
@@ -1789,6 +2126,10 @@ class PositionRiskService:
             "trade_action": trade_action,
             "suggested_price": suggested_price,
             "suggested_volume": suggested_volume,
+            "stage": stage,
+            "r_multiple": r_multiple,
+            "effective_stop_price": effective_stop_price,
+            "feature_snapshot_at": feature_snapshot_at,
         })
 
     def _notify_updated(self) -> None:

@@ -90,9 +90,10 @@ function qmtOrderPrice(value: unknown, priceType?: string) {
   return priceType === 'LATEST' ? '最新价' : priceType || '—'
 }
 
-const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown'] as const
+const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown', 'take_profit_ladder'] as const
 const STOP_LOSS_RULE_GROUPS = [
-  ['成本与趋势', ['stop_loss', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['波动与时间保护', ['atr_protection', 'time_stop']],
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
@@ -101,6 +102,7 @@ const INTRADAY_RULE_TAB: Array<['take_profit' | 'stop_loss' | 't_trading', strin
   ['stop_loss', '止损'],
   ['t_trading', '做 T'],
 ]
+const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
 
 const RULE_LABELS: Record<string, string> = {
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利回撤', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
@@ -109,6 +111,7 @@ const RULE_LABELS: Record<string, string> = {
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
   fund_flow_pressure: '资金卖压',
+  take_profit_ladder: 'R 倍数分批止盈', structure_stop: '分时结构止损', atr_protection: 'ATR 移动保护', time_stop: '时间止损',
   equity_drawdown: '账户高点回撤', unrealized_loss: '持仓总浮亏', total_exposure: '总仓位', symbol_concentration: '单票集中度',
   clustered_severe_events: '严重事件聚集', quote_interruption: '行情中断',
 }
@@ -148,6 +151,10 @@ function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
   }
 }
 
+function effectiveRuleEnabled(ruleId: string, config: Record<string, any>) {
+  return SHORT_TERM_RULES.has(ruleId) ? config.active === true : config.enabled !== false
+}
+
 function hasRuleOverride(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
   const rules = portfolio.overrides[symbol]?.rules ?? {}
   return ruleIds.some(ruleId => Object.keys(rules[ruleId] ?? {}).length > 0)
@@ -166,18 +173,20 @@ function moduleSource(portfolio: PositionRiskPortfolio, symbol: string, ruleIds:
 }
 
 function enabledRuleLabels(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
-  return ruleIds.filter(ruleId => effectiveRule(portfolio, symbol, ruleId).enabled !== false).map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
+  return ruleIds.filter(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))).map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
 }
 
 function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions }) {
   const takeProfit = TAKE_PROFIT_RULES.map(ruleId => effectiveRule(portfolio, symbol, ruleId))
   const fixedTakeProfit = takeProfit[0]
   const trailingTakeProfit = takeProfit[1]
-  const takeProfitEnabled = takeProfit.some(config => config.enabled !== false)
+  const ladderTakeProfit = takeProfit[2]
+  const takeProfitEnabled = TAKE_PROFIT_RULES.some((ruleId, index) => effectiveRuleEnabled(ruleId, takeProfit[index]))
   const takeProfitText = takeProfitEnabled
     ? [
-        fixedTakeProfit.enabled !== false ? `固定 ${percentage(fixedTakeProfit.threshold, true)} · ${actionLabel(fixedTakeProfit.action_pct)}` : null,
-        trailingTakeProfit.enabled !== false ? `回撤 ${percentage(trailingTakeProfit.threshold)} · ${actionLabel(trailingTakeProfit.action_pct)}` : null,
+        effectiveRuleEnabled('take_profit', fixedTakeProfit) ? `固定 ${percentage(fixedTakeProfit.threshold, true)} · ${actionLabel(fixedTakeProfit.action_pct)}` : null,
+        effectiveRuleEnabled('trailing_drawdown', trailingTakeProfit) ? `回撤 ${percentage(trailingTakeProfit.threshold)} · ${actionLabel(trailingTakeProfit.action_pct)}` : null,
+        effectiveRuleEnabled('take_profit_ladder', ladderTakeProfit) ? `分批 ${Number(ladderTakeProfit.first_r ?? 1).toFixed(1)}R/${Number(ladderTakeProfit.second_r ?? 2).toFixed(1)}R` : null,
       ].filter(Boolean).join(' / ')
     : '未启用'
 
@@ -305,6 +314,7 @@ function TradeOrderPanel({ row, tradePreset, onClose, onTradeSubmitted }: { row:
 
 function PositionInspector({ row, options, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; onClose: () => void }) {
   const portfolioQuery = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio })
+  const featuresQuery = useQuery({ queryKey: QK.positionRiskFeatures(row.symbol), queryFn: () => api.positionRiskFeatures([row.symbol]), refetchInterval: 15_000 })
   const queryClient = useQueryClient()
   const [activeRuleTab, setActiveRuleTab] = useState<'take_profit' | 'stop_loss' | 't_trading'>('stop_loss')
   const [expandedRule, setExpandedRule] = useState<string | null>(null)
@@ -316,9 +326,10 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRisk }),
   })
   const setRule = (ruleId: string, enabled: boolean) => {
+    const key = SHORT_TERM_RULES.has(ruleId) ? 'active' : 'enabled'
     mutation.mutate({
       ...override,
-      rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), enabled } },
+      rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [key]: enabled } },
     })
   }
   const setRuleValue = (ruleId: string, key: string, value: number) => {
@@ -391,8 +402,8 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
   ]
   const renderRuleRows = (rules: readonly string[]) => rules.map(ruleId => {
     const evidenceOnly = ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'].includes(ruleId)
-    const inherited = portfolio?.template.rules[ruleId]?.enabled !== false
-    const explicit = override.rules?.[ruleId]?.enabled
+    const inherited = SHORT_TERM_RULES.has(ruleId) ? portfolio?.template.rules[ruleId]?.active === true : portfolio?.template.rules[ruleId]?.enabled !== false
+    const explicit = SHORT_TERM_RULES.has(ruleId) ? override.rules?.[ruleId]?.active : override.rules?.[ruleId]?.enabled
     const enabled = explicit ?? inherited
     const hasOverride = Object.keys(override.rules?.[ruleId] ?? {}).length > 0
     const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
@@ -420,21 +431,35 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                 <label key={field.key} className="min-w-0 text-[10px] text-muted">
                   <span>{field.label}</span>
                   <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
-                    <input
-                      key={`${ruleId}-${field.key}-${displayValue}`}
-                      type="number"
-                      min={field.min}
-                      max={field.max}
-                      step={field.step}
-                      defaultValue={displayValue}
-                      disabled={mutation.isPending || !enabled}
-                      onBlur={event => {
-                        const next = Number(event.target.value)
-                        const stored = field.percent ? next / 100 : next
-                        if (Number.isFinite(next) && stored !== Number(storedValue)) setRuleValue(ruleId, field.key, stored)
-                      }}
-                      className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
-                    />
+                    {field.type === 'select' ? (
+                      <select
+                        value={String(override.rules?.[ruleId]?.[field.key] ?? portfolio?.template.rules[ruleId]?.[field.key] ?? field.options?.[0]?.[0] ?? '')}
+                        disabled={mutation.isPending || !enabled}
+                        onChange={event => mutation.mutate({
+                          ...override,
+                          rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [field.key]: event.target.value } },
+                        })}
+                        className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none disabled:opacity-50"
+                      >
+                        {(field.options ?? []).map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}
+                      </select>
+                    ) : (
+                      <input
+                        key={`${ruleId}-${field.key}-${displayValue}`}
+                        type="number"
+                        min={field.min}
+                        max={field.max}
+                        step={field.step}
+                        defaultValue={displayValue}
+                        disabled={mutation.isPending || !enabled}
+                        onBlur={event => {
+                          const next = Number(event.target.value)
+                          const stored = field.percent ? next / 100 : next
+                          if (Number.isFinite(next) && stored !== Number(storedValue)) setRuleValue(ruleId, field.key, stored)
+                        }}
+                        className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                      />
+                    )}
                     {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
                   </span>
                 </label>
@@ -512,6 +537,30 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
               ['MA5', price(row.ma5)], ['MA10', price(row.ma10)], ['MA20', price(row.ma20)],
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
+
+          {(() => {
+            const feature = featuresQuery.data?.features[row.symbol]
+            const featureState = feature?.fresh ? '数据新鲜' : feature?.reason || '等待闭合分钟数据'
+            return (
+              <section className="mt-3 border-y border-border bg-elevated/30 px-3 py-2 text-[10px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className={cn('font-medium', feature?.fresh ? 'text-bull' : 'text-warning')}>{featureState}</span>
+                  <span className="text-muted">阶段 <b className="text-foreground">{feature?.stage || 'initial'}</b></span>
+                  <span className="text-muted">R <b className="font-mono text-foreground">{feature?.r_multiple == null ? '—' : feature.r_multiple.toFixed(2)}</b></span>
+                  <span className="text-muted">有效保护价 <b className="font-mono text-foreground">{price(feature?.effective_stop_price)}</b></span>
+                  <span className="text-muted">1m/5m <b className="font-mono text-foreground">{feature?.bars_1m ?? 0}/{feature?.bars_5m ?? 0}</b></span>
+                  <span className="text-muted">今日做T <b className="font-mono text-foreground">{feature?.t_trade_count ?? 0} 次</b></span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
+                  <span>{feature?.as_of ? `最后闭合 ${new Date(feature.as_of).toLocaleTimeString('zh-CN')}` : '分时能力不可用时不会生成新的短线建议'}</span>
+                  {feature?.session_vwap != null && <span>VWAP <b className="font-mono text-foreground">{price(feature.session_vwap)}</b></span>}
+                  {feature?.ema9_1m != null && feature?.ema20_1m != null && <span>EMA9/20 <b className="font-mono text-foreground">{price(feature.ema9_1m)}/{price(feature.ema20_1m)}</b></span>}
+                  {feature?.atr14_5m != null && <span>ATR5m <b className="font-mono text-foreground">{price(feature.atr14_5m)}</b></span>}
+                  {(feature?.previous_day_high != null || feature?.previous_day_low != null) && <span>昨高/昨低 <b className="font-mono text-foreground">{price(feature.previous_day_high)}/{price(feature.previous_day_low)}</b></span>}
+                </div>
+              </section>
+            )
+          })()}
 
           <nav className="mt-5 flex border-b border-border" aria-label="单股风控模块">
             {INTRADAY_RULE_TAB.map(([id, label]) => (

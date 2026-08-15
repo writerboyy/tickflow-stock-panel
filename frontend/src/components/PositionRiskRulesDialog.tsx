@@ -27,10 +27,13 @@ const RULE_LABELS: Record<string, string> = {
   unrealized_loss: '持仓总浮亏', total_exposure: '总仓位上限',
   symbol_concentration: '单票仓位上限', clustered_severe_events: '严重事件聚集',
   quote_interruption: '行情中断',
+  take_profit_ladder: 'R 倍数分批止盈', structure_stop: '分时结构止损',
+  atr_protection: 'ATR 移动保护', time_stop: '时间止损',
 }
 
 const INDEPENDENT_RULE_GROUPS = [
-  ['成本与趋势', ['stop_loss', 'trailing_drawdown', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['波动与时间保护', ['atr_protection', 'time_stop']],
   ['涨跌停', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
   ['账户总控', ['daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption']],
 ] as const
@@ -42,6 +45,7 @@ const FUND_EVIDENCE = [
 ] as const
 
 type DialogTab = 'take_profit' | 'stop_loss' | 't_trading'
+const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
 
 export type PositionRiskRuleField = {
   key: string
@@ -52,6 +56,8 @@ export type PositionRiskRuleField = {
   step: number
   percent?: boolean
   defaultValue?: number
+  type?: 'number' | 'select'
+  options?: Array<[string, string]>
 }
 
 export const LARGE_ORDER_FIELDS: PositionRiskRuleField[] = [
@@ -72,9 +78,22 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
     { key: 'threshold', label: '目标收益率', suffix: '%', min: 0, max: 500, step: 1, percent: true, defaultValue: 0.10 },
     { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
+  take_profit_ladder: [
+    { key: 'first_r', label: '第一阶段 R', suffix: 'R', min: 0.1, step: 0.1, defaultValue: 1 },
+    { key: 'first_action_pct', label: '第一阶段减仓', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 30 },
+    { key: 'second_r', label: '第二阶段 R', suffix: 'R', min: 0.2, step: 0.1, defaultValue: 2 },
+    { key: 'second_action_pct', label: '第二阶段减仓', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 30 },
+    { key: 'runner_pct', label: '剩余仓位', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 40 },
+    { key: 'fees_buffer', label: '成本保护缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
+    { key: 'runner_atr_multiple', label: '剩余 ATR 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 2 },
+  ],
   t_trading: [
     { key: 'buy_pct', label: '买入比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 10 },
     { key: 'sell_pct', label: '卖出比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 25 },
+    { key: 'confirm_bars', label: '确认根数', suffix: '根', min: 1, max: 10, step: 1, defaultValue: 2 },
+    { key: 'cooldown_minutes', label: '冷却时间', suffix: '分', min: 0, step: 1, defaultValue: 10 },
+    { key: 'min_expected_return', label: '最低预期收益', suffix: '%', min: 0, max: 100, step: 0.1, percent: true, defaultValue: 0.005 },
+    { key: 'max_daily_trades', label: '每日最多次数', suffix: '次', min: 0, max: 50, step: 1, defaultValue: 3 },
   ],
   trailing_drawdown: [
     { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.05 },
@@ -103,6 +122,23 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
   vwap_breakdown: [
     { key: 'buffer', label: '负偏离阈值', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.01 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 30 },
+    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+  ],
+  structure_stop: [
+    { key: 'reference', label: '结构基准', suffix: '', min: 0, step: 1, type: 'select', options: [['vwap', 'VWAP'], ['ema20', 'EMA20'], ['five_minute_low', '5 分钟前低'], ['opening_range_low', '开盘区间低点']] },
+    { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
+    { key: 'confirm_bars', label: '确认根数', suffix: '根', min: 1, max: 10, step: 1, defaultValue: 2 },
+    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  atr_protection: [
+    { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.02 },
+    { key: 'atr_multiple', label: 'ATR 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 2 },
+    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  time_stop: [
+    { key: 'max_minutes', label: '最长持仓', suffix: '分', min: 1, step: 5, defaultValue: 120 },
+    { key: 'min_gain', label: '最低收益', suffix: '%', min: -100, max: 100, step: 0.5, percent: true, defaultValue: 0 },
+    { key: 'close_before_minutes', label: '收盘前提醒', suffix: '分', min: 0, max: 120, step: 5, defaultValue: 15 },
     { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   broken_limit_up: [{ key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 }],
@@ -214,7 +250,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     }))
   }
 
-  const updateRuleValue = (ruleId: string, key: string, value: number) => {
+  const updateRuleValue = (ruleId: string, key: string, value: number | boolean | string) => {
     setTemplate(previous => ({
       ...previous,
       rules: {
@@ -251,6 +287,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
   }
 
   const ruleConfig = (ruleId: string) => template.rules[ruleId] ?? options?.rules[ruleId] ?? {}
+  const ruleEnabled = (ruleId: string, config = ruleConfig(ruleId)) => SHORT_TERM_RULES.has(ruleId) ? config.active === true : config.enabled !== false
 
   const displayValue = (value: unknown, percent = false) => {
     const numeric = Number(value)
@@ -268,19 +305,33 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
             <label key={field.key} className="min-w-0 text-[10px] text-muted">
               <span>{field.label}</span>
               <span className="mt-1 flex h-8 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
-                <input
-                  type="number"
-                  min={field.min}
-                  max={field.max}
-                  step={field.step}
-                  value={value}
-                  disabled={config.enabled === false}
-                  onChange={event => {
-                    const next = Number(event.target.value)
-                    if (Number.isFinite(next)) updateRuleValue(ruleId, field.key, field.percent ? next / 100 : next)
-                  }}
-                  className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
-                />
+                {field.type === 'select' ? (
+                  <select
+                    value={String(config[field.key] ?? field.options?.[0]?.[0] ?? '')}
+                    disabled={!ruleEnabled(ruleId, config)}
+                    onChange={event => setTemplate(previous => ({
+                      ...previous,
+                      rules: { ...previous.rules, [ruleId]: { ...(previous.rules[ruleId] ?? {}), [field.key]: event.target.value } },
+                    }))}
+                    className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none disabled:opacity-50"
+                  >
+                    {(field.options ?? []).map(([optionValue, optionLabel]) => <option key={optionValue} value={optionValue}>{optionLabel}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type="number"
+                    min={field.min}
+                    max={field.max}
+                    step={field.step}
+                    value={value}
+                    disabled={!ruleEnabled(ruleId, config)}
+                    onChange={event => {
+                      const next = Number(event.target.value)
+                      if (Number.isFinite(next)) updateRuleValue(ruleId, field.key, field.percent ? next / 100 : next)
+                    }}
+                    className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50"
+                  />
+                )}
                 {field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}
               </span>
             </label>
@@ -293,6 +344,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
   const actionLabel = (ruleId: string) => {
     const config = ruleConfig(ruleId)
     if (ruleId === 'symbol_concentration') return `降至 ${Number(config.target_pct ?? 30)}%`
+    if (ruleId === 'take_profit_ladder') return `1R ${Number(config.first_action_pct ?? 30)}% / 2R ${Number(config.second_action_pct ?? 30)}%`
     return Number(config.action_pct ?? 0) > 0 ? `建议 ${config.action_pct}%` : '只提醒'
   }
 
@@ -347,7 +399,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
               <p className="mt-1 text-[11px] text-muted">全局规则作为默认值；单股检查器可以单独覆盖目标和建议比例。</p>
             </div>
             <div className="divide-y divide-border border-y border-border">
-              {(['take_profit', 'trailing_drawdown'] as const).map(ruleId => {
+              {(['take_profit', 'trailing_drawdown', 'take_profit_ladder'] as const).map(ruleId => {
                 const config = ruleConfig(ruleId)
                 const expanded = expandedRule === ruleId
                 return (
@@ -358,7 +410,10 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <span className="truncate">{RULE_LABELS[ruleId]}</span>
                       </button>
                       <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{actionLabel(ruleId)}</span>
-                      <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(ruleId, event.target.checked)} /><span>启用</span></label>
+                      <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={ruleEnabled(ruleId, config)} onChange={event => {
+                        if (SHORT_TERM_RULES.has(ruleId)) updateRuleValue(ruleId, 'active', event.target.checked)
+                        else toggleRule(ruleId, event.target.checked)
+                      }} /><span>启用</span></label>
                       <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} /><span>通知</span></label>
                     </div>
                     {expanded && <div className="mt-3 pl-5">{renderFields(ruleId, POSITION_RISK_RULE_FIELDS[ruleId])}</div>}
@@ -436,7 +491,10 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                               <span className="truncate">{RULE_LABELS[id] ?? id}</span>
                             </button>
                             <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{actionLabel(id)}</span>
-                            <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.enabled !== false} onChange={event => toggleRule(id, event.target.checked)} /><span>监控</span></label>
+                            <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={ruleEnabled(id, config)} onChange={event => {
+                              if (SHORT_TERM_RULES.has(id)) updateRuleValue(id, 'active', event.target.checked)
+                              else toggleRule(id, event.target.checked)
+                            }} /><span>监控</span></label>
                             <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(id, event.target.checked)} /><span>通知</span></label>
                           </div>
                           {expanded && POSITION_RISK_RULE_FIELDS[id] && (

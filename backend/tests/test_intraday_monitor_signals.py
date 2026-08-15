@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import polars as pl
 import pytest
@@ -184,6 +184,69 @@ def test_quote_service_does_not_add_gap_volume_to_recovery_minute():
     )
     recovery_row = next(row for row in snapshot["rows"] if row["datetime"] == datetime(2026, 7, 17, 9, 31))
     assert recovery_row["volume"] == 0
+
+
+def test_quote_service_features_use_closed_one_and_five_minute_bars():
+    service = QuoteService()
+    service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")
+    for index in range(10):
+        point = datetime(2026, 7, 17, 9, 30) + timedelta(minutes=index)
+        close = 10.0 + index * 0.1
+        service._intraday_rows[("stock", "600000.SH", point)] = {
+            "symbol": "600000.SH", "datetime": point,
+            "open": close - 0.05, "high": close + 0.1,
+            "low": close - 0.1, "close": close,
+            "volume": 100.0 + index, "amount": close * (100.0 + index) * 100,
+        }
+
+    features = service.get_intraday_features(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 9, 42),
+    )["600000.SH"]
+
+    assert features["fresh"] is True
+    assert features["bars_1m"] == 10
+    assert features["bars_5m"] == 2
+    assert features["opening_range_low"] == 9.9
+    assert features["opening_range_high"] == 11.0
+    assert features["atr14_5m"] is not None
+    assert len(features["closed_bars"]) == 10
+    assert len(features["closed_bars_5m"]) == 2
+
+    stale = service.get_intraday_features(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 9, 45),
+    )["600000.SH"]
+    assert stale["available"] is False
+    assert stale["reason"] == "分钟数据过期"
+
+
+def test_quote_service_features_include_previous_trading_day_levels():
+    service = QuoteService()
+
+    class DailyRepo:
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns=None):
+            assert asset_type == "stock"
+            assert symbols == ["600000.SH"]
+            return pl.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "date": [datetime(2026, 7, 15).date(), datetime(2026, 7, 16).date()],
+                "raw_high": [10.8, 11.2], "raw_low": [10.1, 10.5],
+            })
+
+    service._repo = DailyRepo()
+    service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")
+    point = datetime(2026, 7, 17, 9, 30)
+    service._intraday_rows[("stock", "600000.SH", point)] = {
+        "symbol": "600000.SH", "datetime": point,
+        "open": 10.9, "high": 11.0, "low": 10.8, "close": 10.9,
+        "volume": 100.0, "amount": 109_000.0,
+    }
+
+    features = service.get_intraday_features(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 9, 32),
+    )["600000.SH"]
+
+    assert features["previous_day_high"] == 11.2
+    assert features["previous_day_low"] == 10.5
 
 
 def test_intraday_gap_does_not_replay_crossing_on_recovery():

@@ -254,6 +254,22 @@ def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):
     })
     assert recommendation["status"] == "pending"
     assert store.set_recommendation_status(recommendation["id"], "confirmed")["status"] == "confirmed"
+
+
+def test_legacy_position_risk_config_gets_short_term_defaults_without_activation(tmp_path: Path):
+    store = PositionRiskStore(tmp_path)
+    store.portfolio_path.write_text(
+        '{"schema_version": 1, "revision": 0, "account": {}, "positions": [], "template": {"rules": {"stop_loss": {"enabled": true}}}}',
+        encoding="utf-8",
+    )
+    portfolio = store.load()
+    rules = portfolio["template"]["rules"]
+    assert rules["take_profit_ladder"]["active"] is False
+    assert rules["structure_stop"]["active"] is False
+    assert rules["atr_protection"]["active"] is False
+    assert rules["time_stop"]["active"] is False
+    assert rules["t_trading"]["enabled"] is False
+    assert portfolio["schema_version"] == 1
     assert store.load()["positions"] == []
 
 
@@ -569,6 +585,22 @@ class _IntradayQuotes(_Quotes):
         return {"vwap": {"600036.SH": 100.0}, "rows": [], "available": True}
 
 
+class _FeatureQuotes(_Quotes):
+    def get_intraday_features(self, symbols, *, asset_type="stock", now=None):
+        return {
+            symbol: {
+                "symbol": symbol, "available": True, "fresh": True,
+                "as_of": "2026-08-07T10:00:00", "bars_1m": 20, "bars_5m": 4,
+                "session_vwap": 9.5, "ema9_1m": 10.6, "ema20_1m": 10.4,
+                "ema9_5m": 10.5, "ema20_5m": 10.3, "atr14_5m": 0.2,
+                "relative_volume": 1.2, "buy_ratio": 0.7, "sell_ratio": 0.3,
+                "closed_bars": [{"close": 10.8}] * 4,
+                "closed_bars_5m": [{"close": 10.8}] * 4,
+            }
+            for symbol in symbols
+        }
+
+
 def test_preview_rejects_negative_asset_gap_and_confirm_does_not_trade(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service._preload_history({"600036.SH"})
@@ -708,7 +740,7 @@ def test_take_profit_uses_private_threshold_and_action(tmp_path: Path, monkeypat
 
 def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
-    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 500, "cost_price": 10}],
@@ -717,13 +749,19 @@ def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, mon
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
     position = portfolio["positions"][0]
+    service._flow["600036.SH"].extend(
+        {"ts": datetime(2026, 8, 7, 9, 59, index).timestamp(), "amount": 1000.0, "volume": 100.0, "direction": 1, "price": 10.0}
+        for index in range(7)
+    )
 
+    features = service._intraday_features({"600036.SH"}, datetime(2026, 8, 7, 10, 0))["600036.SH"]
     service._evaluate_position(
         portfolio,
         position,
         {"symbol": "600036.SH", "last_price": 10, "timestamp": "2026-08-07T10:00:00"},
         datetime(2026, 8, 7, 10, 0),
         {"signal_intraday_avg_cross_up": True},
+        features,
     )
 
     recommendation = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "t:signal_intraday_avg_cross_up")
@@ -732,11 +770,65 @@ def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, mon
     assert recommendation["suggested_volume"] == 100
 
 
+def test_t_trade_signal_fails_closed_without_fresh_features(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 500, "cost_price": 10}],
+        "template": {"rules": {"t_trading": {"enabled": True}}},
+    }, 0)
+    portfolio = service.store.load()
+    service._evaluate_position(
+        portfolio,
+        portfolio["positions"][0],
+        {"symbol": "600036.SH", "last_price": 10, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+        {"signal_intraday_avg_cross_up": True},
+    )
+
+    assert not any(item["rule_id"].startswith("t:") for item in service.store.list_recommendations("pending"))
+
+
+def test_take_profit_ladder_persists_r_stages_and_protection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+    service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"take_profit_ladder": {"active": True, "first_action_pct": 30, "second_action_pct": 30}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 11, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0), {},
+        service._intraday_features({"600036.SH"}, datetime(2026, 8, 7, 10, 0))["600036.SH"],
+    )
+    first = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "take_profit_ladder")
+    assert first["stage"] == "tp_1"
+    assert first["r_multiple"] == pytest.approx(1.0)
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 12, "timestamp": "2026-08-07T10:01:00"},
+        datetime(2026, 8, 7, 10, 1), {},
+        service._intraday_features({"600036.SH"}, datetime(2026, 8, 7, 10, 1))["600036.SH"],
+    )
+    runtime = service.store.get_runtime("position:600036.SH")
+    assert runtime["stage"] == "runner"
+    assert set(runtime["triggered_stages"]) == {"tp_1", "tp_2"}
+
+
 def test_t_trade_volume_is_lot_rounded_and_fail_closed():
     portfolio = {"account": {"cash": 500}}
     position = {"quantity": 1000, "available": 550}
     assert PositionRiskService._t_trade_volume(portfolio, position, 10, "SELL", 25) == 100
     assert PositionRiskService._t_trade_volume(portfolio, position, 10, "BUY", 10) == 0
+    assert PositionRiskService._t_trade_volume({"account": {"cash": 1_500}}, position, 10, "BUY", 25) == 100
 
 
 def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Path):

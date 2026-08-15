@@ -732,6 +732,8 @@ class QuoteService:
     ) -> dict[str, Any]:
         """返回共享分钟行、完整日内 VWAP 和数据能力状态。"""
         now = now or cn_now()
+        if now.tzinfo:
+            now = now.astimezone(CN_TZ).replace(tzinfo=None)
         cleaned = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
         with self._lock:
             stale_rows = [key for key in self._intraday_rows if key[2].date() < now.date()]
@@ -769,6 +771,194 @@ class QuoteService:
             "source": "websocket_aggregate+minute_seed",
             "available": bool(rows),
         }
+
+    @staticmethod
+    def _ema(values: list[float], period: int) -> float | None:
+        if not values:
+            return None
+        alpha = 2.0 / (period + 1.0)
+        result = values[0]
+        for value in values[1:]:
+            result = alpha * value + (1.0 - alpha) * result
+        return result
+
+    @staticmethod
+    def _atr(bars: list[dict[str, float]], period: int) -> float | None:
+        if not bars:
+            return None
+        true_ranges: list[float] = []
+        previous_close: float | None = None
+        for bar in bars:
+            high = _finite(bar.get("high"))
+            low = _finite(bar.get("low"))
+            close = _finite(bar.get("close"))
+            if high is None or low is None or close is None:
+                continue
+            true_ranges.append(
+                max(high - low, abs(high - previous_close), abs(low - previous_close))
+                if previous_close is not None else high - low,
+            )
+            previous_close = close
+        if not true_ranges:
+            return None
+        window = true_ranges[-max(1, int(period)):]
+        return sum(window) / len(window)
+
+    def _previous_day_levels(
+        self,
+        symbols: set[str],
+        now: datetime,
+        asset_type: str,
+    ) -> dict[str, dict[str, float | None]]:
+        """读取最近一个可用交易日的高低点，不把自然日当作交易日。"""
+        if not symbols or self._repo is None:
+            return {}
+        getter = getattr(self._repo, "get_daily_asset_batch", None)
+        if not callable(getter):
+            return {}
+        end = now.date() - timedelta(days=1)
+        start = end - timedelta(days=14)
+        try:
+            frame = getter(
+                asset_type,
+                sorted(symbols),
+                start,
+                end,
+                columns=["symbol", "date", "raw_high", "raw_low", "high", "low"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.warning("前一交易日高低点读取失败", exc_info=True)
+            return {}
+        if frame is None or frame.is_empty():
+            return {}
+        try:
+            rows = frame.sort(["symbol", "date"]).to_dicts()
+        except (AttributeError, pl.exceptions.PolarsError):
+            return {}
+        levels: dict[str, dict[str, float | None]] = {}
+        for row in rows:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            high = _finite(row.get("raw_high"))
+            low = _finite(row.get("raw_low"))
+            if high is None:
+                high = _finite(row.get("high"))
+            if low is None:
+                low = _finite(row.get("low"))
+            levels[symbol] = {"high": high, "low": low}
+        return levels
+
+    def get_intraday_features(
+        self,
+        symbols: set[str],
+        *,
+        asset_type: str = "stock",
+        now: datetime | None = None,
+        freshness_seconds: int = 180,
+    ) -> dict[str, dict[str, Any]]:
+        """返回共享的闭合 1/5 分钟特征；缺少新鲜分钟数据时显式 fail-closed。"""
+        now = now or cn_now()
+        if now.tzinfo:
+            now = now.astimezone(CN_TZ).replace(tzinfo=None)
+        snapshot = self.get_intraday_snapshot(symbols, asset_type=asset_type, now=now)
+        rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for row in snapshot.get("rows") or []:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            dt = row.get("datetime")
+            if symbol and isinstance(dt, datetime):
+                rows_by_symbol.setdefault(symbol, []).append(row)
+        cutoff = now.replace(second=0, microsecond=0)
+        selected_symbols = {
+            str(value).strip().upper() for value in symbols if str(value).strip()
+        }
+        previous_levels = self._previous_day_levels(selected_symbols, now, asset_type)
+        result: dict[str, dict[str, Any]] = {}
+        for symbol in selected_symbols:
+            rows = sorted(rows_by_symbol.get(symbol, []), key=lambda row: row["datetime"])
+            latest_dt = rows[-1]["datetime"] if rows else None
+            closed_at = latest_dt + timedelta(minutes=1) if latest_dt else None
+            age_seconds = max(0.0, (now.replace(tzinfo=None) - closed_at).total_seconds()) if closed_at else None
+            fresh = bool(
+                rows and latest_dt < cutoff and closed_at is not None
+                and age_seconds is not None and age_seconds <= freshness_seconds
+            )
+            bars_1m = [
+                {
+                    "datetime": row["datetime"],
+                    "open": float(row.get("open") or row.get("close") or 0),
+                    "high": float(row.get("high") or row.get("close") or 0),
+                    "low": float(row.get("low") or row.get("close") or 0),
+                    "close": float(row.get("close") or 0),
+                    "volume": float(row.get("volume") or 0),
+                    "amount": float(row.get("amount") or 0),
+                }
+                for row in rows
+                if _finite(row.get("close")) is not None
+            ]
+            grouped: dict[datetime, list[dict[str, Any]]] = {}
+            for bar in bars_1m:
+                dt = bar["datetime"]
+                bucket = dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0)
+                if bucket + timedelta(minutes=5) <= cutoff:
+                    grouped.setdefault(bucket, []).append(bar)
+            bars_5m: list[dict[str, Any]] = []
+            for bucket, values in sorted(grouped.items()):
+                bars_5m.append({
+                    "datetime": bucket,
+                    "open": values[0]["open"],
+                    "high": max(item["high"] for item in values),
+                    "low": min(item["low"] for item in values),
+                    "close": values[-1]["close"],
+                    "volume": sum(item["volume"] for item in values),
+                    "amount": sum(item["amount"] for item in values),
+                    "source_bars": len(values),
+                })
+            closes_1m = [bar["close"] for bar in bars_1m if bar["close"] > 0]
+            closes_5m = [bar["close"] for bar in bars_5m if bar["close"] > 0]
+            opening = [
+                bar for bar in bars_1m
+                if dt_time(9, 30) <= bar["datetime"].time() < dt_time(10, 0)
+            ]
+            previous_volumes = [bar["volume"] for bar in bars_1m[-21:-1] if bar["volume"] > 0]
+            latest_volume = bars_1m[-1]["volume"] if bars_1m else 0.0
+            average_volume = sum(previous_volumes) / len(previous_volumes) if previous_volumes else None
+            latest_close = closes_1m[-1] if closes_1m else None
+            momentum_1m = closes_1m[-1] / closes_1m[-2] - 1 if len(closes_1m) >= 2 and closes_1m[-2] else None
+            momentum_5m = closes_5m[-1] / closes_5m[-2] - 1 if len(closes_5m) >= 2 and closes_5m[-2] else None
+            vwap = _finite((snapshot.get("vwap") or {}).get(symbol))
+            reason = "" if fresh else ("分钟数据为空" if not rows else "分钟数据过期")
+            result[symbol] = {
+                "symbol": symbol,
+                "available": bool(fresh),
+                "fresh": bool(fresh),
+                "reason": reason,
+                "source": snapshot.get("source"),
+                "as_of": latest_dt.isoformat() if latest_dt else None,
+                "age_seconds": age_seconds,
+                "bars_1m": len(bars_1m),
+                "bars_5m": len(bars_5m),
+                "last_price": latest_close,
+                "session_vwap": vwap,
+                "opening_range_high": max((bar["high"] for bar in opening), default=None),
+                "opening_range_low": min((bar["low"] for bar in opening), default=None),
+                "ema9_1m": self._ema(closes_1m, 9),
+                "ema20_1m": self._ema(closes_1m, 20),
+                "ema9_5m": self._ema(closes_5m, 9),
+                "ema20_5m": self._ema(closes_5m, 20),
+                "atr14_1m": self._atr(bars_1m, 14),
+                "atr14_5m": self._atr(bars_5m, 14),
+                "five_minute_high": max((bar["high"] for bar in bars_5m[-3:]), default=None),
+                "five_minute_low": min((bar["low"] for bar in bars_5m[-3:]), default=None),
+                "momentum_1m": momentum_1m,
+                "momentum_5m": momentum_5m,
+                "relative_volume": latest_volume / average_volume if average_volume else None,
+                "previous_day_high": (previous_levels.get(symbol) or {}).get("high"),
+                "previous_day_low": (previous_levels.get(symbol) or {}).get("low"),
+                "closed_bars": bars_1m[-20:],
+                "closed_bars_5m": bars_5m[-20:],
+            }
+        return result
 
     def get_intraday_signals(
         self,

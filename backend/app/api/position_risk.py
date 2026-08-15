@@ -111,6 +111,18 @@ def get_portfolio(request: Request):
     return _service(request).view()
 
 
+@router.get("/features")
+def get_features(request: Request, symbols: str | None = Query(None)):
+    service = _service(request)
+    selected = {
+        value.strip().upper()
+        for value in (symbols or "").split(",")
+        if value.strip()
+    } or None
+    features = service.feature_snapshot(selected)
+    return {"features": features, "count": len(features)}
+
+
 @router.put("/portfolio")
 def replace_portfolio(payload: PortfolioPayload, request: Request):
     service = _service(request)

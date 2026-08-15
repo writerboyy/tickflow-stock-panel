@@ -881,6 +881,10 @@ export interface PositionRiskRecommendation {
   trade_action?: 'BUY' | 'SELL' | null
   suggested_price?: number | null
   suggested_volume?: number | null
+  stage?: string | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
+  feature_snapshot_at?: string | null
   reasons: string[]
   source_ids: string[]
   status: PositionRiskRecommendationStatus
@@ -1029,6 +1033,53 @@ export interface PositionRiskOptions {
     depth: boolean
     intraday: { available: boolean; source: string | null; max_symbols: number; reason: string }
   }
+}
+
+export interface PositionRiskFeatureSnapshot {
+  symbol: string
+  available: boolean
+  fresh: boolean
+  reason: string
+  source: string | null
+  as_of: string | null
+  age_seconds?: number | null
+  bars_1m?: number
+  bars_5m?: number
+  last_price?: number | null
+  session_vwap?: number | null
+  opening_range_high?: number | null
+  opening_range_low?: number | null
+  ema9_1m?: number | null
+  ema20_1m?: number | null
+  ema9_5m?: number | null
+  ema20_5m?: number | null
+  atr14_1m?: number | null
+  atr14_5m?: number | null
+  five_minute_high?: number | null
+  five_minute_low?: number | null
+  previous_day_high?: number | null
+  previous_day_low?: number | null
+  momentum_1m?: number | null
+  momentum_5m?: number | null
+  relative_volume?: number | null
+  buy_ratio?: number | null
+  sell_ratio?: number | null
+  flow_samples?: number
+  orderbook_imbalance?: number | null
+  stage?: string | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
+  hard_stop_price?: number | null
+  feature_snapshot_at?: string | null
+  position_started_at?: number | null
+  t_trade_count?: number
+  t_trade_date?: string | null
+  closed_bars_5m?: Array<{ close?: number | null }>
+}
+
+export interface PositionRiskFeaturesResponse {
+  features: Record<string, PositionRiskFeatureSnapshot>
+  count: number
 }
 
 export interface LimitBoardRow {
@@ -2255,6 +2306,9 @@ export const api = {
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
   positionRiskPortfolio: () => request<PositionRiskPortfolio>('/api/position-risk/portfolio'),
+  positionRiskFeatures: (symbols?: string[]) => request<PositionRiskFeaturesResponse>(
+    `/api/position-risk/features${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
+  ),
   positionRiskOptions: () => request<PositionRiskOptions>('/api/position-risk/options'),
   positionRiskImportImage: (file: File, signal?: AbortSignal, quiet = false) => {
     const data = new FormData()
