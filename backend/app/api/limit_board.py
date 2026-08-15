@@ -69,10 +69,30 @@ def add_selected(payload: SelectedWrite, request: Request):
     return {"ok": True, "config": config}
 
 
+@router.post("/candidate")
+def add_candidate(payload: SelectedWrite, request: Request):
+    try:
+        config = _service(request).add_candidate(payload.symbol, payload.revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
 @router.delete("/selected/{symbol}")
 def remove_selected(symbol: str, revision: int, request: Request):
     try:
         config = _service(request).remove_selected(symbol, revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.delete("/candidate/{symbol}")
+def remove_candidate(symbol: str, revision: int, request: Request):
+    try:
+        config = _service(request).remove_candidate(symbol, revision)
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "config": config}

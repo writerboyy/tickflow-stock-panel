@@ -4,7 +4,6 @@ import {
   Ban,
   Bell,
   Check,
-  CheckCircle2,
   CircleDot,
   Crosshair,
   Flame,
@@ -24,7 +23,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { api, type LimitBoardRow, type LimitBoardView } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type Tab = 'first' | 'selected' | 'candidate' | 'pool' | 'events'
+type Tab = 'first' | 'candidate' | 'pool' | 'events'
 type TableMode = Exclude<Tab, 'events'>
 type NotificationSettings = LimitBoardView['settings']['notifications']
 
@@ -70,7 +69,6 @@ interface RowProps {
   busy: boolean
   onOpen: () => void
   onAddPool: () => void
-  onRemoveSelected: () => void
   onToggleAuto: (enabled: boolean) => void
   onRemovePool: () => void
 }
@@ -82,7 +80,6 @@ function Row({
   busy,
   onOpen,
   onAddPool,
-  onRemoveSelected,
   onToggleAuto,
   onRemovePool,
 }: RowProps) {
@@ -160,13 +157,8 @@ function Row({
               className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-60`}
             >
               {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
-              {inPool ? '已加入' : mode === 'candidate' ? '打板' : '加入'}
+              {inPool ? '已加入' : '打板'}
             </button>
-            {mode === 'selected' ? (
-              <button type="button" title="移除精选跟踪" disabled={busy} onClick={onRemoveSelected} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            ) : null}
           </div>
         </td>
       )}
@@ -181,7 +173,6 @@ interface TableProps {
   busy: boolean
   onOpen: (row: LimitBoardRow) => void
   onAddPool: (row: LimitBoardRow) => void
-  onRemoveSelected: (row: LimitBoardRow) => void
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onRemovePool: (row: LimitBoardRow) => void
 }
@@ -208,7 +199,6 @@ function Table(props: TableProps) {
               busy={props.busy}
               onOpen={() => props.onOpen(row)}
               onAddPool={() => props.onAddPool(row)}
-              onRemoveSelected={() => props.onRemoveSelected(row)}
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onRemovePool={() => props.onRemovePool(row)}
             />
@@ -258,15 +248,11 @@ export function LimitBoard() {
   })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const add = useMutation({
-    mutationFn: (symbol: string) => api.limitBoardAdd(symbol, view.data?.revision ?? 0),
+    mutationFn: (symbol: string) => api.limitBoardCandidateAdd(symbol, view.data?.revision ?? 0),
     onSuccess: () => { setSearch(''); refresh() },
   })
-  const remove = useMutation({
-    mutationFn: (row: LimitBoardRow) => api.limitBoardRemove(row.symbol, view.data?.revision ?? 0),
-    onSuccess: refresh,
-  })
   const addPool = useMutation({
-    mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'selected' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
+    mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'manual' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
   const updatePool = useMutation({
@@ -287,28 +273,31 @@ export function LimitBoard() {
     },
   })
 
-  const selectedSymbols = useMemo(() => new Set((view.data?.selected ?? []).map(row => row.symbol)), [view.data?.selected])
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
+  const candidateSymbols = useMemo(() => new Set([
+    ...(view.data?.candidate_pool ?? []).map(row => row.symbol),
+    ...(view.data?.board_pool ?? []).map(row => row.symbol),
+  ]), [view.data?.candidate_pool, view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || remove.isPending || addPool.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
+  const busy = add.isPending || addPool.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
-  const rows = tab === 'first' ? data.first_board : tab === 'selected' ? data.selected : tab === 'candidate' ? data.candidate_pool : data.board_pool
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'selected' ? 'selected' : tab === 'candidate' ? 'candidate' : 'first'
-  const tableTitle = tab === 'first' ? '全市场首板候选' : tab === 'selected' ? '手工精选股票' : tab === 'candidate' ? '算法备选池' : '实盘打板池'
+  const rows = tab === 'first' ? data.first_board : tab === 'candidate' ? data.candidate_pool : data.board_pool
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
+  const tableTitle = tab === 'first' ? '全市场首板候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? '加入时默认开启自动打板；关闭后仅跟踪，不提交实盘委托'
     : tab === 'candidate'
-    ? '按触板接近度、首板/精选来源、封单和炸板次数排序；加入后自动打板'
-    : '临近涨停后自动进入 WS，可加入算法备选池或打板池'
+    ? '自动合并首板候选和手工加入的股票，按触板接近度、封单和炸板次数排序'
+    : '首板候选会自动进入备选池，临近涨停后自动接入 WS'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="打板专区"
         titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />{runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
-        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入精选" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={selectedSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
+        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
@@ -320,7 +309,6 @@ export function LimitBoard() {
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
           ['first', '首板扫描', data.first_board.length, Flame],
-          ['selected', '精选跟踪', data.selected.length, CheckCircle2],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
@@ -341,8 +329,7 @@ export function LimitBoard() {
               poolSymbols={poolSymbols}
               busy={busy}
               onOpen={setPreview}
-              onAddPool={row => addPool.mutate({ row, source: tableMode === 'selected' || row.source === 'selected' ? 'selected' : 'first_board' })}
-              onRemoveSelected={row => remove.mutate(row)}
+              onAddPool={row => addPool.mutate({ row, source: row.source === 'manual' || row.source === 'selected' ? 'manual' : 'first_board' })}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled })}
               onRemovePool={row => removePool.mutate(row)}
             />

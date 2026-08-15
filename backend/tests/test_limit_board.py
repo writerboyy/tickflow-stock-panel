@@ -190,11 +190,11 @@ def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monke
     assert quotes.events == []
 
 
-def test_manual_tracking_rejects_st_stock(tmp_path):
+def test_manual_candidate_rejects_st_stock(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
 
     with pytest.raises(ValueError, match="已过滤 ST"):
-        service.add_selected("600002.SH", 0)
+        service.add_candidate("600002.SH", 0)
 
 
 def test_view_enriches_themes_and_hides_legacy_st_rows(tmp_path, monkeypatch):
@@ -282,14 +282,14 @@ def test_view_builds_ranked_candidate_pool_without_board_members(tmp_path, monke
     assert "首板候选" in view["candidate_pool"][0]["candidate_reasons"]
 
 
-def test_candidate_pool_marks_selected_rows_without_runtime_quotes(tmp_path):
+def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     service.store.update(0, lambda value: value["selected"].append({"symbol": "600000.SH", "name": "浦发银行"}))
 
     view = service.view()
 
-    assert view["candidate_pool"][0]["source"] == "selected"
-    assert "精选跟踪" in view["candidate_pool"][0]["candidate_reasons"]
+    assert view["candidate_pool"][0]["source"] == "manual"
+    assert "手工加入" in view["candidate_pool"][0]["candidate_reasons"]
 
 
 def test_add_pool_enables_auto_trade_by_default(tmp_path):
@@ -470,7 +470,7 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
     assert view.json()["revision"] == 0
 
     added = client.post(
-        "/api/limit-board/selected",
+        "/api/limit-board/candidate",
         json={"symbol": "600000.SH", "revision": 0},
     )
     assert added.status_code == 200
@@ -478,7 +478,7 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
 
     pooled = client.post(
         "/api/limit-board/pool",
-        json={"symbol": "600000.SH", "source": "selected", "revision": 1},
+        json={"symbol": "600000.SH", "source": "manual", "revision": 1},
     )
     assert pooled.status_code == 200
     assert pooled.json()["config"]["board_pool"][0]["auto_trade"] is True
@@ -495,10 +495,28 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
     assert removed.json()["config"]["board_pool"] == []
 
     stale = client.post(
-        "/api/limit-board/selected",
+        "/api/limit-board/candidate",
         json={"symbol": "600001.SH", "revision": 0},
     )
     assert stale.status_code == 409
+
+
+def test_legacy_selected_api_remains_compatible(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    added = client.post(
+        "/api/limit-board/selected",
+        json={"symbol": "600000.SH", "revision": 0},
+    )
+
+    assert added.status_code == 200
+    view = client.get("/api/limit-board").json()
+    assert view["candidate_pool"][0]["symbol"] == "600000.SH"
+    assert view["candidate_pool"][0]["source"] == "manual"
 
 
 def test_limit_board_api_updates_notification_settings(tmp_path):

@@ -1,4 +1,4 @@
-"""First-board discovery and selected-symbol limit-board tracking."""
+"""First-board discovery and candidate-pool limit-board tracking."""
 from __future__ import annotations
 
 import logging
@@ -749,7 +749,7 @@ class LimitBoardService:
                 modes = sorted(set(row.get("source_modes") or []) | {origin})
                 current = {
                     **row,
-                    "source": "first_board" if "first_board" in modes else "selected",
+                    "source": "first_board" if "first_board" in modes else "manual",
                     "source_modes": modes,
                 }
                 candidates[symbol] = current
@@ -785,7 +785,7 @@ class LimitBoardService:
             if "first_board" in source_modes:
                 reasons.append("首板候选")
             if "selected" in source_modes:
-                reasons.append("精选跟踪")
+                reasons.append("手工加入")
             if gap is None:
                 reasons.append("等待实时行情")
             else:
@@ -940,6 +940,10 @@ class LimitBoardService:
         self._notify_updated()
         return saved
 
+    def add_candidate(self, symbol: str, revision: int) -> dict[str, Any]:
+        """Add a manual candidate while retaining the legacy storage schema."""
+        return self.add_selected(symbol, revision)
+
     def _validated_stock(self, symbol: str) -> tuple[str, str]:
         cleaned = str(symbol).strip().upper()
         names = self.repo.get_name_map([cleaned])
@@ -961,6 +965,9 @@ class LimitBoardService:
         self._refresh_symbol_consumer()
         self._notify_updated()
         return saved
+
+    def remove_candidate(self, symbol: str, revision: int) -> dict[str, Any]:
+        return self.remove_selected(symbol, revision)
 
     def add_pool(self, symbol: str, source: str, revision: int) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)

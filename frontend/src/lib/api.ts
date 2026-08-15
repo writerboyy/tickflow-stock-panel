@@ -2302,13 +2302,13 @@ export const api = {
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {
     method: 'PUT', body: JSON.stringify({ notifications, revision }),
   }),
-  limitBoardAdd: (symbol: string, revision: number) =>
-    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/selected', {
+  limitBoardCandidateAdd: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/candidate', {
       method: 'POST', body: JSON.stringify({ symbol, revision }),
     }),
-  limitBoardRemove: (symbol: string, revision: number) =>
+  limitBoardCandidateRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(
-      `/api/limit-board/selected/${encodeURIComponent(symbol)}?revision=${revision}`,
+      `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
   limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'selected' | 'manual', revision: number) =>
