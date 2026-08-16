@@ -7,7 +7,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.limit_board import router
-from app.services.limit_board_service import LimitBoardService, _qualified_premium_stats
+from app.market_time import CN_TZ
+from app.services.limit_board_service import (
+    LimitBoardService,
+    _qualified_premium_stats,
+    _sweep_ready,
+)
 from app.services.limit_board_store import LimitBoardStore, default_config
 from app.services.quote_service import QuoteService
 
@@ -529,6 +534,58 @@ def test_add_pool_enables_auto_trade_by_default(tmp_path):
     saved = service.add_pool("600000.SH", "first_board", 0)
 
     assert saved["board_pool"][0]["auto_trade"] is True
+    assert saved["board_pool"][0]["order_mode"] == "sweep"
+
+
+def test_sweep_requires_best_ask_within_five_price_levels():
+    five_levels = {
+        "ask_prices": [10.95, 10.96, 10.97, 10.98, 10.99],
+        "ask_volumes": [100, 200, 300, 400, 500],
+    }
+    six_levels = {
+        "ask_prices": [10.94, 10.95, 10.96, 10.97, 10.98],
+        "ask_volumes": [100, 200, 300, 400, 500],
+    }
+
+    assert _sweep_ready(five_levels, 11.0) is True
+    assert _sweep_ready(six_levels, 11.0) is False
+    assert _sweep_ready({**five_levels, "ask_volumes": [0, 0, 0, 0, 0]}, 11.0) is False
+
+
+def test_five_level_depth_triggers_default_sweep_order(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service.add_pool("600000.SH", "first_board", 0)
+    service._quotes["600000.SH"] = {
+        **quote(price=10.94),
+        "source_modes": ["board_pool"],
+    }
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "near_limit"}
+    service.store.save_runtime(runtime)
+
+    service._process_depth([{
+        "symbol": "600000.SH",
+        "timestamp": "2026-08-13T10:00:00+08:00",
+        "bid_prices": [10.94, 10.93, 10.92, 10.91, 10.90],
+        "bid_volumes": [100] * 5,
+        "ask_prices": [10.95, 10.96, 10.97, 10.98, 10.99],
+        "ask_volumes": [100] * 5,
+    }])
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["price"] == 11.0
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
 
 
 def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
@@ -613,6 +670,7 @@ def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
         "name": "浦发银行",
         "source": "first_board",
         "auto_trade": True,
+        "order_mode": "queue",
     }]
     runtime = service._runtime_for_today()
     state = runtime["symbols"].setdefault("600000.SH", {})
@@ -635,7 +693,11 @@ def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
 
 def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
     service, _quotes, config = make_service(tmp_path)
-    config["board_pool"] = [{"symbol": "600000.SH", "auto_trade": True}]
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
     state = {}
 
     service._maybe_auto_trade("600000.SH", quote(), state, config)
@@ -648,7 +710,11 @@ def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
 def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
-    config["board_pool"] = [{"symbol": "600002.SH", "auto_trade": True}]
+    config["board_pool"] = [{
+        "symbol": "600002.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
     state = {}
 
     service._maybe_auto_trade(
@@ -662,6 +728,31 @@ def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
     assert state["auto_order_status"] == "blocked"
     assert "ST 风险警示" in state["auto_order_error"]
     assert "auto_order_key" not in state
+
+
+def test_default_sweep_ignores_queue_trigger_and_submits_on_sweep_trigger(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "sweep",
+    }]
+    state = {}
+
+    service._maybe_auto_trade(
+        "600000.SH", quote(), state, config, trigger_mode="queue",
+    )
+    assert qmt.orders == []
+
+    service._maybe_auto_trade(
+        "600000.SH", quote(), state, config, trigger_mode="sweep",
+    )
+
+    assert len(qmt.orders) == 1
+    assert state["auto_order_mode"] == "sweep"
 
 
 def test_store_revision_conflict_is_fail_closed(tmp_path):
@@ -716,10 +807,11 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
 
     enabled = client.put(
         "/api/limit-board/pool/600000.SH",
-        json={"auto_trade": True, "revision": 2},
+        json={"auto_trade": True, "order_mode": "queue", "revision": 2},
     )
     assert enabled.status_code == 200
     assert enabled.json()["config"]["board_pool"][0]["auto_trade"] is True
+    assert enabled.json()["config"]["board_pool"][0]["order_mode"] == "queue"
 
     removed = client.delete("/api/limit-board/pool/600000.SH?revision=3")
     assert removed.status_code == 200

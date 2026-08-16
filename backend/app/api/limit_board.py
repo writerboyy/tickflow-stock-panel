@@ -22,6 +22,7 @@ class PoolWrite(SelectedWrite):
 class PoolUpdate(BaseModel):
     revision: int = Field(ge=0)
     auto_trade: bool
+    order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
 
 
 class NotificationSettings(BaseModel):
@@ -112,7 +113,12 @@ def add_pool(payload: PoolWrite, request: Request):
 @router.put("/pool/{symbol}")
 def update_pool(symbol: str, payload: PoolUpdate, request: Request):
     try:
-        config = _service(request).update_pool(symbol, payload.auto_trade, payload.revision)
+        config = _service(request).update_pool(
+            symbol,
+            payload.auto_trade,
+            payload.order_mode,
+            payload.revision,
+        )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:

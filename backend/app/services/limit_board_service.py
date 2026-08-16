@@ -25,6 +25,8 @@ _DEPTH_FRESH_SECONDS = 30
 _MIN_LIMIT_UP_COUNT = 4
 _MIN_NEXT_DAY_RED_RATE = 0.80
 _MAX_FIRST_BOARD_BROKEN_RATE = 0.75
+_SWEEP_MAX_PRICE_LEVELS = 5
+_STOCK_PRICE_TICK = 0.01
 _PREMIUM_FILTER_COLUMNS = {
     "symbol",
     "limit_up_count",
@@ -62,6 +64,23 @@ def _is_trading_time(value: datetime) -> bool:
         clock_time(9, 30) <= current < clock_time(11, 30)
         or clock_time(13, 0) <= current < clock_time(15, 0)
     )
+
+
+def _sweep_ready(depth: dict[str, Any], limit_up: float) -> bool:
+    asks = [
+        (price, volume)
+        for price, volume in zip(
+            depth.get("ask_prices") or [],
+            depth.get("ask_volumes") or [],
+            strict=False,
+        )
+        if price > 0 and volume > 0
+    ]
+    if not asks:
+        return False
+    best_ask = asks[0][0]
+    remaining = limit_up - best_ask
+    return -0.001 <= remaining <= _SWEEP_MAX_PRICE_LEVELS * _STOCK_PRICE_TICK + 0.001
 
 
 def _qualified_premium_stats(rows: pl.DataFrame | None) -> dict[str, dict[str, Any]]:
@@ -474,7 +493,7 @@ class LimitBoardService:
                 state["status"] = "touched"
                 self._emit("touched", quote, state, config, "首次触及涨停价")
             if at_limit:
-                self._maybe_auto_trade(symbol, quote, state, config)
+                self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="queue")
             if state.get("sealed") and not at_limit:
                 self._mark_broken(quote, state, runtime, config, "价格离开涨停价")
             elif state.get("sealed"):
@@ -517,6 +536,8 @@ class LimitBoardService:
             state["bid1_volume"] = normalized["bid_volumes"][0] if normalized["bid_volumes"] else 0.0
             state["ask1_volume"] = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
             state["last_depth_at"] = normalized["timestamp"].isoformat()
+            if _sweep_ready(normalized, float(quote["limit_up"])):
+                self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="sweep")
             if state.get("sealed") and not latest_sealed:
                 self._mark_broken(quote, state, runtime, config, "卖一恢复，封板状态中断")
             elif confirmed and not state.get("sealed"):
@@ -594,12 +615,17 @@ class LimitBoardService:
         quote: dict[str, Any],
         state: dict[str, Any],
         config: dict[str, Any],
+        *,
+        trigger_mode: str = "queue",
     ) -> None:
         member = next(
             (item for item in config["board_pool"] if str(item.get("symbol")).strip().upper() == symbol),
             None,
         )
         if not member or not bool(member.get("auto_trade")) or state.get("auto_order_key"):
+            return
+        order_mode = str(member.get("order_mode") or "sweep")
+        if order_mode != trigger_mode:
             return
         if is_risk_warning_name(self._resolve_name(symbol, quote.get("name"))):
             state["auto_order_status"] = "blocked"
@@ -625,6 +651,7 @@ class LimitBoardService:
         state.update({
             "auto_order_key": key,
             "auto_order_status": "submitting",
+            "auto_order_mode": order_mode,
             "auto_order_error": None,
             "auto_order_at": cn_now().isoformat(),
         })
@@ -955,7 +982,12 @@ class LimitBoardService:
         board_pool = []
         for item in config["board_pool"]:
             symbol = str(item["symbol"]).strip().upper()
-            row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
+            row = {
+                "order_mode": "sweep",
+                **item,
+                **runtime_by_symbol.get(symbol, {}),
+                "ws_active": symbol in self._ws_symbols,
+            }
             row["name"] = self._resolve_name(symbol, row.get("name"))
             if is_risk_warning_name(row["name"]):
                 continue
@@ -1135,6 +1167,7 @@ class LimitBoardService:
                 "name": name,
                 "source": source,
                 "auto_trade": True,
+                "order_mode": "sweep",
                 "added_at": cn_now().isoformat(),
             })
 
@@ -1144,8 +1177,17 @@ class LimitBoardService:
         self._notify_updated()
         return saved
 
-    def update_pool(self, symbol: str, auto_trade: bool, revision: int) -> dict[str, Any]:
+    def update_pool(
+        self,
+        symbol: str,
+        auto_trade: bool,
+        order_mode: str,
+        revision: int,
+    ) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
+        cleaned_mode = str(order_mode or "").strip().lower()
+        if cleaned_mode not in {"sweep", "queue"}:
+            raise ValueError("打板方式必须是扫板或排板")
 
         def update(value: dict[str, Any]) -> None:
             member = next(
@@ -1155,6 +1197,7 @@ class LimitBoardService:
             if member is None:
                 raise ValueError("打板池中不存在该股票")
             member["auto_trade"] = bool(auto_trade)
+            member["order_mode"] = cleaned_mode
 
         saved = self.store.update(revision, update)
         self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})

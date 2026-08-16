@@ -71,6 +71,7 @@ interface RowProps {
   onAddPool: () => void
   onRemoveCandidate: () => void
   onToggleAuto: (enabled: boolean) => void
+  onChangeOrderMode: (mode: 'sweep' | 'queue') => void
   onRemovePool: () => void
 }
 
@@ -83,6 +84,7 @@ function Row({
   onAddPool,
   onRemoveCandidate,
   onToggleAuto,
+  onChangeOrderMode,
   onRemovePool,
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
@@ -90,6 +92,7 @@ function Row({
   const rebound = row.source === 'rebound_board' || row.source_modes?.includes('rebound_board')
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
+  const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
     : row.auto_order_status
@@ -138,6 +141,19 @@ function Row({
           </td>
           <td className="sticky right-0 z-10 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
             <div className="flex items-center justify-end gap-1.5">
+              <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
+                {([
+                  ['sweep', '扫板', '新鲜五档盘口中卖一距涨停价不超过 5 个价位时提交'],
+                  ['queue', '排板', '价格已触及涨停价后再提交排队'],
+                ] as const).map(([mode, label, title]) => <button
+                  key={mode}
+                  type="button"
+                  title={title}
+                  disabled={busy}
+                  onClick={() => onChangeOrderMode(mode)}
+                  className={`px-2 text-[10px] ${orderMode === mode ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'} disabled:opacity-40`}
+                >{label}</button>)}
+              </div>
               <label className="inline-flex items-center gap-1 whitespace-nowrap text-secondary" title="自动打板">
                 <input
                   type="checkbox"
@@ -185,6 +201,7 @@ interface TableProps {
   onAddPool: (row: LimitBoardRow) => void
   onRemoveCandidate: (row: LimitBoardRow) => void
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
+  onChangeOrderMode: (row: LimitBoardRow, mode: 'sweep' | 'queue') => void
   onRemovePool: (row: LimitBoardRow) => void
 }
 
@@ -193,11 +210,11 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className="w-full min-w-[980px] border-collapse">
+      <table className="w-full min-w-[1080px] border-collapse">
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-20 w-[128px] bg-surface py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th>{mode === 'candidate' ? <th className="px-2">排序</th> : null}<th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
-            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-20 w-[128px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-20 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
+            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-20 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-20 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>
         <tbody>
@@ -212,6 +229,7 @@ function Table(props: TableProps) {
               onAddPool={() => props.onAddPool(row)}
               onRemoveCandidate={() => props.onRemoveCandidate(row)}
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
+              onChangeOrderMode={mode => props.onChangeOrderMode(row, mode)}
               onRemovePool={() => props.onRemovePool(row)}
             />
           ))}
@@ -272,7 +290,7 @@ export function LimitBoard() {
     onSuccess: refresh,
   })
   const updatePool = useMutation({
-    mutationFn: ({ row, enabled }: { row: LimitBoardRow; enabled: boolean }) => api.limitBoardPoolUpdate(row.symbol, enabled, view.data?.revision ?? 0),
+    mutationFn: ({ row, enabled, orderMode }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue' }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
   const removePool = useMutation({
@@ -303,7 +321,7 @@ export function LimitBoard() {
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
   const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
-    ? '加入时默认开启自动打板；关闭后仅跟踪，不提交实盘委托'
+    ? '默认扫板：卖一距涨停不超过 5 个价位时提交；排板在触及涨停后提交'
     : tab === 'candidate'
     ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
     : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
@@ -352,7 +370,8 @@ export function LimitBoard() {
                   : row.source === 'rebound_board' ? 'rebound_board' : 'first_board',
               })}
               onRemoveCandidate={row => removeCandidate.mutate(row)}
-              onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled })}
+              onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
+              onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
               onRemovePool={row => removePool.mutate(row)}
             />
           </section>

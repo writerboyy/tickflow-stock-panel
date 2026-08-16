@@ -1135,6 +1135,7 @@ export interface LimitBoardRow {
   blacklisted?: boolean
   source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
+  order_mode?: 'sweep' | 'queue'
   auto_order_key?: string
   auto_order_status?: string
   auto_order_sys_id?: string | null
@@ -1192,6 +1193,7 @@ export interface LimitBoardConfig {
     name?: string
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     auto_trade: boolean
+    order_mode?: 'sweep' | 'queue'
     added_at?: string
   }>
 }
@@ -2405,9 +2407,9 @@ export const api = {
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
       method: 'POST', body: JSON.stringify({ symbol, source, revision }),
     }),
-  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, revision: number) =>
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
-      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, revision }),
+      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision }),
     }),
   limitBoardPoolRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(
