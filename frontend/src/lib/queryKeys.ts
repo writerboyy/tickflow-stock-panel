@@ -26,7 +26,6 @@ export const QK = {
   positionRisk:  ['position-risk'] as const,
   positionRiskFeatures: (symbols?: string) => ['position-risk', 'features', symbols ?? 'all'] as const,
   positionRiskOptions: ['position-risk', 'options'] as const,
-  positionRiskRecommendations: (status?: string) => ['position-risk', 'recommendations', status ?? 'all'] as const,
   positionRiskEvents: ['position-risk', 'events'] as const,
   positionRiskQmt: ['position-risk', 'qmt'] as const,
   positionRiskQmtOrders: ['position-risk', 'qmt-orders'] as const,

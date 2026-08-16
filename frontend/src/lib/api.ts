@@ -877,41 +877,30 @@ export interface MonitorRuleOptions {
 
 // ===== Position Risk (持仓风控) =====
 export type PositionRiskStatus = 'idle' | 'websocket' | 'polling_degraded' | 'reconnecting' | 'data_unavailable'
-export type PositionRiskRecommendationStatus = 'pending' | 'confirmed' | 'dismissed' | 'superseded' | 'stale'
 
-export interface PositionRiskEvidence {
-  cost: boolean
-  history: boolean
-  quote: boolean
-  depth: boolean
-  flow: boolean
-}
-
-export interface PositionRiskRecommendation {
-  id: string
-  fingerprint: string
-  symbol: string | null
-  scope: 'symbol' | 'portfolio'
-  rule_id: string
-  severity: 'info' | 'warn' | 'critical'
-  risk_score: number
-  action: string
-  reduction_pct: number
-  trade_action?: 'BUY' | 'SELL' | null
-  suggested_price?: number | null
-  suggested_volume?: number | null
+export interface PositionRiskEvent {
+  ts: number
+  fingerprint?: string
+  first_ts?: number
+  last_ts?: number
+  occurrence_count?: number
+  source: 'position_risk' | string
+  type: string
+  rule_id?: string
+  rule_name?: string
+  symbol?: string
+  name?: string | null
+  message: string
+  price?: number | null
+  severity?: string
+  action_pct?: number
+  trade_action?: 'BUY' | 'SELL' | string | null
   stage?: string | null
   r_multiple?: number | null
   effective_stop_price?: number | null
   feature_snapshot_at?: string | null
-  reasons: string[]
-  source_ids: string[]
-  status: PositionRiskRecommendationStatus
-  portfolio_revision: number
-  created_at: string
-  updated_at: string
+  timeline_origin?: 'position_risk' | 'monitor_rule' | string
 }
-
 export interface PositionRiskPosition {
   symbol: string
   name: string
@@ -930,12 +919,7 @@ export interface PositionRiskPosition {
   ma10: number | null
   ma20: number | null
   latest_signal: string | null
-  evidence: PositionRiskEvidence
-  evidence_coverage: number
   data_status: 'ready' | 'insufficient'
-  risk_score: number
-  risk_level: 'low' | 'medium' | 'high'
-  suggestion: PositionRiskRecommendation | null
 }
 
 export interface PositionRiskPortfolio {
@@ -964,7 +948,6 @@ export interface PositionRiskPortfolio {
     status: PositionRiskStatus
     reason: string
     last_processed_at: string | null
-    pending_count: number
   }
 }
 
@@ -2353,17 +2336,8 @@ export const api = {
     request<{ ok: boolean; portfolio: PositionRiskPortfolio }>(`/api/position-risk/overrides/${encodeURIComponent(symbol)}`, {
       method: 'PUT', body: JSON.stringify({ revision, override }),
     }),
-  positionRiskRecommendations: (status?: PositionRiskRecommendationStatus) =>
-    request<{ recommendations: PositionRiskRecommendation[]; count: number }>(
-      `/api/position-risk/recommendations${status ? `?status=${status}` : ''}`,
-    ),
-  positionRiskRecommendationAction: (id: string, action: 'confirm' | 'dismiss', revision: number) =>
-    request<{ ok: boolean; recommendation: PositionRiskRecommendation; holding_changed: false; message: string }>(
-      `/api/position-risk/recommendations/${encodeURIComponent(id)}/${action}`,
-      { method: 'POST', body: JSON.stringify({ revision }) },
-    ),
   positionRiskEvents: () =>
-    request<{ events: AlertEvent[]; count: number }>('/api/position-risk/events'),
+    request<{ events: PositionRiskEvent[]; count: number }>('/api/position-risk/events'),
   qmtStatus: () => request<QmtStatus>('/api/position-risk/qmt/status'),
   qmtProbe: () => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST' }),
   qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),

@@ -7,7 +7,7 @@ SSE 推送四种事件 (使用标准 SSE event 字段):
   - strategy_alert: 策略监控/告警触发，前端弹通知
   - depth_updated: 五档盘口修正完成，前端刷新连板梯队/看板封单数据
   - large_orders_updated: 实时大单聚合完成，前端刷新榜单
-  - position_risk_updated: 持仓风控状态或建议更新
+  - position_risk_updated: 持仓风控状态或触发更新
   - limit_board_updated: 打板专区候选或状态更新
 """
 from __future__ import annotations

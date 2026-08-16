@@ -210,7 +210,7 @@ export function cnSignal(name: string, customNames?: Record<string, string>): st
 
 const SIGNAL_TOKEN_PATTERN = /(?<![A-Za-z0-9_])(?:signal|csg)[._][A-Za-z0-9_]+/g
 
-/** 将事件和建议文本中的信号 ID 一并转换为中文。 */
+/** 将事件文本中的信号 ID 转换为中文。 */
 export function cnSignalText(text: string, customNames?: Record<string, string>): string {
   return text.replace(SIGNAL_TOKEN_PATTERN, token => cnSignal(token, customNames))
 }

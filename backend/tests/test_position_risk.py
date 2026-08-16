@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import sqlite3
 from threading import Event
 from types import SimpleNamespace
 
 import polars as pl
 import pytest
 
-from app.api.position_risk import _collapse_timeline_events
+from app.api.position_risk import _collapse_timeline_events, router as position_risk_router
 from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
@@ -51,6 +52,17 @@ def _margin_instruments(data_dir: Path) -> None:
         "symbol": ["002432.SZ", "001258.SZ"],
         "name": ["九安医疗", "立新能源"],
     }).write_parquet(target / "instruments.parquet")
+
+
+def _position_events(service: PositionRiskService, rule_id: str | None = None) -> list[dict]:
+    events = alert_store.list_recent(service.store.root.parents[1], days=30, source="position_risk")
+    return [event for event in events if rule_id is None or event.get("rule_id") == rule_id]
+
+
+_REMOVED_PUBLIC_EVENT_FIELDS = {
+    "risk_score", "risk_level", "suggestion_pct", "reasons", "source_ids",
+    "signals", "conditions", "logic", "evidence", "evidence_coverage",
+}
 
 
 def test_ths_position_ocr_parses_headers_numbers_and_confidence(tmp_path: Path):
@@ -229,7 +241,7 @@ def test_position_risk_uses_custom_signal_name_for_new_events(tmp_path: Path):
     assert service.localize_text("csg.take_profit") == "自定义止盈"
 
 
-def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):
+def test_portfolio_store_revision_and_recommendation_table_is_removed(tmp_path: Path):
     store = PositionRiskStore(tmp_path)
     saved = store.replace({
         "account": {"name": "账户", "cash": 1000, "total_asset": 2000, "previous_close_total_asset": 2100},
@@ -238,22 +250,43 @@ def test_portfolio_store_revision_and_recommendation_lifecycle(tmp_path: Path):
     assert saved["revision"] == 1
     with pytest.raises(RevisionConflict):
         store.replace(saved, 0)
+    store.set_runtime("keep", {"value": 1})
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("CREATE TABLE recommendations (id TEXT)")
 
-    recommendation = store.add_recommendation({
-        "fingerprint": "one",
-        "symbol": "600036.SH",
-        "scope": "symbol",
-        "rule_id": "stop_loss",
-        "severity": "critical",
-        "risk_score": 85,
-        "action": "清仓建议",
-        "reduction_pct": 100,
-        "reasons": ["测试"],
-        "source_ids": ["stop_loss"],
-        "portfolio_revision": 1,
-    })
-    assert recommendation["status"] == "pending"
-    assert store.set_recommendation_status(recommendation["id"], "confirmed")["status"] == "confirmed"
+    reopened = PositionRiskStore(tmp_path)
+    tables = {
+        row[0]
+        for row in sqlite3.connect(reopened.db_path).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'",
+        )
+    }
+    assert "recommendations" not in tables
+    assert reopened.get_runtime("keep") == {"value": 1}
+
+
+def test_position_risk_recommendation_routes_are_removed():
+    assert not any(route.path.startswith("/api/position-risk/recommendations") for route in position_risk_router.routes)
+
+
+def test_position_risk_history_migration_cleans_public_fields_and_preserves_other_alerts(tmp_path: Path):
+    alerts_path = tmp_path / "user_data" / "alerts.jsonl"
+    alerts_path.parent.mkdir(parents=True)
+    alerts_path.write_text(
+        "\n".join([
+            '{"ts": 4102444800000, "source": "position_risk", "rule_id": "stop_loss", "risk_score": 85, "risk_level": "high", "suggestion_pct": 50, "reasons": ["x"], "source_ids": ["stop_loss"], "evidence": {"quote": true}, "evidence_coverage": 1}',
+            '{"ts": 4102444800000, "source": "monitor", "rule_id": "custom", "reasons": ["keep"], "signals": ["s"]}',
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    assert alert_store.sanitize_position_risk_events(tmp_path) == 6
+    position_event = alert_store.list_recent(tmp_path, days=30, source="position_risk")[0]
+    assert position_event["action_pct"] == 50
+    assert not _REMOVED_PUBLIC_EVENT_FIELDS & position_event.keys()
+    monitor_event = alert_store.list_recent(tmp_path, days=30, source="monitor")[0]
+    assert monitor_event["reasons"] == ["keep"]
+    assert monitor_event["signals"] == ["s"]
 
 
 def test_legacy_position_risk_config_gets_short_term_defaults_without_activation(tmp_path: Path):
@@ -644,10 +677,9 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 35.9, "timestamp": "2026-08-07T10:00:00"}
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
-    pending = service.store.list_recommendations("pending")
-    stop = next(item for item in pending if item["rule_id"] == "stop_loss")
-    assert stop["risk_score"] >= 85
-    assert stop["reduction_pct"] == 100
+    stop = _position_events(service, "stop_loss")[0]
+    assert stop["action_pct"] == 100
+    assert not _REMOVED_PUBLIC_EVENT_FIELDS & stop.keys()
     assert any(alert["source"] == "position_risk" for alert in quotes.alerts)
 
 
@@ -710,12 +742,11 @@ def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    stop = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "stop_loss")
-    assert stop["reduction_pct"] == 25
+    stop = _position_events(service, "stop_loss")[0]
+    assert stop["action_pct"] == 25
 
 
-def test_take_profit_uses_private_threshold_and_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+def test_take_profit_uses_private_threshold_and_action(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
@@ -733,13 +764,11 @@ def test_take_profit_uses_private_threshold_and_action(tmp_path: Path, monkeypat
         datetime(2026, 8, 7, 10, 0),
     )
 
-    take_profit = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "take_profit")
-    assert take_profit["reduction_pct"] == 50
-    assert take_profit["action"] == "减仓建议"
+    take_profit = _position_events(service, "take_profit")[0]
+    assert take_profit["action_pct"] == 50
 
 
-def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+def test_t_trade_signal_records_manual_buy_action(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
@@ -764,14 +793,12 @@ def test_t_trade_signal_creates_prefilled_buy_recommendation(tmp_path: Path, mon
         features,
     )
 
-    recommendation = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "t:signal_intraday_avg_cross_up")
-    assert recommendation["trade_action"] == "BUY"
-    assert recommendation["suggested_price"] == 10
-    assert recommendation["suggested_volume"] == 100
+    event = _position_events(service, "t:signal_intraday_avg_cross_up")[0]
+    assert event["trade_action"] == "BUY"
+    assert event["price"] == 10
 
 
-def test_t_trade_signal_fails_closed_without_fresh_features(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+def test_t_trade_signal_fails_closed_without_fresh_features(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
@@ -787,11 +814,10 @@ def test_t_trade_signal_fails_closed_without_fresh_features(tmp_path: Path, monk
         {"signal_intraday_avg_cross_up": True},
     )
 
-    assert not any(item["rule_id"].startswith("t:") for item in service.store.list_recommendations("pending"))
+    assert not any(item["rule_id"].startswith("t:") for item in _position_events(service))
 
 
-def test_take_profit_ladder_persists_r_stages_and_protection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(alert_store, "append", lambda *_args, **_kwargs: None)
+def test_take_profit_ladder_persists_r_stages_and_protection(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
@@ -808,7 +834,7 @@ def test_take_profit_ladder_persists_r_stages_and_protection(tmp_path: Path, mon
         datetime(2026, 8, 7, 10, 0), {},
         service._intraday_features({"600036.SH"}, datetime(2026, 8, 7, 10, 0))["600036.SH"],
     )
-    first = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "take_profit_ladder")
+    first = _position_events(service, "take_profit_ladder")[0]
     assert first["stage"] == "tp_1"
     assert first["r_multiple"] == pytest.approx(1.0)
 
@@ -845,8 +871,8 @@ def test_position_signal_action_does_not_modify_public_signal_value(tmp_path: Pa
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    signal = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "signal:signal_macd_dead")
-    assert signal["reduction_pct"] == 100
+    signal = _position_events(service, "signal:signal_macd_dead")[0]
+    assert signal["action_pct"] == 100
     assert repo.rows["signal_macd_dead"].to_list() == [True]
 
 
@@ -865,12 +891,12 @@ def test_position_signal_is_recorded_without_sending_notification(tmp_path: Path
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    pending = service.store.list_recommendations("pending")
+    pending = _position_events(service)
     assert [item["rule_id"] for item in pending] == ["signal:signal_macd_dead"]
     assert not any(item["rule_id"] == "signal:signal_macd_dead" for item in quotes.alerts)
 
 
-def test_default_rule_notification_off_still_records_event_and_recommendation(tmp_path: Path):
+def test_default_rule_notification_off_still_records_event(tmp_path: Path):
     quotes = _Quotes()
     service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
     service.store.replace({
@@ -882,7 +908,7 @@ def test_default_rule_notification_off_still_records_event_and_recommendation(tm
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    assert [item["rule_id"] for item in service.store.list_recommendations("pending")] == ["stop_loss"]
+    assert [item["rule_id"] for item in _position_events(service, "stop_loss")] == ["stop_loss"]
     events = alert_store.list_recent(tmp_path, days=30, source="position_risk")
     assert any(item["rule_id"] == "stop_loss" for item in events)
     assert quotes.alerts == []
@@ -902,8 +928,8 @@ def test_builtin_signal_direction_is_read_only_to_position_config(tmp_path: Path
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
 
-    signal = next(item for item in service.store.list_recommendations("pending") if item["rule_id"] == "signal:signal_macd_dead")
-    assert signal["reduction_pct"] == 25
+    signal = _position_events(service, "signal:signal_macd_dead")[0]
+    assert signal["action_pct"] == 25
 
 
 def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
@@ -919,21 +945,19 @@ def test_quote_recovery_does_not_replay_existing_vwap_breakdown(tmp_path: Path):
     service._preload_history({"600036.SH"})
     service._recovery_pending_symbols.add("600036.SH")
 
-    below = {"symbol": "600036.SH", "last_price": 98, "timestamp": "2026-08-07T13:00:01"}
-    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 0, 1))
-    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 0, 31))
-    assert not service.store.list_recommendations("pending")
+    below = {"symbol": "600036.SH", "last_price": 98, "timestamp": "2026-08-14T13:00:01"}
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 14, 13, 0, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 14, 13, 0, 31))
+    assert not _position_events(service)
 
-    above = {**below, "last_price": 102, "timestamp": "2026-08-07T13:01:00"}
-    service._evaluate_position(portfolio, position, above, datetime(2026, 8, 7, 13, 1))
-    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 1, 1))
-    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 7, 13, 1, 31))
+    above = {**below, "last_price": 102, "timestamp": "2026-08-14T13:01:00"}
+    service._evaluate_position(portfolio, position, above, datetime(2026, 8, 14, 13, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 14, 13, 1, 1))
+    service._evaluate_position(portfolio, position, below, datetime(2026, 8, 14, 13, 1, 31))
 
-    recommendation = service.store.list_recommendations("pending")
-    assert [item["rule_id"] for item in recommendation] == ["vwap_breakdown"]
-    assert recommendation[0]["reasons"] == [
-        "现价 98.000，VWAP 100.000，负偏离 2.00%（阈值 1.00%）持续 30 秒"
-    ]
+    events = _position_events(service, "vwap_breakdown")
+    assert len(events) == 1
+    assert "reasons" not in events[0]
     event = next(
         item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")
         if item["rule_id"] == "vwap_breakdown"
@@ -1113,7 +1137,7 @@ def test_unrealized_loss_uses_current_equity_denominator(tmp_path: Path):
 
     assert any(
         item["rule_id"] == "unrealized_loss"
-        for item in service.store.list_recommendations("pending")
+        for item in _position_events(service)
     )
 
 
@@ -1367,7 +1391,7 @@ def test_symbol_override_controls_builtin_signal_and_monitor_action(tmp_path: Pa
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
 
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
-    assert service.store.list_recommendations("pending") == []
+    assert _position_events(service) == []
 
     service._ingest_monitor_events([{
         "symbol": "600036.SH",
@@ -1376,9 +1400,7 @@ def test_symbol_override_controls_builtin_signal_and_monitor_action(tmp_path: Pa
         "message": "监控规则命中",
         "fingerprint": "monitor-rule-one",
     }])
-    pending = service.store.list_recommendations("pending")
-    assert pending[0]["rule_id"] == "monitor:rule-one"
-    assert pending[0]["reduction_pct"] == 50
+    assert _position_events(service) == []
 
 
 def test_raw_fund_evidence_does_not_emit_independent_events(tmp_path: Path):
@@ -1573,9 +1595,8 @@ def test_fund_pressure_requires_two_evidence_price_confirmation_and_sustain(tmp_
     assert len(quotes.alerts) == 1
     event = quotes.alerts[0]
     assert event["rule_id"] == "fund_flow_pressure"
-    assert set(event["source_ids"]) == {"large_sell", "continuous_outflow"}
-    assert event["suggestion_pct"] == 0
-    assert event["risk_score"] == 50
+    assert event["action_pct"] == 0
+    assert not _REMOVED_PUBLIC_EVENT_FIELDS & event.keys()
 
 
 def test_fund_pressure_three_evidence_and_sharp_drop_upgrades_action(tmp_path: Path):
@@ -1627,8 +1648,8 @@ def test_fund_pressure_three_evidence_and_sharp_drop_upgrades_action(tmp_path: P
 
     event = quotes.alerts[0]
     assert event["rule_id"] == "fund_flow_pressure"
-    assert event["suggestion_pct"] == 50
-    assert event["risk_score"] == 80
+    assert event["action_pct"] == 50
+    assert not _REMOVED_PUBLIC_EVENT_FIELDS & event.keys()
 
 
 def test_fund_pressure_requires_recovery_and_respects_group_cooldown(tmp_path: Path):
@@ -1738,9 +1759,9 @@ def test_two_independent_exit_signals_upgrade_to_half_reduction(tmp_path: Path):
     service._preload_history({"600036.SH"})
     service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 36, "timestamp": "2026-08-07T10:00:00"}
     service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
-    pending = service.store.list_recommendations("pending")
-    assert pending[0]["reduction_pct"] == 50
-    assert any("共振" in reason for reason in pending[0]["reasons"])
+    events = _position_events(service)
+    assert max(event["action_pct"] for event in events) == 50
+    assert all("reasons" not in event for event in events)
 
 
 def test_exit_signal_resonance_survives_service_restart(tmp_path: Path):
@@ -1779,18 +1800,15 @@ def test_exit_signal_resonance_survives_service_restart(tmp_path: Path):
     }
     restarted._evaluate_current(now=datetime(2026, 8, 7, 10, 4), force=True)
 
-    macd = next(
-        item for item in restarted.store.list_recommendations("pending")
-        if item["rule_id"] == "signal:signal_macd_dead"
-    )
-    assert macd["reduction_pct"] == 50
-    assert any("共振" in reason for reason in macd["reasons"])
+    macd = _position_events(restarted, "signal:signal_macd_dead")[0]
+    assert macd["action_pct"] == 50
+    assert "reasons" not in macd
 
 
 def test_persistent_daily_signal_emits_once_for_each_trading_date(tmp_path: Path):
     repo = _Repo()
     repo.rows = repo.rows.with_columns([
-        pl.lit(datetime(2026, 8, 7).date()).alias("date"),
+        pl.lit(datetime(2026, 8, 13).date()).alias("date"),
         pl.lit(True).alias("signal_volume_surge"),
     ])
     service = PositionRiskService(tmp_path, repo, _Quotes(), SimpleNamespace(paper_supervisor=None))
@@ -1806,11 +1824,11 @@ def test_persistent_daily_signal_emits_once_for_each_trading_date(tmp_path: Path
     position = portfolio["positions"][0]
     quote = {"symbol": "600036.SH", "last_price": 36}
 
-    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 14, 59))
-    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 7, 15, 0))
-    repo.rows = repo.rows.with_columns(pl.lit(datetime(2026, 8, 10).date()).alias("date"))
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 13, 14, 59))
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 13, 15, 0))
+    repo.rows = repo.rows.with_columns(pl.lit(datetime(2026, 8, 14).date()).alias("date"))
     service._preload_history({"600036.SH"})
-    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 10, 9, 31))
+    service._evaluate_position(portfolio, position, quote, datetime(2026, 8, 14, 9, 31))
 
     events = [
         item for item in alert_store.list_recent(tmp_path, days=30, source="position_risk")

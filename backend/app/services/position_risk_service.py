@@ -1,4 +1,4 @@
-"""持仓风控实时编排、证据计算和建议生成。"""
+"""持仓风控实时编排和内部特征计算。"""
 from __future__ import annotations
 
 import hashlib
@@ -63,15 +63,6 @@ _BUILTIN_SIGNAL_DIRECTIONS = {
     "signal_intraday_zero_cross_up": "entry",
     "signal_intraday_zero_cross_down": "exit",
 }
-_RULE_WEIGHTS = {
-    "cost": 30,
-    "trend": 20,
-    "momentum": 10,
-    "limit": 15,
-    "flow": 15,
-    "signal": 10,
-}
-
 _SIGNAL_LABELS = {
     **{key: value for key, value in ENRICHED_COLUMNS.items() if key.startswith("signal_")},
     **INTRADAY_SIGNAL_LABELS,
@@ -91,7 +82,7 @@ def position_risk_signal_label(signal_id: str, custom_labels: dict[str, str] | N
 
 
 def localize_position_risk_text(text: str, custom_labels: dict[str, str] | None = None) -> str:
-    """替换事件/建议文本中残留的内置信号 ID，不改写未知业务文本。"""
+    """替换事件文本中残留的内置信号 ID，不改写未知业务文本。"""
     return _SIGNAL_TOKEN.sub(
         lambda match: position_risk_signal_label(match.group(0), custom_labels),
         text,
@@ -145,10 +136,13 @@ def _is_continuous_trading(now: datetime) -> bool:
 
 
 class PositionRiskService:
-    """生成风险提醒；QMT同步可替换本地快照，建议确认仍不会直接交易。"""
+    """生成风险触发记录；QMT 同步可替换本地快照。"""
 
     def __init__(self, data_dir, repo, quote_service, app_state) -> None:
         self.store = PositionRiskStore(data_dir)
+        if not self.store.get_runtime("public_event_schema_v2", False):
+            alert_store.sanitize_position_risk_events(self.store.root.parents[1])
+            self.store.set_runtime("public_event_schema_v2", True)
         self.repo = repo
         self.quote_service = quote_service
         self.app_state = app_state
@@ -210,7 +204,6 @@ class PositionRiskService:
             self.store.set_runtime("severe_event_fingerprints", [])
             self.store.set_runtime("risk_event_noise_guard_v1", True)
         if not self.store.get_runtime("fund_pressure_noise_v1", False):
-            self.store.stale_pending_rules(_FUND_EVIDENCE_RULES)
             self._rule_states = {
                 key: value for key, value in self._rule_states.items()
                 if key.rsplit(":", 1)[-1] not in _FUND_EVIDENCE_RULES
@@ -580,33 +573,6 @@ class PositionRiskService:
                 self._depth[symbol].append({**raw, "received_at": time.time()})
 
     def _ingest_monitor_events(self, events: list[dict[str, Any]]) -> None:
-        portfolio = self.store.load()
-        positions = {item["symbol"] for item in portfolio["positions"]}
-        for event in events:
-            symbol = str(event.get("symbol") or "")
-            if symbol not in positions:
-                continue
-            configured = self._signal_config(
-                portfolio,
-                symbol,
-                "monitor_rules",
-                str(event.get("rule_id") or ""),
-            )
-            reduction = int(configured.get("action_pct") or 0)
-            if reduction <= 0:
-                continue
-            score = max(50, 50 + (20 if event.get("severity") == "critical" else 0))
-            self._create_recommendation(
-                portfolio,
-                symbol=symbol,
-                rule_id=f"monitor:{event.get('rule_id')}",
-                severity=str(event.get("severity") or "info"),
-                risk_score=score,
-                reduction_pct=reduction,
-                reasons=[localize_position_risk_text(str(event.get("message") or event.get("rule_name") or "监控规则命中"), self._custom_signal_labels)],
-                source_ids=[str(event.get("rule_id") or "")],
-                fingerprint=str(event.get("fingerprint") or f"monitor:{event.get('rule_id')}:{symbol}:{event.get('ts')}")
-            )
         self._notify_updated()
 
     def _quote_is_fresh(self, quote: dict[str, Any], now: datetime) -> bool:
@@ -879,6 +845,12 @@ class PositionRiskService:
         cost = _finite(position.get("cost_price"))
         if price is None:
             return
+        self._latest_quotes[symbol] = {
+            **(self._latest_quotes.get(symbol) or {}),
+            **quote,
+            "symbol": symbol,
+            "last_price": price,
+        }
         if intraday_signals:
             limit_up = _finite(quote.get("limit_up"))
             if limit_up and price >= limit_up - max(0.001, limit_up * 1e-6):
@@ -927,7 +899,7 @@ class PositionRiskService:
             and stop_return <= stop_limit
         )
         if self._set_rule(symbol, "stop_loss", stop_active, now):
-            self._emit(portfolio, position, "stop_loss", "成本止损", "critical", 85, stop_action, [f"现价较成本亏损 {stop_return * 100:.2f}%"])
+            self._emit(portfolio, position, "stop_loss", "成本止损", "critical", stop_action, [f"现价较成本亏损 {stop_return * 100:.2f}%"])
 
         initial_stop_price = cost * (1 + stop_threshold) if cost and stop_threshold < 0 else None
         if initial_stop_price and _finite(runtime.get("initial_stop_price")) is None:
@@ -966,7 +938,7 @@ class PositionRiskService:
             )
             if self._set_rule(symbol, "structure_stop", structure_broken, now):
                 self._emit(
-                    portfolio, position, "structure_stop", "分时结构止损", "critical", 75,
+                    portfolio, position, "structure_stop", "分时结构止损", "critical",
                     _action_pct(structure_cfg, 50),
                     [f"连续 {confirm_bars} 根闭合 5 分钟 K 跌破 {reference_name} {reference:.3f}"],
                     feature_snapshot_at=features.get("as_of"),
@@ -984,7 +956,7 @@ class PositionRiskService:
             atr_active = price <= effective_stop
             if self._set_rule(symbol, "atr_protection", atr_active, now):
                 self._emit(
-                    portfolio, position, "atr_protection", "ATR 移动保护", "warn", 65,
+                    portfolio, position, "atr_protection", "ATR 移动保护", "warn",
                     _action_pct(atr_cfg, 50),
                     [f"现价 {price:.3f} 低于动态保护价 {effective_stop:.3f}（5 分钟 ATR {atr:.3f}）"],
                     feature_snapshot_at=features.get("as_of"),
@@ -1010,7 +982,7 @@ class PositionRiskService:
                 else f"持仓超过 {int(max_minutes)} 分钟且收益 {stop_return:.2%} 未达到 {min_gain:.2%}"
             )
             self._emit(
-                portfolio, position, "time_stop", "时间止损", "warn", 55,
+                portfolio, position, "time_stop", "时间止损", "warn",
                 _action_pct(time_cfg, 25),
                 [time_reason],
             )
@@ -1031,7 +1003,6 @@ class PositionRiskService:
                 "take_profit",
                 "固定止盈",
                 "info",
-                55,
                 take_action,
                 [f"现价较成本盈利 {stop_return * 100:.2f}%（目标 {take_threshold:.2%}）"],
             )
@@ -1047,7 +1018,7 @@ class PositionRiskService:
             and price / high - 1 <= -trailing_threshold
         )
         if self._set_rule(symbol, "trailing_drawdown", trailing_active, now):
-            self._emit(portfolio, position, "trailing_drawdown", "盈利回撤", "warn", 60, trailing_action, [f"从持仓高点回撤 {(1 - price / high) * 100:.2f}%"])
+            self._emit(portfolio, position, "trailing_drawdown", "盈利回撤", "warn", trailing_action, [f"从持仓高点回撤 {(1 - price / high) * 100:.2f}%"])
 
         ladder_cfg = self._rule_config(portfolio, symbol, "take_profit_ladder")
         if _advanced_rule_enabled(ladder_cfg) and r_multiple is not None:
@@ -1081,7 +1052,7 @@ class PositionRiskService:
                     event_token=f"stage:{stage}", cooldown_seconds=0,
                 ):
                     self._emit(
-                        portfolio, position, "take_profit_ladder", f"分批止盈 {stage}", "info", 58 if stage == "tp_1" else 68,
+                        portfolio, position, "take_profit_ladder", f"分批止盈 {stage}", "info",
                         action_pct,
                         [f"收益达到 {r_multiple:.2f}R（阶段阈值 {threshold_r:.2f}R）"],
                         source_ids=[stage], stage=stage, r_multiple=r_multiple,
@@ -1097,7 +1068,7 @@ class PositionRiskService:
                     cooldown_seconds=0,
                 ):
                     self._emit(
-                        portfolio, position, "take_profit_runner", "剩余仓位移动保护", "warn", 65,
+                        portfolio, position, "take_profit_runner", "剩余仓位移动保护", "warn",
                         _action_pct({"action_pct": ladder_cfg.get("runner_pct")}, 40),
                         [f"剩余仓位触及移动保护价 {float(runtime['effective_stop_price']):.3f}"],
                         source_ids=["runner"], stage="runner", r_multiple=r_multiple,
@@ -1130,7 +1101,7 @@ class PositionRiskService:
             if self._set_rule(symbol, rule_id, active, now) and not ma_suppressed:
                 self._emit(
                     portfolio, position, rule_id, f"跌破 MA{days}", "warn" if action else "info",
-                    _RULE_WEIGHTS["trend"] + (20 if configured_action >= 50 else 10 if configured_action else 0), configured_action,
+                    configured_action,
                     [f"前复权动态价 {adjusted_price:.3f} 低于 MA{days} {ma:.3f}"],
                 )
 
@@ -1143,7 +1114,7 @@ class PositionRiskService:
             and price <= limit_down + 0.001
         )
         if self._set_rule(symbol, "limit_down", at_limit_down, now):
-            self._emit(portfolio, position, "limit_down", "跌停", "critical", 85, limit_down_action, ["原始现价触及当日跌停价"])
+            self._emit(portfolio, position, "limit_down", "跌停", "critical", limit_down_action, ["原始现价触及当日跌停价"])
 
         depth_state = self._depth_state(symbol, quote, now)
         sealed_cfg = self._rule_config(portfolio, symbol, "resealed_limit_up")
@@ -1154,7 +1125,7 @@ class PositionRiskService:
             now,
         ):
             self._emit(
-                portfolio, position, "resealed_limit_up", "涨停回封", "info", 35,
+                portfolio, position, "resealed_limit_up", "涨停回封", "info",
                 sealed_action, ["炸板后连续 3 个五档快照确认重新封板"],
             )
         broken_cfg = self._rule_config(portfolio, symbol, "broken_limit_up")
@@ -1162,7 +1133,7 @@ class PositionRiskService:
         if self._set_rule(
             symbol, "broken_limit_up", bool(broken_cfg.get("enabled", True) and depth_state["broken"]), now,
         ):
-            self._emit(portfolio, position, "broken_limit_up", "涨停炸板", "critical", 70, broken_action, ["连续封板状态中断"])
+            self._emit(portfolio, position, "broken_limit_up", "涨停炸板", "critical", broken_action, ["连续封板状态中断"])
         shrink_80_cfg = self._rule_config(portfolio, symbol, "sealed_order_shrink_80")
         shrink_50_cfg = self._rule_config(portfolio, symbol, "sealed_order_shrink_50")
         shrink_80_action = _action_pct(shrink_80_cfg, 50)
@@ -1186,12 +1157,12 @@ class PositionRiskService:
         if self._set_rule(symbol, "sealed_order_shrink_80", shrink_80, now):
             self._emit(
                 portfolio, position, "sealed_order_shrink_80", f"封单减少 {shrink_80_threshold:.0%}", "critical",
-                70, shrink_80_action, [f"买一封单较盘中峰值减少至少 {shrink_80_threshold:.0%}"],
+                shrink_80_action, [f"买一封单较盘中峰值减少至少 {shrink_80_threshold:.0%}"],
             )
         if self._set_rule(symbol, "sealed_order_shrink_50", shrink_50, now):
             self._emit(
                 portfolio, position, "sealed_order_shrink_50", f"封单减少 {shrink_50_threshold:.0%}", "warn",
-                55, shrink_50_action, [f"买一封单较盘中峰值减少至少 {shrink_50_threshold:.0%}"],
+                shrink_50_action, [f"买一封单较盘中峰值减少至少 {shrink_50_threshold:.0%}"],
             )
         snapshot_getter = getattr(self.quote_service, "get_intraday_snapshot", None)
         asset_type = str(position.get("asset_type") or self._asset_types.get(symbol) or "stock")
@@ -1314,7 +1285,6 @@ class PositionRiskService:
             _action_pct({"action_pct": pressure_cfg.get("strong_action_pct")}, 50)
             if pressure_level == 3 else _action_pct(pressure_cfg, 25) if pressure_level == 2 else 0
         )
-        score = 80 if pressure_level == 3 else 70 if pressure_level == 2 else 50
         source_ids = [item[0] for item in evidence]
 
         def emit_pressure() -> None:
@@ -1324,7 +1294,6 @@ class PositionRiskService:
                 "fund_flow_pressure",
                 "资金卖压",
                 "warn" if pressure_level >= 2 else "info",
-                score,
                 reduction,
                 [*(item[1] for item in evidence), *price_reasons],
                 source_ids=source_ids,
@@ -1396,7 +1365,7 @@ class PositionRiskService:
             if self._set_rule(symbol, "five_minute_drawdown", False if drawdown_suppressed else drawdown_active, now) and not drawdown_suppressed:
                 self._emit(
                     portfolio, position, "five_minute_drawdown", "5 分钟高点回撤", "warn",
-                    45, drawdown_action, [f"从 5 分钟高点回撤 {(1 - price / five_minute_high):.2%}"],
+                    drawdown_action, [f"从 5 分钟高点回撤 {(1 - price / five_minute_high):.2%}"],
                 )
         vwap_cfg = self._rule_config(portfolio, symbol, "vwap_breakdown")
         vwap_buffer = _finite(vwap_cfg.get("buffer"))
@@ -1416,7 +1385,7 @@ class PositionRiskService:
         ) if not vwap_suppressed else False
         if self._set_rule(symbol, "vwap_breakdown", vwap_active, now) and not vwap_suppressed:
             self._emit(
-                portfolio, position, "vwap_breakdown", "分时均价负偏离超限", "warn", 45, vwap_action,
+                portfolio, position, "vwap_breakdown", "分时均价负偏离超限", "warn", vwap_action,
                 [
                     f"现价 {price:.3f}，VWAP {vwap:.3f}，负偏离 {(1 - price / vwap):.2%}"
                     f"（阈值 {vwap_buffer:.2%}）持续 {int(vwap_sustain)} 秒"
@@ -1550,13 +1519,10 @@ class PositionRiskService:
                         f"t:{signal_id}",
                         f"做T{'买入' if trade_action == 'BUY' else '卖出'}",
                         "info",
-                        45,
                         trade_pct,
                         [f"分时信号：{self._signal_label(signal_id, configured)}"],
                         source_ids=[signal_id],
                         trade_action=trade_action,
-                        suggested_price=price,
-                        suggested_volume=suggested_volume,
                         feature_snapshot_at=features.get("as_of") if features else None,
                     )
                 continue
@@ -1585,7 +1551,6 @@ class PositionRiskService:
                 self._emit(
                     portfolio, position, f"signal:{signal_id}", self._signal_label(signal_id, configured),
                     "warn" if action else "info",
-                    60 if action >= 50 else _RULE_WEIGHTS["signal"] + (40 if action else 10),
                     action,
                     reasons,
                     source_ids=[signal_id],
@@ -1849,7 +1814,6 @@ class PositionRiskService:
                 "quote_interruption",
                 "行情中断",
                 "critical",
-                0,
                 _action_pct(config, 0),
                 [f"{', '.join(stale_symbols)} 行情超过 {int(threshold)} 秒未更新；恢复后其余盘中规则重新建立基线"],
             )
@@ -1913,7 +1877,7 @@ class PositionRiskService:
                 evaluation_time,
             ):
                 action = _action_pct(config, 25 if rule_id == "total_exposure" else 50)
-                self._emit(portfolio, None, rule_id, reason, "critical" if rule_id != "total_exposure" else "warn", 75, action, [reason])
+                self._emit(portfolio, None, rule_id, reason, "critical" if rule_id != "total_exposure" else "warn", action, [reason])
         for position in portfolio["positions"]:
             quote = self._latest_quotes.get(position["symbol"], {})
             price = _finite(quote.get("last_price"))
@@ -1939,9 +1903,8 @@ class PositionRiskService:
                     "symbol_concentration",
                     f"单票超过权益 {threshold:.0%}",
                     "warn",
-                    55,
                     reduction,
-                    [f"当前单票仓位 {weight:.2%}，建议降至 {target_pct:.0f}%"],
+                    [f"当前单票仓位 {weight:.2%}，目标降至 {target_pct:.0f}%"],
                 )
         cluster_config = self._rule_config(portfolio, "__portfolio__", "clustered_severe_events")
         cluster_window = _finite(cluster_config.get("window_seconds"))
@@ -1962,7 +1925,6 @@ class PositionRiskService:
                 "clustered_severe_events",
                 "严重事件聚集",
                 "critical",
-                80,
                 _action_pct(config, 50),
                 [f"{int(cluster_window / 60)} 分钟内出现至少 {int(cluster_count)} 个严重风险事件"],
             )
@@ -1974,15 +1936,12 @@ class PositionRiskService:
         rule_id: str,
         label: str,
         severity: str,
-        score: int,
-        reduction_pct: int,
+        action_pct: int,
         reasons: list[str],
         *,
         source_ids: list[str] | None = None,
         occurred_at: datetime | None = None,
         trade_action: str | None = None,
-        suggested_price: float | None = None,
-        suggested_volume: int | None = None,
         stage: str | None = None,
         r_multiple: float | None = None,
         effective_stop_price: float | None = None,
@@ -2027,12 +1986,14 @@ class PositionRiskService:
             "name": name,
             "message": f"{name}：{label}",
             "severity": severity,
-            "risk_score": min(100, max(0, int(score))),
-            "suggestion_pct": reduction_pct,
-            "reasons": reasons,
+            "action_pct": action_pct,
         }
-        if source_ids:
-            event["source_ids"] = list(source_ids)
+        if symbol:
+            current_price = _finite((self._latest_quotes.get(symbol) or {}).get("last_price"))
+            if current_price is not None:
+                event["price"] = current_price
+        if trade_action:
+            event["trade_action"] = trade_action
         if stage is not None:
             event["stage"] = stage
         if r_multiple is not None:
@@ -2065,73 +2026,6 @@ class PositionRiskService:
                 publish([event])
             else:
                 self.quote_service.push_alerts([event])
-        if reduction_pct > 0:
-            self._create_recommendation(
-                portfolio,
-                symbol=symbol,
-                rule_id=rule_id,
-                severity=severity,
-                risk_score=int(score),
-                reduction_pct=reduction_pct,
-                reasons=reasons,
-                source_ids=source_ids or [rule_id],
-                fingerprint=fingerprint,
-                trade_action=trade_action,
-                suggested_price=suggested_price,
-                suggested_volume=suggested_volume,
-                stage=stage,
-                r_multiple=r_multiple,
-                effective_stop_price=effective_stop_price,
-                feature_snapshot_at=feature_snapshot_at,
-            )
-
-    def _create_recommendation(
-        self,
-        portfolio: dict[str, Any],
-        *,
-        symbol: str | None,
-        rule_id: str,
-        severity: str,
-        risk_score: int,
-        reduction_pct: int,
-        reasons: list[str],
-        source_ids: list[str],
-        fingerprint: str,
-        trade_action: str | None = None,
-        suggested_price: float | None = None,
-        suggested_volume: int | None = None,
-        stage: str | None = None,
-        r_multiple: float | None = None,
-        effective_stop_price: float | None = None,
-        feature_snapshot_at: str | None = None,
-    ) -> dict[str, Any]:
-        if trade_action == "BUY":
-            action = "做T买入建议"
-        elif trade_action == "SELL":
-            action = "做T卖出建议"
-        else:
-            action = "清仓建议" if reduction_pct >= 100 else "减仓建议"
-        return self.store.add_recommendation({
-            "fingerprint": fingerprint,
-            "symbol": symbol,
-            "scope": "symbol" if symbol else "portfolio",
-            "rule_id": rule_id,
-            "severity": severity,
-            "risk_score": risk_score,
-            "action": action,
-            "reduction_pct": reduction_pct,
-            "reasons": reasons,
-            "source_ids": source_ids,
-            "portfolio_revision": portfolio["revision"],
-            "trade_action": trade_action,
-            "suggested_price": suggested_price,
-            "suggested_volume": suggested_volume,
-            "stage": stage,
-            "r_multiple": r_multiple,
-            "effective_stop_price": effective_stop_price,
-            "feature_snapshot_at": feature_snapshot_at,
-        })
-
     def _notify_updated(self) -> None:
         notify = getattr(self.quote_service, "notify_position_risk_updated", None)
         if callable(notify):
@@ -2260,7 +2154,6 @@ class PositionRiskService:
             "imported_at": cn_now().isoformat(),
         }
         saved = self.store.replace(value, revision)
-        self.store.stale_pending()
         self._rule_states = {}
         self.store.set_runtime("rule_states", {})
         self._severe_events.clear()
@@ -2388,7 +2281,6 @@ class PositionRiskService:
         portfolio = self.store.load()
         rows = []
         total_asset = _finite(portfolio["account"].get("total_asset"))
-        evidence_fields = ("cost", "history", "quote", "depth", "flow")
         for position in portfolio["positions"]:
             symbol = position["symbol"]
             quote = self._latest_quotes.get(symbol) or {}
@@ -2398,13 +2290,6 @@ class PositionRiskService:
             cost = _finite(position.get("cost_price"))
             market_value = price * quantity if price is not None else None
             pnl = (price - cost) * quantity if price is not None and cost is not None else None
-            evidence = {
-                "cost": cost is not None,
-                "history": bool(history),
-                "quote": bool(quote),
-                "depth": bool(self._depth.get(symbol)),
-                "flow": len(self._flow.get(symbol, ())) >= 7,
-            }
             rows.append({
                 **position,
                 "price": price,
@@ -2416,17 +2301,8 @@ class PositionRiskService:
                 "ma10": history.get("ma10"),
                 "ma20": history.get("ma20"),
                 "latest_signal": next((key for key, value in history.items() if key.startswith("signal_") and value is True), None),
-                "evidence": evidence,
-                "evidence_coverage": sum(bool(evidence[field]) for field in evidence_fields) / len(evidence_fields),
-                "data_status": "ready" if evidence["quote"] and evidence["history"] else "insufficient",
+                "data_status": "ready" if quote and history else "insufficient",
             })
-        pending = [self._localize_recommendation(item) for item in self.store.list_recommendations("pending")]
-        by_symbol = {item["symbol"]: item for item in pending if item.get("symbol")}
-        for row in rows:
-            suggestion = by_symbol.get(row["symbol"])
-            row["suggestion"] = suggestion
-            row["risk_score"] = suggestion["risk_score"] if suggestion else 0
-            row["risk_level"] = "high" if row["risk_score"] >= 70 else "medium" if row["risk_score"] >= 40 else "low"
         return {
             **portfolio,
             "positions": rows,
@@ -2434,14 +2310,5 @@ class PositionRiskService:
                 "status": self._runtime_status,
                 "reason": self._runtime_reason,
                 "last_processed_at": self._last_processed_at,
-                "pending_count": len(pending),
             },
         }
-
-    def _localize_recommendation(self, item: dict[str, Any]) -> dict[str, Any]:
-        localized = dict(item)
-        localized["reasons"] = [
-            localize_position_risk_text(str(reason), self._custom_signal_labels)
-            for reason in item.get("reasons", [])
-        ]
-        return localized

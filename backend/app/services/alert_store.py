@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -162,6 +163,57 @@ def delete_one(data_dir: Path, ts: int) -> bool:
             logger.warning("alert_store delete_one write failed: %s", e)
             return False
         return True
+
+
+def sanitize_position_risk_events(data_dir: Path) -> int:
+    """Remove legacy score/recommendation/evidence fields from position-risk events."""
+    with _lock:
+        p = _path(data_dir)
+        if not p.exists():
+            return 0
+        removed = 0
+        changed = False
+        kept: list[dict] = []
+        fields = {
+            "risk_score", "risk_level", "reasons", "source_ids", "signals",
+            "conditions", "logic", "evidence", "evidence_coverage",
+        }
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        logger.warning("alert_store position-risk migration found malformed JSON; keeping file unchanged")
+                        return 0
+                    if event.get("source") == "position_risk":
+                        if "suggestion_pct" in event:
+                            event["action_pct"] = event.pop("suggestion_pct")
+                            changed = True
+                        for field in fields:
+                            if field in event:
+                                event.pop(field, None)
+                                removed += 1
+                                changed = True
+                    kept.append(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store position-risk migration read failed: %s", exc)
+            return 0
+        if not changed:
+            return 0
+        temporary = p.with_name(f"{p.name}.position-risk-migration.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as f:
+                for event in kept:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            os.replace(temporary, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store position-risk migration write failed: %s", exc)
+            return 0
+        return removed
 
 
 def count(data_dir: Path) -> int:

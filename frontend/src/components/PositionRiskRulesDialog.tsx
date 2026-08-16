@@ -72,11 +72,11 @@ export const LARGE_ORDER_FIELDS: PositionRiskRuleField[] = [
 export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> = {
   stop_loss: [
     { key: 'threshold', label: '亏损阈值', suffix: '%', min: -100, max: 0, step: 1, percent: true, defaultValue: -0.10 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
   take_profit: [
     { key: 'threshold', label: '目标收益率', suffix: '%', min: 0, max: 500, step: 1, percent: true, defaultValue: 0.10 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
   take_profit_ladder: [
     { key: 'first_r', label: '第一阶段 R', suffix: 'R', min: 0.1, step: 0.1, defaultValue: 1 },
@@ -98,60 +98,60 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
   trailing_drawdown: [
     { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.05 },
     { key: 'threshold', label: '高点回撤', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.08 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   ma5_breakdown: [
     { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 5 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 },
   ],
   ma10_breakdown: [
     { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 5 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   ma20_breakdown: [
     { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 5 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   five_minute_drawdown: [
     { key: 'threshold', label: '回撤阈值', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.03 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   vwap_breakdown: [
     { key: 'buffer', label: '负偏离阈值', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.01 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 30 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   structure_stop: [
     { key: 'reference', label: '结构基准', suffix: '', min: 0, step: 1, type: 'select', options: [['vwap', 'VWAP'], ['ema20', 'EMA20'], ['five_minute_low', '5 分钟前低'], ['opening_range_low', '开盘区间低点']] },
     { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'confirm_bars', label: '确认根数', suffix: '根', min: 1, max: 10, step: 1, defaultValue: 2 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   atr_protection: [
     { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.02 },
     { key: 'atr_multiple', label: 'ATR 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 2 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   time_stop: [
     { key: 'max_minutes', label: '最长持仓', suffix: '分', min: 1, step: 5, defaultValue: 120 },
     { key: 'min_gain', label: '最低收益', suffix: '%', min: -100, max: 100, step: 0.5, percent: true, defaultValue: 0 },
     { key: 'close_before_minutes', label: '收盘前提醒', suffix: '分', min: 0, max: 120, step: 5, defaultValue: 15 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
-  broken_limit_up: [{ key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 }],
-  resealed_limit_up: [{ key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 }],
+  broken_limit_up: [{ key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 }],
+  resealed_limit_up: [{ key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 }],
   sealed_order_shrink_50: [
     { key: 'threshold', label: '减少阈值', suffix: '%', min: 0, max: 100, step: 5, percent: true, defaultValue: 0.50 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   sealed_order_shrink_80: [
     { key: 'threshold', label: '减少阈值', suffix: '%', min: 0, max: 100, step: 5, percent: true, defaultValue: 0.80 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, percent: false, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, percent: false, defaultValue: 50 },
   ],
-  limit_down: [{ key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 }],
+  limit_down: [{ key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 }],
   continuous_outflow: [
     { key: 'direction_ratio', label: '卖出占比', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.65 },
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 10 },
@@ -161,7 +161,7 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
     { key: 'sustain_seconds', label: '持续时间', suffix: '秒', min: 1, step: 1, defaultValue: 10 },
   ],
   fund_flow_pressure: [
-    { key: 'min_evidence', label: '最少资金证据', suffix: '项', min: 2, max: 3, step: 1, defaultValue: 2 },
+    { key: 'min_evidence', label: '最少资金信号', suffix: '项', min: 2, max: 3, step: 1, defaultValue: 2 },
     { key: 'sustain_seconds', label: '确认持续时间', suffix: '秒', min: 1, step: 5, defaultValue: 30 },
     { key: 'recovery_seconds', label: '恢复持续时间', suffix: '秒', min: 1, step: 5, defaultValue: 60 },
     { key: 'cooldown_seconds', label: '同组冷却', suffix: '秒', min: 0, step: 60, defaultValue: 900 },
@@ -169,24 +169,24 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
     { key: 'strong_price_drop', label: '严重一分钟跌幅', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.01 },
     { key: 'recovery_sell_ratio', label: '卖压恢复占比', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.55 },
     { key: 'recovery_imbalance', label: '盘口恢复阈值', suffix: '', min: -1, max: 1, step: 0.05, defaultValue: -0.15 },
-    { key: 'action_pct', label: '确认建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
-    { key: 'strong_action_pct', label: '严重建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'strong_action_pct', label: '强触发执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   daily_equity_loss: [
     { key: 'threshold', label: '亏损阈值', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.03 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   equity_drawdown: [
     { key: 'threshold', label: '回撤阈值', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.08 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   unrealized_loss: [
     { key: 'threshold', label: '浮亏阈值', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.08 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   total_exposure: [
     { key: 'threshold', label: '仓位上限', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.95 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 25 },
   ],
   symbol_concentration: [
     { key: 'threshold', label: '单票上限', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.30 },
@@ -195,11 +195,11 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
   clustered_severe_events: [
     { key: 'count', label: '事件数量', suffix: '个', min: 1, step: 1, defaultValue: 3 },
     { key: 'window_seconds', label: '观察窗口', suffix: '秒', min: 1, step: 30, defaultValue: 300 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
   ],
   quote_interruption: [
     { key: 'threshold_seconds', label: '中断阈值', suffix: '秒', min: 1, step: 1, defaultValue: 30 },
-    { key: 'action_pct', label: '建议比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 },
   ],
 }
 
@@ -345,16 +345,13 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     const config = ruleConfig(ruleId)
     if (ruleId === 'symbol_concentration') return `降至 ${Number(config.target_pct ?? 30)}%`
     if (ruleId === 'take_profit_ladder') return `1R ${Number(config.first_action_pct ?? 30)}% / 2R ${Number(config.second_action_pct ?? 30)}%`
-    return Number(config.action_pct ?? 0) > 0 ? `建议 ${config.action_pct}%` : '只提醒'
+    return Number(config.action_pct ?? 0) > 0 ? `执行 ${config.action_pct}%` : '只提醒'
   }
 
   if (!open) return null
   const pressureConfig = ruleConfig('fund_flow_pressure')
   const minimumEvidence = Number(pressureConfig.min_evidence ?? 2)
   const pressureSustain = Number(pressureConfig.sustain_seconds ?? 30)
-  const pressureAction = Number(pressureConfig.action_pct ?? 25)
-  const strongPressureAction = Number(pressureConfig.strong_action_pct ?? 50)
-  const strongDrop = displayValue(pressureConfig.strong_price_drop ?? 0.01, true)
   const pressurePrimaryFields = (POSITION_RISK_RULE_FIELDS.fund_flow_pressure ?? []).filter(field => [
     'min_evidence', 'sustain_seconds', 'price_buffer', 'strong_price_drop', 'action_pct', 'strong_action_pct',
   ].includes(field.key))
@@ -396,7 +393,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           <section className="mx-auto max-w-4xl">
             <div className="mb-5">
               <h3 className="text-sm font-semibold">止盈</h3>
-              <p className="mt-1 text-[11px] text-muted">全局规则作为默认值；单股检查器可以单独覆盖目标和建议比例。</p>
+              <p className="mt-1 text-[11px] text-muted">全局规则作为默认值；单股检查器可以单独覆盖目标和执行比例。</p>
             </div>
             <div className="divide-y divide-border border-y border-border">
               {(['take_profit', 'trailing_drawdown', 'take_profit_ladder'] as const).map(ruleId => {
@@ -429,7 +426,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
             <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold">做 T</h3>
-                <p className="mt-1 text-[11px] text-muted">复用分时价格/均价和 0 轴穿越信号，只生成半自动建议，不会自动下单。</p>
+                <p className="mt-1 text-[11px] text-muted">复用分时价格/均价和 0 轴穿越信号，生成触发记录，不会自动下单。</p>
               </div>
               <div className="flex items-center gap-3 text-[11px] text-muted">
                 <span className={options?.capabilities.intraday.available ? 'text-bull' : 'text-warning'}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
@@ -445,7 +442,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
               <div className="mb-2 flex items-end justify-between gap-3">
                 <div>
                   <h4 className="text-xs font-semibold">分时穿越信号</h4>
-                  <p className="mt-1 text-[10px] text-muted">入场信号生成买入建议，出场信号生成卖出建议；每次边沿只生成一条建议。</p>
+                  <p className="mt-1 text-[10px] text-muted">入场和出场信号分别记录买入或卖出动作；每次边沿只记录一条。</p>
                 </div>
                 <span className="text-[10px] text-muted">方向由系统定义</span>
               </div>
@@ -473,7 +470,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           <div>
             <div className="mb-5">
               <h3 className="text-sm font-semibold">个股退出规则</h3>
-              <p className="mt-1 text-[11px] text-muted">成本、趋势和涨跌停规则按当前持仓独立形成退出建议；未设置单股覆盖时继承全局模板。</p>
+              <p className="mt-1 text-[11px] text-muted">成本、趋势和涨跌停规则按当前持仓独立形成退出触发；未设置单股覆盖时继承全局模板。</p>
             </div>
             <div className="grid gap-x-8 gap-y-6 lg:grid-cols-3">
               {INDEPENDENT_RULE_GROUPS.map(([group, ruleIds]) => (
@@ -525,10 +522,10 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                   <h3 className="text-sm font-semibold">资金卖压</h3>
                   <span className="bg-warning/10 px-1.5 py-0.5 text-[10px] text-warning">组合风险</span>
                 </div>
-                <p className="mt-1 text-[11px] text-muted">原始证据不单独告警；同时满足证据、价格和持续时间后，只生成这一条结论。</p>
+                <p className="mt-1 text-[11px] text-muted">单项资金信号不单独告警；同时满足资金、价格和持续时间后记录一条触发。</p>
               </div>
               <div className="flex shrink-0 items-center gap-4 text-[11px] text-muted">
-                <span className="bg-elevated px-2 py-1">确认后建议 {pressureAction}%</span>
+                <span className="bg-elevated px-2 py-1">命中执行 {Number(pressureConfig.action_pct ?? 25)}%</span>
                 <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={pressureConfig.enabled !== false} onChange={event => toggleRule('fund_flow_pressure', event.target.checked)} /><span>监控</span></label>
                 <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={pressureConfig.notify === true} onChange={event => toggleRuleNotify('fund_flow_pressure', event.target.checked)} /><span>通知</span></label>
               </div>
@@ -536,7 +533,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
 
             <div className="grid items-stretch gap-2 border-y border-border bg-elevated/30 p-3 sm:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1.15fr] sm:items-center">
               <div className="px-2 py-2">
-                <div className="text-[10px] text-muted">卖压证据</div>
+                <div className="text-[10px] text-muted">卖压信号</div>
                 <div className="mt-1 text-sm font-semibold">至少 {minimumEvidence} / 3 项</div>
               </div>
               <ArrowRight className="hidden h-4 w-4 text-muted sm:block" />
@@ -559,8 +556,8 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
             <section className="mt-6">
               <div className="mb-2 flex items-end justify-between gap-3">
                 <div>
-                  <h4 className="text-xs font-semibold">卖压证据</h4>
-                  <p className="mt-1 text-[10px] text-muted">三项中达到设定数量才进入价格确认；关闭的证据不参与组合。</p>
+                  <h4 className="text-xs font-semibold">卖压信号</h4>
+                  <p className="mt-1 text-[10px] text-muted">三项中达到设定数量才进入价格确认；关闭的信号不参与组合。</p>
                 </div>
                 <span className="shrink-0 text-[10px] text-muted">{minimumEvidence} 选 3</span>
               </div>
@@ -589,7 +586,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
 
             <section className="mt-6 grid gap-6 lg:grid-cols-[1.5fr_1fr]">
               <div>
-                <h4 className="mb-2 text-xs font-semibold">组合判断与建议</h4>
+                <h4 className="mb-2 text-xs font-semibold">组合判断与执行</h4>
                 <div className="border-y border-border py-3">
                   {renderFields('fund_flow_pressure', pressurePrimaryFields, 'sm:grid-cols-3')}
                 </div>
@@ -599,21 +596,13 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                 </button>
                 {showAdvancedPressure && <div className="mt-2">{renderFields('fund_flow_pressure', pressureAdvancedFields, 'sm:grid-cols-2')}</div>}
               </div>
-              <div>
-                <h4 className="mb-2 text-xs font-semibold">结果分级</h4>
-                <div className="divide-y divide-border border-y border-border text-[11px]">
-                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">{minimumEvidence} 项证据 + 价格走弱</span><strong>观察</strong></div>
-                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">3 项证据或已破 MA10 / MA20</span><strong>建议 {pressureAction}%</strong></div>
-                  <div className="flex items-center justify-between gap-3 py-3"><span className="text-muted">3 项证据 + 1 分钟跌幅 ≥ {strongDrop}%</span><strong className="text-warning">建议 {strongPressureAction}%</strong></div>
-                </div>
-              </div>
             </section>
 
             <section className="mt-6 border-t border-border pt-4">
               <div className="flex items-center gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-medium">大单买入辅助采样</div>
-                  <p className="mt-1 text-[10px] text-muted">仅保留买方观察数据，不计入“资金卖压”三项证据，也不会单独告警。</p>
+                  <p className="mt-1 text-[10px] text-muted">仅保留买方观察数据，不计入“资金卖压”组合，也不会单独告警。</p>
                 </div>
                 <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={ruleConfig('large_buy').enabled !== false} onChange={event => toggleRule('large_buy', event.target.checked)} /><span>采样</span></label>
                 <button type="button" onClick={() => setExpandedRule(expandedRule === 'large_buy' ? null : 'large_buy')} className="grid h-8 w-8 shrink-0 place-items-center hover:bg-elevated" aria-label="设置大单买入" title="设置大单买入"><Settings2 className="h-3.5 w-3.5" /></button>
@@ -644,7 +633,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <select value={direction} disabled className="h-7 cursor-not-allowed rounded border border-border bg-surface px-1 text-[10px] opacity-60" aria-label={`${signal.label}方向（只读）`} title="系统信号方向由公共信号定义，只读">
                           <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                         </select>
-                        <select value={actionPct} onChange={event => updateSignal('builtin', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px]" aria-label={`${signal.label}建议比例`}>
+                        <select value={actionPct} onChange={event => updateSignal('builtin', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px]" aria-label={`${signal.label}执行比例`}>
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
                         <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.enabled !== false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /><span>监控</span></label>
@@ -672,7 +661,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         <select disabled={!signal.available} value={direction} onChange={event => updateSignal('custom', signal.id, { direction: event.target.value })} className="h-7 rounded border border-border bg-surface px-1 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" aria-label={`${signal.label}方向`}>
                           <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                         </select>
-                        <select disabled={!signal.available} value={actionPct} onChange={event => updateSignal('custom', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" aria-label={`${signal.label}建议比例`}>
+                        <select disabled={!signal.available} value={actionPct} onChange={event => updateSignal('custom', signal.id, { action_pct: Number(event.target.value) })} className="h-7 rounded border border-border bg-surface px-1 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" aria-label={`${signal.label}执行比例`}>
                           <option value={0}>提醒</option><option value={25}>减仓 25%</option><option value={50}>减仓 50%</option><option value={100}>清仓</option>
                         </select>
                         <label className={`flex items-center gap-1.5 text-[10px] text-muted ${signal.available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}><input type="checkbox" disabled={!signal.available} checked={signal.available && saved?.enabled !== false} onChange={event => toggleSignal('custom', signal.id, event.target.checked, signal.direction, signal.label)} aria-label={`监控${signal.label}`} /><span>监控</span></label>
@@ -700,12 +689,12 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                           value={saved?.action_pct ?? 0}
                           onChange={event => updateSignal('monitor_rules', rule.id, { action_pct: Number(event.target.value) })}
                           className="h-7 rounded border border-border bg-surface px-2 text-[11px]"
-                          aria-label={`${rule.name}建议比例`}
+                          aria-label={`${rule.name}执行比例`}
                         >
                           <option value={0}>只进时间线</option>
-                          <option value={25}>建议减仓 25%</option>
-                          <option value={50}>建议减仓 50%</option>
-                          <option value={100}>建议清仓</option>
+                          <option value={25}>执行减仓 25%</option>
+                          <option value={50}>执行减仓 50%</option>
+                          <option value={100}>执行清仓</option>
                         </select>
                       </span>
                     </div>

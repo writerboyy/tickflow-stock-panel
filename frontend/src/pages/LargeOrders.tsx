@@ -2,10 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
-  BellRing,
-  Check,
   ChevronDown,
-  ChevronRight,
   FileClock,
   ImagePlus,
   Loader2,
@@ -13,7 +10,6 @@ import {
   Search,
   Settings2,
   ShieldCheck,
-  SlidersHorizontal,
   X,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
@@ -25,16 +21,16 @@ import { toast } from '@/components/Toast'
 import {
   api,
   type PositionRiskOptions,
+  type PositionRiskEvent,
   type PositionRiskPosition,
   type PositionRiskPortfolio,
-  type PositionRiskRecommendation,
   type PositionRiskStatus,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignal, cnSignalText } from '@/lib/signals'
 
-type Tab = 'positions' | 'pending' | 'events'
+type Tab = 'positions' | 'events'
 
 const STATUS_LABEL: Record<PositionRiskStatus, string> = {
   idle: '待导入',
@@ -183,12 +179,6 @@ function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: Positi
   )
 }
 
-function riskTone(score: number) {
-  if (score >= 70) return 'text-danger'
-  if (score >= 40) return 'text-warning'
-  return 'text-bull'
-}
-
 function StatusDot({ status }: { status: PositionRiskStatus }) {
   const active = status === 'websocket'
   const warning = status === 'polling_degraded' || status === 'reconnecting'
@@ -196,13 +186,12 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
 }
 
 type TradePreset = {
-  recommendationId?: string
   action: 'BUY' | 'SELL'
   price?: number | null
   volume?: number | null
 }
 
-function TradeOrderPanel({ row, tradePreset, onClose, onTradeSubmitted }: { row: PositionRiskPosition; tradePreset?: TradePreset | null; onClose: () => void; onTradeSubmitted?: (recommendationId: string) => void }) {
+function TradeOrderPanel({ row, tradePreset, onClose }: { row: PositionRiskPosition; tradePreset?: TradePreset | null; onClose: () => void }) {
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const orders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
   const queryClient = useQueryClient()
@@ -229,7 +218,6 @@ function TradeOrderPanel({ row, tradePreset, onClose, onTradeSubmitted }: { row:
       toast(`委托结果：${qmtOrderStatus(result.order.status)}`, 'success')
       queryClient.invalidateQueries({ queryKey: QK.positionRiskQmtOrders })
       queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt })
-      if (tradePreset?.recommendationId && result.order.status !== 'rejected' && result.order.status !== 'unknown') onTradeSubmitted?.(tradePreset.recommendationId)
     },
   })
   const cancelMutation = useMutation({
@@ -469,9 +457,9 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                   </select>
                 </label>
                 {title === '分时信号' ? (
-                  <div className="text-[10px] text-muted"><span>建议比例</span><span className="mt-1 flex h-7 items-center border border-border bg-elevated px-2">由做T模块控制</span></div>
+                  <div className="text-[10px] text-muted"><span>执行比例</span><span className="mt-1 flex h-7 items-center border border-border bg-elevated px-2">由做T模块控制</span></div>
                 ) : (
-                  <label className="text-[10px] text-muted">建议比例
+                  <label className="text-[10px] text-muted">执行比例
                     <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
                       <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
                       <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
@@ -498,7 +486,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="grid grid-cols-5 gap-px border-y border-border bg-border text-xs">
             {[
-              ['风险分', String(row.risk_score)], ['仓位', pct(row.weight)],
+              ['仓位', pct(row.weight)],
               ['MA5', price(row.ma5)], ['MA10', price(row.ma10)], ['MA20', price(row.ma20)],
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
@@ -517,7 +505,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                   <span className="text-muted">今日做T <b className="font-mono text-foreground">{feature?.t_trade_count ?? 0} 次</b></span>
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
-                  <span>{feature?.as_of ? `最后闭合 ${new Date(feature.as_of).toLocaleTimeString('zh-CN')}` : '分时能力不可用时不会生成新的短线建议'}</span>
+                  <span>{feature?.as_of ? `最后闭合 ${new Date(feature.as_of).toLocaleTimeString('zh-CN')}` : '分时能力不可用时不会生成新的短线信号'}</span>
                   {feature?.session_vwap != null && <span>VWAP <b className="font-mono text-foreground">{price(feature.session_vwap)}</b></span>}
                   {feature?.ema9_1m != null && feature?.ema20_1m != null && <span>EMA9/20 <b className="font-mono text-foreground">{price(feature.ema9_1m)}/{price(feature.ema20_1m)}</b></span>}
                   {feature?.atr14_5m != null && <span>ATR5m <b className="font-mono text-foreground">{price(feature.atr14_5m)}</b></span>}
@@ -577,22 +565,13 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                             <span className="min-w-0 truncate">{rule.name}</span>
                             <span className="flex shrink-0 items-center gap-2">
                               <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
-                              <select value={explicit == null ? 'inherit' : String(explicit)} disabled={mutation.isPending} onChange={event => setMonitorAction(rule.id, event.target.value === 'inherit' ? null : Number(event.target.value))} className="h-7 rounded border border-border bg-surface px-2 text-[11px]" aria-label={`${rule.name}建议比例`}>
-                                <option value="inherit">继承模板（{inherited ? `${inherited}%` : '时间线'}）</option><option value="0">只进时间线</option><option value="25">建议减仓 25%</option><option value="50">建议减仓 50%</option><option value="100">建议清仓</option>
+                              <select value={explicit == null ? 'inherit' : String(explicit)} disabled={mutation.isPending} onChange={event => setMonitorAction(rule.id, event.target.value === 'inherit' ? null : Number(event.target.value))} className="h-7 rounded border border-border bg-surface px-2 text-[11px]" aria-label={`${rule.name}执行比例`}>
+                                <option value="inherit">继承模板（{inherited ? `${inherited}%` : '时间线'}）</option><option value="0">只进时间线</option><option value="25">执行减仓 25%</option><option value="50">执行减仓 50%</option><option value="100">执行清仓</option>
                               </select>
                             </span>
                           </div>
                         )
                       }) : <p className="py-2 text-xs text-muted">暂无监控中心规则</p>}
-                    </div>
-                  </section>
-                  <section>
-                    <h3 className="mb-2 text-xs font-semibold text-secondary">证据状态</h3>
-                    <div className="border-y border-border py-2 text-xs">
-                      <div className="flex justify-between"><span className="text-muted">最新命中</span><span>{row.latest_signal ? cnSignal(row.latest_signal) : '暂无'}</span></div>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {Object.entries(row.evidence).map(([key, ready]) => <span key={key} className={cn('rounded px-1.5 py-0.5 text-[10px]', ready ? 'bg-bull/10 text-bull' : 'bg-elevated text-muted')}>{({ cost: '成本', history: '历史', quote: '实时价', depth: '五档', flow: '资金' } as Record<string, string>)[key]}</span>)}
-                      </div>
                     </div>
                   </section>
                 </div>
@@ -603,7 +582,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
           {activeRuleTab === 't_trading' && (
             <section className="mt-4 space-y-5">
               <div className="flex flex-col gap-2 border-y border-border py-3 sm:flex-row sm:items-start sm:justify-between">
-                <div><h3 className="text-xs font-semibold text-secondary">做 T 参数</h3><p className="mt-1 text-[10px] text-muted">入场信号生成买入建议，出场信号生成卖出建议；不会自动下单。</p></div>
+                <div><h3 className="text-xs font-semibold text-secondary">做 T 参数</h3><p className="mt-1 text-[10px] text-muted">入场和出场信号生成触发记录；委托仍需手动确认。</p></div>
                 <span className={cn('text-[10px]', options?.capabilities.intraday.available ? 'text-bull' : 'text-warning')}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
               </div>
               <div className="divide-y divide-border border-y border-border">{renderRuleRows(['t_trading'])}</div>
@@ -620,42 +599,9 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
   )
 }
 
-function PendingRow({ item, revision, name, signalNames, onOpenTrade }: { item: PositionRiskRecommendation; revision: number; name?: string; signalNames: Record<string, string>; onOpenTrade: (item: PositionRiskRecommendation) => void }) {
-  const queryClient = useQueryClient()
-  const ruleLabel = item.trade_action ? '做T' : RULE_LABELS[item.rule_id] ?? cnSignal(item.rule_id)
-  const mutation = useMutation({
-    mutationFn: (action: 'confirm' | 'dismiss') => api.positionRiskRecommendationAction(item.id, action, revision),
-    onSuccess: data => {
-      toast(data.message, 'success')
-      queryClient.invalidateQueries({ queryKey: QK.positionRisk })
-    },
-  })
-  return (
-    <div className="grid gap-3 border-b border-border px-3 py-3 md:grid-cols-[minmax(0,1fr)_110px_190px] md:items-center">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-          <span>{item.symbol ? <>{name || item.symbol}<span className="ml-1.5 font-mono text-xs text-muted">{item.symbol}</span></> : '组合'}</span>
-          <span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{ruleLabel}</span>
-          <span className={cn('font-mono text-xs', riskTone(item.risk_score))}>{item.risk_score} 分</span>
-          <span className="rounded bg-warning/10 px-1.5 py-0.5 text-xs font-semibold text-warning">结论：{item.action} {item.reduction_pct}%</span>
-        </div>
-        <div className="mt-2 break-words text-xs leading-5 text-muted">{item.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</div>
-      </div>
-      <time className="text-[11px] text-muted">{new Date(item.created_at).toLocaleString('zh-CN')}</time>
-      <div className="flex justify-end gap-2">
-        <button type="button" disabled={mutation.isPending} onClick={() => mutation.mutate('dismiss')} className="h-8 rounded-btn border border-border px-3 text-xs hover:bg-elevated">忽略</button>
-        <button type="button" disabled={mutation.isPending} onClick={() => item.trade_action ? onOpenTrade(item) : mutation.mutate('confirm')} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white">
-          {mutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : item.trade_action ? <ChevronRight className="h-3.5 w-3.5" /> : <Check className="h-3.5 w-3.5" />}{item.trade_action ? '打开下单面板' : '确认建议'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export function LargeOrders() {
   const [tab, setTab] = useState<Tab>('positions')
   const [search, setSearch] = useState('')
-  const [risk, setRisk] = useState<'all' | 'medium' | 'high'>('all')
   const [positionSort, setPositionSort] = useState<'asc' | 'desc' | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
@@ -667,7 +613,6 @@ export function LargeOrders() {
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
   const options = useQuery({ queryKey: QK.positionRiskOptions, queryFn: api.positionRiskOptions })
-  const pending = useQuery({ queryKey: QK.positionRiskRecommendations('pending'), queryFn: () => api.positionRiskRecommendations('pending') })
   const events = useQuery({ queryKey: QK.positionRiskEvents, queryFn: api.positionRiskEvents })
   const queryClient = useQueryClient()
   const qmtProbe = useMutation({ mutationFn: api.qmtProbe, onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt }) })
@@ -683,14 +628,6 @@ export function LargeOrders() {
     mutationFn: api.qmtTradingToggle,
     onSuccess: result => queryClient.setQueryData(QK.positionRiskQmt, result.status),
   })
-  const tradeRecommendationMutation = useMutation({
-    mutationFn: (recommendationId: string) => api.positionRiskRecommendationAction(recommendationId, 'confirm', data.revision),
-    onSuccess: result => {
-      toast(result.message, 'success')
-      queryClient.invalidateQueries({ queryKey: QK.positionRiskRecommendations('pending') })
-      queryClient.invalidateQueries({ queryKey: QK.positionRisk })
-    },
-  })
   const signalNames = useMemo(
     () => Object.fromEntries((options.data?.custom_signals ?? []).map(signal => [signal.id, signal.label])),
     [options.data?.custom_signals],
@@ -698,8 +635,7 @@ export function LargeOrders() {
   const rows = useMemo(() => {
     const filtered = (portfolio.data?.positions ?? []).filter(row => {
       const matchesSearch = !search || row.symbol.toLowerCase().includes(search.toLowerCase()) || row.name.includes(search)
-      const matchesRisk = risk === 'all' || row.risk_level === risk
-      return matchesSearch && matchesRisk
+      return matchesSearch
     })
     if (!positionSort) return filtered
     return [...filtered].sort((left, right) => {
@@ -707,28 +643,23 @@ export function LargeOrders() {
       if (right.weight == null) return -1
       return positionSort === 'asc' ? left.weight - right.weight : right.weight - left.weight
     })
-  }, [portfolio.data?.positions, positionSort, risk, search])
+  }, [portfolio.data?.positions, positionSort, search])
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
-  const namesBySymbol = new Map(data.positions.map(row => [row.symbol, row.name]))
   const runtimeReason = compactRuntimeReason(data.runtime.reason)
-  const openTradeRecommendation = (item: PositionRiskRecommendation) => {
-    const row = data.positions.find(position => position.symbol === item.symbol)
-    if (!row || !item.trade_action) return
-    setSelected(null)
-    setTradeRow(row)
-    setTradePreset({
-      recommendationId: item.id,
-      action: item.trade_action,
-      price: item.suggested_price ?? row.price,
-      volume: item.suggested_volume ?? 100,
-    })
-  }
   const openTradeForRow = (row: PositionRiskPosition) => {
     setSelected(null)
     setTradeRow(row)
     setTradePreset(null)
+  }
+  const openTradeForEvent = (event: PositionRiskEvent) => {
+    if (!event.symbol || (event.trade_action !== 'BUY' && event.trade_action !== 'SELL')) return
+    const row = data.positions.find(item => item.symbol === event.symbol)
+    if (!row) return
+    setSelected(null)
+    setTradeRow(row)
+    setTradePreset({ action: event.trade_action, price: event.price ?? row.price, volume: 100 })
   }
 
   return (
@@ -762,7 +693,6 @@ export function LargeOrders() {
         <div className="inline-flex w-fit max-w-full rounded-btn bg-elevated p-0.5">
           {([
             ['positions', '持仓监控', data.positions.length, ShieldCheck],
-            ['pending', '待确认', pending.data?.count ?? data.runtime.pending_count, BellRing],
             ['events', '触发记录', events.data?.count ?? 0, FileClock],
           ] as const).map(([id, label, count, Icon]) => (
             <button key={id} type="button" onClick={() => setTab(id)} className={cn('inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2.5 text-xs', tab === id ? 'bg-surface text-foreground shadow-sm' : 'text-muted')}>
@@ -772,7 +702,6 @@ export function LargeOrders() {
         </div>
         {tab === 'positions' && <div className="flex items-center gap-2 self-end sm:self-auto">
           <label className="relative hidden sm:block"><Search className="absolute left-2 top-2 h-3.5 w-3.5 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="代码 / 名称" className="h-8 w-44 rounded-btn border border-border bg-transparent pl-7 pr-2 text-xs" /></label>
-          <div className="relative"><SlidersHorizontal className="pointer-events-none absolute left-2 top-2 h-3.5 w-3.5 text-muted" /><select value={risk} onChange={event => setRisk(event.target.value as typeof risk)} className="h-8 rounded-btn border border-border bg-surface pl-7 pr-6 text-xs"><option value="all">全部风险</option><option value="high">高风险</option><option value="medium">中风险</option></select></div>
         </div>}
       </div>
 
@@ -780,7 +709,7 @@ export function LargeOrders() {
           <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[1040px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '操作', '证据', '信号', '风险', '建议'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价', '仓位', '风控设置', '操作', '信号'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -790,30 +719,25 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
                 <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
                 <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
-                <td className="px-3 py-2"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-elevated"><div className="h-full bg-accent" style={{ width: `${row.evidence_coverage * 100}%` }} /></div><span className="mt-1 block font-mono text-[10px] text-muted">{Math.round(row.evidence_coverage * 100)}%</span></td>
                 <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
-                <td className={cn('px-3 py-2 font-mono text-sm font-semibold', riskTone(row.risk_score))}>{row.risk_score}</td>
-                <td className="px-3 py-2">{row.suggestion ? <span className="text-warning">{row.suggestion.action} {row.suggestion.reduction_pct}%</span> : <span className="text-muted">观察</span>}</td>
               </tr>)}
             </tbody>
           </table>
         </div>
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.suggestion ? `${row.suggestion.action} ${row.suggestion.reduction_pct}%` : row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
-            <div className="flex items-center gap-2"><div className="text-right"><div className="text-[10px] text-muted">风险</div><div className={cn('font-mono text-base font-semibold', riskTone(row.risk_score))}>{row.risk_score}</div></div><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
+            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)}</div><div className="mt-1 text-[11px] text-muted">{row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
+            <div className="flex items-center gap-2"><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
         </div>
-      </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合筛选的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索或风险筛选' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
-
-      {tab === 'pending' && <div>
-        <div className="border-b border-border bg-warning/5 px-4 py-2 text-[11px] text-warning sm:px-5">确认建议仅记录人工判断，不修改持仓、模拟盘或通知券商委托。</div>
-        {pending.data?.recommendations.length ? pending.data.recommendations.map(item => <PendingRow key={item.id} item={item} revision={data.revision} name={item.symbol ? namesBySymbol.get(item.symbol) : undefined} signalNames={signalNames} onOpenTrade={openTradeRecommendation} />) : <EmptyState icon={ShieldCheck} title="没有待确认建议" hint="风险事件触发后会在这里汇总" />}
-      </div>}
+      </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合搜索的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索条件' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
 
       {tab === 'events' && <div className="divide-y divide-border">
-        {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.fingerprint ?? event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_80px] sm:px-5">
-          <time className="font-mono text-muted"><span className="block">{new Date(event.ts).toLocaleString('zh-CN')}</span>{(event.occurrence_count ?? 1) > 1 && event.first_ts ? <span className="mt-0.5 block text-[10px]">首次 {new Date(event.first_ts).toLocaleTimeString('zh-CN')}</span> : null}</time>{event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}<span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? '做T' : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span>{event.reasons?.length ? <span className="mt-1 block break-words text-[11px] leading-5 text-muted">{event.reasons.map(reason => cnSignalText(reason, signalNames)).join('；')}</span> : null}</span><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.source === 'position_risk' ? '持仓风控' : '监控中心'}</span>
+        {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.fingerprint ?? event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_120px] sm:px-5">
+          <time className="font-mono text-muted"><span className="block">{new Date(event.ts).toLocaleString('zh-CN')}</span>{(event.occurrence_count ?? 1) > 1 && event.first_ts ? <span className="mt-0.5 block text-[10px]">首次 {new Date(event.first_ts).toLocaleTimeString('zh-CN')}</span> : null}</time>
+          {event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}
+          <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? `做T${event.trade_action === 'BUY' ? '买入' : event.trade_action === 'SELL' ? '卖出' : ''}` : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span></span>
+          <span className="flex items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.trade_action && event.symbol ? <button type="button" onClick={() => openTradeForEvent(event)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title="打开手动下单面板">下单</button> : null}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 
@@ -846,7 +770,7 @@ export function LargeOrders() {
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
       <PositionRiskRulesDialog open={rulesOpen} portfolio={data} options={options.data} onClose={() => setRulesOpen(false)} />
       {selected && <PositionInspector row={selected} options={options.data} onClose={() => setSelected(null)} />}
-      {tradeRow && <TradeOrderPanel row={tradeRow} tradePreset={tradePreset} onTradeSubmitted={recommendationId => tradeRecommendationMutation.mutate(recommendationId)} onClose={() => { setTradeRow(null); setTradePreset(null) }} />}
+      {tradeRow && <TradeOrderPanel row={tradeRow} tradePreset={tradePreset} onClose={() => { setTradeRow(null); setTradePreset(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )

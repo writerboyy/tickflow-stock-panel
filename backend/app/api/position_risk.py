@@ -35,10 +35,6 @@ class OverridePayload(BaseModel):
     override: dict[str, Any]
 
 
-class RevisionPayload(BaseModel):
-    revision: int
-
-
 class QmtOrderPayload(BaseModel):
     action: str
     symbol: str
@@ -69,8 +65,6 @@ def _qmt(request: Request):
 def _map_error(exc: Exception) -> HTTPException:
     if isinstance(exc, RevisionConflict):
         return HTTPException(409, str(exc))
-    if isinstance(exc, FileNotFoundError):
-        return HTTPException(404, "建议不存在")
     return HTTPException(400, str(exc))
 
 
@@ -179,60 +173,6 @@ def delete_override(symbol: str, revision: int, request: Request):
     return {"ok": True, "portfolio": saved}
 
 
-@router.get("/recommendations")
-def list_recommendations(
-    request: Request,
-    status: str | None = Query(None),
-    limit: int = Query(500, ge=1, le=5000),
-):
-    service = _service(request)
-    rows = [
-        {
-            **item,
-            "reasons": [
-                service.localize_text(str(reason))
-                for reason in item.get("reasons", [])
-            ],
-        }
-        for item in service.store.list_recommendations(status, limit)
-    ]
-    return {"recommendations": rows, "count": len(rows)}
-
-
-def _set_recommendation(recommendation_id: str, status: str, payload: RevisionPayload, request: Request):
-    service = _service(request)
-    current = service.store.load()
-    if payload.revision != current["revision"]:
-        raise HTTPException(409, f"配置已更新，请刷新后重试（当前 revision={current['revision']}）")
-    try:
-        item = service.store.set_recommendation_status(recommendation_id, status)
-    except (FileNotFoundError, ValueError) as exc:
-        raise _map_error(exc) from exc
-    service._notify_updated()  # noqa: SLF001
-    if status == "confirmed" and item.get("trade_action"):
-        message = "做T建议已标记为已处理；委托结果以 QMT 云端回报为准"
-    elif status == "confirmed":
-        message = "已记录确认，不会修改持仓、模拟盘或发送券商委托"
-    else:
-        message = "已忽略建议"
-    return {
-        "ok": True,
-        "recommendation": item,
-        "holding_changed": False,
-        "message": message,
-    }
-
-
-@router.post("/recommendations/{recommendation_id}/confirm")
-def confirm_recommendation(recommendation_id: str, payload: RevisionPayload, request: Request):
-    return _set_recommendation(recommendation_id, "confirmed", payload, request)
-
-
-@router.post("/recommendations/{recommendation_id}/dismiss")
-def dismiss_recommendation(recommendation_id: str, payload: RevisionPayload, request: Request):
-    return _set_recommendation(recommendation_id, "dismissed", payload, request)
-
-
 def _collapse_timeline_events(rows: list[dict]) -> list[dict]:
     grouped: dict[str, dict] = {}
     for index, item in enumerate(rows):
@@ -267,14 +207,25 @@ def list_events(request: Request, days: int = Query(7, ge=1, le=30), limit: int 
     service = _service(request)
     positions = {item["symbol"] for item in service.store.load()["positions"]}
     rows = alert_store.list_recent(service.store.root.parents[1], days=days, limit=5000)
+    removed_fields = {
+        "risk_score", "risk_level", "suggestion_pct", "reasons", "source_ids",
+        "signals", "conditions", "logic", "evidence", "evidence_coverage",
+    }
+    cleaned_rows = []
+    for item in rows:
+        if item.get("source") == "position_risk":
+            cleaned = {key: value for key, value in item.items() if key not in removed_fields}
+            if "suggestion_pct" in item:
+                cleaned["action_pct"] = item["suggestion_pct"]
+        else:
+            cleaned = dict(item)
+        cleaned["message"] = service.localize_text(str(item.get("message") or ""))
+        cleaned["rule_name"] = service.localize_text(str(item.get("rule_name") or ""))
+        cleaned["timeline_origin"] = "position_risk" if item.get("source") == "position_risk" else "monitor_rule"
+        cleaned_rows.append(cleaned)
     rows = [
-        {
-            **item,
-            "message": service.localize_text(str(item.get("message") or "")),
-            "rule_name": service.localize_text(str(item.get("rule_name") or "")),
-            "timeline_origin": "position_risk" if item.get("source") == "position_risk" else "monitor_rule",
-        }
-        for item in rows
+        item
+        for item in cleaned_rows
         if (
             item.get("source") == "position_risk"
             and item.get("rule_id") not in {

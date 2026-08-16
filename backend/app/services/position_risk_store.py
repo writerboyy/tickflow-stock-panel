@@ -1,11 +1,10 @@
-"""持仓风控配置、运行状态和待确认建议的持久化。"""
+"""持仓风控配置和运行状态的持久化。"""
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
 import threading
-import uuid
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -13,9 +12,6 @@ from typing import Any
 
 
 SCHEMA_VERSION = 1
-RECOMMENDATION_STATUSES = {"pending", "confirmed", "dismissed", "superseded", "stale"}
-
-
 def _now() -> str:
     return datetime.now().astimezone().isoformat()
 
@@ -138,38 +134,8 @@ class PositionRiskStore:
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS recommendations (
-                    id TEXT PRIMARY KEY,
-                    fingerprint TEXT NOT NULL UNIQUE,
-                    symbol TEXT,
-                    scope TEXT NOT NULL DEFAULT 'symbol',
-                    rule_id TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    risk_score INTEGER NOT NULL,
-                    action TEXT NOT NULL,
-                    reduction_pct INTEGER NOT NULL,
-                    reasons_json TEXT NOT NULL,
-                    source_ids_json TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    portfolio_revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_recommendations_status
-                    ON recommendations(status, created_at DESC);
+                DROP TABLE IF EXISTS recommendations;
             """)
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(recommendations)").fetchall()}
-            for name, column_type in (
-                ("trade_action", "TEXT"),
-                ("suggested_price", "REAL"),
-                ("suggested_volume", "INTEGER"),
-                ("stage", "TEXT"),
-                ("r_multiple", "REAL"),
-                ("effective_stop_price", "REAL"),
-                ("feature_snapshot_at", "TEXT"),
-            ):
-                if name not in columns:
-                    conn.execute(f"ALTER TABLE recommendations ADD COLUMN {name} {column_type}")
 
     @staticmethod
     def _merge_defaults(value: dict[str, Any]) -> dict[str, Any]:
@@ -250,108 +216,3 @@ class PositionRiskStore:
                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at""",
                 (key, json.dumps(value, ensure_ascii=False), _now()),
             )
-
-    def stale_pending(self) -> int:
-        with self._connect() as conn:
-            result = conn.execute(
-                "UPDATE recommendations SET status='stale', updated_at=? WHERE status='pending'",
-                (_now(),),
-            )
-            return int(result.rowcount)
-
-    def stale_pending_rules(self, rule_ids: set[str]) -> int:
-        if not rule_ids:
-            return 0
-        placeholders = ",".join("?" for _ in rule_ids)
-        with self._connect() as conn:
-            result = conn.execute(
-                f"UPDATE recommendations SET status='stale', updated_at=? "
-                f"WHERE status='pending' AND rule_id IN ({placeholders})",
-                (_now(), *sorted(rule_ids)),
-            )
-            return int(result.rowcount)
-
-    def add_recommendation(self, item: dict[str, Any]) -> dict[str, Any]:
-        severity_rank = {"info": 1, "warn": 2, "critical": 3}
-        now = _now()
-        with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT * FROM recommendations WHERE fingerprint = ?",
-                (item["fingerprint"],),
-            ).fetchone()
-            if existing:
-                return self._row(existing)
-            pending = conn.execute(
-                """SELECT * FROM recommendations
-                   WHERE status='pending' AND scope=? AND COALESCE(symbol, '')=COALESCE(?, '')
-                     AND COALESCE(trade_action, '')=COALESCE(?, '')
-                   ORDER BY risk_score DESC, created_at DESC LIMIT 1""",
-                (item.get("scope", "symbol"), item.get("symbol"), item.get("trade_action")),
-            ).fetchone()
-            if pending:
-                stronger = (
-                    int(item["risk_score"]), severity_rank.get(item["severity"], 0), int(item["reduction_pct"])
-                ) > (
-                    int(pending["risk_score"]), severity_rank.get(pending["severity"], 0), int(pending["reduction_pct"])
-                )
-                if not stronger:
-                    return self._row(pending)
-                conn.execute(
-                    "UPDATE recommendations SET status='superseded', updated_at=? WHERE id=?",
-                    (now, pending["id"]),
-                )
-            recommendation_id = str(uuid.uuid4())
-            conn.execute(
-                """INSERT INTO recommendations(
-                    id, fingerprint, symbol, scope, rule_id, severity, risk_score, action,
-                    reduction_pct, reasons_json, source_ids_json, status, portfolio_revision,
-                    created_at, updated_at, trade_action, suggested_price, suggested_volume,
-                    stage, r_multiple, effective_stop_price, feature_snapshot_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    recommendation_id, item["fingerprint"], item.get("symbol"), item.get("scope", "symbol"),
-                    item["rule_id"], item["severity"], int(item["risk_score"]), item["action"],
-                    int(item["reduction_pct"]), json.dumps(item.get("reasons", []), ensure_ascii=False),
-                    json.dumps(item.get("source_ids", []), ensure_ascii=False), int(item["portfolio_revision"]),
-                    now, now, item.get("trade_action"), item.get("suggested_price"), item.get("suggested_volume"),
-                    item.get("stage"), item.get("r_multiple"), item.get("effective_stop_price"),
-                    item.get("feature_snapshot_at"),
-                ),
-            )
-            row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
-        return self._row(row)
-
-    @staticmethod
-    def _row(row: sqlite3.Row) -> dict[str, Any]:
-        value = dict(row)
-        value["reasons"] = json.loads(value.pop("reasons_json"))
-        value["source_ids"] = json.loads(value.pop("source_ids_json"))
-        return value
-
-    def list_recommendations(self, status: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
-        query = "SELECT * FROM recommendations"
-        params: list[Any] = []
-        if status:
-            query += " WHERE status=?"
-            params.append(status)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(max(1, min(int(limit), 5000)))
-        with self._connect() as conn:
-            rows = conn.execute(query, params).fetchall()
-        return [self._row(row) for row in rows]
-
-    def set_recommendation_status(self, recommendation_id: str, status: str) -> dict[str, Any]:
-        if status not in {"confirmed", "dismissed"}:
-            raise ValueError("建议只能确认或忽略")
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
-            if row is None:
-                raise FileNotFoundError(recommendation_id)
-            if row["status"] != "pending":
-                raise ValueError("建议已处理或已失效")
-            conn.execute(
-                "UPDATE recommendations SET status=?, updated_at=? WHERE id=?",
-                (status, _now(), recommendation_id),
-            )
-            updated = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
-        return self._row(updated)
