@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.limit_board import router
-from app.services.limit_board_service import LimitBoardService
+from app.services.limit_board_service import LimitBoardService, _qualified_premium_stats
 from app.services.limit_board_store import LimitBoardStore, default_config
 from app.services.quote_service import QuoteService
 
@@ -106,6 +106,15 @@ def make_service(tmp_path, qmt=None):
     return service, quotes, config
 
 
+def premium_snapshot(*symbols: str) -> pl.DataFrame:
+    return pl.DataFrame({
+        "symbol": list(symbols),
+        "limit_up_count": [4] * len(symbols),
+        "next_day_red_rate": [0.80] * len(symbols),
+        "first_board_broken_rate": [0.75] * len(symbols),
+    })
+
+
 def quote(price=11.0, limit=11.0):
     return {
         "symbol": "600000.SH",
@@ -171,6 +180,10 @@ def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monke
         "app.services.limit_board_service.cn_today",
         lambda: datetime(2026, 8, 13).date(),
     )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene.refresh",
+        lambda _repo: premium_snapshot("600000.SH", "600001.SH", "600002.SH"),
+    )
 
     service._history_date = None
     service._refresh_history(config)
@@ -201,6 +214,10 @@ def test_history_separates_clean_first_board_from_rebound_setup(tmp_path, monkey
         "app.services.limit_board_service.cn_today",
         lambda: datetime(2026, 8, 13).date(),
     )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene.refresh",
+        lambda _repo: premium_snapshot("600000.SH", "600001.SH"),
+    )
     dates = [datetime(2026, 8, day).date() for day in (10, 11, 12)]
     history = pl.DataFrame({
         "symbol": ["600000.SH"] * 3 + ["600001.SH"] * 3,
@@ -217,6 +234,71 @@ def test_history_separates_clean_first_board_from_rebound_setup(tmp_path, monkey
     assert "600001.SH" in service._first_board_eligible
     assert "600000.SH" not in service._first_board_eligible
     assert service._rebound_board_eligible == {"600000.SH"}
+
+
+def test_automatic_candidates_require_all_premium_gene_thresholds():
+    rows = pl.DataFrame({
+        "symbol": ["PASS", "COUNT", "RED", "BROKEN", "MISSING"],
+        "limit_up_count": [4, 3, 4, 4, 4],
+        "next_day_red_rate": [0.80, 0.90, 0.7999, 0.90, None],
+        "first_board_broken_rate": [0.75, 0.10, 0.10, 0.7501, 0.10],
+    })
+
+    qualified = _qualified_premium_stats(rows)
+
+    assert qualified == {
+        "PASS": {
+            "limit_up_count": 4,
+            "next_day_red_rate": 0.80,
+            "first_board_broken_rate": 0.75,
+        },
+    }
+
+
+def test_missing_premium_gene_snapshot_blocks_automatic_scan(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    config["settings"]["first_board_lookback_days"] = 1
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene.refresh",
+        lambda _repo: pl.DataFrame(),
+    )
+    service._history_date = None
+
+    service._refresh_history(config)
+
+    assert service._history_ready is False
+    assert service._first_board_eligible == set()
+    assert service._rebound_board_eligible == set()
+    assert "溢价基因数据不足" in service._history_reason
+
+
+def test_valid_snapshot_with_no_qualified_symbols_keeps_scan_ready(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    config["settings"]["first_board_lookback_days"] = 1
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene.refresh",
+        lambda _repo: pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "limit_up_count": [3],
+            "next_day_red_rate": [0.90],
+            "first_board_broken_rate": [0.10],
+        }),
+    )
+    service._history_date = None
+
+    service._refresh_history(config)
+
+    assert service._history_ready is True
+    assert service._first_board_eligible == set()
+    assert "0 只通过" in service._history_reason
 
 
 def test_rebound_quote_enters_candidate_pool_with_rebound_source(tmp_path, monkeypatch):
@@ -347,6 +429,98 @@ def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
 
     assert view["candidate_pool"][0]["source"] == "manual"
     assert "手工加入" in view["candidate_pool"][0]["candidate_reasons"]
+
+
+def test_remove_automatic_candidate_excludes_it_for_current_trading_day(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    current_day = [datetime(2026, 8, 13).date()]
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: current_day[0],
+    )
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {
+            "name": "浦发银行",
+            "source_modes": ["first_board"],
+            "status": "near_limit",
+            "limit_gap_pct": 0.01,
+        },
+    }
+    service.store.save_runtime(runtime)
+    assert [row["symbol"] for row in service.view()["candidate_pool"]] == ["600000.SH"]
+
+    service.remove_candidate("600000.SH", 0)
+
+    assert service.view()["candidate_pool"] == []
+    assert [row["symbol"] for row in service.view()["first_board"]] == ["600000.SH"]
+    assert service._runtime_for_today()["candidate_excluded"] == ["600000.SH"]
+
+    current_day[0] = datetime(2026, 8, 14).date()
+    assert service._runtime_for_today()["candidate_excluded"] == []
+
+
+def test_manual_candidate_add_clears_same_day_exclusion(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    runtime = service._runtime_for_today()
+    runtime["candidate_excluded"] = ["600000.SH"]
+    service.store.save_runtime(runtime)
+
+    service.add_candidate("600000.SH", 0)
+
+    assert service._runtime_for_today()["candidate_excluded"] == []
+    assert [row["symbol"] for row in service.view()["candidate_pool"]] == ["600000.SH"]
+
+
+def test_candidate_pool_does_not_consume_websocket_capacity(tmp_path, monkeypatch):
+    class FakeHub:
+        def __init__(self):
+            self.registered = set()
+
+        @staticmethod
+        def websocket_available(*, exclude):
+            assert exclude == "limit_board"
+            return 10
+
+        def register(self, account_id, mode, symbols, asset_type, _queue):
+            assert (account_id, mode, asset_type) == ("limit_board", "websocket", "stock")
+            self.registered = set(symbols)
+
+        def update_symbols(self, _account_id, symbols):
+            self.registered = set(symbols)
+
+        def unregister(self, _account_id):
+            self.registered = set()
+
+    service, _quotes, config = make_service(tmp_path)
+    hub = FakeHub()
+    service.app_state.paper_supervisor = SimpleNamespace(hub=hub)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0),
+    )
+    service._quotes = {
+        "600000.SH": {
+            "symbol": "600000.SH",
+            "limit_gap_pct": 0.001,
+            "source_modes": ["first_board"],
+        },
+        "600001.SH": {
+            "symbol": "600001.SH",
+            "limit_gap_pct": 0.001,
+            "source_modes": ["board_pool"],
+        },
+    }
+    config["board_pool"] = [{"symbol": "600001.SH", "auto_trade": True}]
+
+    service._sync_websocket(service._runtime_for_today(), config)
+
+    assert service._ws_symbols == {"600001.SH"}
+    assert hub.registered == {"600001.SH"}
 
 
 def test_add_pool_enables_auto_trade_by_default(tmp_path):

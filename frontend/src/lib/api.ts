@@ -1144,6 +1144,9 @@ export interface LimitBoardRow {
   candidate_score?: number
   candidate_rank?: number
   candidate_reasons?: string[]
+  limit_up_count?: number
+  next_day_red_rate?: number
+  first_board_broken_rate?: number
 }
 
 export interface LimitBoardView {

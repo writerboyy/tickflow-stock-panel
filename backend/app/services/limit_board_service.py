@@ -15,13 +15,22 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
-from app.services import alert_store
+from app.services import alert_store, premium_gene
 from app.services.limit_board_store import LimitBoardStore
 
 
 logger = logging.getLogger(__name__)
 _ACCOUNT_ID = "limit_board"
 _DEPTH_FRESH_SECONDS = 30
+_MIN_LIMIT_UP_COUNT = 4
+_MIN_NEXT_DAY_RED_RATE = 0.80
+_MAX_FIRST_BOARD_BROKEN_RATE = 0.75
+_PREMIUM_FILTER_COLUMNS = {
+    "symbol",
+    "limit_up_count",
+    "next_day_red_rate",
+    "first_board_broken_rate",
+}
 
 
 def _finite(value: object) -> float | None:
@@ -55,6 +64,32 @@ def _is_trading_time(value: datetime) -> bool:
     )
 
 
+def _qualified_premium_stats(rows: pl.DataFrame | None) -> dict[str, dict[str, Any]]:
+    if (
+        rows is None
+        or rows.is_empty()
+        or not _PREMIUM_FILTER_COLUMNS.issubset(rows.columns)
+    ):
+        return {}
+    qualified = rows.select(sorted(_PREMIUM_FILTER_COLUMNS)).filter(
+        (pl.col("limit_up_count").cast(pl.Int64, strict=False) >= _MIN_LIMIT_UP_COUNT)
+        & (pl.col("next_day_red_rate").cast(pl.Float64, strict=False) >= _MIN_NEXT_DAY_RED_RATE)
+        & (
+            pl.col("first_board_broken_rate").cast(pl.Float64, strict=False)
+            <= _MAX_FIRST_BOARD_BROKEN_RATE
+        )
+    )
+    return {
+        str(row["symbol"]).strip().upper(): {
+            "limit_up_count": int(row["limit_up_count"]),
+            "next_day_red_rate": float(row["next_day_red_rate"]),
+            "first_board_broken_rate": float(row["first_board_broken_rate"]),
+        }
+        for row in qualified.iter_rows(named=True)
+        if str(row.get("symbol") or "").strip()
+    }
+
+
 class LimitBoardService:
     def __init__(self, data_dir: Path, repo: Any, quote_service: Any, app_state: Any) -> None:
         self.store = LimitBoardStore(data_dir)
@@ -78,8 +113,10 @@ class LimitBoardService:
         self._name_map: dict[str, str] = {}
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
+        self._premium_stats: dict[str, dict[str, Any]] = {}
         self._history_ready = False
-        self._history_reason = "正在读取近 10 个交易日涨停与断板记录"
+        self._history_attempt_at = 0.0
+        self._history_reason = "正在读取涨停历史与溢价基因过滤数据"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
 
@@ -200,19 +237,28 @@ class LimitBoardService:
         today = cn_today().isoformat()
         runtime = self.store.load_runtime()
         if runtime.get("trading_date") != today:
-            runtime = {"trading_date": today, "symbols": {}, "blacklist": []}
+            runtime = {
+                "trading_date": today,
+                "symbols": {},
+                "blacklist": [],
+                "candidate_excluded": [],
+            }
             self.store.save_runtime(runtime)
             self._depth.clear()
         return runtime
 
     def _refresh_history(self, config: dict[str, Any]) -> None:
         today = cn_today()
-        if self._history_date == today and self._history_ready:
-            return
+        now_mono = time.monotonic()
+        if self._history_date == today:
+            if self._history_ready or now_mono - self._history_attempt_at < 60:
+                return
         self._history_date = today
+        self._history_attempt_at = now_mono
         self._history_ready = False
         self._first_board_eligible.clear()
         self._rebound_board_eligible.clear()
+        self._premium_stats.clear()
         lookback = max(1, int(config["settings"].get("first_board_lookback_days", 10)))
         latest, latest_date = self.repo.get_enriched_latest()
         if latest_date is None:
@@ -260,10 +306,27 @@ class LimitBoardService:
             symbol for symbol in universe
             if not is_risk_warning_name(self._name_map.get(str(symbol).strip().upper()))
         }
-        self._first_board_eligible = universe - blocked
-        self._rebound_board_eligible = (rebound & universe) - self._first_board_eligible
+        try:
+            premium_rows = premium_gene.refresh(self.repo)
+        except Exception:  # noqa: BLE001
+            logger.warning("打板专区读取溢价基因快照失败", exc_info=True)
+            premium_rows = pl.DataFrame()
+        if (
+            premium_rows is None
+            or premium_rows.is_empty()
+            or not _PREMIUM_FILTER_COLUMNS.issubset(premium_rows.columns)
+        ):
+            self._history_reason = "溢价基因数据不足，自动首板/反包已暂停"
+            return
+        self._premium_stats = _qualified_premium_stats(premium_rows)
+        qualified = set(self._premium_stats)
+        self._first_board_eligible = (universe - blocked) & qualified
+        self._rebound_board_eligible = (rebound & universe & qualified) - self._first_board_eligible
         self._history_ready = True
-        self._history_reason = f"已核对前 {lookback} 个交易日（含反包判定）"
+        self._history_reason = (
+            f"已核对前 {lookback} 个交易日；自动候选需涨停≥4次、"
+            f"次日红盘率≥80%、首板破板率≤75%（{len(qualified)} 只通过）"
+        )
 
     def _refresh_name_map(self) -> None:
         today = cn_today()
@@ -345,6 +408,7 @@ class LimitBoardService:
                 continue
             quote = {
                 **raw,
+                **self._premium_stats.get(symbol, {}),
                 "symbol": symbol,
                 "name": name,
                 "last_price": price,
@@ -641,7 +705,11 @@ class LimitBoardService:
         for symbol in self._ws_symbols:
             quote = self._quotes.get(symbol)
             state = states.setdefault(symbol, {})
-            if quote is None or symbol in blacklist:
+            if (
+                quote is None
+                or symbol in blacklist
+                or "board_pool" not in quote.get("source_modes", [])
+            ):
                 state.pop("ws_exit_since", None)
                 continue
             if float(quote.get("limit_gap_pct") or 1) <= exit_gap:
@@ -657,6 +725,7 @@ class LimitBoardService:
         candidates = [
             quote for symbol, quote in self._quotes.items()
             if symbol not in blacklist
+            and "board_pool" in quote.get("source_modes", [])
             and (float(quote.get("limit_gap_pct") or 1) <= near or symbol in retained)
         ]
         candidates.sort(key=lambda item: (
@@ -825,6 +894,14 @@ class LimitBoardService:
                 reasons.append("反包候选")
             if "selected" in source_modes:
                 reasons.append("手工加入")
+            if row.get("limit_up_count") is not None:
+                reasons.append(f"近 200 日涨停 {int(row['limit_up_count'])} 次")
+            if row.get("next_day_red_rate") is not None:
+                reasons.append(f"次日红盘率 {float(row['next_day_red_rate']) * 100:.0f}%")
+            if row.get("first_board_broken_rate") is not None:
+                reasons.append(
+                    f"首板破板率 {float(row['first_board_broken_rate']) * 100:.0f}%",
+                )
             if gap is None:
                 reasons.append("等待实时行情")
             else:
@@ -883,10 +960,21 @@ class LimitBoardService:
             if is_risk_warning_name(row["name"]):
                 continue
             board_pool.append(row)
+        candidate_excluded = {
+            str(symbol).strip().upper()
+            for symbol in runtime.get("candidate_excluded") or []
+        }
+        eligible_rows = [
+            item for item in rows
+            if str(item.get("symbol") or "").strip().upper() not in candidate_excluded
+        ]
         candidate_pool = self._candidate_pool(
-            [item for item in rows if "first_board" in item.get("source_modes", [])],
-            [item for item in rows if "rebound_board" in item.get("source_modes", [])],
-            selected,
+            [item for item in eligible_rows if "first_board" in item.get("source_modes", [])],
+            [item for item in eligible_rows if "rebound_board" in item.get("source_modes", [])],
+            [
+                item for item in selected
+                if str(item.get("symbol") or "").strip().upper() not in candidate_excluded
+            ],
             board_pool,
             float(config["settings"].get("near_limit_pct", 0.02)),
         )
@@ -979,6 +1067,12 @@ class LimitBoardService:
             })
 
         saved = self.store.update(revision, update)
+        runtime = self._runtime_for_today()
+        excluded = set(runtime.get("candidate_excluded") or [])
+        if cleaned in excluded:
+            excluded.remove(cleaned)
+            runtime["candidate_excluded"] = sorted(excluded)
+            self._persist_runtime(runtime)
         self._refresh_symbol_consumer()
         self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
         self._notify_updated()
@@ -1011,7 +1105,24 @@ class LimitBoardService:
         return saved
 
     def remove_candidate(self, symbol: str, revision: int) -> dict[str, Any]:
-        return self.remove_selected(symbol, revision)
+        cleaned = str(symbol).strip().upper()
+        saved = self.store.update(
+            revision,
+            lambda value: value.__setitem__(
+                "selected", [
+                    item for item in value["selected"]
+                    if str(item.get("symbol")).strip().upper() != cleaned
+                ],
+            ),
+        )
+        runtime = self._runtime_for_today()
+        excluded = set(runtime.get("candidate_excluded") or [])
+        excluded.add(cleaned)
+        runtime["candidate_excluded"] = sorted(excluded)
+        self._persist_runtime(runtime)
+        self._refresh_symbol_consumer()
+        self._notify_updated()
+        return saved
 
     def add_pool(self, symbol: str, source: str, revision: int) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)

@@ -69,6 +69,7 @@ interface RowProps {
   busy: boolean
   onOpen: () => void
   onAddPool: () => void
+  onRemoveCandidate: () => void
   onToggleAuto: (enabled: boolean) => void
   onRemovePool: () => void
 }
@@ -80,6 +81,7 @@ function Row({
   busy,
   onOpen,
   onAddPool,
+  onRemoveCandidate,
   onToggleAuto,
   onRemovePool,
 }: RowProps) {
@@ -101,6 +103,9 @@ function Row({
           <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
           {mode !== 'pool' && rebound ? <div className="mt-0.5 text-[10px] text-warning">反包候选</div> : null}
+          {mode !== 'pool' && row.limit_up_count != null ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted" title={`涨停 ${row.limit_up_count} 次；次日红盘率 ${((row.next_day_red_rate ?? 0) * 100).toFixed(0)}%；首板破板率 ${((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%`}>
+            {row.limit_up_count}次 · 红{((row.next_day_red_rate ?? 0) * 100).toFixed(0)}% · 破{((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%
+          </div> : null}
         </button>
       </td>
       <td className="w-[160px] max-w-[160px] px-2">
@@ -124,7 +129,7 @@ function Row({
       <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
       <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td>
       <td className="px-2">
-        <span className={row.ws_active ? 'text-bear' : 'text-muted'}>{row.ws_active ? 'WS' : '快照'}</span>
+        <span className={mode === 'pool' && row.ws_active ? 'text-bear' : 'text-muted'}>{mode === 'pool' && row.ws_active ? 'WS' : '轮询'}</span>
       </td>
       {mode === 'pool' ? (
         <>
@@ -161,6 +166,9 @@ function Row({
               {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
               {inPool ? '已加入' : '打板'}
             </button>
+            {mode === 'candidate' ? <button type="button" title="从备选池删除，当日自动候选不再回流" disabled={busy} onClick={onRemoveCandidate} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
+              <Trash2 className="h-3.5 w-3.5" />
+            </button> : null}
           </div>
         </td>
       )}
@@ -175,6 +183,7 @@ interface TableProps {
   busy: boolean
   onOpen: (row: LimitBoardRow) => void
   onAddPool: (row: LimitBoardRow) => void
+  onRemoveCandidate: (row: LimitBoardRow) => void
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onRemovePool: (row: LimitBoardRow) => void
 }
@@ -201,6 +210,7 @@ function Table(props: TableProps) {
               busy={props.busy}
               onOpen={() => props.onOpen(row)}
               onAddPool={() => props.onAddPool(row)}
+              onRemoveCandidate={() => props.onRemoveCandidate(row)}
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onRemovePool={() => props.onRemovePool(row)}
             />
@@ -257,6 +267,10 @@ export function LimitBoard() {
     mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
+  const removeCandidate = useMutation({
+    mutationFn: (row: LimitBoardRow) => api.limitBoardCandidateRemove(row.symbol, view.data?.revision ?? 0),
+    onSuccess: refresh,
+  })
   const updatePool = useMutation({
     mutationFn: ({ row, enabled }: { row: LimitBoardRow; enabled: boolean }) => api.limitBoardPoolUpdate(row.symbol, enabled, view.data?.revision ?? 0),
     onSuccess: refresh,
@@ -281,7 +295,7 @@ export function LimitBoard() {
     ...(view.data?.board_pool ?? []).map(row => row.symbol),
   ]), [view.data?.candidate_pool, view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || addPool.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
+  const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
@@ -291,21 +305,21 @@ export function LimitBoard() {
   const tableHint = tab === 'pool'
     ? '加入时默认开启自动打板；关闭后仅跟踪，不提交实盘委托'
     : tab === 'candidate'
-    ? '自动合并首板、反包候选和手工加入的股票，按触板接近度、封单和炸板次数排序'
-    : '首板与反包候选会自动进入备选池，临近涨停后自动接入 WS'
+    ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
+    : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="打板专区"
-        titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />{runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
+        titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
         right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
-        <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '行情已接入 WS' : '等待 WS 候选'}</span>
+        <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '打板池已接入 WS' : '备选池仅实时轮询'}</span>
         <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
-        {!runtime.first_board_enabled ? <span className="text-warning">首板/反包扫描暂不可用：需要全市场实时行情和历史涨停校验</span> : <span>{runtime.history_reason}</span>}
+        {!runtime.first_board_enabled ? <span className="text-warning">首板/反包扫描暂不可用：{runtime.history_reason}</span> : <span>{runtime.history_reason}</span>}
       </div>
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
@@ -337,6 +351,7 @@ export function LimitBoard() {
                   ? 'manual'
                   : row.source === 'rebound_board' ? 'rebound_board' : 'first_board',
               })}
+              onRemoveCandidate={row => removeCandidate.mutate(row)}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled })}
               onRemovePool={row => removePool.mutate(row)}
             />
