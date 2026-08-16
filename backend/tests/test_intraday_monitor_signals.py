@@ -206,8 +206,18 @@ def test_quote_service_features_use_closed_one_and_five_minute_bars():
     assert features["fresh"] is True
     assert features["bars_1m"] == 10
     assert features["bars_5m"] == 2
-    assert features["opening_range_low"] == 9.9
+    assert features["opening_range_low"] == 10.0
     assert features["opening_range_high"] == 11.0
+    assert features["auction"] == {
+        "available": True,
+        "as_of": "2026-07-17T09:30:00",
+        "price": 10.0,
+        "volume": 100.0,
+        "amount": 100_000.0,
+    }
+    assert features["opening_five_minute"]["available"] is True
+    assert features["opening_five_minute"]["as_of"] == "2026-07-17T09:35:00"
+    assert features["opening_five_minute"]["volume"] == 515.0
     assert features["atr14_5m"] is not None
     assert len(features["closed_bars"]) == 10
     assert len(features["closed_bars_5m"]) == 2

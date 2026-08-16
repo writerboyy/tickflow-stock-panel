@@ -19,6 +19,16 @@ def _now() -> str:
 def default_template() -> dict[str, Any]:
     return {
         "rules": {
+            "market_context": {
+                "enabled": True,
+                "notify": False,
+                "min_correlation": 0.50,
+                "sector_weakening": -0.005,
+                "underperform_threshold": -0.01,
+                "min_flow_samples": 3,
+                "normal_action_pct": 25,
+                "strong_action_pct": 50,
+            },
             "stop_loss": {"enabled": True, "notify": False, "threshold": -0.10, "action_pct": 100},
             "take_profit": {"enabled": False, "notify": False, "threshold": 0.10, "action_pct": 100},
             "trailing_drawdown": {"enabled": True, "notify": False, "activation_gain": 0.05, "threshold": 0.08, "action_pct": 50},

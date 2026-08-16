@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 from threading import Event
@@ -267,6 +267,110 @@ def test_portfolio_store_revision_and_recommendation_table_is_removed(tmp_path: 
 
 def test_position_risk_recommendation_routes_are_removed():
     assert not any(route.path.startswith("/api/position-risk/recommendations") for route in position_risk_router.routes)
+    assert any(
+        route.path == "/api/position-risk/qmt/orders/confirm-action"
+        for route in position_risk_router.routes
+    )
+
+
+def test_position_risk_context_gate_blocks_ordinary_action_but_not_hard_guard(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service._context_service = object()
+    service._contexts["600036.SH"] = {
+        "state": "unavailable",
+        "gate_open": False,
+        "emotion_phase": "数据不足",
+    }
+    portfolio = service.store.load()
+    position = {
+        "symbol": "600036.SH", "name": "招商银行",
+        "quantity": 1000, "available": 1000, "cost_price": 10,
+    }
+    event_time = datetime.now().replace(microsecond=0)
+
+    service._emit(
+        portfolio, position, "take_profit", "固定止盈", "warn", 50, [],
+        occurred_at=event_time,
+    )
+    ordinary = _position_events(service, "take_profit")[0]
+    assert ordinary["action_pct"] == 0
+    assert ordinary["trade_action"] == "SELL"
+    assert ordinary["action_eligible"] is False
+    assert ordinary["context_state"] == "unavailable"
+
+    service._emit(
+        portfolio, position, "stop_loss", "成本止损", "critical", 100, [],
+        occurred_at=event_time,
+    )
+    hard_guard = _position_events(service, "stop_loss")[0]
+    assert hard_guard["action_pct"] == 100
+    assert hard_guard["trade_action"] == "SELL"
+    assert hard_guard["action_eligible"] is True
+
+
+def test_position_risk_context_gate_registers_short_lived_sell_action(tmp_path: Path):
+    class FreshQuotes(_Quotes):
+        def get_fresh_quotes(self, _symbols):
+            return {
+                "quotes": {
+                    "600036.SH": {
+                        "symbol": "600036.SH", "last_price": 10.25,
+                        "limit_down": 9.0, "limit_up": 11.0,
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                },
+            }
+
+    service = PositionRiskService(tmp_path, _Repo(), FreshQuotes(), SimpleNamespace(paper_supervisor=None))
+    service._context_service = object()
+    service._contexts["600036.SH"] = {
+        "state": "supportive", "gate_open": True, "emotion_phase": "发酵",
+    }
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行",
+            "quantity": 1000, "available": 1000, "cost_price": 10,
+        }],
+    }, 0)
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    event_time = datetime.now().replace(microsecond=0)
+    service._emit(
+        portfolio, position, "take_profit", "固定止盈", "warn", 50, [],
+        occurred_at=event_time,
+    )
+    event = _position_events(service, "take_profit")[0]
+
+    order = service.confirmed_action_order(
+        event["fingerprint"], "600036.SH", "SELL", 500,
+        now=event_time + timedelta(seconds=10),
+    )
+    assert order == {
+        "action": "SELL",
+        "symbol": "600036.SH",
+        "volume": 500,
+        "price": 10.25,
+        "price_type": "LIMIT",
+        "idempotency_key": f"risk-{event['fingerprint']}",
+        "strategy_name": "position_risk",
+    }
+    with pytest.raises(ValueError, match="120 秒"):
+        service.confirmed_action_order(
+            event["fingerprint"], "600036.SH", "SELL", 500,
+            now=event_time + timedelta(seconds=121),
+        )
+    with pytest.raises(ValueError, match="只允许卖出|不一致"):
+        service.confirmed_action_order(
+            event["fingerprint"], "600036.SH", "BUY", 500,
+            now=event_time + timedelta(seconds=10),
+        )
+    with pytest.raises(ValueError, match="上限 500 股"):
+        service.confirmed_action_order(
+            event["fingerprint"], "600036.SH", "SELL", 600,
+            now=event_time + timedelta(seconds=10),
+        )
+
 
 
 def test_position_risk_history_migration_cleans_public_fields_and_preserves_other_alerts(tmp_path: Path):
@@ -904,9 +1008,13 @@ def test_default_rule_notification_off_still_records_event(tmp_path: Path):
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
     }, 0)
     service._preload_history({"600036.SH"})
-    service._latest_quotes["600036.SH"] = {"symbol": "600036.SH", "last_price": 35.9, "timestamp": "2026-08-07T10:00:00"}
+    current_time = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    service._latest_quotes["600036.SH"] = {
+        "symbol": "600036.SH", "last_price": 35.9,
+        "timestamp": current_time.isoformat(),
+    }
 
-    service._evaluate_current(now=datetime(2026, 8, 7, 10, 0), force=True)
+    service._evaluate_current(now=current_time, force=True)
 
     assert [item["rule_id"] for item in _position_events(service, "stop_loss")] == ["stop_loss"]
     events = alert_store.list_recent(tmp_path, days=30, source="position_risk")

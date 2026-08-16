@@ -156,6 +156,11 @@ def test_concept_snapshot_uses_member_average_and_full_window(tmp_path):
         target for target in service.list_targets()["concept"]
         if target["name"] == "人工智能"
     )
+    assert service.targets_for_symbol("A", kind="concept") == [target]
+    assert service.member_symbols(target["key"]) == {"A", "B", "C", "D", "E"}
+    members = service.member_symbols(target["key"])
+    members.remove("A")
+    assert service.member_symbols(target["key"]) == {"A", "B", "C", "D", "E"}
     first = pl.DataFrame({
         "symbol": ["A", "B", "C", "D", "E"],
         "name": ["甲", "乙", "丙", "丁", "戊"],

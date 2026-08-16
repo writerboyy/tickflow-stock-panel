@@ -918,8 +918,21 @@ class QuoteService:
             closes_5m = [bar["close"] for bar in bars_5m if bar["close"] > 0]
             opening = [
                 bar for bar in bars_1m
-                if dt_time(9, 30) <= bar["datetime"].time() < dt_time(10, 0)
+                if dt_time(9, 31) <= bar["datetime"].time() < dt_time(10, 0)
             ]
+            auction_bar = next(
+                (bar for bar in bars_1m if bar["datetime"].time() == dt_time(9, 30)),
+                None,
+            )
+            opening_five_minute_bars = [
+                bar for bar in bars_1m
+                if dt_time(9, 31) <= bar["datetime"].time() <= dt_time(9, 35)
+            ]
+            opening_five_minute_complete = (
+                len(opening_five_minute_bars) == 5
+                and {bar["datetime"].time() for bar in opening_five_minute_bars}
+                == {dt_time(9, minute) for minute in range(31, 36)}
+            )
             previous_volumes = [bar["volume"] for bar in bars_1m[-21:-1] if bar["volume"] > 0]
             latest_volume = bars_1m[-1]["volume"] if bars_1m else 0.0
             average_volume = sum(previous_volumes) / len(previous_volumes) if previous_volumes else None
@@ -953,6 +966,28 @@ class QuoteService:
                 "momentum_1m": momentum_1m,
                 "momentum_5m": momentum_5m,
                 "relative_volume": latest_volume / average_volume if average_volume else None,
+                "auction": {
+                    "available": bool(
+                        auction_bar
+                        and auction_bar["close"] > 0
+                        and (auction_bar["volume"] > 0 or auction_bar["amount"] > 0)
+                    ),
+                    "as_of": auction_bar["datetime"].isoformat() if auction_bar else None,
+                    "price": auction_bar["close"] if auction_bar else None,
+                    "volume": auction_bar["volume"] if auction_bar else None,
+                    "amount": auction_bar["amount"] if auction_bar else None,
+                },
+                "opening_five_minute": {
+                    "available": opening_five_minute_complete,
+                    "as_of": opening_five_minute_bars[-1]["datetime"].isoformat()
+                    if opening_five_minute_bars else None,
+                    "open": opening_five_minute_bars[0]["open"] if opening_five_minute_bars else None,
+                    "close": opening_five_minute_bars[-1]["close"] if opening_five_minute_bars else None,
+                    "high": max((bar["high"] for bar in opening_five_minute_bars), default=None),
+                    "low": min((bar["low"] for bar in opening_five_minute_bars), default=None),
+                    "volume": sum(bar["volume"] for bar in opening_five_minute_bars),
+                    "amount": sum(bar["amount"] for bar in opening_five_minute_bars),
+                },
                 "previous_day_high": (previous_levels.get(symbol) or {}).get("high"),
                 "previous_day_low": (previous_levels.get(symbol) or {}).get("low"),
                 "closed_bars": bars_1m[-20:],

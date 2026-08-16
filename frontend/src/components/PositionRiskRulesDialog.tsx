@@ -14,6 +14,7 @@ interface Props {
 }
 
 const RULE_LABELS: Record<string, string> = {
+  market_context: '市场上下文门控',
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利后高点回撤',
   t_trading: '做T',
   ma5_breakdown: '跌破 MA5', ma10_breakdown: '跌破 MA10', ma20_breakdown: '跌破 MA20',
@@ -200,6 +201,14 @@ export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> 
   quote_interruption: [
     { key: 'threshold_seconds', label: '中断阈值', suffix: '秒', min: 1, step: 1, defaultValue: 30 },
     { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 0 },
+  ],
+  market_context: [
+    { key: 'min_correlation', label: '最小相关性', suffix: '', min: -1, max: 1, step: 0.05, defaultValue: 0.5 },
+    { key: 'sector_weakening', label: '板块弱化阈值', suffix: '%', min: -20, max: 20, step: 0.1, percent: true, defaultValue: -0.5 },
+    { key: 'underperform_threshold', label: '个股跑输板块', suffix: '%', min: -20, max: 20, step: 0.1, percent: true, defaultValue: -1 },
+    { key: 'min_flow_samples', label: '最少资金样本', suffix: '笔', min: 1, max: 100, step: 1, defaultValue: 3 },
+    { key: 'normal_action_pct', label: '普通保护比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 25 },
+    { key: 'strong_action_pct', label: '强保护比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 50 },
   ],
 }
 
@@ -472,6 +481,16 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
               <h3 className="text-sm font-semibold">个股退出规则</h3>
               <p className="mt-1 text-[11px] text-muted">成本、趋势和涨跌停规则按当前持仓独立形成退出触发；未设置单股覆盖时继承全局模板。</p>
             </div>
+            <section className="mb-6 border-y border-border bg-elevated/20 px-3 py-3">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h3 className="text-xs font-semibold text-secondary">市场上下文门控</h3>
+                  <p className="mt-1 text-[10px] text-muted">普通止盈、止损和做 T 必须同时具备大盘、板块、集合竞价、开盘量能和资金流数据；硬止损与跌停仍独立保护。</p>
+                </div>
+                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={ruleConfig('market_context').enabled !== false} onChange={event => toggleRule('market_context', event.target.checked)} /><span>启用</span></label>
+              </div>
+              <div className="mt-3">{renderFields('market_context', POSITION_RISK_RULE_FIELDS.market_context, 'sm:grid-cols-4')}</div>
+            </section>
             <div className="grid gap-x-8 gap-y-6 lg:grid-cols-3">
               {INDEPENDENT_RULE_GROUPS.map(([group, ruleIds]) => (
                 <section key={group} className="min-w-0">

@@ -19,6 +19,7 @@ import polars as pl
 from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now
 from app.services import alert_store
+from app.services.position_risk_context import PositionRiskContextService
 from app.services.position_risk_store import PositionRiskStore
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
@@ -37,6 +38,8 @@ _NO_COOLDOWN_RULES = {
     "broken_limit_up",
     "limit_down",
 }
+_HARD_GUARD_RULES = {"stop_loss", "limit_down", "quote_interruption"}
+_ACTION_TTL_SECONDS = 120
 _BUILTIN_SIGNAL_DIRECTIONS = {
     "signal_ma_golden_5_20": "entry",
     "signal_ma_dead_5_20": "exit",
@@ -146,6 +149,11 @@ class PositionRiskService:
         self.repo = repo
         self.quote_service = quote_service
         self.app_state = app_state
+        self._context_service = (
+            PositionRiskContextService(repo, quote_service, app_state)
+            if getattr(app_state, "sector_monitor_service", None) is not None
+            else None
+        )
         self._queue: queue.Queue = queue.Queue(maxsize=8)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -154,6 +162,8 @@ class PositionRiskService:
         self._history: dict[str, dict[str, Any]] = {}
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=20))
         self._flow: dict[str, deque[dict[str, float]]] = defaultdict(lambda: deque(maxlen=1800))
+        self._contexts: dict[str, dict[str, Any]] = {}
+        self._pending_actions: dict[str, dict[str, Any]] = {}
         self._rule_states: dict[str, dict[str, Any]] = self.store.get_runtime("rule_states", {}) or {}
         self._runtime_status = "idle"
         self._runtime_reason = "尚未导入持仓"
@@ -523,6 +533,12 @@ class PositionRiskService:
             for quote in quotes:
                 self._ingest_quote(quote)
             if quotes:
+                if self._context_service is not None:
+                    timestamps = [
+                        value for quote in quotes
+                        if (value := _timestamp(quote.get("timestamp"))) is not None
+                    ]
+                    self._context_service.capture_auction(quotes, max(timestamps, default=cn_now().replace(tzinfo=None)))
                 self._mark_quote_recovered({
                     str(quote.get("symbol") or "").strip().upper()
                     for quote in quotes
@@ -698,6 +714,8 @@ class PositionRiskService:
         intraday_features = self._intraday_features(
             {item["symbol"] for item in portfolio["positions"]}, current_time,
         )
+        symbols = {item["symbol"] for item in portfolio["positions"]}
+        self._refresh_contexts(portfolio, symbols, intraday_features, current_time)
         for position in portfolio["positions"]:
             symbol = position["symbol"]
             quote = self._latest_quotes.get(symbol)
@@ -712,6 +730,28 @@ class PositionRiskService:
                 intraday_features.get(symbol, {}),
             )
         self._evaluate_account(portfolio, current_time)
+
+    def _refresh_contexts(
+        self,
+        portfolio: dict[str, Any],
+        symbols: set[str],
+        features: dict[str, dict[str, Any]],
+        current_time: datetime,
+    ) -> None:
+        if self._context_service is None or not symbols:
+            return
+        contexts = self._context_service.build(
+            symbols,
+            features,
+            {symbol: dict(self._latest_quotes.get(symbol) or {}) for symbol in symbols},
+            {
+                symbol: self._rule_config(portfolio, symbol, "market_context")
+                for symbol in symbols
+            },
+            current_time,
+        )
+        with self._lock:
+            self._contexts = contexts
 
     def _intraday_signals(
         self,
@@ -805,6 +845,7 @@ class PositionRiskService:
         self._preload_history_if_missing()
         current_time = (now or cn_now()).replace(tzinfo=None)
         features = self._intraday_features(selected, current_time)
+        self._refresh_contexts(portfolio, selected, features, current_time)
         result: dict[str, dict[str, Any]] = {}
         positions = {str(item.get("symbol")): item for item in portfolio.get("positions", [])}
         for symbol in selected:
@@ -827,6 +868,12 @@ class PositionRiskService:
                 "position_started_at": runtime.get("position_started_at"),
                 "t_trade_count": int((runtime.get("t_trade") or {}).get("count") or 0),
                 "t_trade_date": (runtime.get("t_trade") or {}).get("date"),
+                "context": dict(self._contexts.get(symbol) or {
+                    "state": "unavailable",
+                    "gate_open": False,
+                    "missing": ["context_service"],
+                    "emotion_phase": "数据不足",
+                }),
             })
             result[symbol] = item
         return result
@@ -1975,6 +2022,25 @@ class PositionRiskService:
             f"{event_time.date()}:{symbol or '__portfolio__'}:{rule_id}:{event_token}"
         )
         fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
+        context = dict(self._contexts.get(symbol) or {}) if symbol else {}
+        context_state = str(context.get("state") or "unavailable") if symbol else None
+        configured_action_pct = action_pct
+        action_direction = trade_action
+        action_eligible = False
+        if symbol and configured_action_pct > 0:
+            if action_direction is None and not rule_id.startswith("signal:") and not rule_id.startswith("monitor:"):
+                action_direction = "SELL"
+            context_config = self._rule_config(portfolio, symbol, "market_context")
+            context_enabled = (
+                self._context_service is not None
+                and context_config.get("enabled", True) is not False
+            )
+            if rule_id in _HARD_GUARD_RULES or not context_enabled:
+                action_eligible = action_direction in {"BUY", "SELL"}
+            elif context_state in {"supportive", "neutral"} and context.get("gate_open") is True:
+                action_eligible = action_direction in {"BUY", "SELL"}
+            elif context_state == "unavailable":
+                action_pct = 0
         event = {
             "ts": int(event_time.timestamp() * 1000),
             "fingerprint": fingerprint,
@@ -1989,11 +2055,15 @@ class PositionRiskService:
             "action_pct": action_pct,
         }
         if symbol:
+            event["context_state"] = context_state
+            event["emotion_phase"] = context.get("emotion_phase") or "数据不足"
+            event["action_eligible"] = action_eligible
+        if symbol:
             current_price = _finite((self._latest_quotes.get(symbol) or {}).get("last_price"))
             if current_price is not None:
                 event["price"] = current_price
-        if trade_action:
-            event["trade_action"] = trade_action
+        if action_direction:
+            event["trade_action"] = action_direction
         if stage is not None:
             event["stage"] = stage
         if r_multiple is not None:
@@ -2020,12 +2090,108 @@ class PositionRiskService:
                     sorted(self._severe_event_fingerprints),
                 )
         alert_store.append(self.store.root.parents[1], event)
+        if action_eligible and action_direction and symbol:
+            expires_at = event_time.timestamp() + _ACTION_TTL_SECONDS
+            with self._lock:
+                self._pending_actions = {
+                    key: value for key, value in self._pending_actions.items()
+                    if (_finite(value.get("expires_at")) or 0) >= event_time.timestamp()
+                }
+                self._pending_actions[fingerprint] = {
+                    "fingerprint": fingerprint,
+                    "symbol": symbol,
+                    "action": action_direction,
+                    "action_pct": configured_action_pct,
+                    "rule_id": rule_id,
+                    "created_at": event_time.timestamp(),
+                    "expires_at": expires_at,
+                }
         if notify is True:
             publish = getattr(self.quote_service, "publish_external_alerts", None)
             if callable(publish):
                 publish([event])
             else:
                 self.quote_service.push_alerts([event])
+
+    def confirmed_action_order(
+        self,
+        fingerprint: str,
+        symbol: str,
+        action: str,
+        volume: int,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """校验一次性风控动作，并使用确认时的新鲜行情生成限价委托。"""
+        current_time = (now or cn_now()).replace(tzinfo=None)
+        cleaned_fingerprint = str(fingerprint or "").strip()
+        cleaned_symbol = str(symbol or "").strip().upper()
+        cleaned_action = str(action or "").strip().upper()
+        with self._lock:
+            pending = dict(self._pending_actions.get(cleaned_fingerprint) or {})
+        if not pending:
+            raise ValueError("风控动作已过期或服务已重启，请等待新的触发记录")
+        if current_time.timestamp() > float(pending["expires_at"]):
+            raise ValueError("风控动作已超过 120 秒有效期")
+        if pending["symbol"] != cleaned_symbol or pending["action"] != cleaned_action:
+            raise ValueError("委托标的或方向与风控触发记录不一致")
+        if cleaned_action not in {"BUY", "SELL"}:
+            raise ValueError("不支持的委托方向")
+        rule_id = str(pending.get("rule_id") or "")
+        if not rule_id.startswith("t:") and cleaned_action != "SELL":
+            raise ValueError("止盈和止损动作只允许卖出")
+        if int(volume) <= 0 or int(volume) % 100 != 0:
+            raise ValueError("委托数量必须是正数且为 100 股整数手")
+
+        fresh = self.quote_service.get_fresh_quotes({cleaned_symbol})
+        quote = (fresh.get("quotes") or {}).get(cleaned_symbol)
+        price = _finite((quote or {}).get("last_price", (quote or {}).get("close")))
+        if quote is None or price is None or price <= 0:
+            raise ValueError("确认时无法获取新鲜行情，已拒绝委托")
+        quote_time = _timestamp(quote.get("timestamp"))
+        if quote_time is None:
+            raise ValueError("确认时行情缺少时间戳，已拒绝委托")
+        try:
+            min_interval = float(self.quote_service.get_min_interval())
+        except (AttributeError, TypeError, ValueError):
+            min_interval = 3.0
+        quote_age = (current_time - quote_time).total_seconds()
+        if quote_age < -5 or quote_age > max(30.0, min_interval * 2):
+            raise ValueError("确认时行情已过期，已拒绝委托")
+        limit_down = _finite(quote.get("limit_down"))
+        limit_up = _finite(quote.get("limit_up"))
+        if cleaned_action == "SELL" and limit_down is not None and price <= limit_down + 0.001:
+            raise ValueError("现价已触及跌停，无法生成可成交的确认委托")
+        if cleaned_action == "BUY" and limit_up is not None and price >= limit_up - 0.001:
+            raise ValueError("现价已触及涨停，无法生成可成交的确认委托")
+
+        portfolio = self.store.load()
+        position = next(
+            (item for item in portfolio.get("positions", []) if item.get("symbol") == cleaned_symbol),
+            None,
+        )
+        if position is None:
+            raise ValueError("当前持仓中不存在该标的")
+        action_pct = int(_finite(pending.get("action_pct")) or 0)
+        if rule_id.startswith("t:"):
+            allowed_volume = self._t_trade_volume(
+                portfolio, position, price, cleaned_action, action_pct,
+            )
+        else:
+            available = max(0, int(_finite(position.get("available")) or 0))
+            allowed_volume = int(available * action_pct / 100 // 100 * 100)
+        if allowed_volume <= 0 or int(volume) > allowed_volume:
+            raise ValueError(f"确认数量超过风控动作可执行上限 {allowed_volume} 股")
+
+        return {
+            "action": cleaned_action,
+            "symbol": cleaned_symbol,
+            "volume": int(volume),
+            "price": price,
+            "price_type": "LIMIT",
+            "idempotency_key": f"risk-{cleaned_fingerprint}",
+            "strategy_name": "position_risk",
+        }
     def _notify_updated(self) -> None:
         notify = getattr(self.quote_service, "notify_position_risk_updated", None)
         if callable(notify):

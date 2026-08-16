@@ -895,6 +895,9 @@ export interface PositionRiskEvent {
   severity?: string
   action_pct?: number
   trade_action?: 'BUY' | 'SELL' | string | null
+  context_state?: 'supportive' | 'neutral' | 'weakening' | 'divergent' | 'unavailable' | string | null
+  emotion_phase?: string | null
+  action_eligible?: boolean
   stage?: string | null
   r_multiple?: number | null
   effective_stop_price?: number | null
@@ -1077,6 +1080,37 @@ export interface PositionRiskFeatureSnapshot {
   t_trade_count?: number
   t_trade_date?: string | null
   closed_bars_5m?: Array<{ close?: number | null }>
+  context?: PositionRiskContext
+}
+
+export interface PositionRiskContext {
+  state?: 'supportive' | 'neutral' | 'weakening' | 'divergent' | 'unavailable' | string
+  gate_open?: boolean
+  missing?: string[]
+  as_of?: string | null
+  market_state?: string | null
+  emotion_phase?: string | null
+  sector_kind?: 'concept' | 'industry' | string | null
+  sector_name?: string | null
+  sector_change_pct?: number | null
+  sector_five_day_change_pct?: number | null
+  sector_yesterday_change_pct?: number | null
+  sector_coverage_ratio?: number | null
+  leader?: { symbol?: string | null; name?: string | null; change_pct?: number | null } | null
+  sector_correlation?: number | null
+  leader_correlation?: number | null
+  correlation_samples?: number
+  leader_correlation_samples?: number
+  auction?: { available?: boolean; price?: number | null; volume?: number | null; amount?: number | null; as_of?: string | null }
+  opening_five_minute?: {
+    available?: boolean
+    volume?: number | null
+    amount?: number | null
+    relative_volume?: number | null
+    buy_ratio?: number | null
+    sell_ratio?: number | null
+    flow_samples?: number
+  }
 }
 
 export interface PositionRiskFeaturesResponse {
@@ -2345,6 +2379,8 @@ export const api = {
   qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
   qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume: number; price?: number | null; price_type: string; idempotency_key: string }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number }) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/confirm-action', { method: 'POST', body: JSON.stringify(payload) }),
   qmtCancelOrder: (order_sys_id: string) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
   limitBoard: () => request<LimitBoardView>('/api/limit-board'),

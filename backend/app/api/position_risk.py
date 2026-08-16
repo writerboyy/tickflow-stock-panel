@@ -48,6 +48,13 @@ class QmtTradeTogglePayload(BaseModel):
     enabled: bool
 
 
+class QmtRiskActionPayload(BaseModel):
+    fingerprint: str = Field(min_length=32, max_length=128)
+    symbol: str
+    action: str
+    volume: int = Field(gt=0)
+
+
 def _service(request: Request):
     service = getattr(request.app.state, "position_risk_service", None)
     if service is None:
@@ -357,6 +364,23 @@ def qmt_orders(request: Request):
 def qmt_submit_order(payload: QmtOrderPayload, request: Request):
     try:
         result = _qmt(request).submit_order(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "order": result}
+
+
+@router.post("/qmt/orders/confirm-action")
+def qmt_confirm_risk_action(payload: QmtRiskActionPayload, request: Request):
+    try:
+        order_request = _service(request).confirmed_action_order(
+            payload.fingerprint,
+            payload.symbol,
+            payload.action,
+            payload.volume,
+        )
+        result = _qmt(request).submit_order(order_request)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

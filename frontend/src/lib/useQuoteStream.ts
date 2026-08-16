@@ -183,6 +183,8 @@ export function useQuoteStream(
 
       es.addEventListener('position_risk_updated', () => {
         qc.invalidateQueries({ queryKey: QK.positionRisk })
+        qc.invalidateQueries({ queryKey: QK.positionRiskFeatures() })
+        qc.invalidateQueries({ queryKey: QK.positionRiskEvents })
       })
 
       es.addEventListener('limit_board_updated', () => {

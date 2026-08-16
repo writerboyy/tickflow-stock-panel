@@ -69,6 +69,42 @@ class SectorMonitorService:
         self._ensure_catalog()
         return {kind: [dict(item) for item in self._catalog[kind]] for kind in self._catalog}
 
+    def targets_for_symbol(
+        self,
+        symbol: str,
+        *,
+        kind: str | None = None,
+        industry_level: int | None = None,
+    ) -> list[dict]:
+        """返回标的当前所属的板块目标，供其他业务服务复用成员口径。"""
+        self._ensure_catalog()
+        cleaned = str(symbol or "").strip().upper()
+        if not cleaned:
+            return []
+        targets = []
+        for target_key, members in self._members_by_key.items():
+            target = self._targets_by_key.get(target_key)
+            if cleaned not in members or not target:
+                continue
+            if kind is not None and target.get("kind") != kind:
+                continue
+            if (
+                target.get("kind") == "industry"
+                and industry_level is not None
+                and int(target.get("level") or 0) != industry_level
+            ):
+                continue
+            targets.append(dict(target))
+        return sorted(
+            targets,
+            key=lambda item: (str(item.get("kind") or ""), int(item.get("level") or 0), str(item.get("name") or "")),
+        )
+
+    def member_symbols(self, target_key: str) -> set[str]:
+        """返回板块成员快照，不暴露内部可变集合。"""
+        self._ensure_catalog()
+        return set(self._members_by_key.get(str(target_key or ""), set()))
+
     def missing_target_keys(self, targets: list[dict]) -> list[str]:
         self._ensure_catalog()
         return [str(target.get("key") or "") for target in targets if target.get("key") not in self._targets_by_key]
