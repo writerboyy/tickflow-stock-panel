@@ -25,7 +25,6 @@ _DEPTH_FRESH_SECONDS = 30
 _MIN_LIMIT_UP_COUNT = 4
 _MIN_NEXT_DAY_RED_RATE = 0.80
 _MAX_FIRST_BOARD_BROKEN_RATE = 0.75
-_SWEEP_MAX_PRICE_LEVELS = 5
 _STOCK_PRICE_TICK = 0.01
 _PREMIUM_FILTER_COLUMNS = {
     "symbol",
@@ -66,7 +65,9 @@ def _is_trading_time(value: datetime) -> bool:
     )
 
 
-def _sweep_ready(depth: dict[str, Any], limit_up: float) -> bool:
+def _sweep_ready(
+    depth: dict[str, Any], limit_up: float, max_price_levels: int = 5,
+) -> bool:
     asks = [
         (price, volume)
         for price, volume in zip(
@@ -80,7 +81,7 @@ def _sweep_ready(depth: dict[str, Any], limit_up: float) -> bool:
         return False
     best_ask = asks[0][0]
     remaining = limit_up - best_ask
-    return -0.001 <= remaining <= _SWEEP_MAX_PRICE_LEVELS * _STOCK_PRICE_TICK + 0.001
+    return -0.001 <= remaining <= max_price_levels * _STOCK_PRICE_TICK + 0.001
 
 
 def _qualified_premium_stats(rows: pl.DataFrame | None) -> dict[str, dict[str, Any]]:
@@ -509,6 +510,7 @@ class LimitBoardService:
 
     def _process_depth(self, records: list[dict[str, Any]]) -> None:
         config = self.store.load_config()
+        sweep_price_levels = int(config["settings"].get("sweep_price_levels", 5))
         runtime = self._runtime_for_today()
         now = cn_now()
         if not _is_trading_time(now):
@@ -536,7 +538,11 @@ class LimitBoardService:
             state["bid1_volume"] = normalized["bid_volumes"][0] if normalized["bid_volumes"] else 0.0
             state["ask1_volume"] = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
             state["last_depth_at"] = normalized["timestamp"].isoformat()
-            if _sweep_ready(normalized, float(quote["limit_up"])):
+            if _sweep_ready(
+                normalized,
+                float(quote["limit_up"]),
+                sweep_price_levels,
+            ):
                 self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="sweep")
             if state.get("sealed") and not latest_sealed:
                 self._mark_broken(quote, state, runtime, config, "卖一恢复，封板状态中断")
@@ -558,10 +564,10 @@ class LimitBoardService:
     @staticmethod
     def _normalize_depth(raw: dict[str, Any], now: datetime) -> dict[str, Any] | None:
         try:
-            bid_prices = [float(value) for value in (raw.get("bid_prices") or [])[:5]]
-            bid_volumes = [float(value) for value in (raw.get("bid_volumes") or [])[:5]]
-            ask_prices = [float(value) for value in (raw.get("ask_prices") or [])[:5]]
-            ask_volumes = [float(value) for value in (raw.get("ask_volumes") or [])[:5]]
+            bid_prices = [float(value) for value in (raw.get("bid_prices") or [])[:10]]
+            bid_volumes = [float(value) for value in (raw.get("bid_volumes") or [])[:10]]
+            ask_prices = [float(value) for value in (raw.get("ask_prices") or [])[:10]]
+            ask_volumes = [float(value) for value in (raw.get("ask_volumes") or [])[:10]]
         except (TypeError, ValueError):
             return None
         timestamp = _quote_time(raw.get("timestamp")) or now
@@ -1083,6 +1089,28 @@ class LimitBoardService:
             config["settings"]["notifications"] = values
 
         saved = self.store.update(revision, update)
+        self._notify_updated()
+        return saved
+
+    def update_advanced_settings(
+        self, settings: dict[str, Any], revision: int,
+    ) -> dict[str, Any]:
+        values = {
+            "sweep_price_levels": int(settings["sweep_price_levels"]),
+            "near_limit_pct": float(settings["near_limit_pct"]),
+            "exit_limit_pct": float(settings["exit_limit_pct"]),
+            "exit_sustain_seconds": int(settings["exit_sustain_seconds"]),
+            "first_board_lookback_days": int(settings["first_board_lookback_days"]),
+            "blacklist_after_breaks": int(settings["blacklist_after_breaks"]),
+        }
+        if values["exit_limit_pct"] < values["near_limit_pct"]:
+            raise ValueError("扫描退出阈值不能小于临板 WS 阈值")
+
+        def update(config: dict[str, Any]) -> None:
+            config["settings"].update(values)
+
+        saved = self.store.update(revision, update)
+        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes()})
         self._notify_updated()
         return saved
 

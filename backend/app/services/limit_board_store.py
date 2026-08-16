@@ -17,6 +17,7 @@ def default_config() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "revision": 0,
         "settings": {
+            "sweep_price_levels": 5,
             "near_limit_pct": 0.02,
             "exit_limit_pct": 0.03,
             "exit_sustain_seconds": 30,

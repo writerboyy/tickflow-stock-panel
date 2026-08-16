@@ -537,7 +537,11 @@ def test_add_pool_enables_auto_trade_by_default(tmp_path):
     assert saved["board_pool"][0]["order_mode"] == "sweep"
 
 
-def test_sweep_requires_best_ask_within_five_price_levels():
+def test_default_config_uses_five_sweep_price_levels():
+    assert default_config()["settings"]["sweep_price_levels"] == 5
+
+
+def test_sweep_uses_configured_price_levels():
     five_levels = {
         "ask_prices": [10.95, 10.96, 10.97, 10.98, 10.99],
         "ask_volumes": [100, 200, 300, 400, 500],
@@ -549,6 +553,7 @@ def test_sweep_requires_best_ask_within_five_price_levels():
 
     assert _sweep_ready(five_levels, 11.0) is True
     assert _sweep_ready(six_levels, 11.0) is False
+    assert _sweep_ready(six_levels, 11.0, 10) is True
     assert _sweep_ready({**five_levels, "ask_volumes": [0, 0, 0, 0, 0]}, 11.0) is False
 
 
@@ -581,6 +586,46 @@ def test_five_level_depth_triggers_default_sweep_order(tmp_path, monkeypatch):
         "bid_volumes": [100] * 5,
         "ask_prices": [10.95, 10.96, 10.97, 10.98, 10.99],
         "ask_volumes": [100] * 5,
+    }])
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["price"] == 11.0
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
+
+
+def test_depth_processing_uses_configured_sweep_price_levels(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service.store.update(
+        0,
+        lambda value: value["settings"].update({"sweep_price_levels": 10}),
+    )
+    service.add_pool("600000.SH", "first_board", 1)
+    service._quotes["600000.SH"] = {
+        **quote(price=10.89),
+        "source_modes": ["board_pool"],
+    }
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "near_limit"}
+    service.store.save_runtime(runtime)
+
+    service._process_depth([{
+        "symbol": "600000.SH",
+        "timestamp": "2026-08-13T10:00:00+08:00",
+        "bid_prices": [10.89 - index / 100 for index in range(10)],
+        "bid_volumes": [100] * 10,
+        "ask_prices": [10.90 + index / 100 for index in range(10)],
+        "ask_volumes": [100] * 10,
     }])
 
     assert len(qmt.orders) == 1
@@ -873,3 +918,68 @@ def test_limit_board_api_updates_notification_settings(tmp_path):
         "broken": True,
         "resealed": False,
     }
+
+
+def test_limit_board_api_updates_advanced_settings(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+    settings = {
+        "sweep_price_levels": 10,
+        "near_limit_pct": 0.015,
+        "exit_limit_pct": 0.04,
+        "exit_sustain_seconds": 45,
+        "first_board_lookback_days": 20,
+        "blacklist_after_breaks": 5,
+    }
+
+    updated = client.put(
+        "/api/limit-board/settings/advanced",
+        json={"revision": 0, "settings": settings},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["config"]["revision"] == 1
+    assert {
+        key: updated.json()["config"]["settings"][key]
+        for key in settings
+    } == settings
+    assert service.store.load_config()["settings"]["sweep_price_levels"] == 10
+
+
+def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+    settings = {
+        "sweep_price_levels": 5,
+        "near_limit_pct": 0.02,
+        "exit_limit_pct": 0.03,
+        "exit_sustain_seconds": 30,
+        "first_board_lookback_days": 10,
+        "blacklist_after_breaks": 3,
+    }
+
+    too_many_levels = client.put(
+        "/api/limit-board/settings/advanced",
+        json={"revision": 0, "settings": {**settings, "sweep_price_levels": 11}},
+    )
+    exit_below_entry = client.put(
+        "/api/limit-board/settings/advanced",
+        json={
+            "revision": 0,
+            "settings": {
+                **settings,
+                "near_limit_pct": 0.03,
+                "exit_limit_pct": 0.02,
+            },
+        },
+    )
+
+    assert too_many_levels.status_code == 422
+    assert exit_below_entry.status_code == 400
+    assert service.store.load_config()["revision"] == 0

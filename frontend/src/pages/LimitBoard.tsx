@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  SlidersHorizontal,
   Trash2,
   Wifi,
 } from 'lucide-react'
@@ -26,6 +27,7 @@ import { QK } from '@/lib/queryKeys'
 type Tab = 'first' | 'candidate' | 'pool' | 'events'
 type TableMode = Exclude<Tab, 'events'>
 type NotificationSettings = LimitBoardView['settings']['notifications']
+type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   watching: { label: '观察中', tone: 'text-muted' },
@@ -67,6 +69,7 @@ interface RowProps {
   mode: TableMode
   inPool: boolean
   busy: boolean
+  sweepPriceLevels: number
   onOpen: () => void
   onAddPool: () => void
   onRemoveCandidate: () => void
@@ -80,6 +83,7 @@ function Row({
   mode,
   inPool,
   busy,
+  sweepPriceLevels,
   onOpen,
   onAddPool,
   onRemoveCandidate,
@@ -143,7 +147,7 @@ function Row({
             <div className="flex items-center justify-end gap-1.5">
               <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
                 {([
-                  ['sweep', '扫板', '新鲜五档盘口中卖一距涨停价不超过 5 个价位时提交'],
+                  ['sweep', '扫板', `新鲜盘口中卖一距涨停价不超过 ${sweepPriceLevels} 个价位时提交`],
                   ['queue', '排板', '价格已触及涨停价后再提交排队'],
                 ] as const).map(([mode, label, title]) => <button
                   key={mode}
@@ -197,6 +201,7 @@ interface TableProps {
   mode: TableMode
   poolSymbols: Set<string>
   busy: boolean
+  sweepPriceLevels: number
   onOpen: (row: LimitBoardRow) => void
   onAddPool: (row: LimitBoardRow) => void
   onRemoveCandidate: (row: LimitBoardRow) => void
@@ -225,6 +230,7 @@ function Table(props: TableProps) {
               mode={mode}
               inPool={props.poolSymbols.has(row.symbol)}
               busy={props.busy}
+              sweepPriceLevels={props.sweepPriceLevels}
               onOpen={() => props.onOpen(row)}
               onAddPool={() => props.onAddPool(row)}
               onRemoveCandidate={() => props.onRemoveCandidate(row)}
@@ -264,12 +270,86 @@ function NotificationDialog({
   </Modal>
 }
 
+function AdvancedSettingsDialog({
+  value,
+  pending,
+  onClose,
+  onSave,
+}: {
+  value: AdvancedSettings
+  pending: boolean
+  onClose: () => void
+  onSave: (value: AdvancedSettings) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  const valid = draft.sweep_price_levels >= 1
+    && draft.sweep_price_levels <= 10
+    && draft.near_limit_pct >= 0.001
+    && draft.near_limit_pct <= 0.10
+    && draft.exit_limit_pct >= draft.near_limit_pct
+    && draft.exit_limit_pct <= 0.20
+    && draft.exit_sustain_seconds >= 1
+    && draft.exit_sustain_seconds <= 300
+    && draft.first_board_lookback_days >= 1
+    && draft.first_board_lookback_days <= 60
+    && draft.blacklist_after_breaks >= 0
+    && draft.blacklist_after_breaks <= 20
+  const inputClass = 'h-8 w-28 rounded-btn border border-border bg-base px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50'
+  const update = <K extends keyof AdvancedSettings,>(key: K, next: AdvancedSettings[K]) => {
+    setDraft(current => ({ ...current, [key]: next }))
+  }
+
+  return <Modal labelledBy="limit-board-advanced-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="w-[94vw] max-w-xl rounded-card border border-border bg-surface shadow-xl">
+    <div className="border-b border-border px-4 py-3"><h2 id="limit-board-advanced-title" className="text-sm font-semibold">高级设置</h2></div>
+    <div className="grid grid-cols-1 divide-y divide-border px-4 sm:grid-cols-2 sm:gap-x-6 sm:divide-y-0">
+      <label className="flex items-center justify-between gap-3 border-b border-border py-3 text-xs sm:col-span-2">
+        <span><span className="block font-medium">扫板触发档位</span><span className="mt-0.5 block text-[10px] text-muted">卖一距涨停价的最大价格档位</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={1} max={10} step={1} value={draft.sweep_price_levels} disabled={pending} onChange={event => update('sweep_price_levels', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">档</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span>临板 WS 阈值</span>
+        <span className="flex items-center gap-2"><input type="number" min={0.1} max={10} step={0.1} value={Number((draft.near_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('near_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span>扫描退出阈值</span>
+        <span className="flex items-center gap-2"><input type="number" min={0.1} max={20} step={0.1} value={Number((draft.exit_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('exit_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 border-t border-border py-3 text-xs sm:border-t-0 sm:border-b sm:border-border">
+        <span>退出持续时间</span>
+        <span className="flex items-center gap-2"><input type="number" min={1} max={300} step={1} value={draft.exit_sustain_seconds} disabled={pending} onChange={event => update('exit_sustain_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span>首板回看</span>
+        <span className="flex items-center gap-2"><input type="number" min={1} max={60} step={1} value={draft.first_board_lookback_days} disabled={pending} onChange={event => update('first_board_lookback_days', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">日</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 border-t border-border py-3 text-xs sm:col-span-2 sm:border-t-0">
+        <span>炸板黑名单阈值</span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={20} step={1} value={draft.blacklist_after_breaks} disabled={pending} onChange={event => update('blacklist_after_breaks', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
+      </label>
+    </div>
+    {!valid ? <div className="border-t border-border px-4 py-2 text-[11px] text-danger">请检查参数范围，且扫描退出阈值不能小于临板 WS 阈值。</div> : null}
+    <div className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" onClick={onClose} disabled={pending} className="h-8 rounded-btn border border-border px-3 text-xs text-muted disabled:opacity-50">取消</button><button type="button" onClick={() => onSave(draft)} disabled={pending || !valid} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white disabled:opacity-50"><Check className="h-3.5 w-3.5" />{pending ? '保存中…' : '保存'}</button></div>
+  </Modal>
+}
+
+function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
+  return {
+    sweep_price_levels: value.sweep_price_levels,
+    near_limit_pct: value.near_limit_pct,
+    exit_limit_pct: value.exit_limit_pct,
+    exit_sustain_seconds: value.exit_sustain_seconds,
+    first_board_lookback_days: value.first_board_lookback_days,
+    blacklist_after_breaks: value.blacklist_after_breaks,
+  }
+}
+
 export function LimitBoard() {
   const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('first')
   const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<LimitBoardRow | null>(null)
   const [notificationOpen, setNotificationOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
   const searchQuery = useQuery({
     queryKey: QK.instrumentSearch(search, 'stock'),
@@ -306,6 +386,15 @@ export function LimitBoard() {
       setNotificationOpen(false)
     },
   })
+  const updateAdvanced = useMutation({
+    mutationFn: (settings: AdvancedSettings) => (
+      api.limitBoardAdvancedSettingsUpdate(settings, view.data?.revision ?? 0)
+    ),
+    onSuccess: async () => {
+      await refresh()
+      setAdvancedOpen(false)
+    },
+  })
 
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
   const candidateSymbols = useMemo(() => new Set([
@@ -313,7 +402,7 @@ export function LimitBoard() {
     ...(view.data?.board_pool ?? []).map(row => row.symbol),
   ]), [view.data?.candidate_pool, view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending
+  const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending || updateAdvanced.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
@@ -321,7 +410,7 @@ export function LimitBoard() {
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
   const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
-    ? '默认扫板：卖一距涨停不超过 5 个价位时提交；排板在触及涨停后提交'
+    ? `默认扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板在触及涨停后提交`
     : tab === 'candidate'
     ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
     : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
@@ -331,7 +420,7 @@ export function LimitBoard() {
       <PageHeader
         title="打板专区"
         titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
-        right={<div className="flex items-center gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
+        right={<div className="flex flex-wrap items-center justify-end gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setAdvancedOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5" />高级设置</button><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
@@ -362,6 +451,7 @@ export function LimitBoard() {
               mode={tableMode}
               poolSymbols={poolSymbols}
               busy={busy}
+              sweepPriceLevels={data.settings.sweep_price_levels}
               onOpen={setPreview}
               onAddPool={row => addPool.mutate({
                 row,
@@ -386,6 +476,7 @@ export function LimitBoard() {
       </div>
 
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
+      {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
       {notificationOpen ? <NotificationDialog value={data.settings.notifications} pending={updateNotifications.isPending} onClose={() => setNotificationOpen(false)} onSave={value => updateNotifications.mutate(value)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>

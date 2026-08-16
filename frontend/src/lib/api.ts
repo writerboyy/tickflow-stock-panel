@@ -1153,6 +1153,7 @@ export interface LimitBoardRow {
 export interface LimitBoardView {
   revision: number
   settings: {
+    sweep_price_levels: number
     near_limit_pct: number
     exit_limit_pct: number
     exit_sustain_seconds: number
@@ -2393,6 +2394,11 @@ export const api = {
     notifications: LimitBoardView['settings']['notifications'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {
     method: 'PUT', body: JSON.stringify({ notifications, revision }),
+  }),
+  limitBoardAdvancedSettingsUpdate: (
+    settings: Omit<LimitBoardView['settings'], 'notifications'>, revision: number,
+  ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {
+    method: 'PUT', body: JSON.stringify({ settings, revision }),
   }),
   limitBoardCandidateAdd: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/candidate', {

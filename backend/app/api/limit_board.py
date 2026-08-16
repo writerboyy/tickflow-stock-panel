@@ -36,6 +36,20 @@ class NotificationSettingsWrite(BaseModel):
     notifications: NotificationSettings
 
 
+class AdvancedSettings(BaseModel):
+    sweep_price_levels: int = Field(ge=1, le=10)
+    near_limit_pct: float = Field(ge=0.001, le=0.10)
+    exit_limit_pct: float = Field(ge=0.001, le=0.20)
+    exit_sustain_seconds: int = Field(ge=1, le=300)
+    first_board_lookback_days: int = Field(ge=1, le=60)
+    blacklist_after_breaks: int = Field(ge=0, le=20)
+
+
+class AdvancedSettingsWrite(BaseModel):
+    revision: int = Field(ge=0)
+    settings: AdvancedSettings
+
+
 def _service(request: Request):
     service = getattr(request.app.state, "limit_board_service", None)
     if service is None:
@@ -56,6 +70,19 @@ def update_notifications(payload: NotificationSettingsWrite, request: Request):
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.put("/settings/advanced")
+def update_advanced_settings(payload: AdvancedSettingsWrite, request: Request):
+    try:
+        config = _service(request).update_advanced_settings(
+            payload.settings.model_dump(), payload.revision,
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "config": config}
 
 
