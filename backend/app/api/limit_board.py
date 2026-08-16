@@ -38,6 +38,8 @@ class NotificationSettingsWrite(BaseModel):
 
 class AdvancedSettings(BaseModel):
     sweep_price_levels: int = Field(ge=1, le=10)
+    queue_wait_seconds: int = Field(default=0, ge=0, le=300)
+    queue_confirm_snapshots: int = Field(default=0, ge=0, le=10)
     near_limit_pct: float = Field(ge=0.001, le=0.10)
     exit_limit_pct: float = Field(ge=0.001, le=0.20)
     exit_sustain_seconds: int = Field(ge=1, le=300)

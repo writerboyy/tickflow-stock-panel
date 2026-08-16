@@ -1154,6 +1154,8 @@ export interface LimitBoardView {
   revision: number
   settings: {
     sweep_price_levels: number
+    queue_wait_seconds: number
+    queue_confirm_snapshots: number
     near_limit_pct: number
     exit_limit_pct: number
     exit_sustain_seconds: number

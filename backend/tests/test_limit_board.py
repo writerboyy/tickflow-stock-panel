@@ -537,8 +537,12 @@ def test_add_pool_enables_auto_trade_by_default(tmp_path):
     assert saved["board_pool"][0]["order_mode"] == "sweep"
 
 
-def test_default_config_uses_five_sweep_price_levels():
-    assert default_config()["settings"]["sweep_price_levels"] == 5
+def test_default_config_preserves_current_sweep_and_queue_triggers():
+    settings = default_config()["settings"]
+
+    assert settings["sweep_price_levels"] == 5
+    assert settings["queue_wait_seconds"] == 0
+    assert settings["queue_confirm_snapshots"] == 0
 
 
 def test_sweep_uses_configured_price_levels():
@@ -631,6 +635,90 @@ def test_depth_processing_uses_configured_sweep_price_levels(tmp_path, monkeypat
     assert len(qmt.orders) == 1
     assert qmt.orders[0]["price"] == 11.0
     assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
+
+
+def test_queue_waits_from_first_touch_before_submitting(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["settings"]["queue_wait_seconds"] = 5
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    current = [datetime(2026, 8, 13, 10, 0, 4, tzinfo=CN_TZ)]
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: current[0],
+    )
+    state = {
+        "touched": True,
+        "touched_at": "2026-08-13T10:00:00+08:00",
+    }
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+    assert qmt.orders == []
+
+    current[0] = datetime(2026, 8, 13, 10, 0, 5, tzinfo=CN_TZ)
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert len(qmt.orders) == 1
+    assert state["auto_order_mode"] == "queue"
+
+
+def test_queue_submits_after_configured_sealed_snapshots(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+
+    def configure(value):
+        value["settings"]["queue_confirm_snapshots"] = 3
+        value["board_pool"].append({
+            "symbol": "600000.SH",
+            "auto_trade": True,
+            "order_mode": "queue",
+        })
+
+    service.store.update(0, configure)
+    service._quotes["600000.SH"] = {
+        **quote(),
+        "source_modes": ["board_pool"],
+    }
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {
+        "status": "touched",
+        "touched": True,
+        "touched_at": "2026-08-13T10:00:00+08:00",
+    }
+    service.store.save_runtime(runtime)
+    sealed_depth = {
+        "symbol": "600000.SH",
+        "timestamp": "2026-08-13T10:00:00+08:00",
+        "bid_prices": [11.0] + [10.99 - index / 100 for index in range(9)],
+        "bid_volumes": [100] * 10,
+        "ask_prices": [0] * 10,
+        "ask_volumes": [0] * 10,
+    }
+
+    service._process_depth([sealed_depth])
+    service._process_depth([sealed_depth])
+    assert qmt.orders == []
+
+    service._process_depth([sealed_depth])
+
+    assert len(qmt.orders) == 1
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "queue"
 
 
 def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
@@ -928,6 +1016,8 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
     client = TestClient(app)
     settings = {
         "sweep_price_levels": 10,
+        "queue_wait_seconds": 8,
+        "queue_confirm_snapshots": 4,
         "near_limit_pct": 0.015,
         "exit_limit_pct": 0.04,
         "exit_sustain_seconds": 45,
@@ -957,6 +1047,8 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
     client = TestClient(app)
     settings = {
         "sweep_price_levels": 5,
+        "queue_wait_seconds": 0,
+        "queue_confirm_snapshots": 0,
         "near_limit_pct": 0.02,
         "exit_limit_pct": 0.03,
         "exit_sustain_seconds": 30,
@@ -979,7 +1071,15 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
             },
         },
     )
+    too_many_queue_snapshots = client.put(
+        "/api/limit-board/settings/advanced",
+        json={
+            "revision": 0,
+            "settings": {**settings, "queue_confirm_snapshots": 11},
+        },
+    )
 
     assert too_many_levels.status_code == 422
     assert exit_below_entry.status_code == 400
+    assert too_many_queue_snapshots.status_code == 422
     assert service.store.load_config()["revision"] == 0

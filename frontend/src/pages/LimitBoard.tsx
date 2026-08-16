@@ -70,6 +70,8 @@ interface RowProps {
   inPool: boolean
   busy: boolean
   sweepPriceLevels: number
+  queueWaitSeconds: number
+  queueConfirmSnapshots: number
   onOpen: () => void
   onAddPool: () => void
   onRemoveCandidate: () => void
@@ -84,6 +86,8 @@ function Row({
   inPool,
   busy,
   sweepPriceLevels,
+  queueWaitSeconds,
+  queueConfirmSnapshots,
   onOpen,
   onAddPool,
   onRemoveCandidate,
@@ -148,7 +152,7 @@ function Row({
               <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
                 {([
                   ['sweep', '扫板', `新鲜盘口中卖一距涨停价不超过 ${sweepPriceLevels} 个价位时提交`],
-                  ['queue', '排板', '价格已触及涨停价后再提交排队'],
+                  ['queue', '排板', queueTriggerDescription(queueWaitSeconds, queueConfirmSnapshots)],
                 ] as const).map(([mode, label, title]) => <button
                   key={mode}
                   type="button"
@@ -202,6 +206,8 @@ interface TableProps {
   poolSymbols: Set<string>
   busy: boolean
   sweepPriceLevels: number
+  queueWaitSeconds: number
+  queueConfirmSnapshots: number
   onOpen: (row: LimitBoardRow) => void
   onAddPool: (row: LimitBoardRow) => void
   onRemoveCandidate: (row: LimitBoardRow) => void
@@ -231,6 +237,8 @@ function Table(props: TableProps) {
               inPool={props.poolSymbols.has(row.symbol)}
               busy={props.busy}
               sweepPriceLevels={props.sweepPriceLevels}
+              queueWaitSeconds={props.queueWaitSeconds}
+              queueConfirmSnapshots={props.queueConfirmSnapshots}
               onOpen={() => props.onOpen(row)}
               onAddPool={() => props.onAddPool(row)}
               onRemoveCandidate={() => props.onRemoveCandidate(row)}
@@ -270,6 +278,15 @@ function NotificationDialog({
   </Modal>
 }
 
+function queueTriggerDescription(waitSeconds: number, confirmSnapshots: number): string {
+  const trigger = confirmSnapshots > 0
+    ? `连续 ${confirmSnapshots} 个盘口快照确认封板`
+    : '价格触及涨停'
+  return waitSeconds > 0
+    ? `${trigger}，且首次触板已等待 ${waitSeconds} 秒后提交`
+    : `${trigger}后提交`
+}
+
 function AdvancedSettingsDialog({
   value,
   pending,
@@ -282,8 +299,15 @@ function AdvancedSettingsDialog({
   onSave: (value: AdvancedSettings) => void
 }) {
   const [draft, setDraft] = useState(value)
-  const valid = draft.sweep_price_levels >= 1
+  const valid = Number.isInteger(draft.sweep_price_levels)
+    && draft.sweep_price_levels >= 1
     && draft.sweep_price_levels <= 10
+    && Number.isInteger(draft.queue_wait_seconds)
+    && draft.queue_wait_seconds >= 0
+    && draft.queue_wait_seconds <= 300
+    && Number.isInteger(draft.queue_confirm_snapshots)
+    && draft.queue_confirm_snapshots >= 0
+    && draft.queue_confirm_snapshots <= 10
     && draft.near_limit_pct >= 0.001
     && draft.near_limit_pct <= 0.10
     && draft.exit_limit_pct >= draft.near_limit_pct
@@ -299,12 +323,20 @@ function AdvancedSettingsDialog({
     setDraft(current => ({ ...current, [key]: next }))
   }
 
-  return <Modal labelledBy="limit-board-advanced-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="w-[94vw] max-w-xl rounded-card border border-border bg-surface shadow-xl">
+  return <Modal labelledBy="limit-board-advanced-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="max-h-[92vh] w-[94vw] max-w-xl overflow-y-auto rounded-card border border-border bg-surface shadow-xl">
     <div className="border-b border-border px-4 py-3"><h2 id="limit-board-advanced-title" className="text-sm font-semibold">高级设置</h2></div>
     <div className="grid grid-cols-1 divide-y divide-border px-4 sm:grid-cols-2 sm:gap-x-6 sm:divide-y-0">
       <label className="flex items-center justify-between gap-3 border-b border-border py-3 text-xs sm:col-span-2">
         <span><span className="block font-medium">扫板触发档位</span><span className="mt-0.5 block text-[10px] text-muted">卖一距涨停价的最大价格档位</span></span>
         <span className="flex items-center gap-2"><input type="number" min={1} max={10} step={1} value={draft.sweep_price_levels} disabled={pending} onChange={event => update('sweep_price_levels', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">档</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span>排板等待时间</span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={300} step={1} value={draft.queue_wait_seconds} disabled={pending} onChange={event => update('queue_wait_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span><span className="block">排板确认快照</span><span className="mt-0.5 block text-[10px] text-muted">0 为触板即排</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={10} step={1} value={draft.queue_confirm_snapshots} disabled={pending} onChange={event => update('queue_confirm_snapshots', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
       </label>
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span>临板 WS 阈值</span>
@@ -335,6 +367,8 @@ function AdvancedSettingsDialog({
 function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
   return {
     sweep_price_levels: value.sweep_price_levels,
+    queue_wait_seconds: value.queue_wait_seconds,
+    queue_confirm_snapshots: value.queue_confirm_snapshots,
     near_limit_pct: value.near_limit_pct,
     exit_limit_pct: value.exit_limit_pct,
     exit_sustain_seconds: value.exit_sustain_seconds,
@@ -410,7 +444,7 @@ export function LimitBoard() {
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
   const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
-    ? `默认扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板在触及涨停后提交`
+    ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
     : tab === 'candidate'
     ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
     : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
@@ -452,6 +486,8 @@ export function LimitBoard() {
               poolSymbols={poolSymbols}
               busy={busy}
               sweepPriceLevels={data.settings.sweep_price_levels}
+              queueWaitSeconds={data.settings.queue_wait_seconds}
+              queueConfirmSnapshots={data.settings.queue_confirm_snapshots}
               onOpen={setPreview}
               onAddPool={row => addPool.mutate({
                 row,

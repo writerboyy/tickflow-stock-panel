@@ -18,6 +18,8 @@ def default_config() -> dict[str, Any]:
         "revision": 0,
         "settings": {
             "sweep_price_levels": 5,
+            "queue_wait_seconds": 0,
+            "queue_confirm_snapshots": 0,
             "near_limit_pct": 0.02,
             "exit_limit_pct": 0.03,
             "exit_sustain_seconds": 30,

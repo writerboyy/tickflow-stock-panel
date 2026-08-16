@@ -127,7 +127,7 @@ class LimitBoardService:
         self._ws_registered = False
         self._ws_symbols: set[str] = set()
         self._quotes: dict[str, dict[str, Any]] = {}
-        self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=3))
+        self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=10))
         self._history_date: date | None = None
         self._name_map_date: date | None = None
         self._name_map: dict[str, str] = {}
@@ -511,6 +511,9 @@ class LimitBoardService:
     def _process_depth(self, records: list[dict[str, Any]]) -> None:
         config = self.store.load_config()
         sweep_price_levels = int(config["settings"].get("sweep_price_levels", 5))
+        queue_confirm_snapshots = int(
+            config["settings"].get("queue_confirm_snapshots", 0),
+        )
         runtime = self._runtime_for_today()
         now = cn_now()
         if not _is_trading_time(now):
@@ -529,12 +532,21 @@ class LimitBoardService:
             if normalized is None:
                 continue
             self._depth[symbol].append(normalized)
-            recent = list(self._depth[symbol])
-            if any((now - item["timestamp"]).total_seconds() > _DEPTH_FRESH_SECONDS for item in recent):
+            recent = [
+                item for item in self._depth[symbol]
+                if (now - item["timestamp"]).total_seconds() <= _DEPTH_FRESH_SECONDS
+            ]
+            self._depth[symbol] = deque(recent, maxlen=10)
+            if not recent:
                 continue
             sealed_flags = [self._sealed_snapshot(item, float(quote["limit_up"])) for item in recent]
-            confirmed = len(sealed_flags) == 3 and all(sealed_flags)
+            confirmed = len(sealed_flags) >= 3 and all(sealed_flags[-3:])
             latest_sealed = sealed_flags[-1]
+            consecutive_sealed = 0
+            for is_sealed in reversed(sealed_flags):
+                if not is_sealed:
+                    break
+                consecutive_sealed += 1
             state["bid1_volume"] = normalized["bid_volumes"][0] if normalized["bid_volumes"] else 0.0
             state["ask1_volume"] = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
             state["last_depth_at"] = normalized["timestamp"].isoformat()
@@ -544,6 +556,15 @@ class LimitBoardService:
                 sweep_price_levels,
             ):
                 self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="sweep")
+            if queue_confirm_snapshots > 0 and latest_sealed:
+                self._maybe_auto_trade(
+                    symbol,
+                    quote,
+                    state,
+                    config,
+                    trigger_mode="queue",
+                    queue_confirmed_snapshots=consecutive_sealed,
+                )
             if state.get("sealed") and not latest_sealed:
                 self._mark_broken(quote, state, runtime, config, "卖一恢复，封板状态中断")
             elif confirmed and not state.get("sealed"):
@@ -623,6 +644,7 @@ class LimitBoardService:
         config: dict[str, Any],
         *,
         trigger_mode: str = "queue",
+        queue_confirmed_snapshots: int = 0,
     ) -> None:
         member = next(
             (item for item in config["board_pool"] if str(item.get("symbol")).strip().upper() == symbol),
@@ -633,6 +655,25 @@ class LimitBoardService:
         order_mode = str(member.get("order_mode") or "sweep")
         if order_mode != trigger_mode:
             return
+        if trigger_mode == "queue":
+            required_snapshots = int(
+                config["settings"].get("queue_confirm_snapshots", 0),
+            )
+            if required_snapshots > 0 and (
+                not state.get("touched")
+                or queue_confirmed_snapshots < required_snapshots
+            ):
+                return
+            wait_seconds = int(config["settings"].get("queue_wait_seconds", 0))
+            if wait_seconds > 0:
+                touched_at = _quote_time(state.get("touched_at"))
+                now = cn_now()
+                now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
+                if (
+                    touched_at is None
+                    or (now_aware - touched_at).total_seconds() < wait_seconds
+                ):
+                    return
         if is_risk_warning_name(self._resolve_name(symbol, quote.get("name"))):
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "ST 风险警示股票已被打板专区过滤"
@@ -1097,6 +1138,8 @@ class LimitBoardService:
     ) -> dict[str, Any]:
         values = {
             "sweep_price_levels": int(settings["sweep_price_levels"]),
+            "queue_wait_seconds": int(settings["queue_wait_seconds"]),
+            "queue_confirm_snapshots": int(settings["queue_confirm_snapshots"]),
             "near_limit_pct": float(settings["near_limit_pct"]),
             "exit_limit_pct": float(settings["exit_limit_pct"]),
             "exit_sustain_seconds": int(settings["exit_sustain_seconds"]),
