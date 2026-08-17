@@ -136,6 +136,7 @@ StockDB 是独立的数据源服务, 与项目内的 `stock-sdk` 插件没有关
 
 - 使用 StockDB 的浏览器 JS 接口时, 本地 StockDB 服务必须已启动, 默认地址为 `127.0.0.1:7899`。
 - 启动 `stockdb.app` 只提供本地服务, **不会启动 `数据更新.app` 下载器或自动更新程序**; 启动 TickFlow 项目也不会替 StockDB 启动下载器。不下载数据时只能验证服务连通性, 不能保证查询有行。
+- macOS 首次从浏览器下载后若提示“stockdb 已损坏，无法打开”，请在终端执行 `sh stockdb/repair_macos_app.sh`。脚本会移除该应用的下载隔离属性并重新生成本机 ad-hoc 签名，然后可用 `open stockdb/stockdb.app` 启动；不会修改 `stockdb/data` 或 `stockdb/mydb`。
 - 接口可用性和数据可用性是两回事。StockDB 服务可达但本地库没有对应日期/标的时, `gp.get` 可能正常返回空数组; 不得把空数组补成零或虚构行情。本次不下载数据的检查中, `GET /?cmd=get&t=日k:600702:20260623` 返回 `200 []`, 应按“服务可用、样例数据为空”处理。
 - 上游 `gp.get`、`bk.get`、`zb.get` 都是异步接口, 必须 `await`; `tu.get` 只有在 SDK 授权和数据初始化完成后才可同步调用。直接使用 StockDB 浏览器 SDK 的页面仍须遵守该约定。
 
