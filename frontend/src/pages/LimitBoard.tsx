@@ -156,7 +156,6 @@ function Row({
           </div> : null}
         </button>
       </td>
-      {mode === 'candidate' ? <td className={`w-[92px] min-w-[92px] px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td> : null}
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
           {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
@@ -166,6 +165,7 @@ function Row({
           </>}
           {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
         </td>
+        <td className={`w-[92px] min-w-[92px] px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td>
         <td className="w-[190px] min-w-[190px] px-2" title={intradayFlow ? `日内走势 ${intradayFlow.trend_score?.toFixed(1) ?? '--'}/25；${intradayFlow.price_volume_rising ? '量价齐升' : '未形成量价齐升'}；资金源 ${intradayFlow.capital_source_label ?? '暂无'}` : undefined}>
           {intradayFlow ? <>
             <div className="font-mono text-[10px] text-secondary">走势 {intradayFlow.trend_score?.toFixed(1) ?? '--'}/25 · 资金 {intradayFlow.capital_available ? `${intradayFlow.capital_score?.toFixed(1) ?? '--'}/25` : '待补'}</div>
@@ -296,7 +296,7 @@ function Table(props: TableProps) {
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
-            {mode === 'candidate' ? <><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">总分</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
+            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">总分</th><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
             <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
