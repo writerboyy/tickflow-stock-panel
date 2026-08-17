@@ -117,6 +117,8 @@ function Row({
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
+  const atLimit = row.limit_gap_pct != null && row.limit_gap_pct <= 0.0001
+  const change = row.change_pct == null ? '--' : `${scorePct(row.change_pct, 2)}${atLimit ? '（涨停）' : ''}`
   const rebound = row.source === 'rebound_board' || row.source_modes?.includes('rebound_board')
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
@@ -124,6 +126,7 @@ function Row({
   const sector = scoreDetail?.sector
   const gene = scoreDetail?.premium_gene
   const technical = scoreDetail?.technical
+  const proximity = scoreDetail?.proximity
   const leadership = LEADERSHIP[sector?.leadership ?? 'follower']
   const rotationTitle = (sector?.days ?? []).map(day => `${day.date.slice(5)} ${scorePct(day.change_pct)} #${day.rank}/${day.rank_count}`).join('；')
   const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
@@ -150,6 +153,7 @@ function Row({
           {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
             <div className="font-mono text-sm font-semibold tabular-nums text-accent">#{row.candidate_rank} · {row.candidate_score.toFixed(1)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
+            {proximity ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-warning">距涨停扣 {proximity.penalty.toFixed(1)} 分</div> : null}
           </>}
           {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
         </td>
@@ -182,6 +186,7 @@ function Row({
       </td>}
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
       {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
+      {mode === 'candidate' ? <td className={`px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td> : null}
       <td className="px-2 font-mono tabular-nums text-warning">{gap}</td>
       <td className="px-2">
         <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
@@ -277,7 +282,7 @@ function Table(props: TableProps) {
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             {mode === 'candidate' ? <><th className="px-2">总分</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
-            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
+            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}{mode === 'candidate' ? <th className="px-2">涨幅</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>

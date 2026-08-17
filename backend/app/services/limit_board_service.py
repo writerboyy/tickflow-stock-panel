@@ -18,6 +18,7 @@ from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.services import alert_store, premium_gene, rps_rotation
 from app.services.limit_board_scoring import (
     premium_gene_detail,
+    proximity_detail,
     sector_detail,
     technical_detail,
 )
@@ -1270,6 +1271,7 @@ class LimitBoardService:
         sector = detail.get("sector") or {}
         gene = detail.get("premium_gene") or {}
         technical = detail.get("technical") or {}
+        proximity = detail.get("proximity") or {}
         if sector:
             reasons.append(
                 f"{sector.get('name') or '板块'} {sector.get('rotation_label') or '数据不足'}"
@@ -1279,6 +1281,11 @@ class LimitBoardService:
             reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/30")
         if technical:
             reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/20")
+        if proximity:
+            reasons.append(
+                f"距涨停 {float(proximity.get('gap_pct') or 0) * 100:.2f}%"
+                f" · 扣 {float(proximity.get('penalty') or 0):.1f} 分"
+            )
         return reasons
 
     def _refresh_candidate_scores(
@@ -1344,9 +1351,17 @@ class LimitBoardService:
                 symbol = str(candidate.get("symbol") or "").strip().upper()
                 previous = previous_cache.get(symbol) or {}
                 previous_detail = previous.get("candidate_score_detail") or {}
+                change_pct = _finite(candidate.get("change_pct"))
+                if change_pct is None:
+                    change_pct = _finite((stock_rows.get(symbol) or {}).get("change_pct"))
+                if change_pct is None:
+                    change_pct = _finite(previous.get("change_pct"))
                 gene = premium_gene_detail(self._premium_stats.get(symbol) or {})
                 technical = technical_detail(
                     stock_rows.get(symbol) or {}, as_of=now.isoformat(),
+                )
+                proximity = proximity_detail(
+                    candidate.get("limit_gap_pct"), change_pct,
                 )
                 sector = None
                 symbol_targets = targets_by_symbol.get(symbol) or {}
@@ -1379,6 +1394,7 @@ class LimitBoardService:
                     "sector": sector,
                     "premium_gene": gene,
                     "technical": technical,
+                    "proximity": proximity,
                 }
                 detail = {}
                 cached_component = False
@@ -1389,9 +1405,15 @@ class LimitBoardService:
                         detail[key] = previous_detail[key]
                         cached_component = True
                 complete = all(detail.get(key) for key in ("sector", "premium_gene", "technical"))
-                score = round(sum(float(detail[key]["score"]) for key in detail), 1) if complete else None
+                base_score = (
+                    sum(float(detail[key]["score"]) for key in ("sector", "premium_gene", "technical"))
+                    if complete else None
+                )
+                penalty = float((detail.get("proximity") or {}).get("penalty") or 0.0)
+                score = round(max(0.0, base_score - penalty), 1) if base_score is not None else None
                 state = "cached" if complete and cached_component else "live" if complete else "unavailable"
                 refreshed[symbol] = {
+                    "change_pct": change_pct,
                     "candidate_score": score,
                     "candidate_rank": None,
                     "candidate_score_state": state,

@@ -4,6 +4,7 @@ import pytest
 
 from app.services.limit_board_scoring import (
     premium_gene_detail,
+    proximity_detail,
     rotation_detail,
     sector_detail,
     technical_detail,
@@ -85,6 +86,18 @@ def test_technical_score_combines_all_configured_indicators():
         "macd": 3.0,
         "rsi": 2.0,
     }
+
+
+def test_proximity_penalty_increases_for_candidates_far_from_limit_up():
+    assert proximity_detail(0.01, 0.09) == {
+        "gap_pct": 0.01,
+        "change_pct": 0.09,
+        "penalty": 0.0,
+        "max_penalty": 20.0,
+    }
+    assert proximity_detail(0.05, 0.05)["penalty"] == pytest.approx(8.0)
+    assert proximity_detail(0.10, 0.0)["penalty"] == pytest.approx(20.0)
+    assert proximity_detail(0.15, -0.01)["penalty"] == pytest.approx(20.0)
 
 
 def test_rotation_uses_five_completed_trading_days_and_marks_rising():

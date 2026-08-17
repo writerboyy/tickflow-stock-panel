@@ -587,6 +587,13 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
     assert row["candidate_score_detail"]["technical"]["score"] == 20.0
     assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is True
+    assert row["change_pct"] == pytest.approx(0.10)
+    assert row["candidate_score_detail"]["proximity"] == {
+        "gap_pct": 0.0,
+        "change_pct": 0.10,
+        "penalty": 0.0,
+        "max_penalty": 20.0,
+    }
     assert view["board_pool"] == []
     assert qmt.orders == []
 
@@ -765,13 +772,20 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     monkeypatch.setattr(
         "app.services.limit_board_service.sector_detail", fake_sector_detail,
     )
-    candidate = [{"symbol": "600000.SH", "source_modes": ["selected"]}]
+    candidate = [{
+        "symbol": "600000.SH",
+        "source_modes": ["selected"],
+        "limit_gap_pct": 0.10,
+        "change_pct": 0.0,
+    }]
     runtime = {"candidate_scores": {}}
 
     service._refresh_candidate_scores(runtime, candidate, now)
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "概念二"
     assert sector["score"] == 42.0
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == 72.0
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["proximity"]["penalty"] == 20.0
 
     concept_available[0] = False
     current_mono[0] = 116.0

@@ -1124,6 +1124,7 @@ export interface LimitBoardRow {
   concept?: string | string[]
   status?: string
   last_price?: number
+  change_pct?: number | null
   limit_up?: number
   limit_gap_pct?: number
   break_count?: number
@@ -1204,6 +1205,12 @@ export interface LimitBoardRow {
       macd_hist?: number
       rsi_14?: number
       as_of?: string
+    }
+    proximity?: {
+      gap_pct: number
+      change_pct?: number | null
+      penalty: number
+      max_penalty: number
     }
   }
   candidate_reasons?: string[]

@@ -141,6 +141,29 @@ def technical_detail(values: dict[str, Any], *, as_of: str | None = None) -> dic
     }
 
 
+def proximity_detail(
+    limit_gap_pct: object,
+    change_pct: object = None,
+) -> dict[str, Any] | None:
+    """Apply a transparent real-time penalty when a candidate is far from limit-up."""
+    gap = finite(limit_gap_pct)
+    if gap is None:
+        return None
+    gap = max(0.0, gap)
+    if gap <= 0.02:
+        penalty = 0.0
+    elif gap <= 0.05:
+        penalty = _linear(gap, 0.02, 0.05, 8.0)
+    else:
+        penalty = 8.0 + _linear(gap, 0.05, 0.10, 12.0)
+    return {
+        "gap_pct": gap,
+        "change_pct": finite(change_pct),
+        "penalty": round(penalty, 2),
+        "max_penalty": 20.0,
+    }
+
+
 def rotation_detail(
     rotation: dict[str, Any], sector_name: str, today: date,
 ) -> dict[str, Any] | None:
