@@ -990,6 +990,7 @@ class QuoteService:
                 },
                 "previous_day_high": (previous_levels.get(symbol) or {}).get("high"),
                 "previous_day_low": (previous_levels.get(symbol) or {}).get("low"),
+                "session_bars": bars_1m,
                 "closed_bars": bars_1m[-20:],
                 "closed_bars_5m": bars_5m[-20:],
             }

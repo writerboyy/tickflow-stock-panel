@@ -17,8 +17,8 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.services import alert_store, premium_gene, rps_rotation
 from app.services.limit_board_scoring import (
+    intraday_flow_detail,
     premium_gene_detail,
-    proximity_detail,
     sector_detail,
     technical_detail,
 )
@@ -43,9 +43,15 @@ _PREMIUM_FILTER_COLUMNS = {
 }
 _SCORE_REFRESH_SECONDS = 15.0
 _SCORE_STOCK_COLUMNS = {
-    "symbol", "name", "close", "last_price", "change_pct", "amount",
+    "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
     "vol_ratio_5d", "macd_dif", "macd_dea", "macd_hist", "rsi_14",
+}
+_SCORE_WEIGHTS = {
+    "intraday_flow": 50.0,
+    "sector": 30.0,
+    "premium_gene": 15.0,
+    "technical": 5.0,
 }
 
 
@@ -590,6 +596,7 @@ class LimitBoardService:
             state.update({
                 "name": quote["name"],
                 "last_price": quote["last_price"],
+                "change_pct": quote.get("change_pct"),
                 "limit_up": quote["limit_up"],
                 "limit_gap_pct": quote["limit_gap_pct"],
                 "source_modes": quote["source_modes"],
@@ -1133,6 +1140,7 @@ class LimitBoardService:
         result.sort(key=lambda row: (
             row.get("candidate_score") is None,
             -float(row.get("candidate_score") or 0.0),
+            -float(((row.get("candidate_score_detail") or {}).get("intraday_flow") or {}).get("score") or 0.0),
             -float(((row.get("candidate_score_detail") or {}).get("sector") or {}).get("score") or 0.0),
             -float(((row.get("candidate_score_detail") or {}).get("premium_gene") or {}).get("score") or 0.0),
             -float(((row.get("candidate_score_detail") or {}).get("technical") or {}).get("score") or 0.0),
@@ -1256,6 +1264,82 @@ class LimitBoardService:
             }
         return stock_df, rows
 
+    def _candidate_intraday_features(
+        self, symbols: set[str], now: datetime,
+    ) -> dict[str, dict[str, Any]]:
+        getter = getattr(self.quote_service, "get_intraday_features", None)
+        if not callable(getter) or not symbols:
+            return {}
+        try:
+            value = getter(
+                symbols,
+                asset_type="stock",
+                now=now,
+                freshness_seconds=180,
+            )
+        except TypeError:
+            try:
+                value = getter(symbols)
+            except Exception:  # noqa: BLE001
+                logger.warning("打板备选池读取分时特征失败", exc_info=True)
+                return {}
+        except Exception:  # noqa: BLE001
+            logger.warning("打板备选池读取分时特征失败", exc_info=True)
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _candidate_flow_snapshots(
+        self, symbols: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Read one batched large-order snapshot and merge quote-level ratios."""
+        result: dict[str, dict[str, Any]] = {}
+        large_orders = getattr(self.app_state, "large_order_service", None)
+        ranking = getattr(large_orders, "ranking", None)
+        if callable(ranking):
+            try:
+                payload = ranking(window=60, scope="all", mode="combined")
+                for row in (payload or {}).get("rows") or []:
+                    symbol = str(row.get("symbol") or "").strip().upper()
+                    if symbol in symbols:
+                        result[symbol] = dict(row)
+            except Exception:  # noqa: BLE001
+                logger.debug("打板备选池读取大单资金快照失败", exc_info=True)
+        with self._lock:
+            quotes = {symbol: dict(self._quotes.get(symbol) or {}) for symbol in symbols}
+        for symbol, quote in quotes.items():
+            ratios = {
+                key: quote.get(key)
+                for key in ("buy_ratio", "sell_ratio", "net_flow_ratio")
+                if _finite(quote.get(key)) is not None
+            }
+            if ratios:
+                result[symbol] = {**result.get(symbol, {}), **ratios}
+        return result
+
+    @staticmethod
+    def _scale_score_detail(
+        value: dict[str, Any] | None,
+        target_max: float,
+        source_max: float,
+    ) -> dict[str, Any] | None:
+        if not value:
+            return None
+        source = _finite(value.get("max_score")) or source_max
+        factor = target_max / source if source > 0 else 0.0
+        result = dict(value)
+        result["score"] = round(float(value.get("score") or 0.0) * factor, 2)
+        result["max_score"] = target_max
+        for key in ("current_score", "rotation_score"):
+            if _finite(value.get(key)) is not None:
+                result[key] = round(float(value[key]) * factor, 2)
+        components = value.get("components")
+        if isinstance(components, dict):
+            result["components"] = {
+                key: round(float(component or 0.0) * factor, 2)
+                for key, component in components.items()
+            }
+        return result
+
     @staticmethod
     def _score_reasons(
         candidate: dict[str, Any], detail: dict[str, dict[str, Any]],
@@ -1271,21 +1355,26 @@ class LimitBoardService:
         sector = detail.get("sector") or {}
         gene = detail.get("premium_gene") or {}
         technical = detail.get("technical") or {}
-        proximity = detail.get("proximity") or {}
+        intraday_flow = detail.get("intraday_flow") or {}
+        if intraday_flow:
+            underwater = float(intraday_flow.get("underwater_ratio") or 0.0)
+            net_flow = intraday_flow.get("net_flow_ratio")
+            if intraday_flow.get("capital_available"):
+                reasons.append(
+                    f"分时强度/资金 {float(intraday_flow.get('score') or 0):.1f}/50"
+                    f" · 水下 {underwater:.0%} · 净流向 {float(net_flow or 0):+.0%}"
+                )
+            else:
+                reasons.append("分时强度已计算，实时资金数据待补")
         if sector:
             reasons.append(
                 f"{sector.get('name') or '板块'} {sector.get('rotation_label') or '数据不足'}"
                 f" · {sector.get('leadership') or 'follower'}"
             )
         if gene:
-            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/30")
+            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/15")
         if technical:
-            reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/20")
-        if proximity:
-            reasons.append(
-                f"距涨停 {float(proximity.get('gap_pct') or 0) * 100:.2f}%"
-                f" · 扣 {float(proximity.get('penalty') or 0):.1f} 分"
-            )
+            reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/5")
         return reasons
 
     def _refresh_candidate_scores(
@@ -1312,6 +1401,20 @@ class LimitBoardService:
             if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
                 return False
             stock_df, stock_rows = self._candidate_stock_snapshot(now)
+            intraday_features = self._candidate_intraday_features(symbols, now)
+            large_orders = getattr(self.app_state, "large_order_service", None)
+            set_score_symbols = getattr(large_orders, "set_score_symbols", None)
+            if callable(set_score_symbols):
+                try:
+                    set_score_symbols(symbols)
+                except Exception:  # noqa: BLE001
+                    logger.debug("打板候选加入实时资金观察失败", exc_info=True)
+            flow_snapshots = self._candidate_flow_snapshots(symbols)
+            with self._lock:
+                candidate_quotes = {
+                    symbol: dict(self._quotes.get(symbol) or {})
+                    for symbol in symbols
+                }
             sector_service = getattr(self.app_state, "sector_monitor_service", None)
             targets_by_symbol: dict[str, dict[str, list[dict[str, Any]]]] = {}
             targets_by_key: dict[str, dict[str, Any]] = {}
@@ -1356,12 +1459,12 @@ class LimitBoardService:
                     change_pct = _finite((stock_rows.get(symbol) or {}).get("change_pct"))
                 if change_pct is None:
                     change_pct = _finite(previous.get("change_pct"))
-                gene = premium_gene_detail(self._premium_stats.get(symbol) or {})
-                technical = technical_detail(
-                    stock_rows.get(symbol) or {}, as_of=now.isoformat(),
-                )
-                proximity = proximity_detail(
-                    candidate.get("limit_gap_pct"), change_pct,
+                intraday_flow = intraday_flow_detail(
+                    intraday_features.get(symbol),
+                    previous_close=(stock_rows.get(symbol) or {}).get("prev_close")
+                    or candidate_quotes.get(symbol, {}).get("prev_close"),
+                    external_flow=flow_snapshots.get(symbol),
+                    as_of=now.isoformat(),
                 )
                 sector = None
                 symbol_targets = targets_by_symbol.get(symbol) or {}
@@ -1390,11 +1493,20 @@ class LimitBoardService:
                             key=lambda item: (float(item["score"]), str(item.get("name") or "")),
                         )
                         break
+                sector = self._scale_score_detail(sector, _SCORE_WEIGHTS["sector"], 50.0)
+                gene = self._scale_score_detail(
+                    premium_gene_detail(self._premium_stats.get(symbol) or {}),
+                    _SCORE_WEIGHTS["premium_gene"],
+                    30.0,
+                )
+                technical = self._scale_score_detail(technical_detail(
+                    stock_rows.get(symbol) or {}, as_of=now.isoformat(),
+                ), _SCORE_WEIGHTS["technical"], 20.0)
                 fresh = {
+                    "intraday_flow": intraday_flow,
                     "sector": sector,
                     "premium_gene": gene,
                     "technical": technical,
-                    "proximity": proximity,
                 }
                 detail = {}
                 cached_component = False
@@ -1404,13 +1516,16 @@ class LimitBoardService:
                     elif previous_detail.get(key):
                         detail[key] = previous_detail[key]
                         cached_component = True
-                complete = all(detail.get(key) for key in ("sector", "premium_gene", "technical"))
+                flow_detail = detail.get("intraday_flow") or {}
+                complete = (
+                    bool(flow_detail.get("capital_available"))
+                    and all(detail.get(key) for key in _SCORE_WEIGHTS)
+                )
                 base_score = (
-                    sum(float(detail[key]["score"]) for key in ("sector", "premium_gene", "technical"))
+                    sum(float(detail[key]["score"]) for key in _SCORE_WEIGHTS)
                     if complete else None
                 )
-                penalty = float((detail.get("proximity") or {}).get("penalty") or 0.0)
-                score = round(max(0.0, base_score - penalty), 1) if base_score is not None else None
+                score = round(base_score, 1) if base_score is not None else None
                 state = "cached" if complete and cached_component else "live" if complete else "unavailable"
                 refreshed[symbol] = {
                     "change_pct": change_pct,

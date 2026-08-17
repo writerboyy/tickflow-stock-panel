@@ -112,6 +112,7 @@ class LargeOrderService:
         self._snapshot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="large-orders")
         self._deep_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="large-orders-kaipanla")
         self._states: dict[str, dict[str, Any]] = {}
+        self._score_symbols: set[str] = set()
         self._rankings: dict[int, tuple[dict[str, Any], ...]] = {window: () for window in WINDOWS}
         self._storage: LargeOrderStore | None = None
         self._deep_pending: set[str] = set()
@@ -222,6 +223,23 @@ class LargeOrderService:
             }
         except Exception:  # noqa: BLE001
             return set()
+
+    def set_score_symbols(self, symbols: set[str]) -> None:
+        """Add the limit-board candidate set to the existing realtime flow scope."""
+        cleaned = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        with self._lock:
+            self._score_symbols = cleaned
+
+    def _scope_symbols(self) -> set[str] | None:
+        position_symbols = self._position_symbols()
+        if position_symbols is None:
+            return None
+        with self._lock:
+            return position_symbols | set(self._score_symbols)
 
     @staticmethod
     def _new_window_tracker(now_ts: float, window: int) -> dict[str, Any]:
@@ -370,13 +388,13 @@ class LargeOrderService:
         """行情线程只复制缓存并投递最新任务，不执行开盘啦请求。"""
         if not self._running or not self._config.get("enabled", True) or self._quote_service is None:
             return
-        position_symbols = self._position_symbols()
-        if position_symbols == set():
+        scope_symbols = self._scope_symbols()
+        if scope_symbols == set():
             with self._lock:
                 self._states.clear()
                 self._rankings = {window: () for window in WINDOWS}
             return
-        snapshot = self._quote_service.get_latest_quotes(position_symbols)
+        snapshot = self._quote_service.get_latest_quotes(scope_symbols)
         with self._lock:
             self._pending_snapshot = snapshot
             if self._snapshot_running:
@@ -425,14 +443,14 @@ class LargeOrderService:
             self._reset_for_new_day()
         if not records:
             return
-        position_symbols = self._position_symbols()
-        if position_symbols is not None:
+        scope_symbols = self._scope_symbols()
+        if scope_symbols is not None:
             with self._lock:
-                for stale_symbol in set(self._states) - position_symbols:
+                for stale_symbol in set(self._states) - scope_symbols:
                     self._states.pop(stale_symbol, None)
             records = [
                 row for row in records
-                if str(row.get("symbol") or "").strip().upper() in position_symbols
+                if str(row.get("symbol") or "").strip().upper() in scope_symbols
             ]
             if not records:
                 return
@@ -538,9 +556,9 @@ class LargeOrderService:
         depth_service = getattr(self._app_state, "depth_service", None) if self._app_state else None
         if depth_service is None:
             return
-        position_symbols = self._position_symbols()
-        if position_symbols is not None:
-            depth_service.request_symbols(position_symbols)
+        scope_symbols = self._scope_symbols()
+        if scope_symbols is not None:
+            depth_service.request_symbols(scope_symbols)
             return
         symbols = {str(row["symbol"]) for row in self._rankings.get(60, ())}
         try:
@@ -561,6 +579,7 @@ class LargeOrderService:
         now_ms = int(time.time() * 1000)
         rows = []
         position_symbols = self._position_symbols()
+        scope_symbols = self._scope_symbols()
         watchlist = set()
         try:
             from app.services import preferences
@@ -568,7 +587,7 @@ class LargeOrderService:
         except Exception:  # noqa: BLE001
             pass
         for snapshot in snapshots:
-            if position_symbols is not None and snapshot.get("symbol") not in position_symbols:
+            if scope_symbols is not None and snapshot.get("symbol") not in scope_symbols:
                 continue
             row = dict(snapshot)
             row.update({
@@ -652,6 +671,7 @@ class LargeOrderService:
         filtered_near_limit = 0
         unassessable = 0
         position_symbols = self._position_symbols()
+        scope_symbols = self._scope_symbols()
         for symbol, state in self._states.items():
             if position_symbols is None and self._is_filtered_symbol(symbol, state.get("name")):
                 continue
@@ -746,6 +766,7 @@ class LargeOrderService:
         now = time.time()
         ranked = list(self._rankings.get(60, ()))
         position_symbols = self._position_symbols()
+        scope_symbols = self._scope_symbols()
         watchlist: list[str] = []
         if position_symbols is None:
             try:
@@ -764,8 +785,8 @@ class LargeOrderService:
                 if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
             ]
             symbols = (
-                sorted(position_symbols)
-                if position_symbols is not None
+                sorted(scope_symbols or set())
+                if scope_symbols is not None
                 else list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
             )
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))

@@ -130,6 +130,19 @@ def test_position_mode_only_tracks_holdings_without_market_segment_filter():
     service.stop()
 
 
+def test_limit_board_score_symbols_share_realtime_flow_scope_with_positions():
+    service = LargeOrderService(FakeQuoteService())
+    service._app_state = SimpleNamespace(
+        position_risk_service=SimpleNamespace(
+            store=SimpleNamespace(load=lambda: {"positions": [{"symbol": "000001.SZ"}]}),
+        ),
+    )
+
+    service.set_score_symbols({"600000.SH", "600001.SZ"})
+
+    assert service._scope_symbols() == {"000001.SZ", "600000.SH", "600001.SZ"}
+
+
 @pytest.mark.parametrize(
     ("symbol", "name", "expected"),
     [

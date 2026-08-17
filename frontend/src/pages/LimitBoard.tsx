@@ -68,6 +68,10 @@ function scorePct(value: number | null | undefined, digits = 1): string {
   return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(digits)}%`
 }
 
+function ratioPct(value: number | null | undefined, digits = 0): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${(value * 100).toFixed(digits)}%`
+}
+
 function scoreTime(value: string | null | undefined): string {
   if (!value) return '--'
   const parsed = new Date(value)
@@ -123,10 +127,10 @@ function Row({
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
   const scoreDetail = row.candidate_score_detail
+  const intradayFlow = scoreDetail?.intraday_flow
   const sector = scoreDetail?.sector
   const gene = scoreDetail?.premium_gene
   const technical = scoreDetail?.technical
-  const proximity = scoreDetail?.proximity
   const leadership = LEADERSHIP[sector?.leadership ?? 'follower']
   const rotationTitle = (sector?.days ?? []).map(day => `${day.date.slice(5)} ${scorePct(day.change_pct)} #${day.rank}/${day.rank_count}`).join('；')
   const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
@@ -148,14 +152,22 @@ function Row({
           </div> : null}
         </button>
       </td>
+      {mode === 'candidate' ? <td className={`w-[92px] min-w-[92px] px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td> : null}
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
           {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
             <div className="font-mono text-sm font-semibold tabular-nums text-accent">#{row.candidate_rank} · {row.candidate_score.toFixed(1)}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
-            {proximity ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-warning">距涨停扣 {proximity.penalty.toFixed(1)} 分</div> : null}
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">分{intradayFlow?.score.toFixed(1)} 板{sector?.score.toFixed(1)}</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">基{gene?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
           </>}
           {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
+        </td>
+        <td className="w-[190px] min-w-[190px] px-2" title={intradayFlow ? `日内走势 ${intradayFlow.trend_score?.toFixed(1) ?? '--'}/25；${intradayFlow.price_volume_rising ? '量价齐升' : '未形成量价齐升'}；资金源 ${intradayFlow.capital_source_label ?? '暂无'}` : undefined}>
+          {intradayFlow ? <>
+            <div className="font-mono text-[10px] text-secondary">走势 {intradayFlow.trend_score?.toFixed(1) ?? '--'}/25 · 资金 {intradayFlow.capital_available ? `${intradayFlow.capital_score?.toFixed(1) ?? '--'}/25` : '待补'}</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">{intradayFlow.trend_state === 'strong' ? '日内强势' : intradayFlow.trend_state === 'weak' ? '日内偏弱' : '日内中性'} · 水下 {ratioPct(intradayFlow.underwater_ratio)} · {intradayFlow.price_volume_rising ? '量价齐升' : '量价未齐升'}</div>
+            <div className={`mt-0.5 whitespace-nowrap font-mono text-[9px] ${(intradayFlow.net_flow_ratio ?? 0) >= 0 ? 'text-bear' : 'text-danger'}`}>{intradayFlow.capital_available ? `${intradayFlow.capital_source_label ?? '实时主动资金'} · 净流向 ${scorePct(intradayFlow.net_flow_ratio, 0)} · 连续流出 ${intradayFlow.outflow_streak ?? 0} 根` : intradayFlow.capital_source_label ?? '实时主动资金待补'}</div>
+          </> : <div className="text-muted">分时待补</div>}
         </td>
         <td className="w-[210px] min-w-[210px] px-2" title={rotationTitle || allThemes.join('、') || undefined}>
           {sector ? <>
@@ -169,13 +181,13 @@ function Row({
           {gene ? <>
             <div className="font-mono text-[10px] text-secondary">涨 {gene.limit_up_count ?? '--'} · 红 {scorePct(gene.next_day_red_rate, 0)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">溢 {scorePct(gene.premium_5_rate, 0)} · 封 {scorePct(gene.first_board_seal_rate, 0)} · 晋 {scorePct(gene.consecutive_rate, 0)}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-accent">{gene.score.toFixed(1)}/30</div>
+            <div className="mt-0.5 font-mono text-[9px] text-accent">{gene.score.toFixed(1)}/15</div>
           </> : <div className="text-muted">基因待补</div>}
         </td>
         <td className="w-[180px] min-w-[180px] px-2" title={technical ? `MA5 ${technical.ma5?.toFixed(2) ?? '--'}；MA10 ${technical.ma10?.toFixed(2) ?? '--'}；MA20 ${technical.ma20?.toFixed(2) ?? '--'}；MA60 ${technical.ma60?.toFixed(2) ?? '--'}` : undefined}>
           {technical ? <>
-            <div className="whitespace-nowrap font-mono text-[9px] text-secondary">均 {technical.components?.trend?.toFixed(1)}/7 · 动 {technical.components?.momentum?.toFixed(1)}/5</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量 {technical.components?.volume?.toFixed(1)}/3 · MACD {technical.components?.macd?.toFixed(1)}/3 · RSI {technical.components?.rsi?.toFixed(1)}/2</div>
+            <div className="whitespace-nowrap font-mono text-[9px] text-secondary">均 {technical.components?.trend?.toFixed(2)}/1.75 · 动 {technical.components?.momentum?.toFixed(2)}/1.25</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量 {technical.components?.volume?.toFixed(2)}/0.75 · MACD {technical.components?.macd?.toFixed(2)}/0.75 · RSI {technical.components?.rsi?.toFixed(2)}/0.50</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量比 {technical.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical.rsi_14?.toFixed(0) ?? '--'}</div>
           </> : <div className="text-muted">技术面待补</div>}
         </td>
@@ -186,7 +198,6 @@ function Row({
       </td>}
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
       {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
-      {mode === 'candidate' ? <td className={`px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td> : null}
       <td className="px-2 font-mono tabular-nums text-warning">{gap}</td>
       <td className="px-2">
         <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
@@ -277,12 +288,12 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1320px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1510px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
-            {mode === 'candidate' ? <><th className="px-2">总分</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
-            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}{mode === 'candidate' ? <th className="px-2">涨幅</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
+            {mode === 'candidate' ? <><th className="px-2">涨幅</th><th className="px-2">总分</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
+            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>

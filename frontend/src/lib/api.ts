@@ -1148,6 +1148,38 @@ export interface LimitBoardRow {
   candidate_score_state?: 'live' | 'cached' | 'unavailable'
   candidate_score_as_of?: string | null
   candidate_score_detail?: {
+    intraday_flow?: {
+      score: number
+      max_score: number
+      components?: {
+        trend?: number
+        vwap?: number
+        underwater?: number
+        price_volume?: number
+        net_flow?: number
+        outflow_continuity?: number
+      }
+      trend_score?: number
+      trend_max_score?: number
+      trend_state?: 'strong' | 'neutral' | 'weak'
+      price_volume_rising?: boolean
+      capital_score?: number
+      capital_max_score?: number
+      flow_state?: 'inflow' | 'outflow' | 'balanced' | 'unavailable'
+      capital_source_label?: string
+      trend_pct?: number
+      underwater_ratio?: number
+      vwap_gap_pct?: number | null
+      buy_ratio?: number
+      sell_ratio?: number
+      net_flow_ratio?: number
+      outflow_streak?: number
+      flow_source?: 'kaipanla' | 'large_order' | 'tick_proxy' | 'unavailable'
+      capital_available?: boolean
+      amount_growth?: number | null
+      bars?: number
+      as_of?: string
+    }
     sector?: {
       score: number
       max_score: number
@@ -1205,12 +1237,6 @@ export interface LimitBoardRow {
       macd_hist?: number
       rsi_14?: number
       as_of?: string
-    }
-    proximity?: {
-      gap_pct: number
-      change_pct?: number | null
-      penalty: number
-      max_penalty: number
     }
   }
   candidate_reasons?: string[]

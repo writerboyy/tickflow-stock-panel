@@ -141,26 +141,132 @@ def technical_detail(values: dict[str, Any], *, as_of: str | None = None) -> dic
     }
 
 
-def proximity_detail(
-    limit_gap_pct: object,
-    change_pct: object = None,
+def intraday_flow_detail(
+    intraday: dict[str, Any] | None,
+    *,
+    previous_close: object = None,
+    external_flow: dict[str, Any] | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any] | None:
-    """Apply a transparent real-time penalty when a candidate is far from limit-up."""
-    gap = finite(limit_gap_pct)
-    if gap is None:
+    """Score live intraday trend and capital-flow direction.
+
+    Minute bars are the required live input.  When a large-order source exposes
+    buy/sell ratios, those values are preferred; otherwise the minute bar
+    amount and direction provide a clearly labelled price-flow proxy.
+    """
+    if not isinstance(intraday, dict) or not intraday.get("available"):
         return None
-    gap = max(0.0, gap)
-    if gap <= 0.02:
-        penalty = 0.0
-    elif gap <= 0.05:
-        penalty = _linear(gap, 0.02, 0.05, 8.0)
+    bars = [
+        row for row in (intraday.get("session_bars") or intraday.get("closed_bars") or [])
+        if isinstance(row, dict)
+        and finite(row.get("close")) is not None
+        and finite(row.get("amount")) is not None
+    ]
+    if not bars:
+        return None
+
+    closes = [float(finite(row.get("close")) or 0.0) for row in bars]
+    base = finite(previous_close)
+    if base is None or base <= 0:
+        base = finite(bars[0].get("open"))
+    if base is None or base <= 0:
+        return None
+    last_price = closes[-1]
+    trend_pct = last_price / base - 1.0
+    underwater_ratio = sum(value < base for value in closes) / len(closes)
+    vwap = finite(intraday.get("session_vwap"))
+    vwap_gap_pct = last_price / vwap - 1.0 if vwap and vwap > 0 else None
+
+    buy_ratio = finite((external_flow or {}).get("buy_ratio"))
+    sell_ratio = finite((external_flow or {}).get("sell_ratio"))
+    capital_available = (
+        (buy_ratio is not None or sell_ratio is not None)
+        and str((external_flow or {}).get("data_quality") or "") != "proxy_only"
+    )
+    flow_source = str((external_flow or {}).get("source") or "large_order") if capital_available else "unavailable"
+    if buy_ratio is None and sell_ratio is not None:
+        buy_ratio = 1.0 - sell_ratio
+    elif sell_ratio is None and buy_ratio is not None:
+        sell_ratio = 1.0 - buy_ratio
+    if buy_ratio is not None and sell_ratio is not None:
+        buy_ratio = _clamp(buy_ratio)
+        sell_ratio = _clamp(sell_ratio)
+        net_flow_ratio = buy_ratio - sell_ratio
     else:
-        penalty = 8.0 + _linear(gap, 0.05, 0.10, 12.0)
+        buy_ratio = sell_ratio = net_flow_ratio = None
+
+    outflow_streak = 0
+    latest = closes[-1]
+    for previous in reversed(closes[:-1]):
+        if latest < previous:
+            outflow_streak += 1
+            latest = previous
+            continue
+        break
+
+    amounts = [max(0.0, finite(row.get("amount")) or 0.0) for row in bars]
+    recent_amount = sum(amounts[-3:]) / max(1, len(amounts[-3:]))
+    earlier_amounts = amounts[:-3]
+    earlier_amount = sum(earlier_amounts) / len(earlier_amounts) if earlier_amounts else None
+    amount_growth = (
+        recent_amount / earlier_amount - 1.0
+        if earlier_amount and earlier_amount > 0 else None
+    )
+    price_volume = (
+        _linear(amount_growth, -0.20, 0.50, 5.0)
+        if trend_pct > 0 and amount_growth is not None else 0.0
+    )
+    components = {
+        "trend": _linear(trend_pct, -0.03, 0.05, 8.0),
+        "vwap": _linear(vwap_gap_pct, -0.02, 0.03, 6.0) if vwap_gap_pct is not None else 0.0,
+        "underwater": (1.0 - underwater_ratio) * 6.0,
+        "price_volume": price_volume,
+        "net_flow": _linear(net_flow_ratio, -0.60, 0.60, 18.0)
+        if capital_available and net_flow_ratio is not None else 0.0,
+        "outflow_continuity": (
+            (1.0 - min(outflow_streak / 5.0, 1.0)) * 7.0
+            if capital_available else 0.0
+        ),
+    }
+    trend_score = sum(components[key] for key in ("trend", "vwap", "underwater", "price_volume"))
+    capital_score = sum(components[key] for key in ("net_flow", "outflow_continuity"))
+    trend_state = "strong" if trend_score >= 18.0 else "weak" if trend_score < 10.0 else "neutral"
+    if not capital_available:
+        flow_state = "unavailable"
+        capital_source_label = "暂无实时主动资金"
+    elif net_flow_ratio is not None and net_flow_ratio >= 0.10:
+        flow_state = "inflow"
+        capital_source_label = "开盘啦实时主动大单"
+    elif net_flow_ratio is not None and net_flow_ratio <= -0.10:
+        flow_state = "outflow"
+        capital_source_label = "开盘啦实时主动大单"
+    else:
+        flow_state = "balanced"
+        capital_source_label = "开盘啦实时主动大单"
     return {
-        "gap_pct": gap,
-        "change_pct": finite(change_pct),
-        "penalty": round(penalty, 2),
-        "max_penalty": 20.0,
+        "score": round(sum(components.values()), 2),
+        "max_score": 50.0,
+        "components": {key: round(value, 2) for key, value in components.items()},
+        "trend_score": round(trend_score, 2),
+        "trend_max_score": 25.0,
+        "trend_state": trend_state,
+        "price_volume_rising": bool(trend_pct > 0 and amount_growth is not None and amount_growth > 0),
+        "capital_score": round(capital_score, 2),
+        "capital_max_score": 25.0,
+        "flow_state": flow_state,
+        "capital_source_label": capital_source_label,
+        "trend_pct": trend_pct,
+        "underwater_ratio": underwater_ratio,
+        "vwap_gap_pct": vwap_gap_pct,
+        "buy_ratio": buy_ratio,
+        "sell_ratio": sell_ratio,
+        "net_flow_ratio": net_flow_ratio,
+        "outflow_streak": outflow_streak,
+        "flow_source": flow_source,
+        "capital_available": capital_available,
+        "amount_growth": amount_growth,
+        "bars": len(bars),
+        "as_of": as_of,
     }
 
 

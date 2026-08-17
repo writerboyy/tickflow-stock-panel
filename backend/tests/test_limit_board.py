@@ -521,6 +521,11 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
     monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
     service.app_state.sector_monitor_service = SectorService()
+    service.app_state.large_order_service = SimpleNamespace(
+        ranking=lambda **_kwargs: {
+            "rows": [{"symbol": "600000.SH", "buy_ratio": 0.8, "sell_ratio": 0.2}]
+        },
+    )
     service._premium_stats["600000.SH"] = {
         "as_of": "2026-08-14",
         "window_days": 200,
@@ -554,6 +559,17 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
         "macd_hist": [0.1] * 5,
         "rsi_14": [70.0] * 5,
     })
+    quotes.get_intraday_features = lambda symbols, **_kwargs: {
+        symbol: {
+            "available": True,
+            "session_vwap": 10.7,
+            "closed_bars": [
+                {"open": 10.0, "close": close, "amount": 1_000_000}
+                for close in (10.6, 10.7, 10.8, 10.9, 11.0)
+            ],
+        }
+        for symbol in symbols
+    }
     rotation_dates = ["2026-08-14", "2026-08-13", "2026-08-12", "2026-08-11", "2026-08-10"]
     rotation = {
         "dates": rotation_dates,
@@ -583,17 +599,13 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_rank"] == 1
     assert row["candidate_score"] is not None
     assert row["candidate_score_state"] == "live"
-    assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
-    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
-    assert row["candidate_score_detail"]["technical"]["score"] == 20.0
+    assert row["candidate_score_detail"]["intraday_flow"]["max_score"] == 50.0
+    assert row["candidate_score_detail"]["sector"]["max_score"] == 30.0
+    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 15.0
+    assert row["candidate_score_detail"]["technical"]["score"] == 5.0
     assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is True
     assert row["change_pct"] == pytest.approx(0.10)
-    assert row["candidate_score_detail"]["proximity"] == {
-        "gap_pct": 0.0,
-        "change_pct": 0.10,
-        "penalty": 0.0,
-        "max_penalty": 20.0,
-    }
+    assert "proximity" not in row["candidate_score_detail"]
     assert view["board_pool"] == []
     assert qmt.orders == []
 
@@ -641,9 +653,10 @@ def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missi
     now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
     monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
     previous_detail = {
-        "sector": {"score": 35.0, "name": "人工智能", "as_of": now.isoformat()},
-        "premium_gene": {"score": 18.0, "as_of": "2026-08-14"},
-        "technical": {"score": 17.0, "as_of": now.isoformat()},
+        "intraday_flow": {"score": 35.0, "capital_available": True, "as_of": now.isoformat()},
+        "sector": {"score": 20.0, "name": "人工智能", "as_of": now.isoformat()},
+        "premium_gene": {"score": 11.0, "as_of": "2026-08-14"},
+        "technical": {"score": 4.0, "as_of": now.isoformat()},
     }
     runtime = {
         "candidate_scores": {
@@ -758,6 +771,10 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
         "app.services.limit_board_service.technical_detail",
         lambda _values, **_kwargs: {"score": 20.0},
     )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.intraday_flow_detail",
+        lambda *_args, **_kwargs: {"score": 40.0, "max_score": 50.0, "capital_available": True},
+    )
 
     def fake_sector_detail(**kwargs):
         target = kwargs["target"]
@@ -783,16 +800,16 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     service._refresh_candidate_scores(runtime, candidate, now)
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "概念二"
-    assert sector["score"] == 42.0
-    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == 72.0
-    assert runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["proximity"]["penalty"] == 20.0
+    assert sector["score"] == pytest.approx(25.2)
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == pytest.approx(85.2)
+    assert "proximity" not in runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]
 
     concept_available[0] = False
     current_mono[0] = 116.0
     service._refresh_candidate_scores(runtime, candidate, now)
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "二级行业"
-    assert sector["score"] == 49.0
+    assert sector["score"] == pytest.approx(29.4)
 
 
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):

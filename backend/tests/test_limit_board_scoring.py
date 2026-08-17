@@ -3,8 +3,8 @@ from datetime import date
 import pytest
 
 from app.services.limit_board_scoring import (
+    intraday_flow_detail,
     premium_gene_detail,
-    proximity_detail,
     rotation_detail,
     sector_detail,
     technical_detail,
@@ -88,16 +88,57 @@ def test_technical_score_combines_all_configured_indicators():
     }
 
 
-def test_proximity_penalty_increases_for_candidates_far_from_limit_up():
-    assert proximity_detail(0.01, 0.09) == {
-        "gap_pct": 0.01,
-        "change_pct": 0.09,
-        "penalty": 0.0,
-        "max_penalty": 20.0,
-    }
-    assert proximity_detail(0.05, 0.05)["penalty"] == pytest.approx(8.0)
-    assert proximity_detail(0.10, 0.0)["penalty"] == pytest.approx(20.0)
-    assert proximity_detail(0.15, -0.01)["penalty"] == pytest.approx(20.0)
+def test_intraday_flow_score_makes_persistent_underwater_outflow_lowest_weighted_signal():
+    rising = intraday_flow_detail({
+        "available": True,
+        "session_vwap": 10.30,
+        "closed_bars": [
+            {"open": 10.0, "close": close, "amount": amount}
+            for close, amount in zip(
+                (10.1, 10.2, 10.3, 10.4, 10.5),
+                (1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000),
+                strict=True,
+            )
+        ],
+    }, previous_close=10.0, external_flow={"buy_ratio": 1.0, "sell_ratio": 0.0})
+    underwater = intraday_flow_detail({
+        "available": True,
+        "session_vwap": 9.70,
+        "closed_bars": [
+            {"open": 10.0, "close": close, "amount": 1_000_000}
+            for close in (9.9, 9.8, 9.7, 9.6, 9.5)
+        ],
+    }, previous_close=10.0, external_flow={"buy_ratio": 0.0, "sell_ratio": 1.0})
+
+    assert rising is not None and underwater is not None
+    assert rising["max_score"] == 50.0
+    assert rising["score"] > 40.0
+    assert rising["trend_score"] > 20.0
+    assert rising["trend_state"] == "strong"
+    assert rising["price_volume_rising"] is True
+    assert rising["capital_score"] == pytest.approx(25.0)
+    assert rising["capital_source_label"] == "开盘啦实时主动大单"
+    assert rising["components"]["price_volume"] == pytest.approx(5.0)
+    assert underwater["score"] < 5.0
+    assert underwater["trend_state"] == "weak"
+    assert underwater["price_volume_rising"] is False
+    assert underwater["flow_state"] == "outflow"
+    assert underwater["underwater_ratio"] == pytest.approx(1.0)
+    assert underwater["net_flow_ratio"] == pytest.approx(-1.0)
+    assert underwater["outflow_streak"] == 4
+
+
+def test_intraday_flow_prefers_realtime_large_order_ratios_and_requires_live_minutes():
+    detail = intraday_flow_detail({
+        "available": True,
+        "session_vwap": 10.0,
+        "closed_bars": [{"open": 10.0, "close": 10.1, "amount": 1_000_000}],
+    }, previous_close=10.0, external_flow={"buy_ratio": 0.25, "sell_ratio": 0.75})
+
+    assert detail is not None
+    assert detail["flow_source"] == "large_order"
+    assert detail["net_flow_ratio"] == pytest.approx(-0.5)
+    assert intraday_flow_detail({"available": False}, previous_close=10.0) is None
 
 
 def test_rotation_uses_five_completed_trading_days_and_marks_rising():
