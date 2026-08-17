@@ -26,6 +26,9 @@ _MIN_LIMIT_UP_COUNT = 4
 _MIN_NEXT_DAY_RED_RATE = 0.80
 _MAX_FIRST_BOARD_BROKEN_RATE = 0.75
 _STOCK_PRICE_TICK = 0.01
+_HISTORY_RETRY_SECONDS = 60
+_HISTORY_WARMUP_RETRY_SECONDS = 5
+_HISTORY_WARMUP_REASON = "历史指标缓存尚未就绪，首板/反包扫描已暂停"
 _PREMIUM_FILTER_COLUMNS = {
     "symbol",
     "limit_up_count",
@@ -241,6 +244,10 @@ class LimitBoardService:
             try:
                 payload = self._queue.get(timeout=1)
             except queue.Empty:
+                try:
+                    self._retry_history()
+                except Exception:  # noqa: BLE001
+                    logger.exception("打板历史数据自动重试失败")
                 continue
             if payload.get("type") == "stop":
                 break
@@ -271,7 +278,12 @@ class LimitBoardService:
         today = cn_today()
         now_mono = time.monotonic()
         if self._history_date == today:
-            if self._history_ready or now_mono - self._history_attempt_at < 60:
+            retry_seconds = (
+                _HISTORY_WARMUP_RETRY_SECONDS
+                if self._history_reason == _HISTORY_WARMUP_REASON
+                else _HISTORY_RETRY_SECONDS
+            )
+            if self._history_ready or now_mono - self._history_attempt_at < retry_seconds:
                 return
         self._history_date = today
         self._history_attempt_at = now_mono
@@ -282,14 +294,17 @@ class LimitBoardService:
         lookback = max(1, int(config["settings"].get("first_board_lookback_days", 10)))
         latest, latest_date = self.repo.get_enriched_latest()
         if latest_date is None:
-            self._history_reason = "历史指标缓存尚未就绪，首板/反包扫描已暂停"
+            self._history_reason = _HISTORY_WARMUP_REASON
             return
         end = min(latest_date, today - timedelta(days=1))
         start = end - timedelta(days=max(30, lookback * 3))
         history = self.repo.get_enriched_range(
             start, end, columns=["symbol", "date", "signal_limit_up", "signal_broken_limit_up"],
         )
-        if history is None or history.is_empty() or "signal_limit_up" not in history.columns:
+        if history is None:
+            self._history_reason = _HISTORY_WARMUP_REASON
+            return
+        if history.is_empty() or "signal_limit_up" not in history.columns:
             self._history_reason = "近 10 个交易日涨停记录不足，首板/反包扫描已暂停"
             return
         dates = history["date"].unique().sort().to_list()
@@ -347,6 +362,20 @@ class LimitBoardService:
             f"已核对前 {lookback} 个交易日；自动候选需涨停≥4次、"
             f"次日红盘率≥80%、首板破板率≤75%（{len(qualified)} 只通过）"
         )
+
+    def _retry_history(self) -> None:
+        if self._history_ready:
+            return
+        previous_ready = self._history_ready
+        previous_reason = self._history_reason
+        self._refresh_history(self.store.load_config())
+        if self._history_ready and not previous_ready:
+            self._enqueue({
+                "type": "market",
+                "quotes": self.quote_service.get_latest_quotes(),
+            })
+        if self._history_ready != previous_ready or self._history_reason != previous_reason:
+            self._notify_updated()
 
     def _refresh_name_map(self) -> None:
         today = cn_today()

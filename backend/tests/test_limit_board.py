@@ -281,6 +281,22 @@ def test_missing_premium_gene_snapshot_blocks_automatic_scan(tmp_path, monkeypat
     assert "溢价基因数据不足" in service._history_reason
 
 
+def test_missing_history_cache_remains_on_fast_warmup_retry(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    config["settings"]["first_board_lookback_days"] = 1
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service.repo.get_enriched_range = lambda *_args, **_kwargs: None
+    service._history_date = None
+
+    service._refresh_history(config)
+
+    assert service._history_ready is False
+    assert "历史指标缓存尚未就绪" in service._history_reason
+
+
 def test_valid_snapshot_with_no_qualified_symbols_keeps_scan_ready(tmp_path, monkeypatch):
     service, _quotes, config = make_service(tmp_path)
     config["settings"]["first_board_lookback_days"] = 1
@@ -304,6 +320,42 @@ def test_valid_snapshot_with_no_qualified_symbols_keeps_scan_ready(tmp_path, mon
     assert service._history_ready is True
     assert service._first_board_eligible == set()
     assert "0 只通过" in service._history_reason
+
+
+def test_history_retries_after_cache_warmup_without_market_event(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    today = datetime(2026, 8, 13).date()
+    current_mono = [104.0]
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: today,
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.time.monotonic",
+        lambda: current_mono[0],
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene.refresh",
+        lambda _repo: premium_snapshot("600000.SH"),
+    )
+    service.store.update(
+        0,
+        lambda value: value["settings"].update({"first_board_lookback_days": 1}),
+    )
+    service._history_ready = False
+    service._history_date = today
+    service._history_attempt_at = 100.0
+    service._history_reason = "历史指标缓存尚未就绪，首板/反包扫描已暂停"
+
+    service._retry_history()
+    assert service._history_ready is False
+
+    current_mono[0] = 105.0
+    service._retry_history()
+
+    assert service._history_ready is True
+    assert "已核对前 1 个交易日" in service._history_reason
+    assert service._queue.get_nowait() == {"type": "market", "quotes": []}
 
 
 def test_rebound_quote_enters_candidate_pool_with_rebound_source(tmp_path, monkeypatch):
