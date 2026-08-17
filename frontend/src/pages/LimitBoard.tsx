@@ -87,9 +87,9 @@ function plainPercentValue(value: number | null | undefined): string {
 }
 
 const LEADERSHIP = {
-  leader: { label: '龙头', tone: 'text-bear' },
-  front: { label: '前排', tone: 'text-warning' },
-  follower: { label: '跟随', tone: 'text-muted' },
+  leader: '龙头',
+  front: '前排',
+  follower: '跟随',
 } as const
 
 interface RowProps {
@@ -165,18 +165,18 @@ function Row({
           </>}
           {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
         </td>
-        <td className={`w-[92px] min-w-[92px] px-2 font-mono tabular-nums ${atLimit ? 'text-bear' : row.change_pct != null && row.change_pct >= 0 ? 'text-secondary' : 'text-danger'}`}>{change}</td>
+        <td className="w-[92px] min-w-[92px] px-2 font-mono tabular-nums text-secondary">{change}</td>
         <td className="w-[190px] min-w-[190px] px-2" title={intradayFlow ? `日内走势 ${intradayFlow.trend_score?.toFixed(1) ?? '--'}/25；${intradayFlow.price_volume_rising ? '量价齐升' : '未形成量价齐升'}；资金源 ${intradayFlow.capital_source_label ?? '暂无'}` : undefined}>
           {intradayFlow ? <>
             <div className="font-mono text-[10px] text-secondary">走势 {intradayFlow.trend_score?.toFixed(1) ?? '--'}/25 · 资金 {intradayFlow.capital_available ? `${intradayFlow.capital_score?.toFixed(1) ?? '--'}/25` : '待补'}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">{intradayFlow.trend_state === 'strong' ? '日内强势' : intradayFlow.trend_state === 'weak' ? '日内偏弱' : '日内中性'} · 水下 {ratioPct(intradayFlow.underwater_ratio)} · {intradayFlow.price_volume_rising ? '量价齐升' : '量价未齐升'}</div>
-            <div className={`mt-0.5 whitespace-nowrap font-mono text-[9px] ${(intradayFlow.net_flow_ratio ?? 0) >= 0 ? 'text-bear' : 'text-danger'}`}>{intradayFlow.capital_available ? `${intradayFlow.capital_source_label ?? '实时主动资金'} · 净流向 ${scorePct(intradayFlow.net_flow_ratio, 0)} · 连续流出 ${intradayFlow.outflow_streak ?? 0} 根` : intradayFlow.capital_source_label ?? '实时主动资金待补'}</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">{intradayFlow.capital_available ? `${intradayFlow.capital_source_label ?? '实时主动资金'} · 净流向 ${scorePct(intradayFlow.net_flow_ratio, 0)} · 连续流出 ${intradayFlow.outflow_streak ?? 0} 根` : intradayFlow.capital_source_label ?? '实时主动资金待补'}</div>
           </> : <div className="text-muted">分时待补</div>}
         </td>
         <td className="w-[210px] min-w-[210px] px-2" title={rotationTitle || allThemes.join('、') || undefined}>
           {sector ? <>
-            <div className="flex items-center gap-1.5"><span className="max-w-[110px] truncate font-medium">{sector.name}</span><span className={sector.change_pct != null && sector.change_pct >= 0 ? 'text-bear' : 'text-danger'}>{scorePct(sector.change_pct)}</span></div>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className={leadership.tone}>{leadership.label}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '震荡'}</span></div>
+            <div className="flex items-center gap-1.5"><span className="max-w-[110px] truncate font-medium">{sector.name}</span><span className="text-secondary">{scorePct(sector.change_pct)}</span></div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="text-secondary">{leadership}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '震荡'}</span></div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">5日 {scorePct(sector.five_day_change_pct)} · 昨 {scorePct(sector.yesterday_change_pct)}</div>
             {sector.leader && !sector.is_sector_leader ? <div className="mt-0.5 max-w-[190px] truncate text-[9px] text-muted">龙头 {sector.leader.name || sector.leader.symbol} {scorePct(sector.leader.change_pct)}</div> : null}
           </> : <div className="text-muted">板块待补</div>}
@@ -185,7 +185,7 @@ function Row({
           {gene ? <>
             <div className="font-mono text-[10px] text-secondary">涨 {gene.limit_up_count ?? '--'} · 红 {scorePct(gene.next_day_red_rate, 0)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">溢 {scorePct(gene.premium_5_rate, 0)} · 封 {scorePct(gene.first_board_seal_rate, 0)} · 晋 {scorePct(gene.consecutive_rate, 0)}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-accent">{gene.score.toFixed(1)}/15</div>
+            <div className="mt-0.5 font-mono text-[9px] text-secondary">{gene.score.toFixed(1)}/15</div>
           </> : <div className="text-muted">基因待补</div>}
         </td>
         <td className="w-[180px] min-w-[180px] px-2" title={technical ? `MA5 ${technical.ma5?.toFixed(2) ?? '--'}；MA10 ${technical.ma10?.toFixed(2) ?? '--'}；MA20 ${technical.ma20?.toFixed(2) ?? '--'}；MA60 ${technical.ma60?.toFixed(2) ?? '--'}` : undefined}>
@@ -201,8 +201,8 @@ function Row({
         </div>
       </td>}
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
-      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
-      <td className="px-2 font-mono tabular-nums text-warning">{gap}</td>
+      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
+      <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
       <td className="px-2">
         <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
           <CircleDot className="h-3 w-3" />{status.label}
