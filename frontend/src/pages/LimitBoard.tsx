@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Ban,
@@ -35,7 +35,9 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type Tab = 'sector' | 'candidate' | 'pool' | 'events'
+const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
+
+type Tab = 'ladder' | 'sector' | 'candidate' | 'pool' | 'events'
 type TableMode = 'candidate' | 'pool'
 type NotificationSettings = LimitBoardView['settings']['notifications']
 type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
@@ -1042,19 +1044,20 @@ export function LimitBoard() {
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
+          ['ladder', '连板天梯', null, Flame],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
           <button key={id} type="button" onClick={() => setTab(id)} className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium ${tab === id ? 'border-accent text-foreground' : 'border-transparent text-muted'}`}>
-            <Icon className="h-3.5 w-3.5" />{label}<span className="font-mono text-[10px] text-muted">{count}</span>
+            <Icon className="h-3.5 w-3.5" />{label}{count == null ? null : <span className="font-mono text-[10px] text-muted">{count}</span>}
           </button>
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5">
-        {tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
+      <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
