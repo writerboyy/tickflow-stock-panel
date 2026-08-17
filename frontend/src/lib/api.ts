@@ -1156,6 +1156,8 @@ export interface LimitBoardView {
     sweep_price_levels: number
     queue_wait_seconds: number
     queue_confirm_snapshots: number
+    order_amount_per_board: number
+    max_auto_board_count: number
     near_limit_pct: number
     exit_limit_pct: number
     exit_sustain_seconds: number

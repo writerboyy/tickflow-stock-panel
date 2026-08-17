@@ -308,6 +308,12 @@ function AdvancedSettingsDialog({
     && Number.isInteger(draft.queue_confirm_snapshots)
     && draft.queue_confirm_snapshots >= 0
     && draft.queue_confirm_snapshots <= 10
+    && Number.isFinite(draft.order_amount_per_board)
+    && draft.order_amount_per_board >= 0
+    && draft.order_amount_per_board <= 10000000
+    && Number.isInteger(draft.max_auto_board_count)
+    && draft.max_auto_board_count >= 0
+    && draft.max_auto_board_count <= 100
     && draft.near_limit_pct >= 0.001
     && draft.near_limit_pct <= 0.10
     && draft.exit_limit_pct >= draft.near_limit_pct
@@ -337,6 +343,14 @@ function AdvancedSettingsDialog({
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span><span className="block">排板确认快照</span><span className="mt-0.5 block text-[10px] text-muted">0 为触板即排</span></span>
         <span className="flex items-center gap-2"><input type="number" min={0} max={10} step={1} value={draft.queue_confirm_snapshots} disabled={pending} onChange={event => update('queue_confirm_snapshots', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span><span className="block">单板下单资金</span><span className="mt-0.5 block text-[10px] text-muted">0 为当前一手模式</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={10000000} step={100} value={draft.order_amount_per_board} disabled={pending} onChange={event => update('order_amount_per_board', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">元</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span><span className="block">每日自动打板上限</span><span className="mt-0.5 block text-[10px] text-muted">0 为不限制</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={1} value={draft.max_auto_board_count} disabled={pending} onChange={event => update('max_auto_board_count', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">只</span></span>
       </label>
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span>临板 WS 阈值</span>
@@ -369,6 +383,8 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
     sweep_price_levels: value.sweep_price_levels,
     queue_wait_seconds: value.queue_wait_seconds,
     queue_confirm_snapshots: value.queue_confirm_snapshots,
+    order_amount_per_board: value.order_amount_per_board,
+    max_auto_board_count: value.max_auto_board_count,
     near_limit_pct: value.near_limit_pct,
     exit_limit_pct: value.exit_limit_pct,
     exit_sustain_seconds: value.exit_sustain_seconds,

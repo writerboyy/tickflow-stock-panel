@@ -543,6 +543,8 @@ def test_default_config_preserves_current_sweep_and_queue_triggers():
     assert settings["sweep_price_levels"] == 5
     assert settings["queue_wait_seconds"] == 0
     assert settings["queue_confirm_snapshots"] == 0
+    assert settings["order_amount_per_board"] == 0.0
+    assert settings["max_auto_board_count"] == 0
 
 
 def test_sweep_uses_configured_price_levels():
@@ -719,6 +721,67 @@ def test_queue_submits_after_configured_sealed_snapshots(tmp_path, monkeypatch):
 
     assert len(qmt.orders) == 1
     assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "queue"
+
+
+def test_board_pool_auto_trade_uses_configured_amount_per_board(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["settings"]["order_amount_per_board"] = 10_000
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["volume"] == 900
+    assert state["auto_order_volume"] == 900
+    assert state["auto_order_amount"] == 9900.0
+
+
+def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["settings"]["order_amount_per_board"] = 500
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "一手" in state["auto_order_error"]
+
+
+def test_board_pool_auto_trade_respects_daily_board_limit(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["settings"]["max_auto_board_count"] = 1
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600001.SH"] = {"auto_order_key": "limit-board-existing"}
+    state = runtime["symbols"].setdefault("600000.SH", {})
+
+    service._maybe_auto_trade(
+        "600000.SH", quote(), state, config, runtime=runtime,
+    )
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "上限" in state["auto_order_error"]
 
 
 def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
@@ -1018,6 +1081,8 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
         "sweep_price_levels": 10,
         "queue_wait_seconds": 8,
         "queue_confirm_snapshots": 4,
+        "order_amount_per_board": 20_000,
+        "max_auto_board_count": 3,
         "near_limit_pct": 0.015,
         "exit_limit_pct": 0.04,
         "exit_sustain_seconds": 45,
@@ -1049,6 +1114,8 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
         "sweep_price_levels": 5,
         "queue_wait_seconds": 0,
         "queue_confirm_snapshots": 0,
+        "order_amount_per_board": 0,
+        "max_auto_board_count": 0,
         "near_limit_pct": 0.02,
         "exit_limit_pct": 0.03,
         "exit_sustain_seconds": 30,
@@ -1078,8 +1145,16 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
             "settings": {**settings, "queue_confirm_snapshots": 11},
         },
     )
+    too_many_boards = client.put(
+        "/api/limit-board/settings/advanced",
+        json={
+            "revision": 0,
+            "settings": {**settings, "max_auto_board_count": 101},
+        },
+    )
 
     assert too_many_levels.status_code == 422
     assert exit_below_entry.status_code == 400
     assert too_many_queue_snapshots.status_code == 422
+    assert too_many_boards.status_code == 422
     assert service.store.load_config()["revision"] == 0

@@ -494,7 +494,14 @@ class LimitBoardService:
                 state["status"] = "touched"
                 self._emit("touched", quote, state, config, "首次触及涨停价")
             if at_limit:
-                self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="queue")
+                self._maybe_auto_trade(
+                    symbol,
+                    quote,
+                    state,
+                    config,
+                    runtime=runtime,
+                    trigger_mode="queue",
+                )
             if state.get("sealed") and not at_limit:
                 self._mark_broken(quote, state, runtime, config, "价格离开涨停价")
             elif state.get("sealed"):
@@ -555,13 +562,21 @@ class LimitBoardService:
                 float(quote["limit_up"]),
                 sweep_price_levels,
             ):
-                self._maybe_auto_trade(symbol, quote, state, config, trigger_mode="sweep")
+                self._maybe_auto_trade(
+                    symbol,
+                    quote,
+                    state,
+                    config,
+                    runtime=runtime,
+                    trigger_mode="sweep",
+                )
             if queue_confirm_snapshots > 0 and latest_sealed:
                 self._maybe_auto_trade(
                     symbol,
                     quote,
                     state,
                     config,
+                    runtime=runtime,
                     trigger_mode="queue",
                     queue_confirmed_snapshots=consecutive_sealed,
                 )
@@ -643,6 +658,7 @@ class LimitBoardService:
         state: dict[str, Any],
         config: dict[str, Any],
         *,
+        runtime: dict[str, Any] | None = None,
         trigger_mode: str = "queue",
         queue_confirmed_snapshots: int = 0,
     ) -> None:
@@ -674,6 +690,18 @@ class LimitBoardService:
                     or (now_aware - touched_at).total_seconds() < wait_seconds
                 ):
                     return
+        max_boards = int(config["settings"].get("max_auto_board_count", 0))
+        if max_boards > 0:
+            active_runtime = runtime if runtime is not None else self._runtime_for_today()
+            used_boards = sum(
+                1
+                for item in (active_runtime.get("symbols") or {}).values()
+                if item.get("auto_order_key")
+            )
+            if used_boards >= max_boards:
+                state["auto_order_status"] = "blocked"
+                state["auto_order_error"] = f"已达到每日自动打板上限（{max_boards} 只）"
+                return
         if is_risk_warning_name(self._resolve_name(symbol, quote.get("name"))):
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "ST 风险警示股票已被打板专区过滤"
@@ -694,6 +722,14 @@ class LimitBoardService:
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "自动委托队列已满"
             return
+        volume, volume_error = self._auto_order_volume(
+            float(quote["limit_up"]), config,
+        )
+        if volume_error:
+            self._order_slots.release()
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = volume_error
+            return
         key = f"limit-board-{cn_today().strftime('%Y%m%d')}-{symbol}"
         state.update({
             "auto_order_key": key,
@@ -701,6 +737,8 @@ class LimitBoardService:
             "auto_order_mode": order_mode,
             "auto_order_error": None,
             "auto_order_at": cn_now().isoformat(),
+            "auto_order_volume": volume,
+            "auto_order_amount": round(float(quote["limit_up"]) * volume, 2),
         })
         try:
             self._order_executor.submit(
@@ -708,13 +746,30 @@ class LimitBoardService:
                 symbol,
                 float(quote["limit_up"]),
                 key,
+                volume,
             )
         except RuntimeError as exc:
             self._order_slots.release()
             state["auto_order_status"] = "unknown"
             state["auto_order_error"] = str(exc)
 
-    def _submit_auto_order(self, symbol: str, limit_up: float, key: str) -> None:
+    @staticmethod
+    def _auto_order_volume(
+        limit_up: float, config: dict[str, Any],
+    ) -> tuple[int, str | None]:
+        amount = _finite(config["settings"].get("order_amount_per_board", 0))
+        if amount is None or amount < 0:
+            return 0, "单板下单资金配置无效"
+        if amount == 0:
+            return 100, None
+        if limit_up <= 0 or limit_up != limit_up:
+            return 0, "涨停价无效，已阻止自动委托"
+        volume = int(amount / (limit_up * 100)) * 100
+        if volume < 100:
+            return 0, "单板下单资金不足一手，已阻止自动委托"
+        return volume, None
+
+    def _submit_auto_order(self, symbol: str, limit_up: float, key: str, volume: int) -> None:
         qmt = self._qmt()
         try:
             if qmt is None:
@@ -724,7 +779,7 @@ class LimitBoardService:
                 "strategy_name": "limit_board",
                 "action": "BUY",
                 "symbol": symbol,
-                "volume": 100,
+                "volume": volume,
                 "price": limit_up,
                 "price_type": "LIMIT",
             })
@@ -1140,6 +1195,8 @@ class LimitBoardService:
             "sweep_price_levels": int(settings["sweep_price_levels"]),
             "queue_wait_seconds": int(settings["queue_wait_seconds"]),
             "queue_confirm_snapshots": int(settings["queue_confirm_snapshots"]),
+            "order_amount_per_board": float(settings["order_amount_per_board"]),
+            "max_auto_board_count": int(settings["max_auto_board_count"]),
             "near_limit_pct": float(settings["near_limit_pct"]),
             "exit_limit_pct": float(settings["exit_limit_pct"]),
             "exit_sustain_seconds": int(settings["exit_sustain_seconds"]),

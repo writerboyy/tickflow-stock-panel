@@ -40,6 +40,8 @@ class AdvancedSettings(BaseModel):
     sweep_price_levels: int = Field(ge=1, le=10)
     queue_wait_seconds: int = Field(default=0, ge=0, le=300)
     queue_confirm_snapshots: int = Field(default=0, ge=0, le=10)
+    order_amount_per_board: float = Field(default=0, ge=0, le=10_000_000)
+    max_auto_board_count: int = Field(default=0, ge=0, le=100)
     near_limit_pct: float = Field(ge=0.001, le=0.10)
     exit_limit_pct: float = Field(ge=0.001, le=0.20)
     exit_sustain_seconds: int = Field(ge=1, le=300)
