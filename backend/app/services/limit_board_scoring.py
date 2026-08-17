@@ -355,15 +355,35 @@ def sector_detail(
     stock_rows: dict[str, dict[str, Any]],
     member_symbols: set[str],
     today: date,
+    realtime: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not snapshot.get("valid") or (finite(snapshot.get("coverage_ratio")) or 0.0) < 0.8:
         return None
     history = rotation_detail(rotation, _rotation_name(target), today)
     stock = stock_rows.get(symbol)
-    if history is None or stock is None:
+    if stock is None:
         return None
+    rotation_available = history is not None
+    if history is None:
+        history = {
+            "score": 0.0,
+            "components": {},
+            "days": [],
+            "five_day_change_pct": None,
+            "trend_slope": None,
+            "rank_change": None,
+            "top_20_days": None,
+            "yesterday_change_pct": None,
+            "rotation_label": None,
+        }
     candidate_change = finite(stock.get("change_pct"))
-    sector_change = finite(snapshot.get("change_pct"))
+    local_sector_change = finite(snapshot.get("change_pct"))
+    realtime_sector_change = finite((realtime or {}).get("change_pct"))
+    sector_change = (
+        realtime_sector_change
+        if realtime_sector_change is not None
+        else local_sector_change
+    )
     if candidate_change is None or sector_change is None:
         return None
     ranked = []
@@ -441,6 +461,18 @@ def sector_detail(
         "leader_gap_pct": leader_gap,
         "leadership": leadership,
         "is_sector_leader": is_leader,
+        "rotation_available": rotation_available,
+        "realtime_available": realtime_sector_change is not None,
+        "realtime_rank": (realtime or {}).get("rank"),
+        "realtime_rank_count": (realtime or {}).get("rank_count"),
+        "realtime_strength": finite((realtime or {}).get("strength")),
+        "realtime_change_pct": realtime_sector_change,
+        "realtime_speed_pct": finite((realtime or {}).get("speed_pct")),
+        "realtime_amount": finite((realtime or {}).get("amount")),
+        "realtime_main_net": finite((realtime or {}).get("main_net")),
+        "realtime_main_buy": finite((realtime or {}).get("main_buy")),
+        "realtime_main_sell": finite((realtime or {}).get("main_sell")),
+        "realtime_volume_ratio": finite((realtime or {}).get("volume_ratio")),
         "rotation_components": history["components"],
         **rotation_fields,
     }

@@ -242,6 +242,41 @@ class LimitBoardService:
             return None
         return value if isinstance(value, dict) else None
 
+    def _sector_strength_snapshot(self, today: date) -> dict[str, dict[str, Any]]:
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        if collector is None:
+            return {}
+        getter = getattr(collector, "sector_strength_snapshot", None)
+        if not callable(getter):
+            return {}
+        try:
+            snapshot = getter()
+        except Exception:  # noqa: BLE001
+            logger.debug("读取开盘啦实时板块强度快照失败", exc_info=True)
+            return {}
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("state") != "live"
+            or snapshot.get("as_of") != today.isoformat()
+        ):
+            return {}
+        result = {}
+        for row in snapshot.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("plate_name") or "").strip()
+            if not name:
+                continue
+            change_pct_pct = _finite(row.get("change_pct_pct"))
+            speed_pct_pct = _finite(row.get("speed_pct_pct"))
+            value = {
+                **row,
+                "change_pct": change_pct_pct / 100.0 if change_pct_pct is not None else None,
+                "speed_pct": speed_pct_pct / 100.0 if speed_pct_pct is not None else None,
+            }
+            result[name] = value
+        return result
+
     def _sentiment_guard(self, config: dict[str, Any]) -> dict[str, Any]:
         threshold = _finite(
             config.get("settings", {}).get("max_market_broken_rate_pct", 40.0),
@@ -557,7 +592,12 @@ class LimitBoardService:
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected_rows, board_rows,
         )
-        self._refresh_candidate_scores(runtime, candidates, now)
+        scoring_rows = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in [*candidates, *rows]
+            if item.get("symbol")
+        }
+        self._refresh_candidate_scores(runtime, list(scoring_rows.values()), now)
         self._sync_websocket(runtime, config)
         self._last_scan_at = now.isoformat()
         self._persist_runtime(runtime)
@@ -1137,15 +1177,35 @@ class LimitBoardService:
                 "candidate_reasons": [],
             }
             result.append({**candidate, **score})
-        result.sort(key=lambda row: (
-            row.get("candidate_score") is None,
-            -float(row.get("candidate_score") or 0.0),
-            -float(((row.get("candidate_score_detail") or {}).get("intraday_flow") or {}).get("score") or 0.0),
-            -float(((row.get("candidate_score_detail") or {}).get("sector") or {}).get("score") or 0.0),
-            -float(((row.get("candidate_score_detail") or {}).get("premium_gene") or {}).get("score") or 0.0),
-            -float(((row.get("candidate_score_detail") or {}).get("technical") or {}).get("score") or 0.0),
-            str(row.get("symbol") or ""),
-        ))
+        def sort_key(row: dict[str, Any]) -> tuple:
+            detail = row.get("candidate_score_detail") or {}
+            sector = detail.get("sector") or {}
+            intraday = detail.get("intraday_flow") or {}
+            gene = detail.get("premium_gene") or {}
+            technical = detail.get("technical") or {}
+            realtime_rank = _finite(sector.get("realtime_rank"))
+            leadership_rank = {
+                "leader": 2,
+                "front": 1,
+                "follower": 0,
+            }.get(str(sector.get("leadership") or ""), 0)
+            stock_rank = _finite(sector.get("stock_rank"))
+            return (
+                row.get("candidate_score") is None,
+                not bool(sector.get("realtime_available")),
+                realtime_rank if realtime_rank is not None else float("inf"),
+                -float(_finite(sector.get("realtime_strength")) or 0.0),
+                -float(_finite(sector.get("score")) or 0.0),
+                -leadership_rank,
+                stock_rank if stock_rank is not None else float("inf"),
+                -float(row.get("candidate_score") or 0.0),
+                -float(intraday.get("score") or 0.0),
+                -float(gene.get("score") or 0.0),
+                -float(technical.get("score") or 0.0),
+                str(row.get("symbol") or ""),
+            )
+
+        result.sort(key=sort_key)
         rank = 0
         for row in result:
             if row.get("candidate_score") is None:
@@ -1448,6 +1508,7 @@ class LimitBoardService:
                 "concept": self._rotation("concept", None, now.date()),
                 "industry": self._rotation("industry", 2, now.date()),
             } if sector_service is not None else {}
+            realtime_sectors = self._sector_strength_snapshot(now.date())
 
             refreshed: dict[str, dict[str, Any]] = {}
             for candidate in candidates:
@@ -1475,6 +1536,14 @@ class LimitBoardService:
                         snapshot = snapshots.get(key)
                         if snapshot is None:
                             continue
+                        realtime = (
+                            realtime_sectors.get(str(target.get("name") or "").strip())
+                            or realtime_sectors.get(
+                                str(target.get("name") or "").split(" / ")[-1].strip()
+                            )
+                        )
+                        if realtime is None:
+                            continue
                         value = sector_detail(
                             symbol=symbol,
                             target=target,
@@ -1483,6 +1552,7 @@ class LimitBoardService:
                             stock_rows=stock_rows,
                             member_symbols=sector_service.member_symbols(key),
                             today=now.date(),
+                            realtime=realtime,
                         )
                         if value is not None:
                             value["as_of"] = now.isoformat()
@@ -1490,7 +1560,13 @@ class LimitBoardService:
                     if available:
                         sector = max(
                             available,
-                            key=lambda item: (float(item["score"]), str(item.get("name") or "")),
+                            key=lambda item: (
+                                bool(item.get("realtime_available")),
+                                -float(_finite(item.get("realtime_rank")) or float("inf")),
+                                float(_finite(item.get("realtime_strength")) or 0.0),
+                                float(item["score"]),
+                                str(item.get("name") or ""),
+                            ),
                         )
                         break
                 sector = self._scale_score_detail(sector, _SCORE_WEIGHTS["sector"], 50.0)
@@ -1520,6 +1596,7 @@ class LimitBoardService:
                 complete = (
                     bool(flow_detail.get("capital_available"))
                     and all(detail.get(key) for key in _SCORE_WEIGHTS)
+                    and bool((detail.get("sector") or {}).get("rotation_available", True))
                 )
                 base_score = (
                     sum(float(detail[key]["score"]) for key in _SCORE_WEIGHTS)
@@ -1550,10 +1627,27 @@ class LimitBoardService:
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected, board_pool,
         )
-        if self._refresh_candidate_scores(runtime, candidates, cn_now()):
+        scoring_rows = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in [*candidates, *rows]
+            if item.get("symbol")
+        }
+        if self._refresh_candidate_scores(runtime, list(scoring_rows.values()), cn_now()):
             self._persist_runtime(runtime)
+        score_cache = runtime.get("candidate_scores") or {}
         candidate_pool = self._rank_candidates(
-            candidates, runtime.get("candidate_scores") or {},
+            candidates, score_cache,
+        )
+        first_board = self._rank_candidates(
+            [
+                item for item in rows
+                if {"first_board", "rebound_board"} & set(item.get("source_modes", []))
+            ],
+            score_cache,
+        )
+        rebound_board = self._rank_candidates(
+            [item for item in rows if "rebound_board" in item.get("source_modes", [])],
+            score_cache,
         )
         events = []
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
@@ -1568,7 +1662,10 @@ class LimitBoardService:
             if label:
                 event["message"] = f"{event['name']}：{label}"
             events.append(event)
-        self._enrich_concepts([*rows, *selected, *board_pool, *candidate_pool, *events])
+        self._enrich_concepts([
+            *rows, *selected, *board_pool, *candidate_pool,
+            *first_board, *rebound_board, *events,
+        ])
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
         qmt = self._qmt()
@@ -1591,11 +1688,8 @@ class LimitBoardService:
         return {
             "revision": config["revision"],
             "settings": config["settings"],
-            "first_board": [
-                item for item in rows
-                if {"first_board", "rebound_board"} & set(item.get("source_modes", []))
-            ],
-            "rebound_board": [item for item in rows if "rebound_board" in item.get("source_modes", [])],
+            "first_board": first_board,
+            "rebound_board": rebound_board,
             "selected": selected,
             "candidate_pool": candidate_pool,
             "board_pool": board_pool,

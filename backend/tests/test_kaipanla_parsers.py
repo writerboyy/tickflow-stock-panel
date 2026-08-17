@@ -322,7 +322,7 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
     constituent_row = [None] * 41
     constituent_row[0], constituent_row[1], constituent_row[40] = "600126", "杭钢股份", 2
     constituents = parse_sector_constituents({"list": [constituent_row]}, "P1")
-    strength_row = ["P1", "板块"] + [0] * 9
+    strength_row = ["P1", "板块", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500, 20, 900, 2.1, 35, 30]
     strengths = parse_sector_strength({"list": [strength_row]})
 
     assert report_date == date(2026, 6, 30)
@@ -333,6 +333,11 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
     assert movements[0]["side"] == "buy"
     assert constituents[0]["limit_count"] == 2
     assert strengths[0]["plate_id"] == "P1"
+    assert strengths[0]["strength"] == 88.5
+    assert strengths[0]["change_pct_pct"] == 3.2
+    assert strengths[0]["main_net"] == 12.0
+    assert strengths[0]["rank"] == 1
+    assert strengths[0]["rank_count"] == 1
 
 
 def test_lhb_detail_parser_preserves_source_identity_across_reason_groups():

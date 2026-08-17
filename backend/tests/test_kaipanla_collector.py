@@ -152,6 +152,35 @@ async def test_market_sentiment_snapshot_does_not_substitute_completed_day_data(
 
 
 @pytest.mark.asyncio
+async def test_sector_strength_snapshot_keeps_live_fields_and_rejects_old_day(
+    tmp_path, monkeypatch,
+):
+    _configured(monkeypatch)
+    row = ["P1", "人工智能", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500, 20, 900, 2.1, 35, 30]
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {"sector_strength": {"Day": ["2026-05-15"], "list": [row]}},
+            calls,
+        ),
+    )
+
+    assert await collector.refresh_sector_strength(date(2026, 5, 15)) == 1
+    snapshot = collector.sector_strength_snapshot()
+    assert snapshot["state"] == "live"
+    assert snapshot["rows"][0]["change_pct_pct"] == 3.2
+    assert snapshot["rows"][0]["main_net"] == 12.0
+
+    collector._client_factory = lambda: FakeClient(
+        {"sector_strength": {"Day": ["2026-05-14"], "list": [row]}},
+        calls,
+    )
+    assert await collector.refresh_sector_strength(date(2026, 5, 15)) == 0
+    assert collector.sector_strength_snapshot()["state"] == "unavailable"
+
+
+@pytest.mark.asyncio
 async def test_auction_manifest_requires_all_live_checkpoints_and_bid_details(tmp_path, monkeypatch):
     _configured(monkeypatch)
     responses = {
@@ -916,8 +945,9 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 13
+    assert len(scheduler.jobs) == 14
     assert "kaipanla_market_sentiment" in scheduler.jobs
+    assert "kaipanla_sector_strength" in scheduler.jobs
     assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
@@ -940,5 +970,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 13
+    assert len(scheduler.jobs) == 14
     assert collector._bootstrap_task is None

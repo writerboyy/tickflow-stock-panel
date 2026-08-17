@@ -4,6 +4,7 @@ import {
   Ban,
   Bell,
   Check,
+  CircleHelp,
   CircleDot,
   Crosshair,
   Flame,
@@ -16,6 +17,7 @@ import {
   SlidersHorizontal,
   Trash2,
   Wifi,
+  X,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
@@ -160,6 +162,7 @@ function Row({
         <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
           {visibleThemes.length ? visibleThemes.join('、') : '--'}
         </div>
+        {mode !== 'candidate' && sector?.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted" title="开盘啦实时板块强度">板强 {sector.realtime_strength?.toFixed(1) ?? '--'} · #{sector.realtime_rank ?? '--'}/{sector.realtime_rank_count ?? '--'} · {scorePct(sector.realtime_change_pct, 2)}</div> : null}
       </td>
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
@@ -181,10 +184,12 @@ function Row({
         <td className="w-[210px] min-w-[210px] px-2" title={rotationTitle || allThemes.join('、') || undefined}>
           {sector ? <>
             <div className="flex items-center gap-1.5"><span className="max-w-[110px] truncate font-medium">{sector.name}</span><span className="text-secondary">{scorePct(sector.change_pct)}</span></div>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="text-secondary">{leadership}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '震荡'}</span></div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="text-secondary">{leadership}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '数据不足'}</span></div>
+            {sector.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-secondary" title="开盘啦实时板块强度"><span>强 {sector.realtime_strength?.toFixed(1) ?? '--'}</span><span className="ml-1.5">板 #{sector.realtime_rank ?? '--'}/{sector.realtime_rank_count ?? '--'}</span><span className="ml-1.5">速 {scorePct(sector.realtime_speed_pct, 2)}</span></div> : <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted">实时板块强度待补</div>}
+            {sector.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">主净 {sector.realtime_main_net == null ? '--' : sector.realtime_main_net.toFixed(0)} · 量比 {sector.realtime_volume_ratio?.toFixed(2) ?? '--'}</div> : null}
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">5日 {scorePct(sector.five_day_change_pct)} · 昨 {scorePct(sector.yesterday_change_pct)}</div>
             {sector.leader && !sector.is_sector_leader ? <div className="mt-0.5 max-w-[190px] truncate text-[9px] text-muted">龙头 {sector.leader.name || sector.leader.symbol} {scorePct(sector.leader.change_pct)}</div> : null}
-          </> : <div className="text-muted">板块待补</div>}
+          </> : <div className="text-muted">实时板块强度待补</div>}
         </td>
         <td className="w-[170px] min-w-[170px] px-2" title={gene ? `快照 ${gene.as_of || '--'}；样本 ${gene.next_day_observation_count ?? 0}` : undefined}>
           {gene ? <>
@@ -353,6 +358,22 @@ function NotificationDialog({
   </Modal>
 }
 
+function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
+  return <Modal labelledBy="limit-board-candidate-algorithm-title" onClose={onClose} panelClassName="w-[92vw] max-w-lg rounded-card border border-border bg-surface shadow-xl">
+    <div className="flex items-center justify-between border-b border-border px-4 py-3">
+      <h2 id="limit-board-candidate-algorithm-title" className="text-sm font-semibold">备选池排序算法</h2>
+      <button type="button" onClick={onClose} className="grid h-7 w-7 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭排序算法"><X className="h-4 w-4" /></button>
+    </div>
+    <div className="space-y-3 px-4 py-4 text-xs text-secondary">
+      <p>排序先按数据完整性，再按开盘啦实时板块排名和强度确定板块优先级。</p>
+      <p>进入同一板块后，依次按龙头、前排、跟随、个股在板块内的涨幅排名，再比较总分和分项分。</p>
+      <p>总分由分时强度/资金、板块历史轮动、涨停基因和技术面组成；涨幅、距涨停、触板状态和炸板次数不参与排序。</p>
+      <p>实时板块接口缺失时不使用本地聚合替代，相关标的显示“实时板块强度待补”，完整排序数据恢复后自动更新。</p>
+    </div>
+    <div className="flex justify-end border-t border-border px-4 py-3"><button type="button" onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated hover:text-foreground">关闭</button></div>
+  </Modal>
+}
+
 function queueTriggerDescription(waitSeconds: number, confirmSnapshots: number): string {
   const trigger = confirmSnapshots > 0
     ? `连续 ${confirmSnapshots} 个盘口快照确认封板`
@@ -483,6 +504,7 @@ export function LimitBoard() {
   const [preview, setPreview] = useState<LimitBoardRow | null>(null)
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
   const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
   const overview = useQuery({
     queryKey: QK.overviewMarket(undefined),
@@ -607,6 +629,7 @@ export function LimitBoard() {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
               <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
+                {tab === 'candidate' ? <button type="button" onClick={() => setCandidateAlgorithmOpen(true)} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-secondary hover:bg-elevated hover:text-foreground"><CircleHelp className="h-3.5 w-3.5" />排序算法</button> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
               </div>
             </div>
@@ -644,6 +667,7 @@ export function LimitBoard() {
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
       {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
       {notificationOpen ? <NotificationDialog value={data.settings.notifications} pending={updateNotifications.isPending} onClose={() => setNotificationOpen(false)} onSave={value => updateNotifications.mutate(value)} /> : null}
+      {candidateAlgorithmOpen ? <CandidateAlgorithmDialog onClose={() => setCandidateAlgorithmOpen(false)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )

@@ -32,6 +32,7 @@ from app.plugins.kaipanla.parsers import (
     parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
+    parse_trade_date,
     parse_sector_constituents,
     parse_sector_strength,
     parse_shareholder_changes,
@@ -99,9 +100,12 @@ class KaipanlaCollector:
         self._client_factory = client_factory
         self._bootstrap_task: asyncio.Task | None = None
         self._sentiment_task: asyncio.Task | None = None
+        self._sector_strength_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._sentiment_lock = threading.Lock()
         self._market_sentiment: dict | None = None
+        self._sector_strength_lock = threading.Lock()
+        self._sector_strength: dict | None = None
 
     @property
     def configured(self) -> bool:
@@ -151,6 +155,19 @@ class KaipanlaCollector:
                     timezone="Asia/Shanghai",
                 ),
                 id="kaipanla_market_sentiment",
+                misfire_grace_time=30,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_sector_strength,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-15",
+                    minute="*",
+                    second="*/15",
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_sector_strength",
                 misfire_grace_time=30,
                 replace_existing=True,
             )
@@ -261,14 +278,26 @@ class KaipanlaCollector:
                 ),
                 name="kaipanla-market-sentiment",
             )
+        if self._sector_strength_task is None or self._sector_strength_task.done():
+            self._sector_strength_task = asyncio.create_task(
+                self._run_safely(
+                    "sector_strength",
+                    self.refresh_sector_strength,
+                    cn_today(),
+                ),
+                name="kaipanla-sector-strength",
+            )
 
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
             self._bootstrap_task.cancel()
         if self._sentiment_task and not self._sentiment_task.done():
             self._sentiment_task.cancel()
+        if self._sector_strength_task and not self._sector_strength_task.done():
+            self._sector_strength_task.cancel()
         self._bootstrap_task = None
         self._sentiment_task = None
+        self._sector_strength_task = None
 
     async def _run_safely(self, name: str, func, *args) -> int:
         if not self.configured:
@@ -312,6 +341,20 @@ class KaipanlaCollector:
             now.date(),
         )
 
+    async def _scheduled_sector_strength(self) -> int:
+        now = cn_now()
+        current = now.timetz().replace(tzinfo=None)
+        if not (
+            clock_time(9, 15) <= current <= clock_time(11, 30)
+            or clock_time(13, 0) <= current <= clock_time(15, 5)
+        ):
+            return 0
+        return await self._run_safely(
+            "sector_strength",
+            self.refresh_sector_strength,
+            now.date(),
+        )
+
     async def _scheduled_lhb(self) -> int:
         return await self._run_safely("lhb", self.collect_lhb)
 
@@ -342,6 +385,48 @@ class KaipanlaCollector:
         """Return the latest in-memory Kaipanla sentiment snapshot."""
         with self._sentiment_lock:
             return dict(self._market_sentiment) if self._market_sentiment else None
+
+    def sector_strength_snapshot(self) -> dict | None:
+        """Return today's in-memory Kaipanla sector-strength ranking."""
+        with self._sector_strength_lock:
+            if not self._sector_strength:
+                return None
+            return {
+                **self._sector_strength,
+                "rows": [dict(row) for row in self._sector_strength.get("rows") or []],
+            }
+
+    async def refresh_sector_strength(self, trade_date: date) -> int:
+        """Poll today's board ranking without carrying an old trading day forward."""
+        try:
+            async with self._client_factory() as client:
+                payload = await client.request(
+                    "sector_strength",
+                    {
+                        "Day": trade_date.isoformat(),
+                        "Index": 0,
+                        "st": _REFERENCE_PAGE_SIZE,
+                    },
+                )
+            reported = payload.get("Day") if isinstance(payload, dict) else None
+            if isinstance(reported, list):
+                reported = reported[0] if reported else None
+            if reported not in (None, "") and parse_trade_date(reported) != trade_date:
+                raise ValueError("实时板块强度返回的交易日不是当天")
+            rows = parse_sector_strength(payload)
+        except Exception:  # noqa: BLE001
+            logger.debug("实时板块强度接口暂不可用", exc_info=True)
+            rows = []
+        snapshot = {
+            "provider": "kaipanla",
+            "state": "live" if rows else "unavailable",
+            "as_of": trade_date.isoformat(),
+            "refreshed_at": cn_now().isoformat(),
+            "rows": rows,
+        }
+        with self._sector_strength_lock:
+            self._sector_strength = snapshot
+        return len(rows)
 
     async def refresh_market_sentiment(self, trade_date: date) -> int:
         """Poll today's live sentiment endpoints without substituting an old close."""

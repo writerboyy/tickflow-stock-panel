@@ -1197,13 +1197,25 @@ export interface LimitBoardRow {
       leader_gap_pct?: number
       leadership?: 'leader' | 'front' | 'follower'
       is_sector_leader?: boolean
+      rotation_available?: boolean
+      realtime_available?: boolean
+      realtime_rank?: number
+      realtime_rank_count?: number
+      realtime_strength?: number | null
+      realtime_change_pct?: number | null
+      realtime_speed_pct?: number | null
+      realtime_amount?: number | null
+      realtime_main_net?: number | null
+      realtime_main_buy?: number | null
+      realtime_main_sell?: number | null
+      realtime_volume_ratio?: number | null
       days?: Array<{ date: string; change_pct: number; rank: number; rank_count: number; rank_percentile: number }>
       five_day_change_pct?: number
       trend_slope?: number
       rank_change?: number
       top_20_days?: number
       yesterday_change_pct?: number
-      rotation_label?: '主线' | '上升' | '退潮' | '震荡'
+      rotation_label?: '主线' | '上升' | '退潮' | '震荡' | '数据不足' | null
       as_of?: string
     }
     premium_gene?: {

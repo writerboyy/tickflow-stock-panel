@@ -521,6 +521,20 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
     monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
     service.app_state.sector_monitor_service = SectorService()
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "state": "live",
+            "as_of": now.date().isoformat(),
+            "rows": [{
+                "plate_name": "人工智能",
+                "change_pct_pct": 2.0,
+                "speed_pct_pct": 0.2,
+                "strength": 88.0,
+                "rank": 1,
+                "rank_count": 10,
+            }],
+        },
+    )
     service.app_state.large_order_service = SimpleNamespace(
         ranking=lambda **_kwargs: {
             "rows": [{"symbol": "600000.SH", "buy_ratio": 0.8, "sell_ratio": 0.2}]
@@ -730,6 +744,41 @@ def test_candidate_ranking_ignores_gap_status_and_break_count():
     assert [row["candidate_rank"] for row in ranked] == [1, 2]
 
 
+def test_candidate_ranking_prioritizes_live_sector_before_total_score():
+    scores = {
+        "600000.SH": {
+            "candidate_score": 70.0,
+            "candidate_score_detail": {
+                "sector": {
+                    "score": 30.0,
+                    "realtime_available": True,
+                    "realtime_rank": 2,
+                    "realtime_strength": 70.0,
+                    "leadership": "leader",
+                    "stock_rank": 1,
+                },
+            },
+        },
+        "600001.SH": {
+            "candidate_score": 90.0,
+            "candidate_score_detail": {
+                "sector": {
+                    "score": 30.0,
+                    "realtime_available": True,
+                    "realtime_rank": 8,
+                    "realtime_strength": 95.0,
+                    "leadership": "leader",
+                    "stock_rank": 1,
+                },
+            },
+        },
+    }
+    ranked = LimitBoardService._rank_candidates(
+        [{"symbol": "600000.SH"}, {"symbol": "600001.SH"}], scores,
+    )
+    assert [row["symbol"] for row in ranked] == ["600000.SH", "600001.SH"]
+
+
 def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_industry(
     tmp_path, monkeypatch,
 ):
@@ -758,6 +807,22 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     current_mono = [100.0]
     concept_available = [True]
     service.app_state.sector_monitor_service = SectorService()
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "state": "live",
+            "as_of": now.date().isoformat(),
+            "rows": [
+                {
+                    "plate_name": name,
+                    "change_pct_pct": 1.0,
+                    "strength": 80.0,
+                    "rank": index + 1,
+                    "rank_count": 3,
+                }
+                for index, name in enumerate(("概念一", "概念二", "二级行业"))
+            ],
+        },
+    )
     quotes.enriched_date = now.date()
     quotes.enriched = pl.DataFrame({"symbol": ["600000.SH"]})
     monkeypatch.setattr(

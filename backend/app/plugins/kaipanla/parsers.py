@@ -434,15 +434,48 @@ def parse_dragon_tiger_details(payload: dict, code: str) -> list[dict]:
 
 
 def parse_sector_strength(payload: dict) -> list[dict]:
-    """解析板块强度榜，仅用于发现板块成分采集所需的 plate_id。"""
+    """解析板块强度榜，同时保留盘中实时排名与资金字段。"""
+    source_rows = _rows(payload, "list")
     rows = []
-    for index, row in enumerate(_rows(payload, "list")):
+    rank_count = len(source_rows)
+    for index, row in enumerate(source_rows):
         if not isinstance(row, list) or len(row) < 11:
             raise ResponseShapeError(f"list[{index}] 至少需要 11 列")
         rows.append(
             {
                 "plate_id": _text(row[0], f"list[{index}].plate_id", required=True),
                 "plate_name": _text(row[1], f"list[{index}].plate_name"),
+                "strength": _float(row[2], f"list[{index}].strength"),
+                "change_pct_pct": _float(row[3], f"list[{index}].change_pct"),
+                "speed_pct_pct": _float(row[4], f"list[{index}].speed_pct"),
+                "amount": _float(row[5], f"list[{index}].amount"),
+                "main_net": _float(row[6], f"list[{index}].main_net"),
+                "main_buy": _float(row[7], f"list[{index}].main_buy"),
+                "main_sell": _float(row[8], f"list[{index}].main_sell"),
+                "volume_ratio": _float(row[9], f"list[{index}].volume_ratio"),
+                "float_market_value": _float(row[10], f"list[{index}].float_market_value"),
+                "large_order_amount_3m": (
+                    _float(row[11], f"list[{index}].large_order_amount_3m")
+                    if len(row) > 11 else None
+                ),
+                "market_value": (
+                    _float(row[12], f"list[{index}].market_value")
+                    if len(row) > 12 else None
+                ),
+                "institution_increase": (
+                    _float(row[13], f"list[{index}].institution_increase")
+                    if len(row) > 13 else None
+                ),
+                "pe_current": (
+                    _float(row[14], f"list[{index}].pe_current")
+                    if len(row) > 14 else None
+                ),
+                "pe_forward": (
+                    _float(row[15], f"list[{index}].pe_forward")
+                    if len(row) > 15 else None
+                ),
+                "rank": index + 1,
+                "rank_count": rank_count,
             }
         )
     return rows
