@@ -82,6 +82,10 @@ function percentValue(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
+function plainPercentValue(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value.toFixed(2)}%`
+}
+
 const LEADERSHIP = {
   leader: { label: '龙头', tone: 'text-bear' },
   front: { label: '前排', tone: 'text-warning' },
@@ -292,7 +296,7 @@ function Table(props: TableProps) {
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
-            {mode === 'candidate' ? <><th className="px-2">涨幅</th><th className="px-2">总分</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
+            {mode === 'candidate' ? <><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">总分</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
             <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
@@ -570,7 +574,7 @@ export function LimitBoard() {
       <section className="border-b border-border px-4 py-3 sm:px-5">
         <div className="grid min-w-[720px] grid-cols-5 divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
           {[
-            ['今日破板率', data.market_sentiment ? percentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
+            ['今日破板率', data.market_sentiment ? plainPercentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
             ['昨日涨停今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
             ['昨日连板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
             ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
@@ -578,7 +582,7 @@ export function LimitBoard() {
           ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
-          {data.market_sentiment ? <span>{data.market_sentiment.state === 'live' ? '开盘啦实时' : `开盘啦 ${data.market_sentiment.as_of} 收盘数据`}</span> : <span>开盘啦数据暂不可用</span>}
+          {data.market_sentiment ? <span>{data.market_sentiment.state === 'live' ? '实时情绪数据' : data.market_sentiment.state === 'stale' ? `${data.market_sentiment.as_of ?? '--'} 收盘数据` : '实时情绪数据暂不可用'}</span> : <span>实时情绪数据暂不可用</span>}
           {data.market_sentiment ? <span>刷新 {scoreTime(data.market_sentiment.refreshed_at)}</span> : null}
           <span className={runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'}>{runtime.sentiment_guard.reason}</span>
         </div>

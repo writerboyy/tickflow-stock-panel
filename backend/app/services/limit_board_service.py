@@ -254,7 +254,7 @@ class LimitBoardService:
                 "blocked": False,
                 "threshold_pct": threshold,
                 "broken_rate_pct": None,
-                "reason": "开盘啦情绪快照暂不可用，未触发自动停手",
+                "reason": "实时情绪快照暂不可用，未触发自动停手",
             }
         state = str(snapshot.get("state") or "unavailable")
         broken_rate = _finite(snapshot.get("market_broken_rate_pct"))
@@ -262,11 +262,11 @@ class LimitBoardService:
         if blocked:
             reason = f"今日破板率 {broken_rate:.2f}% 已达到 {threshold:.2f}%，自动打板已停止"
         elif state == "stale":
-            reason = f"开盘啦 {snapshot.get('as_of') or '--'} 收盘数据，仅供参考，未触发自动停手"
+            reason = f"{snapshot.get('as_of') or '--'} 收盘数据，仅供参考，未触发自动停手"
         elif state == "live" and broken_rate is not None:
             reason = f"今日破板率 {broken_rate:.2f}% 未达到停手阈值 {threshold:.2f}%"
         else:
-            reason = "开盘啦情绪快照缺少破板率，未触发自动停手"
+            reason = "实时情绪快照缺少破板率，未触发自动停手"
         return {
             "state": state if state in {"live", "stale"} else "unavailable",
             "blocked": blocked,

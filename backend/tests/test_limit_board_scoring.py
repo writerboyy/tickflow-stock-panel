@@ -117,7 +117,7 @@ def test_intraday_flow_score_makes_persistent_underwater_outflow_lowest_weighted
     assert rising["trend_state"] == "strong"
     assert rising["price_volume_rising"] is True
     assert rising["capital_score"] == pytest.approx(25.0)
-    assert rising["capital_source_label"] == "开盘啦实时主动大单"
+    assert rising["capital_source_label"] == "实时主动大单"
     assert rising["components"]["price_volume"] == pytest.approx(5.0)
     assert underwater["score"] < 5.0
     assert underwater["trend_state"] == "weak"

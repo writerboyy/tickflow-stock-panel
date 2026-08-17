@@ -125,7 +125,7 @@ async def test_market_sentiment_snapshot_uses_live_expression_and_matching_ladde
 
 
 @pytest.mark.asyncio
-async def test_market_sentiment_snapshot_falls_back_to_completed_weekday_and_keeps_stale(
+async def test_market_sentiment_snapshot_does_not_substitute_completed_day_data(
     tmp_path, monkeypatch,
 ):
     _configured(monkeypatch)
@@ -140,17 +140,15 @@ async def test_market_sentiment_snapshot_falls_back_to_completed_weekday_and_kee
     }
     collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
 
-    assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 1
-    snapshot = collector.market_sentiment_snapshot()
-    assert snapshot["state"] == "stale"
-    assert snapshot["as_of"] == "2026-05-14"
-    assert snapshot["max_consecutive"] is None
-
-    calls.clear()
-    responses["limit_up_expression"] = RuntimeError("暂时不可用")
     assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 0
-    assert collector.market_sentiment_snapshot()["as_of"] == "2026-05-14"
-    assert calls == [("limit_up_expression", {"Day": "2026-05-15"})]
+    snapshot = collector.market_sentiment_snapshot()
+    assert snapshot["state"] == "unavailable"
+    assert snapshot["as_of"] == "2026-05-15"
+    assert snapshot["max_consecutive"] is None
+    assert calls == [
+        ("limit_up_expression", {"Day": "2026-05-15"}),
+        ("limit_up_ladder", {}),
+    ]
 
 
 @pytest.mark.asyncio

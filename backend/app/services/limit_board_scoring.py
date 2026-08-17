@@ -236,13 +236,13 @@ def intraday_flow_detail(
         capital_source_label = "暂无实时主动资金"
     elif net_flow_ratio is not None and net_flow_ratio >= 0.10:
         flow_state = "inflow"
-        capital_source_label = "开盘啦实时主动大单"
+        capital_source_label = "实时主动大单"
     elif net_flow_ratio is not None and net_flow_ratio <= -0.10:
         flow_state = "outflow"
-        capital_source_label = "开盘啦实时主动大单"
+        capital_source_label = "实时主动大单"
     else:
         flow_state = "balanced"
-        capital_source_label = "开盘啦实时主动大单"
+        capital_source_label = "实时主动大单"
     return {
         "score": round(sum(components.values()), 2),
         "max_score": 50.0,

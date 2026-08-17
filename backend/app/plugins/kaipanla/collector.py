@@ -6,8 +6,9 @@ import asyncio
 import logging
 import threading
 from collections.abc import Callable
-from datetime import date, time as clock_time, timedelta
+from datetime import date, time as clock_time
 from pathlib import Path
+from typing import Any
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -343,40 +344,34 @@ class KaipanlaCollector:
             return dict(self._market_sentiment) if self._market_sentiment else None
 
     async def refresh_market_sentiment(self, trade_date: date) -> int:
-        """Refresh the small live sentiment snapshot without creating history rows."""
-        with self._sentiment_lock:
-            existing = dict(self._market_sentiment) if self._market_sentiment else None
-
-        candidates = [trade_date]
-        if existing is None:
-            candidates.extend(
-                value
-                for offset in range(1, 16)
-                if (value := trade_date - timedelta(days=offset)).weekday() < 5
-            )
-
+        """Poll today's live sentiment endpoints without substituting an old close."""
         selected = None
+        ladder: dict[str, Any] = {}
         async with self._client_factory() as client:
-            for candidate in candidates:
-                try:
-                    payload = await client.request(
-                        "limit_up_expression",
-                        {"Day": candidate.isoformat()},
-                    )
-                    selected = parse_limit_up_expression(payload, candidate)
-                except Exception:  # noqa: BLE001
-                    continue
-                break
+            try:
+                payload = await client.request(
+                    "limit_up_expression",
+                    {"Day": trade_date.isoformat()},
+                )
+                selected = parse_limit_up_expression(payload, trade_date)
+            except Exception:  # noqa: BLE001
+                logger.debug("实时情绪表达接口暂不可用", exc_info=True)
+            try:
+                ladder_payload = await client.request("limit_up_ladder")
+                ladder = parse_limit_up_ladder_height(ladder_payload)
+            except Exception:  # noqa: BLE001
+                logger.debug("实时连板高度接口暂不可用", exc_info=True)
 
             if selected is None:
+                with self._sentiment_lock:
+                    self._market_sentiment = {
+                        "provider": "kaipanla",
+                        "state": "unavailable",
+                        "as_of": trade_date.isoformat(),
+                        "max_consecutive": None,
+                        "refreshed_at": cn_now().isoformat(),
+                    }
                 return 0
-
-            try:
-                ladder = parse_limit_up_ladder_height(
-                    await client.request("limit_up_ladder"),
-                )
-            except Exception:  # noqa: BLE001
-                ladder = {}
 
         selected["max_consecutive"] = (
             ladder.get("max_consecutive")
@@ -385,7 +380,7 @@ class KaipanlaCollector:
         )
         selected.update({
             "provider": "kaipanla",
-            "state": "live" if selected["as_of"] == trade_date.isoformat() else "stale",
+            "state": "live",
             "refreshed_at": cn_now().isoformat(),
         })
         with self._sentiment_lock:

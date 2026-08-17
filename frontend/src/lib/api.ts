@@ -1269,7 +1269,7 @@ export interface LimitBoardView {
   blacklist: string[]
   market_sentiment: {
     provider: 'kaipanla'
-    state: 'live' | 'stale'
+    state: 'live' | 'stale' | 'unavailable'
     as_of: string
     refreshed_at: string
     market_broken_rate_pct?: number | null
