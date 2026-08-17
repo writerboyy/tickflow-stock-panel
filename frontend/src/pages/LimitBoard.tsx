@@ -156,6 +156,11 @@ function Row({
           </div> : null}
         </button>
       </td>
+      <td className="w-[160px] max-w-[160px] px-2">
+        <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
+          {visibleThemes.length ? visibleThemes.join('、') : '--'}
+        </div>
+      </td>
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
           {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
@@ -195,11 +200,7 @@ function Row({
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量比 {technical.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical.rsi_14?.toFixed(0) ?? '--'}</div>
           </> : <div className="text-muted">技术面待补</div>}
         </td>
-      </> : <td className="w-[160px] max-w-[160px] px-2">
-        <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
-          {visibleThemes.length ? visibleThemes.join('、') : '--'}
-        </div>
-      </td>}
+      </> : null}
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
       {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
       <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
@@ -292,11 +293,12 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1510px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1670px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
-            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">总分</th><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
+            <th className="w-[160px] px-2">题材</th>
+            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">总分</th><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : null}
             <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
