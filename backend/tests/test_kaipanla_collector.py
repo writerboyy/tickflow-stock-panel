@@ -1043,9 +1043,14 @@ async def test_sector_constituents_at_persists_and_reuses_completed_membership(t
         lambda: FakeClient({"sector_constituents": RuntimeError("must not fetch")}, restored_calls),
     )
     second = await restored.sector_constituents_at(date(2026, 8, 14), "801001")
+    memberships = restored.sector_constituent_memberships(date(2026, 8, 14))
 
     assert first[0]["code"] == "600126"
     assert second[0]["symbol"] == "600126.SH"
+    assert memberships.select("plate_id", "symbol").to_dicts() == [{
+        "plate_id": "801001",
+        "symbol": "600126.SH",
+    }]
     assert restored_calls == []
 
 

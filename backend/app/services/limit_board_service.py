@@ -41,16 +41,17 @@ _PREMIUM_FILTER_COLUMNS = {
     "next_day_red_rate",
     "first_board_broken_rate",
 }
-_SCORE_REFRESH_SECONDS = 15.0
+_SCORE_REFRESH_SECONDS = 5.0
+_SECTOR_CANDIDATE_LIMIT = 10
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
     "vol_ratio_5d", "macd_dif", "macd_dea", "macd_hist", "rsi_14",
 }
 _SCORE_WEIGHTS = {
-    "intraday_flow": 50.0,
-    "sector": 30.0,
-    "premium_gene": 15.0,
+    "sector": 50.0,
+    "premium_gene": 30.0,
+    "intraday_flow": 15.0,
     "technical": 5.0,
 }
 
@@ -173,12 +174,28 @@ class LimitBoardService:
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
         self._premium_stats: dict[str, dict[str, Any]] = {}
+        self._sector_membership_date: date | None = None
+        self._sector_memberships = pl.DataFrame()
+        self._sector_candidate_key: tuple[date, str, tuple[str, ...]] | None = None
+        self._sector_candidate_symbols: set[str] = set()
+        self._sector_candidate_plate_ids: set[str] = set()
+        self._sector_candidates_by_symbol: dict[str, list[dict[str, str]]] = {}
+        self._sector_candidate_scope: dict[str, Any] = {
+            "state": "unavailable",
+            "plate_count": 0,
+            "symbol_count": 0,
+            "reason": "正在读取实时板块强度前 10 名",
+        }
+        self._sector_trend_cache: dict[
+            tuple[date, int, str, str],
+            tuple[dict[str, Any] | None, dict[str, dict[str, Any]]],
+        ] = {}
         self._score_refresh_at = 0.0
         self._rotation_date: date | None = None
         self._rotation_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
         self._history_ready = False
         self._history_attempt_at = 0.0
-        self._history_reason = "正在读取涨停历史与溢价基因过滤数据"
+        self._history_reason = "正在读取涨停历史与溢价基因数据"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
 
@@ -200,7 +217,7 @@ class LimitBoardService:
             hub.add_depth_listener(self.enqueue_depth)
         self._thread = threading.Thread(target=self._worker, name="limit-board", daemon=True)
         self._thread.start()
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes()})
+        self._on_market_fetch()
 
     def stop(self) -> None:
         self.quote_service.remove_fetch_listener(self._on_market_fetch)
@@ -242,6 +259,168 @@ class LimitBoardService:
             logger.debug("读取开盘啦情绪快照失败", exc_info=True)
             return None
         return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _top_sector_rows(
+        rows: list[dict[str, Any]],
+        limit: int = _SECTOR_CANDIDATE_LIMIT,
+    ) -> list[dict[str, Any]]:
+        values = [
+            {
+                "plate_id": str(row.get("plate_id") or "").strip(),
+                "plate_name": str(row.get("plate_name") or "").strip(),
+                "rank": _finite(row.get("rank")),
+                "strength": _finite(row.get("strength")),
+            }
+            for row in rows
+            if isinstance(row, dict) and str(row.get("plate_id") or "").strip()
+        ]
+        if not values:
+            return []
+        frame = pl.DataFrame(values).with_columns(
+            pl.col("rank").is_null().alias("_rank_missing"),
+            pl.col("strength").is_null().alias("_strength_missing"),
+        )
+        return frame.sort(
+            ["_rank_missing", "rank", "_strength_missing", "strength", "plate_id"],
+            descending=[False, False, False, True, False],
+            nulls_last=True,
+        ).head(limit).drop("_rank_missing", "_strength_missing").to_dicts()
+
+    @staticmethod
+    def _trend_state(strength_delta: float | None, main_net_delta: float | None) -> str:
+        if strength_delta is None or main_net_delta is None:
+            return "unavailable"
+        if strength_delta > 0 and main_net_delta > 0:
+            return "accelerating"
+        if strength_delta < 0 and main_net_delta < 0:
+            return "weakening"
+        if strength_delta == 0 and main_net_delta == 0:
+            return "stable"
+        return "divergent"
+
+    def _sector_window_trend(
+        self,
+        today: date,
+        snapshot: dict[str, Any],
+        timeline: list[str],
+        window_minutes: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+        captured = _quote_time(snapshot.get("refreshed_at"))
+        if captured is None:
+            return None, {}
+        bucket_end = captured.replace(
+            minute=(captured.minute // 5) * 5,
+            second=0,
+            microsecond=0,
+        )
+        points = sorted(
+            (point, raw)
+            for raw in timeline
+            if (point := _quote_time(raw)) is not None and point.date() == today
+        )
+        current = next(
+            ((point, raw) for point, raw in reversed(points) if point <= bucket_end),
+            None,
+        )
+        if current is None:
+            return None, {}
+        base = next(
+            (
+                (point, raw)
+                for point, raw in reversed(points)
+                if point <= current[0] - timedelta(minutes=window_minutes)
+            ),
+            None,
+        )
+        if base is None:
+            return None, {}
+        cache_key = (today, window_minutes, current[1], base[1])
+        cached = self._sector_trend_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        getter = getattr(collector, "sector_strength_snapshot_at", None)
+        if not callable(getter):
+            return None, {}
+        try:
+            current_snapshot = getter(today, current[1])
+            base_snapshot = getter(today, base[1])
+        except Exception:  # noqa: BLE001
+            logger.debug("读取开盘啦 5 分钟板块趋势失败", exc_info=True)
+            return None, {}
+        if not isinstance(current_snapshot, dict) or not isinstance(base_snapshot, dict):
+            return None, {}
+        current_rows = {
+            str(row.get("plate_id") or "").strip(): row
+            for row in current_snapshot.get("rows") or []
+            if isinstance(row, dict) and str(row.get("plate_id") or "").strip()
+        }
+        base_rows = {
+            str(row.get("plate_id") or "").strip(): row
+            for row in base_snapshot.get("rows") or []
+            if isinstance(row, dict) and str(row.get("plate_id") or "").strip()
+        }
+        by_plate: dict[str, dict[str, Any]] = {}
+        for plate_id in current_rows.keys() & base_rows.keys():
+            current_strength = _finite(current_rows[plate_id].get("strength"))
+            base_strength = _finite(base_rows[plate_id].get("strength"))
+            current_main_net = _finite(current_rows[plate_id].get("main_net"))
+            base_main_net = _finite(base_rows[plate_id].get("main_net"))
+            strength_delta = (
+                current_strength - base_strength
+                if current_strength is not None and base_strength is not None else None
+            )
+            main_net_delta = (
+                current_main_net - base_main_net
+                if current_main_net is not None and base_main_net is not None else None
+            )
+            by_plate[plate_id] = {
+                f"strength_delta_{window_minutes}m": strength_delta,
+                f"main_net_delta_{window_minutes}m": main_net_delta,
+                f"trend_{window_minutes}m_state": self._trend_state(
+                    strength_delta, main_net_delta,
+                ),
+            }
+
+        top_ids = {
+            str(row.get("plate_id") or "")
+            for row in self._top_sector_rows(list(current_rows.values()))
+        }
+        comparable = [
+            {
+                "plate_id": plate_id,
+                "plate_name": str(current_rows[plate_id].get("plate_name") or ""),
+                **value,
+            }
+            for plate_id, value in by_plate.items()
+            if plate_id in top_ids
+            and value[f"strength_delta_{window_minutes}m"] is not None
+            and value[f"main_net_delta_{window_minutes}m"] is not None
+        ]
+        if comparable:
+            strength_delta = sum(
+                value[f"strength_delta_{window_minutes}m"] for value in comparable
+            ) / len(comparable)
+            main_net_delta = sum(
+                value[f"main_net_delta_{window_minutes}m"] for value in comparable
+            )
+            summary = {
+                "state": self._trend_state(strength_delta, main_net_delta),
+                "window_minutes": window_minutes,
+                "captured_at": current[1],
+                "base_at": base[1],
+                "strength_delta": strength_delta,
+                "main_net_delta": main_net_delta,
+                "comparable_count": len(comparable),
+            }
+        else:
+            summary = None
+        if len(self._sector_trend_cache) >= 256:
+            self._sector_trend_cache.clear()
+        self._sector_trend_cache[cache_key] = (summary, by_plate)
+        return summary, by_plate
 
     def _sector_strength_view(
         self,
@@ -323,6 +502,18 @@ class LimitBoardService:
             row for row in normalized
             if row.get("is_child") and str(row.get("plate_id") or "") not in seen_children
         )
+        trend_5m, trend_5m_by_plate = (
+            self._sector_window_trend(today, snapshot, timeline, 5)
+            if include_timeline else (None, {})
+        )
+        trend_30m, trend_30m_by_plate = (
+            self._sector_window_trend(today, snapshot, timeline, 30)
+            if include_timeline else (None, {})
+        )
+        for row in ordered:
+            plate_id = str(row.get("plate_id") or "")
+            row.update(trend_5m_by_plate.get(plate_id, {}))
+            row.update(trend_30m_by_plate.get(plate_id, {}))
         return {
             "provider": "kaipanla",
             "state": "live",
@@ -331,6 +522,8 @@ class LimitBoardService:
             "institution_label": snapshot.get("institution_label") or "机构增仓",
             "history_state": snapshot.get("history_state") or ("live" if timeline else "unavailable"),
             "timeline": timeline,
+            "trend_5m": trend_5m,
+            "trend_30m": trend_30m,
             "rows": ordered,
         }
 
@@ -591,6 +784,106 @@ class LimitBoardService:
             if str(row.get("plate_name") or "").strip()
         }
 
+    def _set_sector_candidate_unavailable(self, reason: str) -> set[str]:
+        self._sector_candidate_key = None
+        self._sector_candidate_symbols.clear()
+        self._sector_candidate_plate_ids.clear()
+        self._sector_candidates_by_symbol.clear()
+        self._sector_candidate_scope = {
+            "state": "unavailable",
+            "plate_count": 0,
+            "symbol_count": 0,
+            "reason": reason,
+        }
+        return set()
+
+    def _refresh_sector_candidate_universe(self, today: date) -> set[str]:
+        view = self._sector_strength_view(today)
+        if not view or view.get("state") != "live":
+            return self._set_sector_candidate_unavailable("实时板块强度前 10 名暂不可用")
+        top_rows = self._top_sector_rows(view.get("rows") or [])
+        if not top_rows:
+            return self._set_sector_candidate_unavailable("实时板块强度前 10 名为空")
+        plate_ids = tuple(str(row["plate_id"]) for row in top_rows)
+        snapshot_at = str(view.get("refreshed_at") or "")
+        candidate_key = (today, snapshot_at, plate_ids)
+        if self._sector_candidate_key == candidate_key:
+            return set(self._sector_candidate_symbols)
+
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        date_getter = getattr(collector, "latest_completed_trading_date", None)
+        membership_getter = getattr(collector, "sector_constituent_memberships", None)
+        if not callable(date_getter) or not callable(membership_getter):
+            return self._set_sector_candidate_unavailable("板块成分批量数据暂不可用")
+        membership_date = date_getter(today)
+        if not isinstance(membership_date, date):
+            return self._set_sector_candidate_unavailable("缺少上一完整交易日板块成分")
+        if self._sector_membership_date != membership_date or self._sector_memberships.is_empty():
+            try:
+                memberships = membership_getter(membership_date)
+            except Exception:  # noqa: BLE001
+                logger.debug("批量读取开盘啦板块成分失败", exc_info=True)
+                return self._set_sector_candidate_unavailable("板块成分批量数据读取失败")
+            if isinstance(memberships, list):
+                memberships = pl.DataFrame(memberships)
+            if (
+                not isinstance(memberships, pl.DataFrame)
+                or memberships.is_empty()
+                or not {"plate_id", "symbol"}.issubset(memberships.columns)
+            ):
+                return self._set_sector_candidate_unavailable("上一完整交易日板块成分为空")
+            self._sector_membership_date = membership_date
+            self._sector_memberships = memberships.select("plate_id", "symbol").with_columns(
+                pl.col("plate_id").cast(pl.String).str.strip_chars(),
+                pl.col("symbol").cast(pl.String).str.strip_chars().str.to_uppercase(),
+            ).filter(
+                pl.col("plate_id").is_not_null()
+                & (pl.col("plate_id") != "")
+                & pl.col("symbol").is_not_null()
+                & (pl.col("symbol") != "")
+            ).unique()
+
+        selected = self._sector_memberships.filter(
+            pl.col("plate_id").is_in(plate_ids),
+        )
+        if selected.is_empty():
+            return self._set_sector_candidate_unavailable("前 10 板块未匹配上一完整交易日成分")
+        matched_plate_ids = set(selected.get_column("plate_id").unique().to_list())
+        missing_plate_ids = set(plate_ids) - matched_plate_ids
+        if missing_plate_ids:
+            return self._set_sector_candidate_unavailable(
+                f"前 10 板块有 {len(missing_plate_ids)} 个缺少上一完整交易日成分",
+            )
+        names = {str(row["plate_id"]): str(row.get("plate_name") or "") for row in top_rows}
+        by_symbol: dict[str, list[dict[str, str]]] = {}
+        grouped = selected.group_by("symbol").agg(pl.col("plate_id").sort())
+        for row in grouped.iter_rows(named=True):
+            symbol = str(row["symbol"])
+            by_symbol[symbol] = [
+                {"plate_id": plate_id, "plate_name": names.get(plate_id, "")}
+                for plate_id in row["plate_id"]
+            ]
+        self._sector_candidate_key = candidate_key
+        self._sector_candidate_symbols = set(by_symbol)
+        self._sector_candidate_plate_ids = set(plate_ids)
+        self._sector_candidates_by_symbol = by_symbol
+        self._sector_candidate_scope = {
+            "state": "live",
+            "as_of": snapshot_at or None,
+            "membership_as_of": membership_date.isoformat(),
+            "plate_count": len(plate_ids),
+            "symbol_count": len(by_symbol),
+            "plate_ids": list(plate_ids),
+            "reason": f"仅扫描实时板块强度前 {len(plate_ids)} 名的 {len(by_symbol)} 只去重成分",
+        }
+        return set(self._sector_candidate_symbols)
+
+    def _automatic_candidate_symbols(self, today: date) -> set[str]:
+        sector_symbols = self._refresh_sector_candidate_universe(today)
+        if not self._history_ready:
+            return set()
+        return sector_symbols & (self._first_board_eligible | self._rebound_board_eligible)
+
     def _sentiment_guard(self, config: dict[str, Any]) -> dict[str, Any]:
         threshold = _finite(
             config.get("settings", {}).get("max_market_broken_rate_pct", 40.0),
@@ -640,7 +933,17 @@ class LimitBoardService:
             pass
 
     def _on_market_fetch(self) -> None:
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes()})
+        config = self.store.load_config()
+        self._refresh_history(config)
+        symbols = {
+            str(item["symbol"]).strip().upper()
+            for key in ("selected", "board_pool")
+            for item in config[key]
+        }
+        if self._market_mode() == "full_market":
+            symbols.update(self._automatic_candidate_symbols(cn_today()))
+        quotes = self.quote_service.get_latest_quotes(symbols) if symbols else []
+        self._enqueue({"type": "market", "quotes": quotes})
 
     def _market_mode(self) -> str:
         mode_getter = getattr(self.quote_service, "realtime_mode", None)
@@ -786,13 +1089,12 @@ class LimitBoardService:
             self._history_reason = "溢价基因数据不足，自动首板/反包已暂停"
             return
         self._premium_stats = _premium_stats_by_symbol(premium_rows)
-        qualified = set(_qualified_premium_stats(premium_rows))
-        self._first_board_eligible = (universe - blocked) & qualified
-        self._rebound_board_eligible = (rebound & universe & qualified) - self._first_board_eligible
+        self._first_board_eligible = universe - blocked
+        self._rebound_board_eligible = (rebound & universe) - self._first_board_eligible
         self._history_ready = True
         self._history_reason = (
-            f"已核对前 {lookback} 个交易日；自动候选需涨停≥4次、"
-            f"次日红盘率≥80%、首板破板率≤75%（{len(qualified)} 只通过）"
+            f"已核对前 {lookback} 个交易日；自动候选仅来自实时板块强度前 10 名，"
+            "涨停基因用于 30 分个股排序"
         )
 
     def _retry_history(self) -> None:
@@ -802,10 +1104,7 @@ class LimitBoardService:
         previous_reason = self._history_reason
         self._refresh_history(self.store.load_config())
         if self._history_ready and not previous_ready:
-            self._enqueue({
-                "type": "market",
-                "quotes": self.quote_service.get_latest_quotes(),
-            })
+            self._on_market_fetch()
         if self._history_ready != previous_ready or self._history_reason != previous_reason:
             self._notify_updated()
 
@@ -844,10 +1143,30 @@ class LimitBoardService:
         self._refresh_history(config)
         full_market = self._market_mode() == "full_market"
         runtime = self._runtime_for_today()
-        runtime_symbols = set(runtime.get("symbols") or {})
         selected = {str(item["symbol"]).strip().upper() for item in config["selected"]}
         board_pool = {str(item["symbol"]).strip().upper() for item in config["board_pool"]}
         now = cn_now()
+        automatic_candidates = (
+            self._automatic_candidate_symbols(now.date()) if full_market else set()
+        )
+        runtime_by_symbol = runtime.setdefault("symbols", {})
+        for symbol, state in list(runtime_by_symbol.items()):
+            modes = set(state.get("source_modes") or [])
+            modes.difference_update({"first_board", "rebound_board"})
+            if symbol in selected:
+                modes.add("selected")
+            if symbol in board_pool:
+                modes.add("board_pool")
+            if symbol in automatic_candidates:
+                if symbol in self._first_board_eligible:
+                    modes.add("first_board")
+                if symbol in self._rebound_board_eligible:
+                    modes.add("rebound_board")
+            if modes:
+                state["source_modes"] = sorted(modes)
+            else:
+                runtime_by_symbol.pop(symbol, None)
+        runtime_symbols = set(runtime_by_symbol)
         updates: dict[str, dict[str, Any]] = {}
         for raw in records:
             symbol = str(raw.get("symbol") or "").strip().upper()
@@ -873,12 +1192,7 @@ class LimitBoardService:
                 source_modes.append("selected")
             scan_window = float(config["settings"].get("exit_limit_pct", 0.03))
             if (
-                full_market
-                and self._history_ready
-                and (
-                    symbol in self._first_board_eligible
-                    or symbol in self._rebound_board_eligible
-                )
+                symbol in automatic_candidates
                 and (gap <= scan_window or symbol in runtime_symbols)
             ):
                 if symbol in self._first_board_eligible:
@@ -897,6 +1211,15 @@ class LimitBoardService:
                 "limit_gap_pct": gap,
                 "timestamp": quote_at.isoformat(),
                 "source_modes": source_modes,
+                "top_sector_ids": [
+                    item["plate_id"]
+                    for item in self._sector_candidates_by_symbol.get(symbol, [])
+                ],
+                "top_sector_names": [
+                    item["plate_name"]
+                    for item in self._sector_candidates_by_symbol.get(symbol, [])
+                    if item.get("plate_name")
+                ],
             }
             updates[symbol] = quote
         with self._lock:
@@ -954,6 +1277,8 @@ class LimitBoardService:
                 "limit_up": quote["limit_up"],
                 "limit_gap_pct": quote["limit_gap_pct"],
                 "source_modes": quote["source_modes"],
+                "top_sector_ids": quote.get("top_sector_ids") or [],
+                "top_sector_names": quote.get("top_sector_names") or [],
                 "last_quote_at": quote["timestamp"],
             })
             state.update({
@@ -1367,7 +1692,7 @@ class LimitBoardService:
     def _emit(
         self, event_type: str, quote: dict[str, Any], state: dict[str, Any], config: dict[str, Any], reason: str,
     ) -> None:
-        labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
+        labels = {"touched": "涨停", "broken": "炸板", "resealed": "回封"}
         now = cn_now()
         name = self._resolve_name(str(quote["symbol"]), quote.get("name"))
         event = {
@@ -1515,8 +1840,8 @@ class LimitBoardService:
                 -leadership_rank,
                 stock_rank if stock_rank is not None else float("inf"),
                 -float(row.get("candidate_score") or 0.0),
-                -float(intraday.get("score") or 0.0),
                 -float(gene.get("score") or 0.0),
+                -float(intraday.get("score") or 0.0),
                 -float(technical.get("score") or 0.0),
                 str(row.get("symbol") or ""),
             )
@@ -1705,7 +2030,14 @@ class LimitBoardService:
         result = dict(value)
         result["score"] = round(float(value.get("score") or 0.0) * factor, 2)
         result["max_score"] = target_max
-        for key in ("current_score", "rotation_score"):
+        for key in (
+            "current_score",
+            "rotation_score",
+            "trend_score",
+            "trend_max_score",
+            "capital_score",
+            "capital_max_score",
+        ):
             if _finite(value.get(key)) is not None:
                 result[key] = round(float(value[key]) * factor, 2)
         components = value.get("components")
@@ -1737,7 +2069,7 @@ class LimitBoardService:
             net_flow = intraday_flow.get("net_flow_ratio")
             if intraday_flow.get("capital_available"):
                 reasons.append(
-                    f"分时强度/资金 {float(intraday_flow.get('score') or 0):.1f}/50"
+                    f"分时强度/资金 {float(intraday_flow.get('score') or 0):.1f}/15"
                     f" · 水下 {underwater:.0%} · 净流向 {float(net_flow or 0):+.0%}"
                 )
             else:
@@ -1748,7 +2080,7 @@ class LimitBoardService:
                 f" · {sector.get('leadership') or 'follower'}"
             )
         if gene:
-            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/15")
+            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/30")
         if technical:
             reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/5")
         return reasons
@@ -1836,12 +2168,16 @@ class LimitBoardService:
                     change_pct = _finite((stock_rows.get(symbol) or {}).get("change_pct"))
                 if change_pct is None:
                     change_pct = _finite(previous.get("change_pct"))
-                intraday_flow = intraday_flow_detail(
-                    intraday_features.get(symbol),
-                    previous_close=(stock_rows.get(symbol) or {}).get("prev_close")
-                    or candidate_quotes.get(symbol, {}).get("prev_close"),
-                    external_flow=flow_snapshots.get(symbol),
-                    as_of=now.isoformat(),
+                intraday_flow = self._scale_score_detail(
+                    intraday_flow_detail(
+                        intraday_features.get(symbol),
+                        previous_close=(stock_rows.get(symbol) or {}).get("prev_close")
+                        or candidate_quotes.get(symbol, {}).get("prev_close"),
+                        external_flow=flow_snapshots.get(symbol),
+                        as_of=now.isoformat(),
+                    ),
+                    _SCORE_WEIGHTS["intraday_flow"],
+                    50.0,
                 )
                 sector = None
                 symbol_targets = targets_by_symbol.get(symbol) or {}
@@ -1972,7 +2308,7 @@ class LimitBoardService:
             score_cache,
         )
         events = []
-        labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}
+        labels = {"touched": "涨停", "broken": "炸板", "resealed": "回封"}
         for event in self.store.events(runtime["trading_date"]):
             symbol = str(event.get("symbol") or "").strip().upper()
             if not symbol:
@@ -1980,8 +2316,9 @@ class LimitBoardService:
             event["name"] = self._resolve_name(symbol, event.get("name"))
             if is_risk_warning_name(event["name"]):
                 continue
-            label = str(event.get("rule_name") or labels.get(str(event.get("type"))) or "").strip()
+            label = str(labels.get(str(event.get("type"))) or event.get("rule_name") or "").strip()
             if label:
+                event["rule_name"] = label
                 event["message"] = f"{event['name']}：{label}"
             events.append(event)
         self._enrich_concepts([
@@ -2007,6 +2344,14 @@ class LimitBoardService:
             trading_reason = "QMT 已连接，实盘模式未开启"
         else:
             trading_reason = str(qmt_status.get("reason") or "QMT 交易网关未就绪")
+        self._refresh_sector_candidate_universe(cn_today())
+        sector_strength = self.sector_strength_view()
+        market_mode = self._market_mode()
+        first_board_enabled = (
+            market_mode == "full_market"
+            and self._history_ready
+            and self._sector_candidate_scope.get("state") == "live"
+        )
         return {
             "revision": config["revision"],
             "settings": config["settings"],
@@ -2020,12 +2365,13 @@ class LimitBoardService:
                 if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
             ],
             "market_sentiment": self._market_sentiment_snapshot(),
-            "sector_strength": self.sector_strength_view(),
+            "sector_strength": sector_strength,
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],
                 "history_ready": self._history_ready,
                 "history_reason": self._history_reason,
+                "candidate_scope": dict(self._sector_candidate_scope),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "websocket_status": "connected" if self._ws_registered else "idle",
@@ -2034,8 +2380,16 @@ class LimitBoardService:
                 "trading_enabled": trading_enabled,
                 "trading_reason": trading_reason,
                 "sentiment_guard": sentiment_guard,
-                "market_mode": self._market_mode(),
-                "first_board_enabled": self._market_mode() == "full_market" and self._history_ready,
+                "market_mode": market_mode,
+                "refresh_cycle": {
+                    "as_of": (
+                        sector_strength.get("refreshed_at")
+                        if isinstance(sector_strength, dict)
+                        else self._last_scan_at
+                    ),
+                    "interval_seconds": int(_SCORE_REFRESH_SECONDS),
+                },
+                "first_board_enabled": first_board_enabled,
             },
         }
 
@@ -2081,7 +2435,7 @@ class LimitBoardService:
             config["settings"].update(values)
 
         saved = self.store.update(revision, update)
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes()})
+        self._on_market_fetch()
         self._notify_updated()
         return saved
 

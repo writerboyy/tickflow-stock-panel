@@ -179,6 +179,9 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
         lambda: datetime(2026, 8, 13).date(),
     )
     service._history_date = datetime(2026, 8, 13).date()
+    monkeypatch.setattr(
+        service, "_automatic_candidate_symbols", lambda _day: {"600000.SH"},
+    )
 
     service._process_quotes([{
         "symbol": "600000.SH",
@@ -190,7 +193,7 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
 
     assert service._quotes["600000.SH"]["name"] == "浦发银行"
     assert quotes.events[0]["name"] == "浦发银行"
-    assert quotes.events[0]["message"] == "浦发银行：触板"
+    assert quotes.events[0]["message"] == "浦发银行：涨停"
 
 
 def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monkeypatch):
@@ -316,7 +319,7 @@ def test_missing_history_cache_remains_on_fast_warmup_retry(tmp_path, monkeypatc
     assert "历史指标缓存尚未就绪" in service._history_reason
 
 
-def test_valid_snapshot_with_no_qualified_symbols_keeps_scan_ready(tmp_path, monkeypatch):
+def test_valid_gene_snapshot_no_longer_blocks_sector_candidate(tmp_path, monkeypatch):
     service, _quotes, config = make_service(tmp_path)
     config["settings"]["first_board_lookback_days"] = 1
     monkeypatch.setattr(
@@ -337,8 +340,8 @@ def test_valid_snapshot_with_no_qualified_symbols_keeps_scan_ready(tmp_path, mon
     service._refresh_history(config)
 
     assert service._history_ready is True
-    assert service._first_board_eligible == set()
-    assert "0 只通过" in service._history_reason
+    assert service._first_board_eligible == {"600000.SH"}
+    assert "涨停基因用于 30 分个股排序" in service._history_reason
 
 
 def test_history_retries_after_cache_warmup_without_market_event(tmp_path, monkeypatch):
@@ -390,6 +393,9 @@ def test_rebound_quote_enters_candidate_pool_with_rebound_source(tmp_path, monke
     service._history_date = datetime(2026, 8, 13).date()
     service._first_board_eligible = set()
     service._rebound_board_eligible = {"600000.SH"}
+    monkeypatch.setattr(
+        service, "_automatic_candidate_symbols", lambda _day: {"600000.SH"},
+    )
 
     service._process_quotes([{
         "symbol": "600000.SH",
@@ -623,9 +629,9 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_rank"] == 1
     assert row["candidate_score"] is not None
     assert row["candidate_score_state"] == "live"
-    assert row["candidate_score_detail"]["intraday_flow"]["max_score"] == 50.0
-    assert row["candidate_score_detail"]["sector"]["max_score"] == 30.0
-    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 15.0
+    assert row["candidate_score_detail"]["intraday_flow"]["max_score"] == 15.0
+    assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
+    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
     assert row["candidate_score_detail"]["technical"]["score"] == 5.0
     assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is True
     assert row["change_pct"] == pytest.approx(0.10)
@@ -634,7 +640,7 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert qmt.orders == []
 
 
-def test_candidate_score_refresh_uses_fifteen_second_window_and_bypasses_for_new_symbol(
+def test_candidate_score_refresh_uses_five_second_window_and_bypasses_for_new_symbol(
     tmp_path, monkeypatch,
 ):
     service, quotes, _config = make_service(tmp_path)
@@ -661,11 +667,11 @@ def test_candidate_score_refresh_uses_fifteen_second_window_and_bypasses_for_new
     assert service._refresh_candidate_scores(runtime, second, now) is True
     assert calls[0] == 2
 
-    current_mono[0] = 115.0
+    current_mono[0] = 109.0
     assert service._refresh_candidate_scores(runtime, second, now) is False
     assert calls[0] == 2
 
-    current_mono[0] = 121.0
+    current_mono[0] = 110.0
     service._refresh_candidate_scores(runtime, second, now)
     assert calls[0] == 3
 
@@ -914,8 +920,8 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     service._refresh_candidate_scores(runtime, candidate, now)
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "概念二"
-    assert sector["score"] == pytest.approx(25.2)
-    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == pytest.approx(85.2)
+    assert sector["score"] == pytest.approx(42.0)
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == pytest.approx(89.0)
     assert "proximity" not in runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]
 
     concept_available[0] = False
@@ -923,7 +929,7 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     service._refresh_candidate_scores(runtime, candidate, now)
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "二级行业"
-    assert sector["score"] == pytest.approx(29.4)
+    assert sector["score"] == pytest.approx(49.0)
 
 
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
@@ -1327,7 +1333,7 @@ def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
         "source": "limit_board",
         "symbol": "600000.SH",
         "name": "浦发银行",
-        "message": "浦发银行：触板",
+        "message": "浦发银行：涨停",
     }
 
     service.enrich_external_alerts([event])
@@ -1335,7 +1341,7 @@ def test_limit_board_notification_body_contains_name_and_concept(monkeypatch):
 
     assert event["ext_gn_ths__所属概念"] == "银行;金融科技"
     assert event["concept"] == "银行;金融科技"
-    assert body == "600000.SH 浦发银行：触板\n概念：银行、金融科技"
+    assert body == "600000.SH 浦发银行：涨停\n概念：银行、金融科技"
 
 
 def test_limit_board_notification_body_limits_and_deduplicates_concepts():
@@ -1513,12 +1519,14 @@ def test_limit_board_view_exposes_market_sentiment_guard(tmp_path):
             "as_of": "2026-08-13",
             "refreshed_at": "2026-08-13T10:00:00+08:00",
             "market_broken_rate_pct": 42.3,
+            "market_evaluation": "分化",
             "max_consecutive": 5,
         },
     )
 
     result = service.view()
 
+    assert result["market_sentiment"]["market_evaluation"] == "分化"
     assert result["market_sentiment"]["max_consecutive"] == 5
     assert result["runtime"]["sentiment_guard"]["blocked"] is True
     assert result["runtime"]["trading_enabled"] is False
@@ -1579,6 +1587,205 @@ def test_limit_board_view_exposes_live_sector_strength_tree(tmp_path, monkeypatc
     assert historical["rows"][0]["strength"] == 70
     with pytest.raises(ValueError, match="时间点格式无效"):
         service.sector_strength_view("not-a-time")
+
+
+def test_sector_candidate_universe_uses_top_ten_and_one_membership_batch(
+    tmp_path,
+    monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    membership_date = date(2026, 8, 14)
+    calls = []
+    rows = [
+        {
+            "plate_id": f"P{rank:02d}",
+            "plate_name": f"板块{rank:02d}",
+            "strength": 110 - rank,
+            "rank": rank,
+            "rank_count": 11,
+        }
+        for rank in range(1, 12)
+    ]
+
+    def memberships(trade_date):
+        calls.append(trade_date)
+        return pl.DataFrame({
+            "plate_id": [row["plate_id"] for row in rows],
+            "symbol": [f"600{rank:03d}.SH" for rank in range(1, 12)],
+        })
+
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-17T10:00:05+08:00",
+            "rows": rows,
+        },
+        latest_completed_trading_date=lambda _day: membership_date,
+        sector_constituent_memberships=memberships,
+    )
+
+    first = service._refresh_sector_candidate_universe(today)
+    second = service._refresh_sector_candidate_universe(today)
+
+    assert first == {f"600{rank:03d}.SH" for rank in range(1, 11)}
+    assert second == first
+    assert "600011.SH" not in first
+    assert service._sector_candidate_plate_ids == {f"P{rank:02d}" for rank in range(1, 11)}
+    assert calls == [membership_date]
+
+
+def test_sector_candidate_universe_stops_when_a_top_ten_membership_is_missing(
+    tmp_path,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    rows = [
+        {
+            "plate_id": f"P{rank:02d}",
+            "plate_name": f"板块{rank:02d}",
+            "strength": 110 - rank,
+            "rank": rank,
+        }
+        for rank in range(1, 11)
+    ]
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-17T10:00:05+08:00",
+            "rows": rows,
+        },
+        latest_completed_trading_date=lambda _day: date(2026, 8, 14),
+        sector_constituent_memberships=lambda _day: pl.DataFrame({
+            "plate_id": [f"P{rank:02d}" for rank in range(1, 10)],
+            "symbol": [f"600{rank:03d}.SH" for rank in range(1, 10)],
+        }),
+    )
+
+    assert service._refresh_sector_candidate_universe(today) == set()
+    assert service._sector_candidate_scope["state"] == "unavailable"
+    assert "1 个缺少" in service._sector_candidate_scope["reason"]
+
+
+def test_market_fetch_requests_only_top_ten_sector_candidates(tmp_path, monkeypatch):
+    service, quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    requested = []
+    service._history_date = today
+    service._history_ready = True
+    service._first_board_eligible = {f"600{rank:03d}.SH" for rank in range(1, 12)}
+    rows = [
+        {
+            "plate_id": f"P{rank:02d}",
+            "plate_name": f"板块{rank:02d}",
+            "strength": 110 - rank,
+            "rank": rank,
+        }
+        for rank in range(1, 12)
+    ]
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-17T10:00:05+08:00",
+            "rows": rows,
+        },
+        latest_completed_trading_date=lambda _day: date(2026, 8, 14),
+        sector_constituent_memberships=lambda _day: pl.DataFrame({
+            "plate_id": [row["plate_id"] for row in rows],
+            "symbol": [f"600{rank:03d}.SH" for rank in range(1, 12)],
+        }),
+    )
+
+    def latest(symbols=None):
+        requested.append(set(symbols or []))
+        return []
+
+    quotes.get_latest_quotes = latest
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+
+    service._on_market_fetch()
+
+    assert requested == [{f"600{rank:03d}.SH" for rank in range(1, 11)}]
+    assert "600011.SH" not in requested[0]
+
+
+def test_sector_strength_exposes_stable_five_minute_horizontal_trend(
+    tmp_path,
+    monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    points = [
+        "2026-08-17T09:35:00+08:00",
+        "2026-08-17T10:00:00+08:00",
+        "2026-08-17T10:05:00+08:00",
+        "2026-08-17T10:05:05+08:00",
+    ]
+    values = {
+        points[0]: (80.0, -5.0),
+        points[1]: (100.0, 10.0),
+        points[2]: (110.0, 20.0),
+        points[3]: (999.0, -999.0),
+    }
+
+    def snapshot_at(_day, captured_at):
+        strength, main_net = values[captured_at]
+        return {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": captured_at,
+            "rows": [{
+                "plate_id": "P1",
+                "plate_name": "芯片",
+                "rank": 1,
+                "strength": strength,
+                "main_net": main_net,
+            }],
+        }
+
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-17T10:07:30+08:00",
+            "history_state": "live",
+            "rows": [{
+                "plate_id": "P1",
+                "plate_name": "芯片",
+                "rank": 1,
+                "strength": 120.0,
+                "main_net": 25.0,
+            }],
+        },
+        sector_strength_timeline=lambda _day: points,
+        sector_strength_snapshot_at=snapshot_at,
+    )
+
+    result = service.sector_strength_view()
+
+    trend = result["trend_5m"]
+    assert trend["state"] == "accelerating"
+    assert trend["captured_at"] == points[2]
+    assert trend["base_at"] == points[1]
+    assert trend["strength_delta"] == pytest.approx(10.0)
+    assert trend["main_net_delta"] == pytest.approx(10.0)
+    assert trend["comparable_count"] == 1
+    assert result["rows"][0]["strength_delta_5m"] == pytest.approx(10.0)
+    assert result["rows"][0]["main_net_delta_5m"] == pytest.approx(10.0)
+    assert result["trend_30m"]["captured_at"] == points[2]
+    assert result["trend_30m"]["base_at"] == points[0]
+    assert result["rows"][0]["strength_delta_30m"] == pytest.approx(30.0)
+    assert result["rows"][0]["main_net_delta_30m"] == pytest.approx(25.0)
 
 
 @pytest.mark.asyncio

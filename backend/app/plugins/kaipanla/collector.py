@@ -58,6 +58,7 @@ from app.plugins.kaipanla.storage import (
     ensure_configs,
     has_auction_0925,
     recent_trading_dates,
+    read_sector_constituent_memberships,
     read_sector_constituents,
     read_sector_strength_snapshot,
     read_sector_strength_timeline,
@@ -432,6 +433,10 @@ class KaipanlaCollector:
             (value for value in reversed(recent_trading_dates(self.data_dir)) if value < trade_date),
             None,
         )
+
+    def sector_constituent_memberships(self, trade_date: date):
+        """Return the completed-day membership table for batched consumers."""
+        return read_sector_constituent_memberships(self.data_dir, trade_date)
 
     async def refresh_sector_strength(self, trade_date: date) -> int:
         """Poll today's board ranking without carrying an old trading day forward."""

@@ -1133,6 +1133,8 @@ export interface LimitBoardRow {
   last_depth_at?: string
   ws_active?: boolean
   source_modes?: string[]
+  top_sector_ids?: string[]
+  top_sector_names?: string[]
   blacklisted?: boolean
   source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
@@ -1271,8 +1273,24 @@ export interface LimitBoardSectorStrengthRow {
   main_sell?: number | null
   volume_ratio?: number | null
   institution_increase?: number | null
+  strength_delta_5m?: number | null
+  main_net_delta_5m?: number | null
+  trend_5m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
+  strength_delta_30m?: number | null
+  main_net_delta_30m?: number | null
+  trend_30m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
   rank?: number
   rank_count?: number
+}
+
+export interface LimitBoardSectorWindowTrend {
+  state: 'accelerating' | 'stable' | 'weakening' | 'divergent'
+  window_minutes: number
+  captured_at: string
+  base_at: string
+  strength_delta: number
+  main_net_delta: number
+  comparable_count: number
 }
 
 export interface LimitBoardSectorStrengthSnapshot {
@@ -1283,6 +1301,8 @@ export interface LimitBoardSectorStrengthSnapshot {
   institution_label?: string | null
   history_state: 'live' | 'closed' | 'unavailable'
   timeline: string[]
+  trend_5m?: LimitBoardSectorWindowTrend | null
+  trend_30m?: LimitBoardSectorWindowTrend | null
   rows: LimitBoardSectorStrengthRow[]
 }
 
@@ -1361,6 +1381,15 @@ export interface LimitBoardView {
     trading_date: string
     history_ready: boolean
     history_reason: string
+    candidate_scope: {
+      state: 'live' | 'unavailable'
+      as_of?: string | null
+      membership_as_of?: string | null
+      plate_count: number
+      symbol_count: number
+      plate_ids?: string[]
+      reason: string
+    }
     last_scan_at: string | null
     last_error: string | null
     websocket_status: string
@@ -1376,6 +1405,10 @@ export interface LimitBoardView {
       reason: string
     }
     market_mode: string
+    refresh_cycle: {
+      as_of?: string | null
+      interval_seconds: number
+    }
     first_board_enabled: boolean
   }
 }

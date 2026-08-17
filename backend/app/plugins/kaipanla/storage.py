@@ -478,6 +478,30 @@ def read_sector_constituents(
     return frame.to_dicts()
 
 
+def read_sector_constituent_memberships(
+    data_dir: Path,
+    trade_date: date,
+) -> pl.DataFrame:
+    """Read all persisted board memberships with one parquet scan."""
+    columns = ["plate_id", "symbol", "code", "name", "tags"]
+    schema = {column: pl.String for column in columns}
+    path = _partition_path(data_dir, SECTOR_CONSTITUENT_TABLE, trade_date)
+    if not path.exists():
+        return pl.DataFrame(schema=schema)
+    try:
+        available = set(pl.read_parquet_schema(path))
+        selected = [column for column in columns if column in available]
+        if not {"plate_id", "symbol"}.issubset(selected):
+            return pl.DataFrame(schema=schema)
+        frame = pl.scan_parquet(path).select(selected).collect()
+    except (OSError, pl.exceptions.PolarsError):
+        return pl.DataFrame(schema=schema)
+    missing = [column for column in columns if column not in frame.columns]
+    return frame.with_columns(
+        *(pl.lit(None, dtype=pl.String).alias(column) for column in missing),
+    ).select(columns)
+
+
 def read_funds_large_order_reference(
     data_dir: Path,
     trade_date: date,
