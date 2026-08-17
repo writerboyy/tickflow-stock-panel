@@ -435,7 +435,12 @@ def parse_dragon_tiger_details(payload: dict, code: str) -> list[dict]:
 
 def parse_sector_strength(payload: dict) -> list[dict]:
     """解析板块强度榜，同时保留盘中实时排名与资金字段。"""
-    source_rows = _rows(payload, "list")
+    source_rows = [*_rows(payload, "list")]
+    extra_rows = payload.get("list_soninfo")
+    if extra_rows is not None:
+        if not isinstance(extra_rows, list):
+            raise ResponseShapeError("list_soninfo 不是数组")
+        source_rows.extend(extra_rows)
     rows = []
     rank_count = len(source_rows)
     for index, row in enumerate(source_rows):

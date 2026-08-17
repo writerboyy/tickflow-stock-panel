@@ -1589,7 +1589,13 @@ class LimitBoardService:
                 for key, value in fresh.items():
                     if value is not None:
                         detail[key] = value
-                    elif previous_detail.get(key):
+                    elif (
+                        previous_detail.get(key)
+                        and (
+                            key != "sector"
+                            or previous_detail[key].get("realtime_available") is True
+                        )
+                    ):
                         detail[key] = previous_detail[key]
                         cached_component = True
                 flow_detail = detail.get("intraday_flow") or {}

@@ -107,7 +107,7 @@ def test_connection_api_persists_fields_only_and_returns_masked_status(tmp_path,
         ("shareholder_count_changes", "applhb.longhuvip.com", "GET"),
         ("dragon_tiger_movement", "apphis.longhuvip.com", "POST"),
         ("dragon_tiger_details", "applhb.longhuvip.com", "POST"),
-        ("sector_strength", "apphis.longhuvip.com", "POST"),
+        ("sector_strength", "apphq.longhuvip.com", "POST"),
         ("sector_constituents", "apphis.longhuvip.com", "POST"),
     ],
 )

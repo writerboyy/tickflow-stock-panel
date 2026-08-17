@@ -253,7 +253,7 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
     ),
     "sector_strength": (
         "POST",
-        "apphis.longhuvip.com",
+        "apphq.longhuvip.com",
         {"a": "RealRankingInfo", "c": "ZhiShuRanking", "Type": "1", "Order": "1", "ZSType": "7"},
     ),
     "sector_constituents": (

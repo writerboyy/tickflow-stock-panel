@@ -668,7 +668,12 @@ def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missi
     monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
     previous_detail = {
         "intraday_flow": {"score": 35.0, "capital_available": True, "as_of": now.isoformat()},
-        "sector": {"score": 20.0, "name": "人工智能", "as_of": now.isoformat()},
+        "sector": {
+            "score": 20.0,
+            "name": "人工智能",
+            "as_of": now.isoformat(),
+            "realtime_available": True,
+        },
         "premium_gene": {"score": 11.0, "as_of": "2026-08-14"},
         "technical": {"score": 4.0, "as_of": now.isoformat()},
     }
@@ -696,6 +701,40 @@ def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missi
     assert cached["candidate_score"] == 70.0
     assert cached["candidate_score_state"] == "cached"
     assert cached["candidate_score_detail"] == previous_detail
+
+
+def test_candidate_score_refresh_drops_legacy_local_sector_cache(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
+    runtime = {
+        "candidate_scores": {
+            "600000.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_detail": {
+                    "intraday_flow": {"score": 35.0, "capital_available": True},
+                    "sector": {
+                        "score": 20.0,
+                        "name": "本地聚合板块",
+                        "realtime_available": False,
+                    },
+                    "premium_gene": {"score": 11.0},
+                    "technical": {"score": 4.0},
+                },
+            },
+        },
+    }
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["selected"]}],
+        now,
+    )
+
+    cached = runtime["candidate_scores"]["600000.SH"]
+    assert "sector" not in cached["candidate_score_detail"]
+    assert cached["candidate_score"] is None
+    assert cached["candidate_score_state"] == "unavailable"
 
 
 def test_candidate_score_cache_is_cleared_on_next_trading_day(tmp_path, monkeypatch):
