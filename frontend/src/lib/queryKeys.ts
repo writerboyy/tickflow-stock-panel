@@ -30,6 +30,7 @@ export const QK = {
   positionRiskQmt: ['position-risk', 'qmt'] as const,
   positionRiskQmtOrders: ['position-risk', 'qmt-orders'] as const,
   limitBoard: ['limit-board'] as const,
+  limitBoardQuotes: (symbols: string) => ['limit-board', 'quotes', symbols] as const,
   limitBoardSectorStrength: (capturedAt: string) => ['limit-board', 'sector-strength', capturedAt] as const,
   limitBoardSectorConstituents: (plateId: string, capturedAt: string) => ['limit-board', 'sector-constituents', plateId, capturedAt] as const,
   indexList:      ['index-list'] as const,

@@ -196,6 +196,134 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
     assert quotes.events[0]["message"] == "浦发银行：涨停"
 
 
+def test_heat_quote_snapshot_registers_batch_consumer_and_returns_quotes(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "last_price": 10.25,
+        "change_pct": 0.025,
+        "limit_up": 11.0,
+        "timestamp": "2026-08-18T10:00:00+08:00",
+    }]
+
+    snapshot = service.quote_snapshot(["600000.sh", "600001.SH"])
+
+    assert quotes.consumers["limit_board"] == {"600000.SH", "600001.SH"}
+    assert snapshot["state"] == "partial"
+    assert snapshot["as_of"] == "2026-08-18T10:00:00+08:00"
+    assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.25
+    assert snapshot["quotes"]["600000.SH"]["change_pct"] == 0.025
+    assert snapshot["missing_symbols"] == ["600001.SH"]
+
+
+def test_heat_quote_snapshot_uses_daily_snapshot_when_realtime_is_empty(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    quotes.enriched = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "name": ["浦发银行"],
+        "close": [10.25],
+        "prev_close": [10.0],
+        "change_pct": [0.025],
+    })
+    quotes.enriched_date = date(2026, 8, 18)
+
+    snapshot = service.quote_snapshot(["600000.SH"])
+
+    assert snapshot["state"] == "snapshot"
+    assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.25
+    assert snapshot["quotes"]["600000.SH"]["limit_up"] == 11.0
+    assert snapshot["quotes"]["600000.SH"]["source"] == "daily_snapshot"
+
+
+def test_automatic_candidate_is_scored_without_near_limit_filter(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    monkeypatch.setattr(
+        service, "_automatic_candidate_symbols", lambda _day: {"600000.SH"},
+    )
+    service._history_date = now.date()
+
+    def score(runtime, candidates, _now):
+        runtime["candidate_scores"] = {
+            str(row["symbol"]): {
+                "candidate_score": 80.0,
+                "candidate_score_detail": {},
+            }
+            for row in candidates
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
+
+    service._process_quotes([{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "last_price": 8.0,
+        "limit_up": 11.0,
+        "timestamp": now.isoformat(),
+    }])
+
+    state = service._runtime_for_today()["symbols"]["600000.SH"]
+    assert state["limit_gap_pct"] == pytest.approx(0.375)
+    assert state["status"] == "watching"
+    assert state["source_modes"] == ["first_board"]
+
+
+def test_automatic_candidates_keep_only_scored_top_thirty(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    symbols = [f"{600000 + index}.SH" for index in range(35)]
+    runtime = {
+        "symbols": {
+            symbol: {"source_modes": ["first_board"]}
+            for symbol in symbols
+        },
+        "candidate_scores": {
+            symbol: {
+                "candidate_score": float(100 - index),
+                "candidate_score_detail": {},
+            }
+            for index, symbol in enumerate(symbols)
+        },
+    }
+    runtime["symbols"]["300001.SZ"] = {"source_modes": ["selected"]}
+    runtime["candidate_scores"]["300001.SZ"] = {
+        "candidate_score": None,
+        "candidate_score_detail": {},
+    }
+
+    retained = service._trim_automatic_candidates(runtime)
+
+    assert retained == set(symbols[:30])
+    assert set(runtime["symbols"]) == {*symbols[:30], "300001.SZ"}
+    assert set(runtime["candidate_scores"]) == {*symbols[:30], "300001.SZ"}
+
+
+def test_main_board_only_filters_automatic_candidate_universe(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    symbols = {
+        "600000.SH",
+        "000001.SZ",
+        "300001.SZ",
+        "688001.SH",
+        "920001.BJ",
+    }
+    service._first_board_eligible = set(symbols)
+    monkeypatch.setattr(
+        service, "_refresh_sector_candidate_universe", lambda _day: set(symbols),
+    )
+    service.store.update(
+        0,
+        lambda value: value["settings"].update({"main_board_only": True}),
+    )
+
+    automatic = service._automatic_candidate_symbols(date(2026, 8, 17))
+
+    assert automatic == {"600000.SH", "000001.SZ"}
+
+
 def test_first_board_filters_st_from_history_and_realtime_quotes(tmp_path, monkeypatch):
     service, quotes, config = make_service(tmp_path)
     config["settings"]["first_board_lookback_days"] = 1
@@ -396,6 +524,19 @@ def test_rebound_quote_enters_candidate_pool_with_rebound_source(tmp_path, monke
     monkeypatch.setattr(
         service, "_automatic_candidate_symbols", lambda _day: {"600000.SH"},
     )
+
+    def score(runtime, candidates, _now):
+        runtime["candidate_scores"] = {
+            str(row["symbol"]): {
+                "candidate_score": 80.0,
+                "candidate_score_detail": {},
+                "candidate_reasons": ["反包候选"],
+            }
+            for row in candidates
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
 
     service._process_quotes([{
         "symbol": "600000.SH",
@@ -1051,6 +1192,7 @@ def test_default_config_preserves_current_sweep_and_queue_triggers():
     assert settings["queue_confirm_snapshots"] == 0
     assert settings["order_amount_per_board"] == 0.0
     assert settings["max_auto_board_count"] == 0
+    assert settings["main_board_only"] is False
 
 
 def test_sweep_uses_configured_price_levels():
@@ -2262,6 +2404,21 @@ def test_limit_board_api_updates_notification_settings(tmp_path):
     }
 
 
+def test_limit_board_quote_api_limits_batch_size(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/limit-board/quotes",
+        json={"symbols": [f"{index:06d}.SH" for index in range(31)]},
+    )
+
+    assert response.status_code == 422
+
+
 def test_limit_board_api_updates_advanced_settings(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     app = FastAPI()
@@ -2275,6 +2432,7 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
         "order_amount_per_board": 20_000,
         "max_auto_board_count": 3,
         "max_market_broken_rate_pct": 35.5,
+        "main_board_only": True,
         "near_limit_pct": 0.015,
         "exit_limit_pct": 0.04,
         "exit_sustain_seconds": 45,
@@ -2309,6 +2467,7 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
         "order_amount_per_board": 0,
         "max_auto_board_count": 0,
         "max_market_broken_rate_pct": 40,
+        "main_board_only": False,
         "near_limit_pct": 0.02,
         "exit_limit_pct": 0.03,
         "exit_sustain_seconds": 30,

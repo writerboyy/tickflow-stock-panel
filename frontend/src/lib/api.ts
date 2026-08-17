@@ -1259,6 +1259,21 @@ export interface LimitBoardRow {
   first_board_broken_rate?: number
 }
 
+export interface LimitBoardQuoteSnapshot {
+  state: 'live' | 'snapshot' | 'partial' | 'unavailable'
+  as_of: string | null
+  quotes: Record<string, {
+    symbol: string
+    name?: string | null
+    last_price?: number | null
+    change_pct?: number | null
+    limit_up?: number | null
+    timestamp?: string | number | null
+    source?: 'realtime' | 'daily_snapshot'
+  }>
+  missing_symbols: string[]
+}
+
 export interface LimitBoardSectorStrengthRow {
   plate_id: string
   plate_name?: string | null
@@ -1350,6 +1365,7 @@ export interface LimitBoardView {
     order_amount_per_board: number
     max_auto_board_count: number
     max_market_broken_rate_pct: number
+    main_board_only: boolean
     near_limit_pct: number
     exit_limit_pct: number
     exit_sustain_seconds: number
@@ -2627,6 +2643,10 @@ export const api = {
     request<LimitBoardSectorConstituents>(
       `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents?captured_at=${encodeURIComponent(capturedAt)}`,
     ),
+  limitBoardQuotes: (symbols: string[]) =>
+    request<LimitBoardQuoteSnapshot>('/api/limit-board/quotes', {
+      method: 'POST', body: JSON.stringify({ symbols }),
+    }),
   limitBoardNotificationsUpdate: (
     notifications: LimitBoardView['settings']['notifications'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {

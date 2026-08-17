@@ -43,6 +43,7 @@ _PREMIUM_FILTER_COLUMNS = {
 }
 _SCORE_REFRESH_SECONDS = 5.0
 _SECTOR_CANDIDATE_LIMIT = 10
+_AUTOMATIC_CANDIDATE_LIMIT = 30
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
@@ -85,6 +86,13 @@ def _is_trading_time(value: datetime) -> bool:
         clock_time(9, 30) <= current < clock_time(11, 30)
         or clock_time(13, 0) <= current < clock_time(15, 0)
     )
+
+
+def _is_main_board_symbol(symbol: str) -> bool:
+    value = str(symbol or "").strip().upper()
+    if value.endswith(".BJ") or value.startswith(("300", "301", "688", "689")):
+        return False
+    return value.endswith((".SH", ".SZ"))
 
 
 def _sweep_ready(
@@ -167,6 +175,7 @@ class LimitBoardService:
         self._ws_symbols: set[str] = set()
         self._quotes: dict[str, dict[str, Any]] = {}
         self._sector_quote_symbols: set[str] = set()
+        self._heat_quote_symbols: set[str] = set()
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=10))
         self._history_date: date | None = None
         self._name_map_date: date | None = None
@@ -247,6 +256,94 @@ class LimitBoardService:
 
     def _qmt(self):
         return getattr(self.app_state, "qmt_trading_service", None)
+
+    def quote_snapshot(self, symbols: list[str]) -> dict[str, Any]:
+        requested = list(dict.fromkeys(
+            str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
+        ))[:30]
+        requested_set = set(requested)
+        with self._lock:
+            changed = requested_set != self._heat_quote_symbols
+            self._heat_quote_symbols = requested_set
+        if changed:
+            self._refresh_symbol_consumer()
+
+        rows = self.quote_service.get_latest_quotes(requested_set)
+        quotes: dict[str, dict[str, Any]] = {}
+        for raw in rows:
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            if symbol not in requested_set:
+                continue
+            quotes[symbol] = {
+                "symbol": symbol,
+                "name": raw.get("name"),
+                "last_price": _finite(raw.get("last_price")),
+                "change_pct": _finite(raw.get("change_pct")),
+                "limit_up": _finite(raw.get("limit_up")),
+                "timestamp": raw.get("timestamp"),
+                "source": "realtime",
+            }
+        missing = requested_set - quotes.keys()
+        enriched_as_of: date | None = None
+        enriched_getter = getattr(self.quote_service, "get_enriched_today", None)
+        if missing and callable(enriched_getter):
+            try:
+                enriched, enriched_as_of = enriched_getter()
+            except Exception:  # noqa: BLE001
+                logger.debug("读取热股收盘行情快照失败", exc_info=True)
+            else:
+                if isinstance(enriched, pl.DataFrame) and not enriched.is_empty() and "symbol" in enriched.columns:
+                    columns = [
+                        column for column in (
+                            "symbol", "name", "last_price", "close", "change_pct",
+                            "prev_close", "limit_up",
+                        )
+                        if column in enriched.columns
+                    ]
+                    snapshot_rows = (
+                        enriched
+                        .filter(
+                            pl.col("symbol").cast(pl.Utf8).str.to_uppercase().is_in(sorted(missing))
+                        )
+                        .select(columns)
+                        .to_dicts()
+                    )
+                    snapshot_date = enriched_as_of or cn_today()
+                    for raw in snapshot_rows:
+                        symbol = str(raw.get("symbol") or "").strip().upper()
+                        price = _finite(raw.get("last_price"))
+                        if price is None:
+                            price = _finite(raw.get("close"))
+                        if symbol not in missing or price is None:
+                            continue
+                        name = raw.get("name")
+                        quotes[symbol] = {
+                            "symbol": symbol,
+                            "name": name,
+                            "last_price": price,
+                            "change_pct": _finite(raw.get("change_pct")),
+                            "limit_up": self._limit_up(raw, symbol, str(name or ""), snapshot_date),
+                            "timestamp": snapshot_date.isoformat(),
+                            "source": "daily_snapshot",
+                        }
+        timestamps = [
+            str(row["timestamp"])
+            for row in quotes.values()
+            if row.get("timestamp")
+        ]
+        all_realtime = bool(quotes) and all(
+            row.get("source") == "realtime" for row in quotes.values()
+        )
+        return {
+            "state": (
+                "live" if len(quotes) == len(requested) and all_realtime
+                else "snapshot" if len(quotes) == len(requested)
+                else "partial" if quotes else "unavailable"
+            ),
+            "as_of": max(timestamps) if timestamps else None,
+            "quotes": quotes,
+            "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
+        }
 
     def _market_sentiment_snapshot(self) -> dict[str, Any] | None:
         collector = getattr(self.app_state, "kaipanla_collector", None)
@@ -882,7 +979,10 @@ class LimitBoardService:
         sector_symbols = self._refresh_sector_candidate_universe(today)
         if not self._history_ready:
             return set()
-        return sector_symbols & (self._first_board_eligible | self._rebound_board_eligible)
+        result = sector_symbols & (self._first_board_eligible | self._rebound_board_eligible)
+        if self.store.load_config()["settings"].get("main_board_only", False):
+            result = {symbol for symbol in result if _is_main_board_symbol(symbol)}
+        return result
 
     def _sentiment_guard(self, config: dict[str, Any]) -> dict[str, Any]:
         threshold = _finite(
@@ -1149,6 +1249,10 @@ class LimitBoardService:
         automatic_candidates = (
             self._automatic_candidate_symbols(now.date()) if full_market else set()
         )
+        excluded = {
+            str(symbol).strip().upper()
+            for symbol in runtime.get("candidate_excluded") or []
+        }
         runtime_by_symbol = runtime.setdefault("symbols", {})
         for symbol, state in list(runtime_by_symbol.items()):
             modes = set(state.get("source_modes") or [])
@@ -1157,7 +1261,7 @@ class LimitBoardService:
                 modes.add("selected")
             if symbol in board_pool:
                 modes.add("board_pool")
-            if symbol in automatic_candidates:
+            if symbol in automatic_candidates and symbol not in excluded:
                 if symbol in self._first_board_eligible:
                     modes.add("first_board")
                 if symbol in self._rebound_board_eligible:
@@ -1166,7 +1270,6 @@ class LimitBoardService:
                 state["source_modes"] = sorted(modes)
             else:
                 runtime_by_symbol.pop(symbol, None)
-        runtime_symbols = set(runtime_by_symbol)
         updates: dict[str, dict[str, Any]] = {}
         for raw in records:
             symbol = str(raw.get("symbol") or "").strip().upper()
@@ -1190,11 +1293,7 @@ class LimitBoardService:
                 source_modes.append("board_pool")
             if symbol in selected:
                 source_modes.append("selected")
-            scan_window = float(config["settings"].get("exit_limit_pct", 0.03))
-            if (
-                symbol in automatic_candidates
-                and (gap <= scan_window or symbol in runtime_symbols)
-            ):
+            if symbol in automatic_candidates and symbol not in excluded:
                 if symbol in self._first_board_eligible:
                     source_modes.append("first_board")
                 if symbol in self._rebound_board_eligible:
@@ -1235,6 +1334,7 @@ class LimitBoardService:
             if item.get("symbol")
         }
         self._refresh_candidate_scores(runtime, list(scoring_rows.values()), now)
+        self._trim_automatic_candidates(runtime)
         self._sync_websocket(runtime, config)
         self._last_scan_at = now.isoformat()
         self._persist_runtime(runtime)
@@ -1747,6 +1847,7 @@ class LimitBoardService:
         }
         with self._lock:
             symbols.update(self._sector_quote_symbols)
+            symbols.update(self._heat_quote_symbols)
         self.quote_service.set_symbol_consumer(_ACCOUNT_ID, symbols)
 
     def _enrich_concepts(self, rows: list[dict[str, Any]]) -> None:
@@ -1855,6 +1956,40 @@ class LimitBoardService:
             rank += 1
             row["candidate_rank"] = rank
         return result
+
+    def _trim_automatic_candidates(self, runtime: dict[str, Any]) -> set[str]:
+        """Persist only the best scored automatic rows; manual tracking always survives."""
+        runtime_by_symbol = runtime.setdefault("symbols", {})
+        automatic_rows = [
+            {"symbol": symbol, **state}
+            for symbol, state in runtime_by_symbol.items()
+            if {"first_board", "rebound_board"} & set(state.get("source_modes") or [])
+        ]
+        ranked = self._rank_candidates(
+            automatic_rows,
+            runtime.get("candidate_scores") or {},
+        )
+        retained_order = [
+            str(row["symbol"]).strip().upper()
+            for row in ranked
+            if row.get("candidate_score") is not None
+        ][:_AUTOMATIC_CANDIDATE_LIMIT]
+        retained = set(retained_order)
+        for symbol, state in list(runtime_by_symbol.items()):
+            modes = set(state.get("source_modes") or [])
+            if symbol not in retained:
+                modes.difference_update({"first_board", "rebound_board"})
+            if modes:
+                state["source_modes"] = sorted(modes)
+            else:
+                runtime_by_symbol.pop(symbol, None)
+        kept_symbols = set(runtime_by_symbol)
+        runtime["candidate_scores"] = {
+            symbol: value
+            for symbol, value in (runtime.get("candidate_scores") or {}).items()
+            if symbol in kept_symbols
+        }
+        return retained
 
     def _view_collections(
         self, runtime: dict[str, Any], config: dict[str, Any],
@@ -2420,6 +2555,7 @@ class LimitBoardService:
             "max_market_broken_rate_pct": float(
                 settings.get("max_market_broken_rate_pct", 40.0),
             ),
+            "main_board_only": bool(settings.get("main_board_only", False)),
             "near_limit_pct": float(settings["near_limit_pct"]),
             "exit_limit_pct": float(settings["exit_limit_pct"]),
             "exit_sustain_seconds": int(settings["exit_sustain_seconds"]),

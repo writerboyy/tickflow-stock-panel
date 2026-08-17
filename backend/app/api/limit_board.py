@@ -43,6 +43,7 @@ class AdvancedSettings(BaseModel):
     order_amount_per_board: float = Field(default=0, ge=0, le=10_000_000)
     max_auto_board_count: int = Field(default=0, ge=0, le=100)
     max_market_broken_rate_pct: float = Field(default=40.0, ge=0, le=100)
+    main_board_only: bool = False
     near_limit_pct: float = Field(ge=0.001, le=0.10)
     exit_limit_pct: float = Field(ge=0.001, le=0.20)
     exit_sustain_seconds: int = Field(ge=1, le=300)
@@ -53,6 +54,10 @@ class AdvancedSettings(BaseModel):
 class AdvancedSettingsWrite(BaseModel):
     revision: int = Field(ge=0)
     settings: AdvancedSettings
+
+
+class QuoteSnapshotRequest(BaseModel):
+    symbols: list[str] = Field(min_length=1, max_length=30)
 
 
 def _service(request: Request):
@@ -73,6 +78,11 @@ def sector_strength(request: Request, captured_at: str | None = None):
         return _service(request).sector_strength_view(captured_at)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/quotes")
+def quote_snapshot(payload: QuoteSnapshotRequest, request: Request):
+    return _service(request).quote_snapshot(payload.symbols)
 
 
 @router.get("/sector-strength/{plate_id}/constituents")

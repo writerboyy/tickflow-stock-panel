@@ -23,6 +23,7 @@ def default_config() -> dict[str, Any]:
             "order_amount_per_board": 0.0,
             "max_auto_board_count": 0,
             "max_market_broken_rate_pct": 40.0,
+            "main_board_only": False,
             "near_limit_pct": 0.02,
             "exit_limit_pct": 0.03,
             "exit_sustain_seconds": 30,

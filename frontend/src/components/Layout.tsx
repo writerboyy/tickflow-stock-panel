@@ -81,7 +81,7 @@ const nav = [
   { to: '/',                label: '看板',     icon: LayoutDashboard },
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/large-orders', label: '持仓风控', icon: ShieldCheck },
-  { to: '/limit-board', label: '打板专区', icon: Crosshair },
+  { to: '/limit-board', label: '短线猎手', icon: Crosshair },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
   { to: '/free-strategy', label: '量化策略', icon: Code2 },
