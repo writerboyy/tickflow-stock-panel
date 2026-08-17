@@ -553,9 +553,6 @@ export function LimitBoard() {
     ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
     : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
   const marketEmotion = overview.data?.emotion
-  const marketRadar = (overview.data?.radar ?? []).filter(item => (
-    ['profit', 'money', 'speculation', 'mainline'].includes(item.key)
-  ))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -608,10 +605,6 @@ export function LimitBoard() {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
               <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
-                {tab === 'candidate' && marketEmotion ? <>
-                  <span className={marketEmotion.score >= 55 ? 'text-bear' : marketEmotion.score < 45 ? 'text-bull' : 'text-secondary'} title={`看板日期 ${overview.data?.as_of ?? '--'}`}>情绪 {marketEmotion.label} <span className="font-mono">{marketEmotion.score}</span></span>
-                  {marketRadar.map(item => <span key={item.key} className="text-muted">{item.label} <span className="font-mono text-secondary">{item.value}</span></span>)}
-                </> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
               </div>
             </div>
