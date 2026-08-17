@@ -596,6 +596,43 @@ def parse_limitup(payload: dict) -> list[dict]:
     ]
 
 
+def parse_limit_up_expression(payload: dict, trade_date: date) -> dict:
+    """Parse Kaipanla's twelve-field limit-up performance snapshot."""
+    values = _rows(payload, "info")
+    if len(values) != 12:
+        raise ResponseShapeError("info 必须恰好包含 12 列")
+    return {
+        "as_of": trade_date.isoformat(),
+        "first_board_count": _int(values[0], "info[0]"),
+        "second_board_count": _int(values[1], "info[1]"),
+        "third_board_count": _int(values[2], "info[2]"),
+        "high_board_count": _int(values[3], "info[3]"),
+        "consecutive_rate_pct": _float(values[4], "info[4]"),
+        "yesterday_first_board_up_count": _int(values[5], "info[5]"),
+        "yesterday_first_board_down_count": _int(values[6], "info[6]"),
+        "market_broken_rate_pct": _float(values[7], "info[7]"),
+        "yesterday_limitup_change_pct": _float(values[8], "info[8]"),
+        "yesterday_consecutive_change_pct": _float(values[9], "info[9]"),
+        "yesterday_broken_change_pct": _float(values[10], "info[10]"),
+        "market_evaluation": _text(values[11], "info[11]"),
+    }
+
+
+def parse_limit_up_ladder_height(payload: dict) -> dict:
+    rows = _rows(payload, "List")
+    heights: list[int] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ResponseShapeError(f"List[{index}] 不是对象")
+        height = _int(row.get("Tip"), f"List[{index}].Tip")
+        if height is not None and height > 0:
+            heights.append(height)
+    return {
+        "as_of": _text(payload.get("Date"), "Date"),
+        "max_consecutive": max(heights, default=0),
+    }
+
+
 def parse_premium_gene(payload: dict, code: str) -> dict:
     """解析开盘啦 /76 涨停基因六项数组，保留百分比单位。"""
     values = _rows(payload, "List")

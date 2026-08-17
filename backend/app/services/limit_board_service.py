@@ -223,6 +223,51 @@ class LimitBoardService:
     def _qmt(self):
         return getattr(self.app_state, "qmt_trading_service", None)
 
+    def _market_sentiment_snapshot(self) -> dict[str, Any] | None:
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        getter = getattr(collector, "market_sentiment_snapshot", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001
+            logger.debug("读取开盘啦情绪快照失败", exc_info=True)
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _sentiment_guard(self, config: dict[str, Any]) -> dict[str, Any]:
+        threshold = _finite(
+            config.get("settings", {}).get("max_market_broken_rate_pct", 40.0),
+        )
+        threshold = 40.0 if threshold is None else max(0.0, min(100.0, threshold))
+        snapshot = self._market_sentiment_snapshot()
+        if snapshot is None:
+            return {
+                "state": "unavailable",
+                "blocked": False,
+                "threshold_pct": threshold,
+                "broken_rate_pct": None,
+                "reason": "开盘啦情绪快照暂不可用，未触发自动停手",
+            }
+        state = str(snapshot.get("state") or "unavailable")
+        broken_rate = _finite(snapshot.get("market_broken_rate_pct"))
+        blocked = state == "live" and broken_rate is not None and broken_rate >= threshold
+        if blocked:
+            reason = f"今日破板率 {broken_rate:.2f}% 已达到 {threshold:.2f}%，自动打板已停止"
+        elif state == "stale":
+            reason = f"开盘啦 {snapshot.get('as_of') or '--'} 收盘数据，仅供参考，未触发自动停手"
+        elif state == "live" and broken_rate is not None:
+            reason = f"今日破板率 {broken_rate:.2f}% 未达到停手阈值 {threshold:.2f}%"
+        else:
+            reason = "开盘啦情绪快照缺少破板率，未触发自动停手"
+        return {
+            "state": state if state in {"live", "stale"} else "unavailable",
+            "blocked": blocked,
+            "threshold_pct": threshold,
+            "broken_rate_pct": broken_rate,
+            "reason": reason,
+        }
+
     def _enqueue(self, payload: dict[str, Any]) -> None:
         try:
             self._queue.put_nowait(payload)
@@ -775,6 +820,11 @@ class LimitBoardService:
         if is_risk_warning_name(self._resolve_name(symbol, quote.get("name"))):
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "ST 风险警示股票已被打板专区过滤"
+            return
+        sentiment_guard = self._sentiment_guard(config)
+        if sentiment_guard["blocked"]:
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = sentiment_guard["reason"]
             return
         qmt = self._qmt()
         qmt_status = qmt.status() if qmt is not None else {}
@@ -1391,7 +1441,11 @@ class LimitBoardService:
             and qmt_status.get("state") == "ready"
             and qmt_status.get("trade_enabled")
         )
-        if trading_enabled:
+        sentiment_guard = self._sentiment_guard(config)
+        if sentiment_guard["blocked"]:
+            trading_enabled = False
+            trading_reason = sentiment_guard["reason"]
+        elif trading_enabled:
             trading_reason = "QMT 实盘已就绪"
         elif qmt_status.get("state") == "ready":
             trading_reason = "QMT 已连接，实盘模式未开启"
@@ -1412,6 +1466,7 @@ class LimitBoardService:
                 symbol for symbol in runtime.get("blacklist", [])
                 if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
             ],
+            "market_sentiment": self._market_sentiment_snapshot(),
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],
@@ -1424,6 +1479,7 @@ class LimitBoardService:
                 "websocket_capacity": capacity,
                 "trading_enabled": trading_enabled,
                 "trading_reason": trading_reason,
+                "sentiment_guard": sentiment_guard,
                 "market_mode": self._market_mode(),
                 "first_board_enabled": self._market_mode() == "full_market" and self._history_ready,
             },
@@ -1453,6 +1509,9 @@ class LimitBoardService:
             "queue_confirm_snapshots": int(settings["queue_confirm_snapshots"]),
             "order_amount_per_board": float(settings["order_amount_per_board"]),
             "max_auto_board_count": int(settings["max_auto_board_count"]),
+            "max_market_broken_rate_pct": float(
+                settings.get("max_market_broken_rate_pct", 40.0),
+            ),
             "near_limit_pct": float(settings["near_limit_pct"]),
             "exit_limit_pct": float(settings["exit_limit_pct"]),
             "exit_sustain_seconds": int(settings["exit_sustain_seconds"]),
@@ -1461,6 +1520,8 @@ class LimitBoardService:
         }
         if values["exit_limit_pct"] < values["near_limit_pct"]:
             raise ValueError("扫描退出阈值不能小于临板 WS 阈值")
+        if not 0 <= values["max_market_broken_rate_pct"] <= 100:
+            raise ValueError("今日破板率停手阈值必须在 0 到 100 之间")
 
         def update(config: dict[str, Any]) -> None:
             config["settings"].update(values)

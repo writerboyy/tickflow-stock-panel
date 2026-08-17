@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
-from datetime import date
+from datetime import date, time as clock_time, timedelta
 from pathlib import Path
 
 from apscheduler.triggers.cron import CronTrigger
@@ -23,6 +24,8 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_list,
     parse_interval_stock,
     parse_large_order_statistics,
+    parse_limit_up_expression,
+    parse_limit_up_ladder_height,
     parse_limitup,
     parse_northbound_sector,
     parse_northbound_stocks,
@@ -94,7 +97,10 @@ class KaipanlaCollector:
         self.data_dir = Path(data_dir)
         self._client_factory = client_factory
         self._bootstrap_task: asyncio.Task | None = None
+        self._sentiment_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
+        self._sentiment_lock = threading.Lock()
+        self._market_sentiment: dict | None = None
 
     @property
     def configured(self) -> bool:
@@ -132,6 +138,19 @@ class KaipanlaCollector:
                 ),
                 id="kaipanla_limitup",
                 misfire_grace_time=7200,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_market_sentiment,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-15",
+                    minute="*",
+                    second="*/15",
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_market_sentiment",
+                misfire_grace_time=30,
                 replace_existing=True,
             )
             scheduler.add_job(
@@ -232,11 +251,23 @@ class KaipanlaCollector:
             self._run_safely("auction_catch_up", self.catch_up_auction),
             name="kaipanla-auction-catch-up",
         )
+        if self._sentiment_task is None or self._sentiment_task.done():
+            self._sentiment_task = asyncio.create_task(
+                self._run_safely(
+                    "market_sentiment",
+                    self.refresh_market_sentiment,
+                    cn_today(),
+                ),
+                name="kaipanla-market-sentiment",
+            )
 
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
             self._bootstrap_task.cancel()
+        if self._sentiment_task and not self._sentiment_task.done():
+            self._sentiment_task.cancel()
         self._bootstrap_task = None
+        self._sentiment_task = None
 
     async def _run_safely(self, name: str, func, *args) -> int:
         if not self.configured:
@@ -266,6 +297,20 @@ class KaipanlaCollector:
     async def _scheduled_limitup(self) -> int:
         return await self._run_safely("limitup", self.collect_limitup, cn_today())
 
+    async def _scheduled_market_sentiment(self) -> int:
+        now = cn_now()
+        current = now.timetz().replace(tzinfo=None)
+        if not (
+            clock_time(9, 15) <= current <= clock_time(11, 30)
+            or clock_time(13, 0) <= current <= clock_time(15, 5)
+        ):
+            return 0
+        return await self._run_safely(
+            "market_sentiment",
+            self.refresh_market_sentiment,
+            now.date(),
+        )
+
     async def _scheduled_lhb(self) -> int:
         return await self._run_safely("lhb", self.collect_lhb)
 
@@ -291,6 +336,61 @@ class KaipanlaCollector:
             logger.warning("开盘啦资金采集缺少已完成交易日")
             return 0
         return await self._run_safely("funds", self.collect_funds, max(completed_dates))
+
+    def market_sentiment_snapshot(self) -> dict | None:
+        """Return the latest in-memory Kaipanla sentiment snapshot."""
+        with self._sentiment_lock:
+            return dict(self._market_sentiment) if self._market_sentiment else None
+
+    async def refresh_market_sentiment(self, trade_date: date) -> int:
+        """Refresh the small live sentiment snapshot without creating history rows."""
+        with self._sentiment_lock:
+            existing = dict(self._market_sentiment) if self._market_sentiment else None
+
+        candidates = [trade_date]
+        if existing is None:
+            candidates.extend(
+                value
+                for offset in range(1, 16)
+                if (value := trade_date - timedelta(days=offset)).weekday() < 5
+            )
+
+        selected = None
+        async with self._client_factory() as client:
+            for candidate in candidates:
+                try:
+                    payload = await client.request(
+                        "limit_up_expression",
+                        {"Day": candidate.isoformat()},
+                    )
+                    selected = parse_limit_up_expression(payload, candidate)
+                except Exception:  # noqa: BLE001
+                    continue
+                break
+
+            if selected is None:
+                return 0
+
+            try:
+                ladder = parse_limit_up_ladder_height(
+                    await client.request("limit_up_ladder"),
+                )
+            except Exception:  # noqa: BLE001
+                ladder = {}
+
+        selected["max_consecutive"] = (
+            ladder.get("max_consecutive")
+            if ladder.get("as_of") == selected["as_of"]
+            else None
+        )
+        selected.update({
+            "provider": "kaipanla",
+            "state": "live" if selected["as_of"] == trade_date.isoformat() else "stale",
+            "refreshed_at": cn_now().isoformat(),
+        })
+        with self._sentiment_lock:
+            self._market_sentiment = selected
+        return 1
 
     async def _scheduled_northbound(self) -> int:
         return await self._run_safely("northbound", self.collect_northbound)

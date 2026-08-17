@@ -74,6 +74,10 @@ function scoreTime(value: string | null | undefined): string {
   return Number.isNaN(parsed.getTime()) ? '--' : parsed.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+function percentValue(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
 const LEADERSHIP = {
   leader: { label: '龙头', tone: 'text-bear' },
   front: { label: '前排', tone: 'text-warning' },
@@ -363,6 +367,9 @@ function AdvancedSettingsDialog({
     && Number.isInteger(draft.max_auto_board_count)
     && draft.max_auto_board_count >= 0
     && draft.max_auto_board_count <= 100
+    && Number.isFinite(draft.max_market_broken_rate_pct)
+    && draft.max_market_broken_rate_pct >= 0
+    && draft.max_market_broken_rate_pct <= 100
     && draft.near_limit_pct >= 0.001
     && draft.near_limit_pct <= 0.10
     && draft.exit_limit_pct >= draft.near_limit_pct
@@ -402,6 +409,10 @@ function AdvancedSettingsDialog({
         <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={1} value={draft.max_auto_board_count} disabled={pending} onChange={event => update('max_auto_board_count', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">只</span></span>
       </label>
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span><span className="block">今日破板率停手阈值</span><span className="mt-0.5 block text-[10px] text-muted">达到后停止自动打板，默认 40%</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={0.1} value={draft.max_market_broken_rate_pct} disabled={pending} onChange={event => update('max_market_broken_rate_pct', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+      </label>
+      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span>临板 WS 阈值</span>
         <span className="flex items-center gap-2"><input type="number" min={0.1} max={10} step={0.1} value={Number((draft.near_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('near_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
       </label>
@@ -434,6 +445,7 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
     queue_confirm_snapshots: value.queue_confirm_snapshots,
     order_amount_per_board: value.order_amount_per_board,
     max_auto_board_count: value.max_auto_board_count,
+    max_market_broken_rate_pct: value.max_market_broken_rate_pct,
     near_limit_pct: value.near_limit_pct,
     exit_limit_pct: value.exit_limit_pct,
     exit_sustain_seconds: value.exit_sustain_seconds,
@@ -453,7 +465,7 @@ export function LimitBoard() {
   const overview = useQuery({
     queryKey: QK.overviewMarket(undefined),
     queryFn: () => api.overviewMarket(),
-    enabled: tab === 'candidate',
+    enabled: true,
     refetchInterval: 15000,
     staleTime: 5000,
   })
@@ -538,6 +550,24 @@ export function LimitBoard() {
         <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
         {!runtime.first_board_enabled ? <span className="text-warning">首板/反包扫描暂不可用：{runtime.history_reason}</span> : <span>{runtime.history_reason}</span>}
       </div>
+
+      <section className="border-b border-border px-4 py-3 sm:px-5">
+        <div className="grid min-w-[720px] grid-cols-5 divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
+          {[
+            ['今日破板率', data.market_sentiment ? percentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
+            ['昨日涨停今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
+            ['昨日连板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
+            ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
+            ['情绪 / 连板高度', `${marketEmotion ? `${marketEmotion.label} ${marketEmotion.score}` : '--'} / ${data.market_sentiment?.max_consecutive ?? '--'}板`, 'text-accent'],
+          ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+          {data.market_sentiment ? <span>{data.market_sentiment.state === 'live' ? '开盘啦实时' : `开盘啦 ${data.market_sentiment.as_of} 收盘数据`}</span> : <span>开盘啦数据暂不可用</span>}
+          {data.market_sentiment ? <span>刷新 {scoreTime(data.market_sentiment.refreshed_at)}</span> : null}
+          <span className={runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'}>{runtime.sentiment_guard.reason}</span>
+        </div>
+        {runtime.sentiment_guard.blocked ? <div className="mt-2 flex items-center gap-2 rounded-btn border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"><ShieldAlert className="h-3.5 w-3.5" />自动打板已停止</div> : null}
+      </section>
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([

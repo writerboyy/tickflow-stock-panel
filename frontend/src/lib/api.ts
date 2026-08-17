@@ -1220,6 +1220,7 @@ export interface LimitBoardView {
     queue_confirm_snapshots: number
     order_amount_per_board: number
     max_auto_board_count: number
+    max_market_broken_rate_pct: number
     near_limit_pct: number
     exit_limit_pct: number
     exit_sustain_seconds: number
@@ -1233,6 +1234,18 @@ export interface LimitBoardView {
   candidate_pool: LimitBoardRow[]
   board_pool: LimitBoardRow[]
   blacklist: string[]
+  market_sentiment: {
+    provider: 'kaipanla'
+    state: 'live' | 'stale'
+    as_of: string
+    refreshed_at: string
+    market_broken_rate_pct?: number | null
+    yesterday_limitup_change_pct?: number | null
+    yesterday_consecutive_change_pct?: number | null
+    yesterday_broken_change_pct?: number | null
+    market_evaluation?: string | null
+    max_consecutive?: number | null
+  } | null
   events: Array<Record<string, any>>
   runtime: {
     trading_date: string
@@ -1245,6 +1258,13 @@ export interface LimitBoardView {
     websocket_capacity: number
     trading_enabled: boolean
     trading_reason: string
+    sentiment_guard: {
+      state: 'live' | 'stale' | 'unavailable'
+      blocked: boolean
+      threshold_pct: number
+      broken_rate_pct?: number | null
+      reason: string
+    }
     market_mode: string
     first_board_enabled: boolean
   }

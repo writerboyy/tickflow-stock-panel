@@ -1285,6 +1285,101 @@ def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
     assert "auto_order_key" not in state
 
 
+def test_board_pool_auto_trade_stops_when_live_market_broken_rate_is_high(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        market_sentiment_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": "2026-08-13",
+            "market_broken_rate_pct": 42.3,
+        },
+    )
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    state = {}
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "自动打板已停止" in state["auto_order_error"]
+
+
+def test_board_pool_auto_trade_allows_stale_market_snapshot(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        market_sentiment_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "stale",
+            "as_of": "2026-08-12",
+            "market_broken_rate_pct": 80.0,
+        },
+    )
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    state = {}
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert len(qmt.orders) == 1
+
+
+def test_board_pool_auto_trade_allows_live_market_snapshot_below_threshold(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        market_sentiment_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": "2026-08-13",
+            "market_broken_rate_pct": 39.9,
+        },
+    )
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    service._maybe_auto_trade("600000.SH", quote(), {}, config)
+
+    assert len(qmt.orders) == 1
+
+
+def test_limit_board_view_exposes_market_sentiment_guard(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        market_sentiment_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": "2026-08-13",
+            "refreshed_at": "2026-08-13T10:00:00+08:00",
+            "market_broken_rate_pct": 42.3,
+            "max_consecutive": 5,
+        },
+    )
+
+    result = service.view()
+
+    assert result["market_sentiment"]["max_consecutive"] == 5
+    assert result["runtime"]["sentiment_guard"]["blocked"] is True
+    assert result["runtime"]["trading_enabled"] is False
+    assert "自动打板已停止" in result["runtime"]["trading_reason"]
+
+
 def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
@@ -1487,6 +1582,7 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
         "queue_confirm_snapshots": 4,
         "order_amount_per_board": 20_000,
         "max_auto_board_count": 3,
+        "max_market_broken_rate_pct": 35.5,
         "near_limit_pct": 0.015,
         "exit_limit_pct": 0.04,
         "exit_sustain_seconds": 45,
@@ -1520,6 +1616,7 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
         "queue_confirm_snapshots": 0,
         "order_amount_per_board": 0,
         "max_auto_board_count": 0,
+        "max_market_broken_rate_pct": 40,
         "near_limit_pct": 0.02,
         "exit_limit_pct": 0.03,
         "exit_sustain_seconds": 30,

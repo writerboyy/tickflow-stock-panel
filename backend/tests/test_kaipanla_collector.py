@@ -101,6 +101,59 @@ async def test_0925_collection_automatically_fans_out_bid_details(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_market_sentiment_snapshot_uses_live_expression_and_matching_ladder(
+    tmp_path, monkeypatch,
+):
+    _configured(monkeypatch)
+    calls = []
+    responses = {
+        "limit_up_expression": {"info": [52, 5, 5, 1, 13.5, 38, 11, 23.17, -0.09, -0.41, -2.04, "分化"]},
+        "limit_up_ladder": {"Date": "2026-05-15", "List": [{"Tip": 0}, {"Tip": 4}]},
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
+
+    assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 1
+    snapshot = collector.market_sentiment_snapshot()
+
+    assert snapshot["state"] == "live"
+    assert snapshot["market_broken_rate_pct"] == 23.17
+    assert snapshot["max_consecutive"] == 4
+    assert calls == [
+        ("limit_up_expression", {"Day": "2026-05-15"}),
+        ("limit_up_ladder", {}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_market_sentiment_snapshot_falls_back_to_completed_weekday_and_keeps_stale(
+    tmp_path, monkeypatch,
+):
+    _configured(monkeypatch)
+    calls = []
+    responses = {
+        "limit_up_expression": lambda params: (
+            {"info": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, "旧数据"]}
+            if params["Day"] == "2026-05-14"
+            else RuntimeError("当天尚未生成")
+        ),
+        "limit_up_ladder": {"Date": "2026-05-13", "List": [{"Tip": 6}]},
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
+
+    assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 1
+    snapshot = collector.market_sentiment_snapshot()
+    assert snapshot["state"] == "stale"
+    assert snapshot["as_of"] == "2026-05-14"
+    assert snapshot["max_consecutive"] is None
+
+    calls.clear()
+    responses["limit_up_expression"] = RuntimeError("暂时不可用")
+    assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 0
+    assert collector.market_sentiment_snapshot()["as_of"] == "2026-05-14"
+    assert calls == [("limit_up_expression", {"Day": "2026-05-15"})]
+
+
+@pytest.mark.asyncio
 async def test_auction_manifest_requires_all_live_checkpoints_and_bid_details(tmp_path, monkeypatch):
     _configured(monkeypatch)
     responses = {
@@ -865,7 +918,8 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 12
+    assert len(scheduler.jobs) == 13
+    assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
@@ -888,5 +942,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 12
+    assert len(scheduler.jobs) == 13
     assert collector._bootstrap_task is None

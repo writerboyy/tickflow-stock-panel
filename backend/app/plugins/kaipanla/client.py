@@ -75,6 +75,22 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
             "c": "DailyLimitResumption",
         },
     ),
+    "limit_up_expression": (
+        "POST",
+        "apphis.longhuvip.com",
+        {
+            "a": "ZhangTingExpression",
+            "c": "HisHomeDingPan",
+        },
+    ),
+    "limit_up_ladder": (
+        "POST",
+        "apphwhq.longhuvip.com",
+        {
+            "a": "GetYTFP_SCTD",
+            "c": "FuPanLa",
+        },
+    ),
     76: (
         "POST",
         "apphwhq.longhuvip.com",

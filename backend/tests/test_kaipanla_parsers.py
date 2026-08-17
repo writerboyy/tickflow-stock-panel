@@ -18,6 +18,8 @@ from app.plugins.kaipanla.parsers import (
     parse_large_order_intents,
     parse_lhb_detail,
     parse_lhb_list,
+    parse_limit_up_expression,
+    parse_limit_up_ladder_height,
     parse_limitup,
     parse_premium_gene,
     parse_northbound_sector,
@@ -167,6 +169,25 @@ def test_limitup_parser_flattens_nested_plates_to_one_row_per_stock():
     assert rows[0]["plate_names"] == "核电;聚变"
     assert rows[0]["reason_detail"] == "详细原因"
     assert rows[0]["market_limitup_count"] == 97
+
+
+def test_limit_up_expression_parser_maps_kaipanla_sentiment_fields():
+    row = parse_limit_up_expression(
+        {"info": [52, 5, 5, 1, 13.5135, 38.4615, 11.1111, 23.1707, -0.094, -0.416, -2.042, "题材存在炒作机会"]},
+        date(2026, 8, 14),
+    )
+
+    assert row["as_of"] == "2026-08-14"
+    assert row["first_board_count"] == 52
+    assert row["market_broken_rate_pct"] == 23.1707
+    assert row["yesterday_consecutive_change_pct"] == -0.416
+    assert row["market_evaluation"] == "题材存在炒作机会"
+
+
+def test_limit_up_ladder_parser_ignores_special_zero_level():
+    assert parse_limit_up_ladder_height(
+        {"Date": "2026-08-14", "List": [{"Tip": 0}, {"Tip": 3}, {"Tip": 5}, {"Tip": -1}]},
+    ) == {"as_of": "2026-08-14", "max_consecutive": 5}
 
 
 def test_premium_gene_parser_maps_documented_six_values_as_percentages():
