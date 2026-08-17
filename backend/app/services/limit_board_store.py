@@ -104,6 +104,35 @@ class LimitBoardStore:
         with self._lock:
             self._atomic_write(self.runtime_path, value)
 
+    @staticmethod
+    def event_identity(value: dict[str, Any]) -> str:
+        trading_date = str(value.get("trading_date") or "").strip()
+        symbol = str(value.get("symbol") or "").strip().upper()
+        event_type = str(value.get("type") or "").strip()
+        if not trading_date or not symbol or not event_type:
+            return f"legacy:{int(value.get('ts') or 0)}"
+        break_count = 0 if event_type == "touched" else int(value.get("break_count") or 0)
+        return f"limit_board:{trading_date}:{symbol}:{event_type}:{break_count}"
+
+    def append_event_once(self, value: dict[str, Any]) -> bool:
+        identity = self.event_identity(value)
+        with self._lock:
+            if self.events_path.exists():
+                try:
+                    with self.events_path.open("r", encoding="utf-8") as stream:
+                        for line in stream:
+                            try:
+                                existing = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if self.event_identity(existing) == identity:
+                                return False
+                except OSError:
+                    pass
+            with self.events_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(value, ensure_ascii=False) + "\n")
+        return True
+
     def append_event(self, value: dict[str, Any]) -> None:
         with self._lock, self.events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(value, ensure_ascii=False) + "\n")
@@ -112,7 +141,7 @@ class LimitBoardStore:
         with self._lock:
             if not self.events_path.exists():
                 return []
-            rows = []
+            rows_by_identity: dict[str, dict[str, Any]] = {}
             try:
                 with self.events_path.open("r", encoding="utf-8") as stream:
                     for line in stream:
@@ -121,9 +150,13 @@ class LimitBoardStore:
                         except json.JSONDecodeError:
                             continue
                         if str(value.get("trading_date")) == trading_date:
-                            rows.append(value)
+                            identity = self.event_identity(value)
+                            current = rows_by_identity.get(identity)
+                            if current is None or int(value.get("ts") or 0) < int(current.get("ts") or 0):
+                                rows_by_identity[identity] = value
             except OSError:
                 return []
+        rows = list(rows_by_identity.values())
         rows.sort(key=lambda item: int(item.get("ts") or 0), reverse=True)
         return rows[: max(1, min(int(limit), 2000))]
 

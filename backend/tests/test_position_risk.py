@@ -601,6 +601,71 @@ def test_qmt_submit_preserves_limit_board_order_source(tmp_path: Path):
     assert result["status"] == "accepted_pending"
 
 
+def test_qmt_submit_records_order_timeline_and_real_broker_time(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+
+    def fake_call(method, _params):
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "submit_orders_batch":
+            return [{
+                "success": True,
+                "accepted": True,
+                "order_sys_id": "board-time-1",
+                "order_time": "2026-08-18 10:05:00.250",
+            }]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "limit-board-20260818-600036.SH",
+        "strategy_name": "limit_board",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "volume": 100,
+        "price": 35,
+        "price_type": "LIMIT",
+        "trigger_at": "2026-08-18T10:03:20.100+08:00",
+        "system_order_at": "2026-08-18T10:03:20.150+08:00",
+    })
+
+    assert result["trigger_at"] == "2026-08-18T10:03:20.100+08:00"
+    assert result["system_order_at"] == "2026-08-18T10:03:20.150+08:00"
+    assert result["qmt_submit_at"]
+    assert result["qmt_accepted_at"]
+    assert result["broker_order_at"] == "2026-08-18T10:05:00.250+08:00"
+    assert result["broker_order_time_raw"] == "2026-08-18 10:05:00.250"
+    assert result["broker_order_time_field"] == "order_time"
+
+
+def test_qmt_remote_order_sync_adds_broker_time_to_local_order(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service._remember_order({
+        "idempotency_key": "limit-board-20260818-600036.SH",
+        "strategy_name": "limit_board",
+        "order_sys_id": "board-sync-1",
+        "user_order_id": "limit_board:limit-board-20260818-600036.SH",
+        "status": "accepted_pending",
+        "created_at": "2026-08-18T02:03:20.150+00:00",
+        "updated_at": "2026-08-18T02:03:20.150+00:00",
+        "system_order_at": "2026-08-18T10:03:20.150+08:00",
+    })
+
+    service._merge_remote_orders([{
+        "order_sys_id": "board-sync-1",
+        "status": "queued",
+        "entrust_time": 100500,
+    }])
+    saved = service.get_orders({"limit-board-20260818-600036.SH"})[
+        "limit-board-20260818-600036.SH"
+    ]
+
+    assert saved["status"] == "queued"
+    assert saved["broker_order_at"] == "2026-08-18T10:05:00.000+08:00"
+    assert saved["broker_order_time_raw"] == 100500
+
+
 def test_qmt_submit_uses_sell_preflight(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True

@@ -168,6 +168,61 @@ def test_first_touch_emits_once_and_records_source(tmp_path, monkeypatch):
     assert quotes.events[0]["concept"] == "银行;金融科技"
 
 
+def test_first_touch_is_deduplicated_after_runtime_state_is_trimmed(tmp_path, monkeypatch):
+    service, quotes, config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 3, 20, 150000, tzinfo=CN_TZ),
+    )
+    runtime = service._runtime_for_today()
+    current_quote = {
+        **quote(),
+        "timestamp": "2026-08-13T10:03:20.150+08:00",
+    }
+
+    service._evaluate_quotes({"600000.SH": current_quote}, runtime, config)
+    runtime["symbols"].pop("600000.SH")
+    service._evaluate_quotes({"600000.SH": current_quote}, runtime, config)
+
+    events = service.store.events("2026-08-13")
+    assert len(events) == 1
+    assert events[0]["trigger_at"] == "2026-08-13T10:03:20.150+08:00"
+    assert len(quotes.events) == 1
+
+
+def test_event_store_keeps_real_break_cycles_and_collapses_legacy_duplicates(tmp_path):
+    store = LimitBoardStore(tmp_path)
+    base = {
+        "trading_date": "2026-08-13",
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+    }
+    store.append_event({**base, "ts": 200, "type": "touched", "break_count": 0})
+    store.append_event({**base, "ts": 100, "type": "touched", "break_count": 0})
+    assert store.append_event_once({
+        **base, "ts": 300, "type": "touched", "break_count": 0,
+    }) is False
+    assert store.append_event_once({
+        **base, "ts": 400, "type": "broken", "break_count": 1,
+    }) is True
+    assert store.append_event_once({
+        **base, "ts": 500, "type": "resealed", "break_count": 1,
+    }) is True
+    assert store.append_event_once({
+        **base, "ts": 600, "type": "broken", "break_count": 2,
+    }) is True
+
+    events = store.events("2026-08-13")
+
+    assert [(item["type"], item["break_count"]) for item in events] == [
+        ("broken", 2),
+        ("resealed", 1),
+        ("broken", 1),
+        ("touched", 0),
+    ]
+    assert events[-1]["ts"] == 100
+
+
 def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monkeypatch):
     service, quotes, _config = make_service(tmp_path)
     monkeypatch.setattr(
@@ -614,6 +669,45 @@ def test_view_repairs_code_names_in_existing_runtime_and_events(tmp_path, monkey
     assert view["first_board"][0]["name"] == "浦发银行"
     assert view["events"][0]["name"] == "浦发银行"
     assert view["events"][0]["message"] == "浦发银行：回封"
+
+
+def test_view_attaches_batched_qmt_timeline_to_touch_event(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    service.store.append_event({
+        "ts": 1_786_594_600_150,
+        "trigger_at": "2026-08-13T10:03:20.150+08:00",
+        "trading_date": "2026-08-13",
+        "source": "limit_board",
+        "type": "touched",
+        "rule_name": "涨停",
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "message": "浦发银行：涨停",
+        "break_count": 0,
+        "reasons": ["首次触及涨停价"],
+    })
+    qmt.get_orders = lambda keys: {
+        "limit-board-20260813-600000.SH": {
+            "idempotency_key": "limit-board-20260813-600000.SH",
+            "status": "accepted_pending",
+            "trigger_at": "2026-08-13T10:03:20.150+08:00",
+            "system_order_at": "2026-08-13T10:03:20.200+08:00",
+            "qmt_submit_at": "2026-08-13T10:03:20.250+08:00",
+            "qmt_response_at": "2026-08-13T10:03:20.500+08:00",
+            "broker_order_at": "2026-08-13T10:05:00.000+08:00",
+        }
+    } if "limit-board-20260813-600000.SH" in keys else {}
+
+    event = service.view()["events"][0]
+
+    assert event["order_timeline"]["qmt_submit_at"] == "2026-08-13T10:03:20.250+08:00"
+    assert event["order_timeline"]["broker_order_at"] == "2026-08-13T10:05:00.000+08:00"
+    assert event["order_timeline"]["system_to_broker_delay_ms"] == 99_800
 
 
 def test_view_keeps_unscored_candidate_when_context_is_unavailable(tmp_path, monkeypatch):

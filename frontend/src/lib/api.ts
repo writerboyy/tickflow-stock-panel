@@ -1357,6 +1357,37 @@ export interface LimitBoardSectorConstituents {
   rows: LimitBoardSectorConstituent[]
 }
 
+export interface LimitBoardOrderTimeline {
+  idempotency_key?: string | null
+  status?: string | null
+  order_sys_id?: string | null
+  trigger_at?: string | null
+  system_order_at?: string | null
+  qmt_submit_at?: string | null
+  qmt_response_at?: string | null
+  qmt_accepted_at?: string | null
+  broker_order_at?: string | null
+  broker_order_time_raw?: string | number | null
+  broker_order_time_field?: string | null
+  system_to_broker_delay_ms?: number | null
+  error?: string | null
+}
+
+export interface LimitBoardEvent {
+  ts: number
+  trigger_at?: string | null
+  trading_date?: string
+  type: string
+  symbol: string
+  name: string
+  concept?: string | string[]
+  rule_name?: string
+  message?: string
+  reasons?: string[]
+  break_count?: number
+  order_timeline?: LimitBoardOrderTimeline
+}
+
 export interface LimitBoardView {
   revision: number
   settings: {
@@ -1393,7 +1424,7 @@ export interface LimitBoardView {
     max_consecutive?: number | null
   } | null
   sector_strength: LimitBoardSectorStrengthSnapshot | null
-  events: Array<Record<string, any>>
+  events: LimitBoardEvent[]
   runtime: {
     trading_date: string
     history_ready: boolean

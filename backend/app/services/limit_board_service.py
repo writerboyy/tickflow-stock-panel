@@ -1646,12 +1646,16 @@ class LimitBoardService:
             state["auto_order_error"] = volume_error
             return
         key = f"limit-board-{cn_today().strftime('%Y%m%d')}-{symbol}"
+        trigger_at = cn_now().isoformat(timespec="milliseconds")
+        system_order_at = cn_now().isoformat(timespec="milliseconds")
         state.update({
             "auto_order_key": key,
             "auto_order_status": "submitting",
             "auto_order_mode": order_mode,
             "auto_order_error": None,
-            "auto_order_at": cn_now().isoformat(),
+            "auto_order_at": system_order_at,
+            "auto_order_trigger_at": trigger_at,
+            "auto_order_system_at": system_order_at,
             "auto_order_volume": volume,
             "auto_order_amount": round(float(quote["limit_up"]) * volume, 2),
         })
@@ -1662,6 +1666,8 @@ class LimitBoardService:
                 float(quote["limit_up"]),
                 key,
                 volume,
+                trigger_at,
+                system_order_at,
             )
         except RuntimeError as exc:
             self._order_slots.release()
@@ -1684,7 +1690,15 @@ class LimitBoardService:
             return 0, "单板下单资金不足一手，已阻止自动委托"
         return volume, None
 
-    def _submit_auto_order(self, symbol: str, limit_up: float, key: str, volume: int) -> None:
+    def _submit_auto_order(
+        self,
+        symbol: str,
+        limit_up: float,
+        key: str,
+        volume: int,
+        trigger_at: str,
+        system_order_at: str,
+    ) -> None:
         qmt = self._qmt()
         try:
             if qmt is None:
@@ -1697,6 +1711,8 @@ class LimitBoardService:
                 "volume": volume,
                 "price": limit_up,
                 "price_type": "LIMIT",
+                "trigger_at": trigger_at,
+                "system_order_at": system_order_at,
             })
             result = {
                 "symbol": symbol,
@@ -1704,6 +1720,12 @@ class LimitBoardService:
                 "status": str(order.get("status") or "unknown"),
                 "order_sys_id": order.get("order_sys_id"),
                 "error": order.get("error"),
+                "trigger_at": order.get("trigger_at") or trigger_at,
+                "system_order_at": order.get("system_order_at") or system_order_at,
+                "qmt_submit_at": order.get("qmt_submit_at"),
+                "qmt_accepted_at": order.get("qmt_accepted_at"),
+                "broker_order_at": order.get("broker_order_at"),
+                "broker_order_time_raw": order.get("broker_order_time_raw"),
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("打板自动委托提交失败: %s", exc)
@@ -1713,6 +1735,12 @@ class LimitBoardService:
                 "status": "unknown",
                 "order_sys_id": None,
                 "error": str(exc),
+                "trigger_at": trigger_at,
+                "system_order_at": system_order_at,
+                "qmt_submit_at": None,
+                "qmt_accepted_at": None,
+                "broker_order_at": None,
+                "broker_order_time_raw": None,
             }
         try:
             self._order_results.put(result)
@@ -1730,6 +1758,12 @@ class LimitBoardService:
             "auto_order_sys_id": result.get("order_sys_id"),
             "auto_order_error": result.get("error"),
             "auto_order_updated_at": cn_now().isoformat(),
+            "auto_order_trigger_at": result.get("trigger_at"),
+            "auto_order_system_at": result.get("system_order_at"),
+            "auto_order_qmt_submit_at": result.get("qmt_submit_at"),
+            "auto_order_qmt_accepted_at": result.get("qmt_accepted_at"),
+            "auto_order_broker_at": result.get("broker_order_at"),
+            "auto_order_broker_time_raw": result.get("broker_order_time_raw"),
         })
         self._persist_runtime(runtime)
         self._notify_updated()
@@ -1805,6 +1839,7 @@ class LimitBoardService:
         name = self._resolve_name(str(quote["symbol"]), quote.get("name"))
         event = {
             "ts": int(now.timestamp() * 1000),
+            "trigger_at": now.isoformat(timespec="milliseconds"),
             "trading_date": now.date().isoformat(),
             "source": "limit_board",
             "type": event_type,
@@ -1821,10 +1856,12 @@ class LimitBoardService:
             "blacklisted": state.get("status") == "blacklisted",
             "reasons": [reason],
         }
+        event["event_identity"] = self.store.event_identity(event)
         enrich = getattr(self.quote_service, "enrich_external_alerts", None)
         if callable(enrich):
             enrich([event])
-        self.store.append_event(event)
+        if not self.store.append_event_once(event):
+            return
         alert_store.append(self.store.root.parents[1], event)
         enabled = bool(config["settings"].get("notifications", {}).get(event_type, True))
         if enabled:
@@ -1964,6 +2001,31 @@ class LimitBoardService:
             rank += 1
             row["candidate_rank"] = rank
         return result
+
+    @staticmethod
+    def _order_timeline(order: dict[str, Any]) -> dict[str, Any]:
+        system_order_at = order.get("system_order_at")
+        broker_order_at = order.get("broker_order_at")
+        system_time = _quote_time(system_order_at)
+        broker_time = _quote_time(broker_order_at)
+        delay_ms = None
+        if system_time is not None and broker_time is not None:
+            delay_ms = round((broker_time - system_time).total_seconds() * 1000)
+        return {
+            "idempotency_key": order.get("idempotency_key"),
+            "status": order.get("status"),
+            "order_sys_id": order.get("order_sys_id"),
+            "trigger_at": order.get("trigger_at"),
+            "system_order_at": system_order_at,
+            "qmt_submit_at": order.get("qmt_submit_at"),
+            "qmt_response_at": order.get("qmt_response_at"),
+            "qmt_accepted_at": order.get("qmt_accepted_at"),
+            "broker_order_at": broker_order_at,
+            "broker_order_time_raw": order.get("broker_order_time_raw"),
+            "broker_order_time_field": order.get("broker_order_time_field"),
+            "system_to_broker_delay_ms": delay_ms,
+            "error": order.get("error"),
+        }
 
     def _trim_automatic_candidates(self, runtime: dict[str, Any]) -> set[str]:
         """Persist only the best scored automatic rows; manual tracking always survives."""
@@ -2450,9 +2512,19 @@ class LimitBoardService:
             [item for item in rows if "rebound_board" in item.get("source_modes", [])],
             score_cache,
         )
+        qmt = self._qmt()
+        stored_events = self.store.events(runtime["trading_date"])
+        order_keys = {
+            f"limit-board-{str(event.get('trading_date') or '').replace('-', '')}-{str(event.get('symbol') or '').strip().upper()}"
+            for event in stored_events
+            if event.get("type") == "touched" and event.get("trading_date") and event.get("symbol")
+        }
+        get_orders = getattr(qmt, "get_orders", None)
+        orders = get_orders(order_keys) if callable(get_orders) else {}
+        runtime_symbols = runtime.get("symbols") or {}
         events = []
         labels = {"touched": "涨停", "broken": "炸板", "resealed": "回封"}
-        for event in self.store.events(runtime["trading_date"]):
+        for event in stored_events:
             symbol = str(event.get("symbol") or "").strip().upper()
             if not symbol:
                 continue
@@ -2463,6 +2535,27 @@ class LimitBoardService:
             if label:
                 event["rule_name"] = label
                 event["message"] = f"{event['name']}：{label}"
+            if event.get("type") == "touched":
+                order_key = (
+                    f"limit-board-{str(event.get('trading_date') or '').replace('-', '')}-{symbol}"
+                )
+                order = orders.get(order_key)
+                state = runtime_symbols.get(symbol) or {}
+                if order is None and state.get("auto_order_key") == order_key:
+                    order = {
+                        "idempotency_key": order_key,
+                        "status": state.get("auto_order_status"),
+                        "order_sys_id": state.get("auto_order_sys_id"),
+                        "trigger_at": state.get("auto_order_trigger_at"),
+                        "system_order_at": state.get("auto_order_system_at") or state.get("auto_order_at"),
+                        "qmt_submit_at": state.get("auto_order_qmt_submit_at"),
+                        "qmt_accepted_at": state.get("auto_order_qmt_accepted_at"),
+                        "broker_order_at": state.get("auto_order_broker_at"),
+                        "broker_order_time_raw": state.get("auto_order_broker_time_raw"),
+                        "error": state.get("auto_order_error"),
+                    }
+                if order is not None:
+                    event["order_timeline"] = self._order_timeline(order)
             events.append(event)
         self._enrich_concepts([
             *rows, *selected, *board_pool, *candidate_pool,
@@ -2470,7 +2563,6 @@ class LimitBoardService:
         ])
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
-        qmt = self._qmt()
         qmt_status = qmt.status() if qmt is not None else {}
         trading_enabled = bool(
             qmt_status.get("configured")

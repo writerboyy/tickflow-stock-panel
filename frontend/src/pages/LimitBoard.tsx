@@ -26,6 +26,7 @@ import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import {
   api,
+  type LimitBoardEvent,
   type LimitBoardQuoteSnapshot,
   type LimitBoardRow,
   type LimitBoardSectorConstituent,
@@ -89,6 +90,23 @@ function scoreTime(value: string | null | undefined): string {
   if (!value) return '--'
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? '--' : parsed.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function exactTime(value: string | number | null | undefined): string {
+  if (value == null || value === '') return '--'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '--'
+  return [
+    String(parsed.getHours()).padStart(2, '0'),
+    String(parsed.getMinutes()).padStart(2, '0'),
+    String(parsed.getSeconds()).padStart(2, '0'),
+  ].join(':') + `.${String(parsed.getMilliseconds()).padStart(3, '0')}`
+}
+
+function elapsedTime(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '--'
+  if (Math.abs(value) < 1000) return `${value} 毫秒`
+  return `${(value / 1000).toFixed(3)} 秒`
 }
 
 function percentValue(value: number | null | undefined): string {
@@ -1173,9 +1191,15 @@ export function LimitBoard() {
           </section>
         ) : (
           <section className="divide-y divide-border overflow-hidden rounded-btn border border-border bg-surface">
-            {data.events.length ? data.events.map((event: any, index: number) => {
+            {data.events.length ? data.events.map((event: LimitBoardEvent, index: number) => {
               const eventThemes = themes(event.concept).slice(0, 2)
-              return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-secondary">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div></div><div className="text-right text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{new Date(event.ts).toLocaleTimeString('zh-CN')}</div></div></div>
+              const timeline = event.order_timeline
+              const brokerTime = timeline?.broker_order_at
+                ? exactTime(timeline.broker_order_at)
+                : timeline?.broker_order_time_raw != null
+                  ? `原始值 ${String(timeline.broker_order_time_raw)}`
+                  : 'QMT 未返回券商委托时间'
+              return <div key={`${event.ts}-${index}`} className="flex items-start gap-3 px-3 py-3 text-xs"><span className={event.type === 'broken' ? 'text-danger' : event.type === 'resealed' ? 'text-bull' : 'text-accent'}>{STATUS[event.type]?.label || event.type}</span><div className="min-w-0 flex-1"><button type="button" onClick={() => setPreview({ symbol: event.symbol, name: event.name })} className="font-medium hover:text-accent" title="查看 K 线与分时">{event.name} <span className="ml-1 font-mono text-[10px] text-muted">{event.symbol}</span></button>{eventThemes.length ? <div className="mt-1 truncate text-[10px] text-secondary">题材：{eventThemes.join('、')}</div> : null}<div className="mt-1 text-[11px] text-secondary">{event.reasons?.join('；')}</div>{timeline ? <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 border-t border-border pt-2 font-mono text-[10px] text-muted"><span>策略触发 {exactTime(timeline.trigger_at || event.trigger_at || event.ts)}</span><span>系统送单 {exactTime(timeline.system_order_at)}</span><span>QMT 提交 {exactTime(timeline.qmt_submit_at)}</span><span>QMT 返回 {exactTime(timeline.qmt_response_at || timeline.qmt_accepted_at)}</span><span>券商委托 {brokerTime}</span>{timeline.system_to_broker_delay_ms != null ? <span className="text-foreground">送单到券商 {elapsedTime(timeline.system_to_broker_delay_ms)}</span> : null}{timeline.status ? <span className={ORDER_STATUS[timeline.status]?.tone || 'text-muted'}>{ORDER_STATUS[timeline.status]?.label || timeline.status}</span> : null}</div> : event.type === 'touched' ? <div className="mt-2 border-t border-border pt-2 text-[10px] text-muted">未发送自动委托</div> : null}</div><div className="shrink-0 text-right font-mono text-[10px] text-muted"><div>炸板 {event.break_count || 0} 次</div><div>{exactTime(event.trigger_at || event.ts)}</div></div></div>
             }) : <div className="px-4 py-12 text-center text-xs text-muted">今天还没有涨停、炸板或回封记录</div>}
           </section>
         )}

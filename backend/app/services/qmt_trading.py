@@ -14,6 +14,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 try:
     import redis
@@ -23,6 +24,17 @@ except ImportError:  # pragma: no cover - optional until QMT is configured
 
 class QmtRpcError(RuntimeError):
     pass
+
+
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+_BROKER_ORDER_TIME_FIELDS = (
+    "broker_order_at",
+    "order_time",
+    "entrust_time",
+    "order_datetime",
+    "entrust_datetime",
+    "order_timestamp",
+)
 
 
 def _now() -> str:
@@ -43,6 +55,79 @@ def _float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
+
+
+def _parse_broker_time(value: Any, anchor: str | None) -> str | None:
+    anchor_value = datetime.now(_CN_TZ)
+    if anchor:
+        try:
+            parsed_anchor = datetime.fromisoformat(str(anchor).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed_anchor.tzinfo is None:
+                parsed_anchor = parsed_anchor.replace(tzinfo=_CN_TZ)
+            anchor_value = parsed_anchor.astimezone(_CN_TZ)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if number >= 1_000_000_000_000:
+            parsed = datetime.fromtimestamp(number / 1000, timezone.utc)
+        elif number >= 1_000_000_000:
+            parsed = datetime.fromtimestamp(number, timezone.utc)
+        else:
+            value = str(int(number)).zfill(6)
+            parsed = None
+    else:
+        parsed = None
+    if parsed is None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            formats = (
+                "%Y%m%d%H%M%S.%f",
+                "%Y%m%d%H%M%S",
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S",
+                "%H:%M:%S.%f",
+                "%H:%M:%S",
+                "%H%M%S%f",
+                "%H%M%S",
+            )
+            for fmt in formats:
+                try:
+                    candidate = datetime.strptime(text, fmt)
+                except ValueError:
+                    continue
+                if fmt.startswith("%H"):
+                    candidate = candidate.replace(
+                        year=anchor_value.year,
+                        month=anchor_value.month,
+                        day=anchor_value.day,
+                    )
+                parsed = candidate
+                break
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_CN_TZ)
+    return parsed.isoformat(timespec="milliseconds")
+
+
+def _broker_time(order: dict[str, Any], anchor: str | None) -> tuple[str | None, Any, str | None]:
+    for field in _BROKER_ORDER_TIME_FIELDS:
+        raw = order.get(field)
+        if raw in (None, ""):
+            continue
+        raw_value = raw if isinstance(raw, (str, int, float, bool)) else str(raw)
+        return _parse_broker_time(raw, anchor), raw_value, field
+    return None, None, None
 
 
 class QmtRedisRpcClient:
@@ -285,6 +370,35 @@ class QmtTradingService:
                 result.append(value)
         return result
 
+    def get_orders(self, idempotency_keys: set[str]) -> dict[str, dict[str, Any]]:
+        keys = sorted({str(key).strip() for key in idempotency_keys if str(key).strip()})
+        if not keys:
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for key in keys:
+                if key in self._orders:
+                    result[key] = dict(self._orders[key])
+        missing = [key for key in keys if key not in result]
+        if missing:
+            placeholders = ",".join("?" for _key in missing)
+            with sqlite3.connect(self._db_path) as conn:
+                rows = conn.execute(
+                    f"SELECT idempotency_key, order_json FROM qmt_orders WHERE idempotency_key IN ({placeholders})",  # noqa: S608
+                    missing,
+                ).fetchall()
+            for key, raw in rows:
+                try:
+                    value = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                result[str(key)] = value
+                with self._lock:
+                    self._orders[str(key)] = value
+        return result
+
     @staticmethod
     def _normalize_remote_order(order: dict[str, Any]) -> dict[str, Any]:
         value = dict(order)
@@ -293,7 +407,61 @@ class QmtTradingService:
             value.get("order_sys_id") or value.get("order_sysid") or value.get("order_id") or "",
         ) or None
         value["user_order_id"] = str(value.get("user_order_id") or value.get("remark") or "") or None
+        broker_at, broker_raw, broker_field = _broker_time(value, value.get("created_at"))
+        if broker_raw is not None:
+            value["broker_order_at"] = broker_at
+            value["broker_order_time_raw"] = broker_raw
+            value["broker_order_time_field"] = broker_field
         return value
+
+    @staticmethod
+    def _remote_order_identifiers(order: dict[str, Any]) -> set[str]:
+        identifiers = {
+            str(order.get(field) or "").strip()
+            for field in ("order_sys_id", "user_order_id", "signal_id", "remark")
+        }
+        return {value for value in identifiers if value}
+
+    def _merge_remote_orders(self, remote_orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        local = self._local_orders()
+        by_identifier: dict[str, dict[str, Any]] = {}
+        for item in local:
+            key = str(item.get("idempotency_key") or "").strip()
+            strategy = str(item.get("strategy_name") or "").strip()
+            identifiers = self._remote_order_identifiers(item)
+            if key:
+                identifiers.add(key)
+                if strategy:
+                    identifiers.add(f"{strategy}:{key}")
+            for identifier in identifiers:
+                by_identifier[identifier] = item
+
+        merged_remote: list[dict[str, Any]] = []
+        matched_keys: set[str] = set()
+        for raw in remote_orders:
+            remote = self._normalize_remote_order(raw)
+            current = next(
+                (
+                    by_identifier[identifier]
+                    for identifier in self._remote_order_identifiers(remote)
+                    if identifier in by_identifier
+                ),
+                None,
+            )
+            if current is None:
+                merged_remote.append(remote)
+                continue
+            merged = dict(current)
+            merged.update({key: value for key, value in remote.items() if value is not None})
+            merged["idempotency_key"] = current["idempotency_key"]
+            merged["updated_at"] = _now()
+            self._remember_order(merged)
+            matched_keys.add(str(current["idempotency_key"]))
+            merged_remote.append(merged)
+        return merged_remote + [
+            item for item in local
+            if str(item.get("idempotency_key") or "") not in matched_keys
+        ]
 
     def _query_remote_orders(self) -> list[dict[str, Any]]:
         result = self.client.call("query_orders", {"account_id": self.client.account_id, "strategy_name": ""})
@@ -320,6 +488,11 @@ class QmtTradingService:
         started = time.monotonic()
         try:
             snapshot = self.client.snapshot()
+            remote_orders = snapshot.get("orders") or []
+            if isinstance(remote_orders, list):
+                snapshot["orders"] = self._merge_remote_orders([
+                    item for item in remote_orders if isinstance(item, dict)
+                ])
         except Exception as exc:
             with self._lock:
                 self._last_status = {"state": "error", "reason": str(exc), "last_probe_at": _now()}
@@ -470,8 +643,17 @@ class QmtTradingService:
                 "strategy_name": strategy_name,
                 "status": "submitting", "order_sys_id": None, "user_order_id": order_tag,
                 "created_at": created_at, "updated_at": created_at, "error": None,
+                "trigger_at": request.get("trigger_at"),
+                "system_order_at": request.get("system_order_at"),
+                "qmt_submit_at": None,
+                "qmt_response_at": None,
+                "qmt_accepted_at": None,
+                "broker_order_at": None,
+                "broker_order_time_raw": None,
+                "broker_order_time_field": None,
             }
             self._remember_order(row)
+            row["qmt_submit_at"] = _now()
             try:
                 response = self.client.call(
                     "submit_orders_batch",
@@ -482,25 +664,39 @@ class QmtTradingService:
                 self._remember_order(row)
                 raise
             result = response[0] if isinstance(response, list) and response and isinstance(response[0], dict) else None
+            qmt_response_at = _now()
             if result is None:
-                row.update(status="unknown", updated_at=_now(), error="QMT 委托响应格式无效")
+                row.update(
+                    status="unknown",
+                    qmt_response_at=qmt_response_at,
+                    updated_at=qmt_response_at,
+                    error="QMT 委托响应格式无效",
+                )
                 self._remember_order(row)
                 raise QmtRpcError("QMT 委托响应格式无效；该幂等键不会自动重发")
             if not result.get("success") or not result.get("accepted"):
                 uncertain = not bool(result.get("explicit_failure"))
                 row.update(
                     status="unknown" if uncertain else "rejected",
-                    updated_at=_now(), error=str(result.get("error") or "QMT 拒绝委托"),
+                    qmt_response_at=qmt_response_at,
+                    updated_at=qmt_response_at,
+                    error=str(result.get("error") or "QMT 拒绝委托"),
                 )
                 self._remember_order(row)
                 raise QmtRpcError(
                     f"{row['error']}；该幂等键不会自动重发" if uncertain else str(row["error"]),
                 )
+            broker_at, broker_raw, broker_field = _broker_time(result, created_at)
             row.update(
                 status="accepted_pending",
                 order_sys_id=str(result.get("order_sys_id") or "") or None,
                 user_order_id=str(result.get("user_order_id") or order_tag),
-                updated_at=_now(),
+                qmt_response_at=qmt_response_at,
+                qmt_accepted_at=qmt_response_at,
+                broker_order_at=broker_at,
+                broker_order_time_raw=broker_raw,
+                broker_order_time_field=broker_field,
+                updated_at=qmt_response_at,
             )
             self._remember_order(row)
             return row
@@ -511,14 +707,7 @@ class QmtTradingService:
             orders = self._query_remote_orders()
         except Exception:
             return local
-        remote_ids = {
-            str(item.get("order_sys_id") or item.get("user_order_id") or "")
-            for item in orders
-        }
-        return orders + [
-            item for item in local
-            if str(item.get("order_sys_id") or item.get("user_order_id") or "") not in remote_ids
-        ]
+        return self._merge_remote_orders(orders)
 
     def cancel_order(self, request: dict[str, Any]) -> dict[str, Any]:
         if not self.trade_enabled:
