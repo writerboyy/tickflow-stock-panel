@@ -1431,7 +1431,7 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 
 // ===== 主页面 =====
 
-export function LimitUpLadder() {
+export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNode } = {}) {
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
@@ -1547,6 +1547,7 @@ export function LimitUpLadder() {
     return (
       <div className="flex flex-col h-full">
         <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
+        {headerContent}
         <EmptyState icon={Flame} title={direction === 'down' ? '暂无连跌数据' : '暂无连板数据'} hint={direction === 'down' ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无涨停股或 enriched 数据未就绪'} />
       </div>
     )
@@ -1696,6 +1697,8 @@ export function LimitUpLadder() {
           </div>
         }
       />
+
+      {headerContent}
 
       {/* 总览条 + 日期 */}
       <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} />
