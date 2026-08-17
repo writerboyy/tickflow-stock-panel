@@ -529,7 +529,7 @@ class LimitBoardService:
                     state,
                     config,
                     runtime=runtime,
-                    trigger_mode="queue",
+                    trigger_mode="limit_touch",
                 )
             if state.get("sealed") and not at_limit:
                 self._mark_broken(quote, state, runtime, config, "价格离开涨停价")
@@ -698,9 +698,11 @@ class LimitBoardService:
         if not member or not bool(member.get("auto_trade")) or state.get("auto_order_key"):
             return
         order_mode = str(member.get("order_mode") or "sweep")
-        if order_mode != trigger_mode:
+        if trigger_mode != "limit_touch" and order_mode != trigger_mode:
             return
-        if trigger_mode == "queue":
+        if trigger_mode == "limit_touch" and order_mode not in {"sweep", "queue"}:
+            return
+        if order_mode == "queue":
             required_snapshots = int(
                 config["settings"].get("queue_confirm_snapshots", 0),
             )

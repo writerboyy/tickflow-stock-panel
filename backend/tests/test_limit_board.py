@@ -651,6 +651,33 @@ def test_five_level_depth_triggers_default_sweep_order(tmp_path, monkeypatch):
     assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
 
 
+def test_limit_touch_triggers_sweep_order_without_depth(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today",
+        lambda: datetime(2026, 8, 13).date(),
+    )
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "sweep",
+    }]
+    runtime = service._runtime_for_today()
+
+    service._evaluate_quotes({"600000.SH": quote()}, runtime, config)
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["price"] == 11.0
+    assert runtime["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
+
+
 def test_depth_processing_uses_configured_sweep_price_levels(tmp_path, monkeypatch):
     qmt = FakeQmt()
     service, _quotes, _config = make_service(tmp_path, qmt)
@@ -978,11 +1005,38 @@ def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
     assert "auto_order_key" not in state
 
 
-def test_default_sweep_ignores_queue_trigger_and_submits_on_sweep_trigger(tmp_path):
+def test_sweep_submits_on_limit_touch_without_queue_delay(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
     service._order_executor.shutdown(wait=False, cancel_futures=True)
     service._order_executor = ImmediateExecutor()
+    config["settings"].update({
+        "queue_wait_seconds": 60,
+        "queue_confirm_snapshots": 3,
+    })
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "sweep",
+    }]
+    state = {
+        "touched": True,
+        "touched_at": "2026-08-13T10:00:00+08:00",
+    }
+
+    service._maybe_auto_trade(
+        "600000.SH", quote(), state, config, trigger_mode="limit_touch",
+    )
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["price"] == 11.0
+    assert qmt.orders[0]["price_type"] == "LIMIT"
+    assert state["auto_order_mode"] == "sweep"
+
+
+def test_sweep_ignores_queue_only_depth_trigger(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
     config["board_pool"] = [{
         "symbol": "600000.SH",
         "auto_trade": True,
@@ -993,14 +1047,9 @@ def test_default_sweep_ignores_queue_trigger_and_submits_on_sweep_trigger(tmp_pa
     service._maybe_auto_trade(
         "600000.SH", quote(), state, config, trigger_mode="queue",
     )
+
     assert qmt.orders == []
-
-    service._maybe_auto_trade(
-        "600000.SH", quote(), state, config, trigger_mode="sweep",
-    )
-
-    assert len(qmt.orders) == 1
-    assert state["auto_order_mode"] == "sweep"
+    assert "auto_order_key" not in state
 
 
 def test_store_revision_conflict_is_fail_closed(tmp_path):
