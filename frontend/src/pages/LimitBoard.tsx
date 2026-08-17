@@ -556,7 +556,7 @@ function SectorStrengthTable({
                 type="button"
                 aria-pressed={selected}
                 onClick={() => selectSignal(signal)}
-                className={`h-[92px] w-[174px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-accent/50 hover:bg-elevated/50 focus-visible:ring-1 focus-visible:ring-accent lg:w-full ${selected ? 'border-accent bg-accent/10' : 'border-border bg-surface'}`}
+                className={`h-[92px] w-[174px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
               >
                 <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{signal.name || signal.symbol}</span><span className="shrink-0 text-[9px] text-secondary">{rebound ? '反包' : '首板'}</span></div>
                 <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
@@ -591,9 +591,9 @@ function SectorStrengthTable({
                   setSelectedPlateId(row.plate_id)
                 }
               }}
-              className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected ? 'bg-accent/20' : linked ? 'bg-accent/10' : ''}`}
+              className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected && linked ? 'bg-warning/25 ring-1 ring-inset ring-warning/60' : linked ? 'bg-warning/10' : selected ? 'bg-accent/20' : ''}`}
             >
-              <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1.5 text-sm font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
+              <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1.5 text-sm font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
               <td className="bg-accent/10 px-3 py-2.5 text-right font-mono text-base font-semibold tabular-nums text-foreground">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.main_net)}`}>{moneyYi(row.main_net)}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.institution_increase)}`}>{moneyYi(row.institution_increase)}</td>
@@ -617,7 +617,7 @@ function SectorStrengthTable({
                   if (element) constituentRowRefs.current.set(row.symbol, element)
                   else constituentRowRefs.current.delete(row.symbol)
                 }}
-                className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-accent/15 ring-1 ring-inset ring-accent/40' : ''}`}
+                className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
               <td className="px-3 py-2.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-sm font-medium">{row.name || row.code}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted">#{row.rank} {row.symbol}{row.tags ? ` · ${row.tags}` : ''}</span></button></td>
               <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
