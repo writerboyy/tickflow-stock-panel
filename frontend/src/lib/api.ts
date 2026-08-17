@@ -1142,8 +1142,70 @@ export interface LimitBoardRow {
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
-  candidate_score?: number
-  candidate_rank?: number
+  candidate_score?: number | null
+  candidate_rank?: number | null
+  candidate_score_state?: 'live' | 'cached' | 'unavailable'
+  candidate_score_as_of?: string | null
+  candidate_score_detail?: {
+    sector?: {
+      score: number
+      max_score: number
+      current_score: number
+      rotation_score: number
+      kind?: 'concept' | 'industry'
+      name?: string
+      change_pct?: number | null
+      up_ratio?: number | null
+      coverage_ratio?: number | null
+      member_count?: number
+      leader?: { symbol?: string; name?: string; change_pct?: number; amount?: number }
+      stock_rank?: number
+      stock_change_pct?: number
+      leader_gap_pct?: number
+      leadership?: 'leader' | 'front' | 'follower'
+      is_sector_leader?: boolean
+      days?: Array<{ date: string; change_pct: number; rank: number; rank_count: number; rank_percentile: number }>
+      five_day_change_pct?: number
+      trend_slope?: number
+      rank_change?: number
+      top_20_days?: number
+      yesterday_change_pct?: number
+      rotation_label?: '主线' | '上升' | '退潮' | '震荡'
+      as_of?: string
+    }
+    premium_gene?: {
+      score: number
+      max_score: number
+      as_of?: string | null
+      window_days?: number
+      limit_up_count?: number
+      premium_5_rate?: number
+      next_day_observation_count?: number
+      next_day_red_rate?: number
+      first_board_attempt_count?: number
+      first_board_seal_rate?: number
+      first_board_broken_rate?: number
+      consecutive_rate?: number
+    }
+    technical?: {
+      score: number
+      max_score: number
+      components?: { trend?: number; momentum?: number; volume?: number; macd?: number; rsi?: number }
+      price?: number
+      ma5?: number
+      ma10?: number
+      ma20?: number
+      ma60?: number
+      momentum_5d?: number
+      momentum_20d?: number
+      vol_ratio_5d?: number
+      macd_dif?: number
+      macd_dea?: number
+      macd_hist?: number
+      rsi_14?: number
+      as_of?: string
+    }
+  }
   candidate_reasons?: string[]
   limit_up_count?: number
   next_day_red_rate?: number

@@ -46,6 +46,8 @@ class FakeQuotes:
     def __init__(self):
         self.events = []
         self.consumers = {}
+        self.enriched = pl.DataFrame()
+        self.enriched_date = None
 
     def publish_external_alerts(self, events):
         self.events.extend(events)
@@ -58,6 +60,13 @@ class FakeQuotes:
 
     def get_latest_quotes(self, _symbols=None):
         return []
+
+    def get_enriched_today(self):
+        return self.enriched, self.enriched_date
+
+    @staticmethod
+    def get_index_quotes():
+        return pl.DataFrame()
 
     def notify_limit_board_updated(self):
         pass
@@ -444,7 +453,7 @@ def test_view_repairs_code_names_in_existing_runtime_and_events(tmp_path, monkey
     assert view["events"][0]["message"] == "浦发银行：回封"
 
 
-def test_view_builds_ranked_candidate_pool_without_board_members(tmp_path, monkeypatch):
+def test_view_keeps_unscored_candidate_when_context_is_unavailable(tmp_path, monkeypatch):
     service, _quotes, _config = make_service(tmp_path)
     monkeypatch.setattr(
         "app.services.limit_board_service.cn_today",
@@ -473,9 +482,303 @@ def test_view_builds_ranked_candidate_pool_without_board_members(tmp_path, monke
     view = service.view()
 
     assert [row["symbol"] for row in view["candidate_pool"]] == ["600000.SH"]
-    assert view["candidate_pool"][0]["candidate_rank"] == 1
-    assert view["candidate_pool"][0]["candidate_score"] > 0
-    assert "首板候选" in view["candidate_pool"][0]["candidate_reasons"]
+    assert view["candidate_pool"][0]["candidate_rank"] is None
+    assert view["candidate_pool"][0]["candidate_score"] is None
+    assert view["candidate_pool"][0]["candidate_score_state"] == "unavailable"
+
+
+def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, monkeypatch):
+    class SectorService:
+        @staticmethod
+        def targets_for_symbol(_symbol, *, kind=None, industry_level=None):
+            assert industry_level in (None, 2)
+            return [{"key": "concept-ai", "kind": "concept", "name": "人工智能"}] if kind == "concept" else []
+
+        @staticmethod
+        def build_snapshots(_stock_df, _index_df, targets, _windows, *, now):
+            assert now > 0
+            return {
+                target["key"]: {
+                    **target,
+                    "valid": True,
+                    "change_pct": 0.02,
+                    "coverage_ratio": 1.0,
+                    "up_count": 5,
+                    "down_count": 0,
+                    "valid_count": 5,
+                    "total_count": 5,
+                }
+                for target in targets
+            }
+
+        @staticmethod
+        def member_symbols(_key):
+            return {"600000.SH", "600001.SH", "A", "B", "C"}
+
+    qmt = FakeQmt()
+    service, quotes, _config = make_service(tmp_path, qmt)
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    service.app_state.sector_monitor_service = SectorService()
+    service._premium_stats["600000.SH"] = {
+        "as_of": "2026-08-14",
+        "window_days": 200,
+        "limit_up_count": 12,
+        "premium_5_count": 5,
+        "next_day_observation_count": 10,
+        "next_day_red_rate": 0.8,
+        "first_board_attempt_count": 10,
+        "first_board_sealed_count": 8,
+        "first_board_seal_rate": 0.8,
+        "first_board_broken_rate": 0.2,
+        "consecutive_rate": 0.5,
+    }
+    symbols = ["600000.SH", "600001.SH", "A", "B", "C"]
+    quotes.enriched_date = now.date()
+    quotes.enriched = pl.DataFrame({
+        "symbol": symbols,
+        "name": ["浦发银行", "邯郸钢铁", "A", "B", "C"],
+        "close": [11.0, 10.9, 10.5, 10.3, 10.1],
+        "change_pct": [0.10, 0.09, 0.05, 0.03, 0.01],
+        "amount": [200.0, 100.0, 100.0, 100.0, 100.0],
+        "ma5": [10.5] * 5,
+        "ma10": [10.0] * 5,
+        "ma20": [9.5] * 5,
+        "ma60": [9.0] * 5,
+        "momentum_5d": [0.10] * 5,
+        "momentum_20d": [0.30] * 5,
+        "vol_ratio_5d": [2.5] * 5,
+        "macd_dif": [0.3] * 5,
+        "macd_dea": [0.2] * 5,
+        "macd_hist": [0.1] * 5,
+        "rsi_14": [70.0] * 5,
+    })
+    rotation_dates = ["2026-08-14", "2026-08-13", "2026-08-12", "2026-08-11", "2026-08-10"]
+    rotation = {
+        "dates": rotation_dates,
+        "columns": {
+            day: [["人工智能", value], ["其他", 0.0]]
+            for day, value in zip(rotation_dates, [0.03, 0.02, 0.01, 0.0, -0.01], strict=True)
+        },
+    }
+    monkeypatch.setattr(
+        "app.services.limit_board_service.rps_rotation.build_rps_rotation",
+        lambda *_args, **_kwargs: rotation,
+    )
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {
+            "name": "浦发银行",
+            "source_modes": ["first_board"],
+            "status": "touched",
+            "limit_gap_pct": 0.0,
+        },
+    }
+    service.store.save_runtime(runtime)
+
+    view = service.view()
+    row = view["candidate_pool"][0]
+
+    assert row["candidate_rank"] == 1
+    assert row["candidate_score"] is not None
+    assert row["candidate_score_state"] == "live"
+    assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
+    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
+    assert row["candidate_score_detail"]["technical"]["score"] == 20.0
+    assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is True
+    assert view["board_pool"] == []
+    assert qmt.orders == []
+
+
+def test_candidate_score_refresh_uses_fifteen_second_window_and_bypasses_for_new_symbol(
+    tmp_path, monkeypatch,
+):
+    service, quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    current_mono = [100.0]
+    calls = [0]
+
+    def get_enriched_today():
+        calls[0] += 1
+        return pl.DataFrame(), None
+
+    quotes.get_enriched_today = get_enriched_today
+    monkeypatch.setattr(
+        "app.services.limit_board_service.time.monotonic", lambda: current_mono[0],
+    )
+    runtime = {"candidate_scores": {}}
+    first = [{"symbol": "600000.SH", "source_modes": ["first_board"]}]
+
+    assert service._refresh_candidate_scores(runtime, first, now) is True
+    assert calls[0] == 1
+
+    current_mono[0] = 105.0
+    second = [*first, {"symbol": "600001.SH", "source_modes": ["first_board"]}]
+    assert service._refresh_candidate_scores(runtime, second, now) is True
+    assert calls[0] == 2
+
+    current_mono[0] = 115.0
+    assert service._refresh_candidate_scores(runtime, second, now) is False
+    assert calls[0] == 2
+
+    current_mono[0] = 121.0
+    service._refresh_candidate_scores(runtime, second, now)
+    assert calls[0] == 3
+
+
+def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missing(
+    tmp_path, monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
+    previous_detail = {
+        "sector": {"score": 35.0, "name": "人工智能", "as_of": now.isoformat()},
+        "premium_gene": {"score": 18.0, "as_of": "2026-08-14"},
+        "technical": {"score": 17.0, "as_of": now.isoformat()},
+    }
+    runtime = {
+        "candidate_scores": {
+            "600000.SH": {
+                "candidate_score": 70.0,
+                "candidate_rank": 1,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": now.isoformat(),
+                "candidate_score_detail": previous_detail,
+                "candidate_reasons": [],
+            },
+        },
+    }
+
+    changed = service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["selected"]}],
+        now,
+    )
+
+    cached = runtime["candidate_scores"]["600000.SH"]
+    assert changed is True
+    assert cached["candidate_score"] == 70.0
+    assert cached["candidate_score_state"] == "cached"
+    assert cached["candidate_score_detail"] == previous_detail
+
+
+def test_candidate_score_cache_is_cleared_on_next_trading_day(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    current_day = [datetime(2026, 8, 17).date()]
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_today", lambda: current_day[0],
+    )
+    runtime = service._runtime_for_today()
+    runtime["candidate_scores"] = {"600000.SH": {"candidate_score": 70.0}}
+    service.store.save_runtime(runtime)
+
+    current_day[0] = datetime(2026, 8, 18).date()
+
+    next_day = service._runtime_for_today()
+    assert next_day["trading_date"] == "2026-08-18"
+    assert "candidate_scores" not in next_day
+
+
+def test_candidate_ranking_ignores_gap_status_and_break_count():
+    scores = {
+        symbol: {
+            "candidate_score": 60.0,
+            "candidate_score_detail": {
+                "sector": {"score": 30.0},
+                "premium_gene": {"score": 18.0},
+                "technical": {"score": 12.0},
+            },
+        }
+        for symbol in ("600000.SH", "600001.SH")
+    }
+    candidates = [
+        {
+            "symbol": "600001.SH", "limit_gap_pct": 0.0,
+            "status": "sealed", "break_count": 0,
+        },
+        {
+            "symbol": "600000.SH", "limit_gap_pct": 0.03,
+            "status": "broken", "break_count": 9,
+        },
+    ]
+
+    ranked = LimitBoardService._rank_candidates(candidates, scores)
+
+    assert [row["symbol"] for row in ranked] == ["600000.SH", "600001.SH"]
+    assert [row["candidate_rank"] for row in ranked] == [1, 2]
+
+
+def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_industry(
+    tmp_path, monkeypatch,
+):
+    class SectorService:
+        @staticmethod
+        def targets_for_symbol(_symbol, *, kind=None, industry_level=None):
+            if kind == "concept":
+                return [
+                    {"key": "c1", "kind": "concept", "name": "概念一"},
+                    {"key": "c2", "kind": "concept", "name": "概念二"},
+                ]
+            assert industry_level == 2
+            return [{"key": "i1", "kind": "industry", "name": "二级行业"}]
+
+        @staticmethod
+        def build_snapshots(_stock_df, _index_df, targets, _windows, *, now):
+            assert now > 0
+            return {target["key"]: {"valid": True} for target in targets}
+
+        @staticmethod
+        def member_symbols(_key):
+            return {"600000.SH"}
+
+    service, quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    current_mono = [100.0]
+    concept_available = [True]
+    service.app_state.sector_monitor_service = SectorService()
+    quotes.enriched_date = now.date()
+    quotes.enriched = pl.DataFrame({"symbol": ["600000.SH"]})
+    monkeypatch.setattr(
+        "app.services.limit_board_service.time.monotonic", lambda: current_mono[0],
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.premium_gene_detail",
+        lambda _values: {"score": 30.0},
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.technical_detail",
+        lambda _values, **_kwargs: {"score": 20.0},
+    )
+
+    def fake_sector_detail(**kwargs):
+        target = kwargs["target"]
+        if target["kind"] == "concept":
+            if not concept_available[0]:
+                return None
+            score = 35.0 if target["key"] == "c1" else 42.0
+        else:
+            score = 49.0
+        return {"score": score, "name": target["name"], "kind": target["kind"]}
+
+    monkeypatch.setattr(
+        "app.services.limit_board_service.sector_detail", fake_sector_detail,
+    )
+    candidate = [{"symbol": "600000.SH", "source_modes": ["selected"]}]
+    runtime = {"candidate_scores": {}}
+
+    service._refresh_candidate_scores(runtime, candidate, now)
+    sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
+    assert sector["name"] == "概念二"
+    assert sector["score"] == 42.0
+
+    concept_available[0] = False
+    current_mono[0] = 116.0
+    service._refresh_candidate_scores(runtime, candidate, now)
+    sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
+    assert sector["name"] == "二级行业"
+    assert sector["score"] == 49.0
 
 
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):

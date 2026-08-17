@@ -15,7 +15,12 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
-from app.services import alert_store, premium_gene
+from app.services import alert_store, premium_gene, rps_rotation
+from app.services.limit_board_scoring import (
+    premium_gene_detail,
+    sector_detail,
+    technical_detail,
+)
 from app.services.limit_board_store import LimitBoardStore
 
 
@@ -34,6 +39,12 @@ _PREMIUM_FILTER_COLUMNS = {
     "limit_up_count",
     "next_day_red_rate",
     "first_board_broken_rate",
+}
+_SCORE_REFRESH_SECONDS = 15.0
+_SCORE_STOCK_COLUMNS = {
+    "symbol", "name", "close", "last_price", "change_pct", "amount",
+    "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
+    "vol_ratio_5d", "macd_dif", "macd_dea", "macd_hist", "rsi_14",
 }
 
 
@@ -113,6 +124,22 @@ def _qualified_premium_stats(rows: pl.DataFrame | None) -> dict[str, dict[str, A
     }
 
 
+def _premium_stats_by_symbol(rows: pl.DataFrame | None) -> dict[str, dict[str, Any]]:
+    if rows is None or rows.is_empty() or "symbol" not in rows.columns:
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for raw in rows.iter_rows(named=True):
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        result[symbol] = {
+            key: value.isoformat() if isinstance(value, date) else value
+            for key, value in raw.items()
+            if key != "symbol"
+        }
+    return result
+
+
 class LimitBoardService:
     def __init__(self, data_dir: Path, repo: Any, quote_service: Any, app_state: Any) -> None:
         self.store = LimitBoardStore(data_dir)
@@ -120,6 +147,7 @@ class LimitBoardService:
         self.quote_service = quote_service
         self.app_state = app_state
         self._lock = threading.RLock()
+        self._score_lock = threading.Lock()
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=3)
         self._order_results: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10)
         self._order_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="limit-board-order")
@@ -137,6 +165,9 @@ class LimitBoardService:
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
         self._premium_stats: dict[str, dict[str, Any]] = {}
+        self._score_refresh_at = 0.0
+        self._rotation_date: date | None = None
+        self._rotation_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
         self._history_ready = False
         self._history_attempt_at = 0.0
         self._history_reason = "正在读取涨停历史与溢价基因过滤数据"
@@ -353,8 +384,8 @@ class LimitBoardService:
         ):
             self._history_reason = "溢价基因数据不足，自动首板/反包已暂停"
             return
-        self._premium_stats = _qualified_premium_stats(premium_rows)
-        qualified = set(self._premium_stats)
+        self._premium_stats = _premium_stats_by_symbol(premium_rows)
+        qualified = set(_qualified_premium_stats(premium_rows))
         self._first_board_eligible = (universe - blocked) & qualified
         self._rebound_board_eligible = (rebound & universe & qualified) - self._first_board_eligible
         self._history_ready = True
@@ -470,6 +501,11 @@ class LimitBoardService:
         with self._lock:
             self._quotes.update(updates)
         self._evaluate_quotes(updates, runtime, config)
+        rows, selected_rows, board_rows = self._view_collections(runtime, config)
+        candidates = self._candidate_rows_for_runtime(
+            runtime, rows, selected_rows, board_rows,
+        )
+        self._refresh_candidate_scores(runtime, candidates, now)
         self._sync_websocket(runtime, config)
         self._last_scan_at = now.isoformat()
         self._persist_runtime(runtime)
@@ -512,6 +548,9 @@ class LimitBoardService:
                 "limit_gap_pct": quote["limit_gap_pct"],
                 "source_modes": quote["source_modes"],
                 "last_quote_at": quote["timestamp"],
+            })
+            state.update({
+                key: value for key, value in self._premium_stats.get(symbol, {}).items()
             })
             if symbol in blacklist:
                 state["status"] = "blacklisted"
@@ -986,7 +1025,6 @@ class LimitBoardService:
         rebound_board: list[dict[str, Any]],
         selected: list[dict[str, Any]],
         board_pool: list[dict[str, Any]],
-        near_limit_pct: float,
     ) -> list[dict[str, Any]]:
         """Build the user-approval queue without enabling orders implicitly."""
         pool_symbols = {
@@ -1023,95 +1061,70 @@ class LimitBoardService:
                 if current.get("name") in (None, "", symbol):
                     current["name"] = row.get("name")
 
-        scored: list[dict[str, Any]] = []
-        near = max(float(near_limit_pct), 0.0001)
-        status_bonus = {
-            "sealed": 18.0,
-            "resealed": 16.0,
-            "touched": 14.0,
-            "near_limit": 8.0,
-            "broken": 2.0,
-        }
-        for row in candidates.values():
-            gap = _finite(row.get("limit_gap_pct"))
-            proximity = 0.0 if gap is None else max(0.0, min(1.0, 1.0 - gap / near))
-            source_modes = set(row.get("source_modes") or [])
-            source_bonus = (
-                12.0 if "first_board" in source_modes
-                else 11.0 if "rebound_board" in source_modes
-                else 8.0
-            )
-            if "selected" in source_modes:
-                source_bonus += 2.0
-            bid_volume = max(0.0, _finite(row.get("bid1_volume")) or 0.0)
-            liquidity_bonus = min(8.0, (bid_volume ** 0.5) / 10.0)
-            break_penalty = min(18.0, float(row.get("break_count") or 0) * 6.0)
-            score = round(proximity * 60.0 + source_bonus + status_bonus.get(row.get("status"), 0.0) + liquidity_bonus - break_penalty, 2)
-            reasons: list[str] = []
-            if "first_board" in source_modes:
-                reasons.append("首板候选")
-            if "rebound_board" in source_modes:
-                reasons.append("反包候选")
-            if "selected" in source_modes:
-                reasons.append("手工加入")
-            if row.get("limit_up_count") is not None:
-                reasons.append(f"近 200 日涨停 {int(row['limit_up_count'])} 次")
-            if row.get("next_day_red_rate") is not None:
-                reasons.append(f"次日红盘率 {float(row['next_day_red_rate']) * 100:.0f}%")
-            if row.get("first_board_broken_rate") is not None:
-                reasons.append(
-                    f"首板破板率 {float(row['first_board_broken_rate']) * 100:.0f}%",
-                )
-            if gap is None:
-                reasons.append("等待实时行情")
-            else:
-                reasons.append(f"距涨停 {(gap * 100):.2f}%")
-            if row.get("status") in {"sealed", "resealed", "touched"}:
-                reasons.append({
-                    "sealed": "已封板",
-                    "resealed": "回封",
-                    "touched": "已触板",
-                }[row["status"]])
-            if row.get("break_count"):
-                reasons.append(f"炸板 {int(row['break_count'])} 次")
-            row["candidate_score"] = score
-            row["candidate_reasons"] = [reason for reason in reasons if reason]
-            scored.append(row)
-        scored.sort(key=lambda row: (
+        return list(candidates.values())
+
+    @staticmethod
+    def _rank_candidates(
+        candidates: list[dict[str, Any]], score_cache: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result = []
+        for candidate in candidates:
+            symbol = str(candidate.get("symbol") or "").strip().upper()
+            score = score_cache.get(symbol) or {
+                "candidate_score": None,
+                "candidate_rank": None,
+                "candidate_score_state": "unavailable",
+                "candidate_score_as_of": None,
+                "candidate_score_detail": {},
+                "candidate_reasons": [],
+            }
+            result.append({**candidate, **score})
+        result.sort(key=lambda row: (
+            row.get("candidate_score") is None,
             -float(row.get("candidate_score") or 0.0),
-            float(row.get("limit_gap_pct") or 1.0),
+            -float(((row.get("candidate_score_detail") or {}).get("sector") or {}).get("score") or 0.0),
+            -float(((row.get("candidate_score_detail") or {}).get("premium_gene") or {}).get("score") or 0.0),
+            -float(((row.get("candidate_score_detail") or {}).get("technical") or {}).get("score") or 0.0),
             str(row.get("symbol") or ""),
         ))
-        for rank, row in enumerate(scored, start=1):
+        rank = 0
+        for row in result:
+            if row.get("candidate_score") is None:
+                row["candidate_rank"] = None
+                continue
+            rank += 1
             row["candidate_rank"] = rank
-        return scored
+        return result
 
-    def view(self) -> dict[str, Any]:
-        config = self.store.load_config()
-        runtime = self._runtime_for_today()
+    def _view_collections(
+        self, runtime: dict[str, Any], config: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        runtime_by_symbol = runtime.get("symbols", {})
         rows = []
-        for symbol, state in runtime.get("symbols", {}).items():
-            modes = state.get("source_modes") or []
-            if not modes:
+        for symbol, state in runtime_by_symbol.items():
+            if not state.get("source_modes"):
                 continue
             row = {"symbol": symbol, **state, "ws_active": symbol in self._ws_symbols}
             row["name"] = self._resolve_name(symbol, row.get("name"))
-            if is_risk_warning_name(row["name"]):
-                continue
-            rows.append(row)
+            if not is_risk_warning_name(row["name"]):
+                rows.append(row)
         rows.sort(key=lambda item: (
             0 if item.get("status") == "blacklisted" else 1,
             float(item.get("limit_gap_pct") or 1),
         ))
+
         selected = []
-        runtime_by_symbol = runtime.get("symbols", {})
         for item in config["selected"]:
             symbol = str(item["symbol"]).strip().upper()
-            row = {**item, **runtime_by_symbol.get(symbol, {}), "ws_active": symbol in self._ws_symbols}
+            row = {
+                **item,
+                **runtime_by_symbol.get(symbol, {}),
+                "ws_active": symbol in self._ws_symbols,
+            }
             row["name"] = self._resolve_name(symbol, row.get("name"))
-            if is_risk_warning_name(row["name"]):
-                continue
-            selected.append(row)
+            if not is_risk_warning_name(row["name"]):
+                selected.append(row)
+
         board_pool = []
         for item in config["board_pool"]:
             symbol = str(item["symbol"]).strip().upper()
@@ -1122,26 +1135,238 @@ class LimitBoardService:
                 "ws_active": symbol in self._ws_symbols,
             }
             row["name"] = self._resolve_name(symbol, row.get("name"))
-            if is_risk_warning_name(row["name"]):
-                continue
-            board_pool.append(row)
-        candidate_excluded = {
+            if not is_risk_warning_name(row["name"]):
+                board_pool.append(row)
+        return rows, selected, board_pool
+
+    def _candidate_rows_for_runtime(
+        self,
+        runtime: dict[str, Any],
+        rows: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        board_pool: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        excluded = {
             str(symbol).strip().upper()
             for symbol in runtime.get("candidate_excluded") or []
         }
-        eligible_rows = [
+        eligible = [
             item for item in rows
-            if str(item.get("symbol") or "").strip().upper() not in candidate_excluded
+            if str(item.get("symbol") or "").strip().upper() not in excluded
         ]
-        candidate_pool = self._candidate_pool(
-            [item for item in eligible_rows if "first_board" in item.get("source_modes", [])],
-            [item for item in eligible_rows if "rebound_board" in item.get("source_modes", [])],
+        return self._candidate_pool(
+            [item for item in eligible if "first_board" in item.get("source_modes", [])],
+            [item for item in eligible if "rebound_board" in item.get("source_modes", [])],
             [
                 item for item in selected
-                if str(item.get("symbol") or "").strip().upper() not in candidate_excluded
+                if str(item.get("symbol") or "").strip().upper() not in excluded
             ],
             board_pool,
-            float(config["settings"].get("near_limit_pct", 0.02)),
+        )
+
+    def _rotation(self, kind: str, level: int | None, today: date) -> dict[str, Any]:
+        if self._rotation_date != today:
+            self._rotation_cache.clear()
+            self._rotation_date = today
+        key = (kind, level)
+        cached = self._rotation_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            value = rps_rotation.build_rps_rotation(self.repo, 7, kind, level)
+        except Exception:  # noqa: BLE001
+            logger.warning("打板备选池读取板块轮动失败: %s", kind, exc_info=True)
+            return {}
+        if value.get("dates") and value.get("columns"):
+            self._rotation_cache[key] = value
+        return value
+
+    def _candidate_stock_snapshot(
+        self, now: datetime,
+    ) -> tuple[pl.DataFrame, dict[str, dict[str, Any]]]:
+        getter = getattr(self.quote_service, "get_enriched_today", None)
+        if not callable(getter):
+            return pl.DataFrame(), {}
+        stock_df, stock_date = getter()
+        if stock_date != now.date() or stock_df is None or stock_df.is_empty():
+            return pl.DataFrame(), {}
+        columns = [column for column in stock_df.columns if column in _SCORE_STOCK_COLUMNS]
+        if "symbol" not in columns:
+            return pl.DataFrame(), {}
+        rows = {}
+        for raw in stock_df.select(columns).iter_rows(named=True):
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            rows[symbol] = {
+                **raw,
+                "symbol": symbol,
+                "name": self._resolve_name(symbol, raw.get("name")),
+            }
+        return stock_df, rows
+
+    @staticmethod
+    def _score_reasons(
+        candidate: dict[str, Any], detail: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        modes = set(candidate.get("source_modes") or [])
+        reasons = []
+        if "first_board" in modes:
+            reasons.append("首板候选")
+        if "rebound_board" in modes:
+            reasons.append("反包候选")
+        if "selected" in modes:
+            reasons.append("手工加入")
+        sector = detail.get("sector") or {}
+        gene = detail.get("premium_gene") or {}
+        technical = detail.get("technical") or {}
+        if sector:
+            reasons.append(
+                f"{sector.get('name') or '板块'} {sector.get('rotation_label') or '数据不足'}"
+                f" · {sector.get('leadership') or 'follower'}"
+            )
+        if gene:
+            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/30")
+        if technical:
+            reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/20")
+        return reasons
+
+    def _refresh_candidate_scores(
+        self,
+        runtime: dict[str, Any],
+        candidates: list[dict[str, Any]],
+        now: datetime,
+    ) -> bool:
+        symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in candidates if item.get("symbol")
+        }
+        previous_cache = runtime.get("candidate_scores") or {}
+        missing = any(symbol not in previous_cache for symbol in symbols)
+        now_mono = time.monotonic()
+        if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
+            return False
+        if not self._score_lock.acquire(blocking=False):
+            return False
+        try:
+            now_mono = time.monotonic()
+            previous_cache = runtime.get("candidate_scores") or {}
+            missing = any(symbol not in previous_cache for symbol in symbols)
+            if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
+                return False
+            stock_df, stock_rows = self._candidate_stock_snapshot(now)
+            sector_service = getattr(self.app_state, "sector_monitor_service", None)
+            targets_by_symbol: dict[str, dict[str, list[dict[str, Any]]]] = {}
+            targets_by_key: dict[str, dict[str, Any]] = {}
+            if sector_service is not None:
+                for symbol in symbols:
+                    concepts = sector_service.targets_for_symbol(symbol, kind="concept")
+                    industries = sector_service.targets_for_symbol(
+                        symbol, kind="industry", industry_level=2,
+                    )
+                    targets_by_symbol[symbol] = {
+                        "concept": concepts,
+                        "industry": industries,
+                    }
+                    for target in [*concepts, *industries]:
+                        targets_by_key[str(target.get("key") or "")] = target
+            snapshots = {}
+            if sector_service is not None and targets_by_key and not stock_df.is_empty():
+                index_getter = getattr(self.quote_service, "get_index_quotes", None)
+                index_df = index_getter() if callable(index_getter) else pl.DataFrame()
+                try:
+                    snapshots = sector_service.build_snapshots(
+                        stock_df,
+                        index_df,
+                        list(targets_by_key.values()),
+                        set(),
+                        now=now.timestamp(),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("打板备选池板块快照计算失败", exc_info=True)
+            rotations = {
+                "concept": self._rotation("concept", None, now.date()),
+                "industry": self._rotation("industry", 2, now.date()),
+            } if sector_service is not None else {}
+
+            refreshed: dict[str, dict[str, Any]] = {}
+            for candidate in candidates:
+                symbol = str(candidate.get("symbol") or "").strip().upper()
+                previous = previous_cache.get(symbol) or {}
+                previous_detail = previous.get("candidate_score_detail") or {}
+                gene = premium_gene_detail(self._premium_stats.get(symbol) or {})
+                technical = technical_detail(
+                    stock_rows.get(symbol) or {}, as_of=now.isoformat(),
+                )
+                sector = None
+                symbol_targets = targets_by_symbol.get(symbol) or {}
+                for kind in ("concept", "industry"):
+                    available = []
+                    for target in symbol_targets.get(kind, []):
+                        key = str(target.get("key") or "")
+                        snapshot = snapshots.get(key)
+                        if snapshot is None:
+                            continue
+                        value = sector_detail(
+                            symbol=symbol,
+                            target=target,
+                            snapshot=snapshot,
+                            rotation=rotations.get(kind) or {},
+                            stock_rows=stock_rows,
+                            member_symbols=sector_service.member_symbols(key),
+                            today=now.date(),
+                        )
+                        if value is not None:
+                            value["as_of"] = now.isoformat()
+                            available.append(value)
+                    if available:
+                        sector = max(
+                            available,
+                            key=lambda item: (float(item["score"]), str(item.get("name") or "")),
+                        )
+                        break
+                fresh = {
+                    "sector": sector,
+                    "premium_gene": gene,
+                    "technical": technical,
+                }
+                detail = {}
+                cached_component = False
+                for key, value in fresh.items():
+                    if value is not None:
+                        detail[key] = value
+                    elif previous_detail.get(key):
+                        detail[key] = previous_detail[key]
+                        cached_component = True
+                complete = all(detail.get(key) for key in ("sector", "premium_gene", "technical"))
+                score = round(sum(float(detail[key]["score"]) for key in detail), 1) if complete else None
+                state = "cached" if complete and cached_component else "live" if complete else "unavailable"
+                refreshed[symbol] = {
+                    "candidate_score": score,
+                    "candidate_rank": None,
+                    "candidate_score_state": state,
+                    "candidate_score_as_of": now.isoformat(),
+                    "candidate_score_detail": detail,
+                    "candidate_reasons": self._score_reasons(candidate, detail),
+                }
+            changed = refreshed != previous_cache
+            runtime["candidate_scores"] = refreshed
+            self._score_refresh_at = now_mono
+            return changed
+        finally:
+            self._score_lock.release()
+
+    def view(self) -> dict[str, Any]:
+        config = self.store.load_config()
+        runtime = self._runtime_for_today()
+        rows, selected, board_pool = self._view_collections(runtime, config)
+        candidates = self._candidate_rows_for_runtime(
+            runtime, rows, selected, board_pool,
+        )
+        if self._refresh_candidate_scores(runtime, candidates, cn_now()):
+            self._persist_runtime(runtime)
+        candidate_pool = self._rank_candidates(
+            candidates, runtime.get("candidate_scores") or {},
         )
         events = []
         labels = {"touched": "触板", "broken": "炸板", "resealed": "回封"}

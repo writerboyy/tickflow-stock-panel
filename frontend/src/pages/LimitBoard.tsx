@@ -64,6 +64,22 @@ function isStName(name: unknown): boolean {
   return String(name ?? '').toUpperCase().includes('ST')
 }
 
+function scorePct(value: number | null | undefined, digits = 1): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(digits)}%`
+}
+
+function scoreTime(value: string | null | undefined): string {
+  if (!value) return '--'
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? '--' : parsed.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+const LEADERSHIP = {
+  leader: { label: '龙头', tone: 'text-bear' },
+  front: { label: '前排', tone: 'text-warning' },
+  follower: { label: '跟随', tone: 'text-muted' },
+} as const
+
 interface RowProps {
   row: LimitBoardRow
   mode: TableMode
@@ -100,6 +116,12 @@ function Row({
   const rebound = row.source === 'rebound_board' || row.source_modes?.includes('rebound_board')
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
+  const scoreDetail = row.candidate_score_detail
+  const sector = scoreDetail?.sector
+  const gene = scoreDetail?.premium_gene
+  const technical = scoreDetail?.technical
+  const leadership = LEADERSHIP[sector?.leadership ?? 'follower']
+  const rotationTitle = (sector?.days ?? []).map(day => `${day.date.slice(5)} ${scorePct(day.change_pct)} #${day.rank}/${day.rank_count}`).join('；')
   const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
@@ -109,45 +131,70 @@ function Row({
 
   return (
     <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
-      <td className="sticky left-0 z-10 w-[128px] min-w-[128px] max-w-[128px] bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
+      <td className="sticky left-0 z-30 w-[128px] min-w-[128px] max-w-[128px] overflow-hidden bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
         <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
           <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
           {mode !== 'pool' && rebound ? <div className="mt-0.5 text-[10px] text-warning">反包候选</div> : null}
-          {mode !== 'pool' && row.limit_up_count != null ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted" title={`涨停 ${row.limit_up_count} 次；次日红盘率 ${((row.next_day_red_rate ?? 0) * 100).toFixed(0)}%；首板破板率 ${((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%`}>
+          {mode === 'first' && row.limit_up_count != null ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted" title={`涨停 ${row.limit_up_count} 次；次日红盘率 ${((row.next_day_red_rate ?? 0) * 100).toFixed(0)}%；首板破板率 ${((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%`}>
             {row.limit_up_count}次 · 红{((row.next_day_red_rate ?? 0) * 100).toFixed(0)}% · 破{((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%
           </div> : null}
         </button>
       </td>
-      <td className="w-[160px] max-w-[160px] px-2">
+      {mode === 'candidate' ? <>
+        <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
+          {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
+            <div className="font-mono text-sm font-semibold tabular-nums text-accent">#{row.candidate_rank} · {row.candidate_score.toFixed(1)}</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
+          </>}
+          {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
+        </td>
+        <td className="w-[210px] min-w-[210px] px-2" title={rotationTitle || allThemes.join('、') || undefined}>
+          {sector ? <>
+            <div className="flex items-center gap-1.5"><span className="max-w-[110px] truncate font-medium">{sector.name}</span><span className={sector.change_pct != null && sector.change_pct >= 0 ? 'text-bear' : 'text-danger'}>{scorePct(sector.change_pct)}</span></div>
+            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className={leadership.tone}>{leadership.label}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '震荡'}</span></div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">5日 {scorePct(sector.five_day_change_pct)} · 昨 {scorePct(sector.yesterday_change_pct)}</div>
+            {sector.leader && !sector.is_sector_leader ? <div className="mt-0.5 max-w-[190px] truncate text-[9px] text-muted">龙头 {sector.leader.name || sector.leader.symbol} {scorePct(sector.leader.change_pct)}</div> : null}
+          </> : <div className="text-muted">板块待补</div>}
+        </td>
+        <td className="w-[170px] min-w-[170px] px-2" title={gene ? `快照 ${gene.as_of || '--'}；样本 ${gene.next_day_observation_count ?? 0}` : undefined}>
+          {gene ? <>
+            <div className="font-mono text-[10px] text-secondary">涨 {gene.limit_up_count ?? '--'} · 红 {scorePct(gene.next_day_red_rate, 0)}</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">溢 {scorePct(gene.premium_5_rate, 0)} · 封 {scorePct(gene.first_board_seal_rate, 0)} · 晋 {scorePct(gene.consecutive_rate, 0)}</div>
+            <div className="mt-0.5 font-mono text-[9px] text-accent">{gene.score.toFixed(1)}/30</div>
+          </> : <div className="text-muted">基因待补</div>}
+        </td>
+        <td className="w-[180px] min-w-[180px] px-2" title={technical ? `MA5 ${technical.ma5?.toFixed(2) ?? '--'}；MA10 ${technical.ma10?.toFixed(2) ?? '--'}；MA20 ${technical.ma20?.toFixed(2) ?? '--'}；MA60 ${technical.ma60?.toFixed(2) ?? '--'}` : undefined}>
+          {technical ? <>
+            <div className="whitespace-nowrap font-mono text-[9px] text-secondary">均 {technical.components?.trend?.toFixed(1)}/7 · 动 {technical.components?.momentum?.toFixed(1)}/5</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量 {technical.components?.volume?.toFixed(1)}/3 · MACD {technical.components?.macd?.toFixed(1)}/3 · RSI {technical.components?.rsi?.toFixed(1)}/2</div>
+            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量比 {technical.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical.rsi_14?.toFixed(0) ?? '--'}</div>
+          </> : <div className="text-muted">技术面待补</div>}
+        </td>
+      </> : <td className="w-[160px] max-w-[160px] px-2">
         <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
           {visibleThemes.length ? visibleThemes.join('、') : '--'}
         </div>
-      </td>
+      </td>}
       <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
-      <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td>
+      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-accent">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
       <td className="px-2 font-mono tabular-nums text-warning">{gap}</td>
-      {mode === 'candidate' ? (
-        <td className="px-2 font-mono tabular-nums text-accent" title={(row.candidate_reasons || []).join('；')}>
-          #{row.candidate_rank ?? '--'} <span className="text-[10px] text-muted">{row.candidate_score?.toFixed(1) ?? '--'}</span>
-        </td>
-      ) : null}
       <td className="px-2">
         <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
           <CircleDot className="h-3 w-3" />{status.label}
         </span>
       </td>
       <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
-      <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td>
-      <td className="px-2">
+      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td> : null}
+      {mode !== 'candidate' ? <td className="px-2">
         <span className={mode === 'pool' && row.ws_active ? 'text-bear' : 'text-muted'}>{mode === 'pool' && row.ws_active ? 'WS' : '轮询'}</span>
-      </td>
+      </td> : null}
       {mode === 'pool' ? (
         <>
           <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
             {orderStatus.label}
           </td>
-          <td className="sticky right-0 z-10 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
+          <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
             <div className="flex items-center justify-end gap-1.5">
               <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
                 {([
@@ -178,7 +225,7 @@ function Row({
           </td>
         </>
       ) : (
-        <td className="sticky right-0 z-10 border-l border-border bg-surface px-2 group-hover:bg-elevated">
+        <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 group-hover:bg-elevated">
           <div className="flex items-center justify-end gap-1">
             <button
               type="button"
@@ -221,11 +268,13 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className="w-full min-w-[1080px] border-collapse">
+      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1320px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
-            <th className="sticky left-0 z-20 w-[128px] bg-surface py-2 pl-3 pr-2">标的</th><th className="w-[160px] px-2">题材</th><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th>{mode === 'candidate' ? <th className="px-2">排序</th> : null}<th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th>
-            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-20 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-20 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
+            <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
+            {mode === 'candidate' ? <><th className="px-2">总分</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : <th className="w-[160px] px-2">题材</th>}
+            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
+            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
           </tr>
         </thead>
         <tbody>
@@ -401,6 +450,13 @@ export function LimitBoard() {
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
+  const overview = useQuery({
+    queryKey: QK.overviewMarket(undefined),
+    queryFn: () => api.overviewMarket(),
+    enabled: tab === 'candidate',
+    refetchInterval: 15000,
+    staleTime: 5000,
+  })
   const searchQuery = useQuery({
     queryKey: QK.instrumentSearch(search, 'stock'),
     queryFn: () => api.instrumentSearch(search, 10, 'stock'),
@@ -464,6 +520,10 @@ export function LimitBoard() {
     : tab === 'candidate'
     ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
     : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
+  const marketEmotion = overview.data?.emotion
+  const marketRadar = (overview.data?.radar ?? []).filter(item => (
+    ['profit', 'money', 'speculation', 'mainline'].includes(item.key)
+  ))
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -495,7 +555,16 @@ export function LimitBoard() {
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5">
         {tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
-            <div className="flex items-center justify-between border-b border-border px-3 py-2.5"><div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>{runtime.last_error ? <span className="text-[10px] text-warning">{runtime.last_error}</span> : null}</div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+              <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
+              <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
+                {tab === 'candidate' && marketEmotion ? <>
+                  <span className={marketEmotion.score >= 55 ? 'text-bear' : marketEmotion.score < 45 ? 'text-bull' : 'text-secondary'} title={`看板日期 ${overview.data?.as_of ?? '--'}`}>情绪 {marketEmotion.label} <span className="font-mono">{marketEmotion.score}</span></span>
+                  {marketRadar.map(item => <span key={item.key} className="text-muted">{item.label} <span className="font-mono text-secondary">{item.value}</span></span>)}
+                </> : null}
+                {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
+              </div>
+            </div>
             <Table
               rows={rows}
               mode={tableMode}
