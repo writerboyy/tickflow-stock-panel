@@ -719,13 +719,27 @@ function filterTiers(tiers: LimitLadderTier[], keys: Set<FilterKey>, bf?: Broken
 
 // ===== 过滤持久化 =====
 
-const DEFAULT_FILTERS = new Set<FilterKey>(['limit_up', 'main', 'chinext', 'star', 'bj'])
+const DEFAULT_BOARD_FILTERS: FilterKey[] = ['main', 'chinext', 'star', 'bj']
 
-function loadFilterKeys(): Set<FilterKey> {
+function defaultFilterKeys(direction: Direction): FilterKey[] {
+  return [...statusTabs(direction).map(tab => tab.key), ...DEFAULT_BOARD_FILTERS]
+}
+
+function loadFilterKeys(direction: Direction): Set<FilterKey> {
   const arr = storage.limitLadderBoard.get([])
-  const allTabs = [...STATUS_TABS_UP, ...BOARD_TABS]
+  const allTabs = [...statusTabs(direction), ...BOARD_TABS]
   const valid = arr.filter((k): k is FilterKey => allTabs.some(t => t.key === k))
-  return valid.length > 0 ? new Set(valid) : new Set(DEFAULT_FILTERS)
+  const legacyDefaults: FilterKey[] = [direction === 'down' ? 'limit_down' : 'limit_up', ...DEFAULT_BOARD_FILTERS]
+  const isLegacyDefault = valid.length === legacyDefaults.length
+    && legacyDefaults.every(key => valid.includes(key))
+  if (storage.limitLadderStatusDefaultV2.get(false)) {
+    return valid.length > 0 ? new Set(valid) : new Set(defaultFilterKeys(direction))
+  }
+  storage.limitLadderStatusDefaultV2.set(true)
+  if (valid.length > 0 && !isLegacyDefault) return new Set(valid)
+  const defaults = defaultFilterKeys(direction)
+  storage.limitLadderBoard.set(defaults)
+  return new Set(defaults)
 }
 
 // ===== 梯队颜色 =====
@@ -1435,7 +1449,7 @@ export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNo
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
-  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(loadFilterKeys)
+  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(() => loadFilterKeys(direction))
   const [extFields, setExtFields] = useState<ExtFieldConfig>(loadExtFields)
   const [showExtConfig, setShowExtConfig] = useState(false)
   const [showConcept, setShowConcept] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).concept)
@@ -1463,13 +1477,9 @@ export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNo
     setDirection(d)
     storage.limitLadderDirection.set(d)
     // 切换方向时重置状态筛选为该方向默认集(避免涨跌状态键错配)
-    const defaultKeys = d === 'down'
-      ? ['limit_down', 'main', 'chinext', 'star', 'bj']
-      : ['limit_up', 'main', 'chinext', 'star', 'bj']
-    const allTabs = [...statusTabs(d), ...BOARD_TABS]
-    const valid = defaultKeys.filter(k => allTabs.some(t => t.key === k)) as FilterKey[]
-    setFilterKeys(new Set(valid))
-    storage.limitLadderBoard.set(valid)
+    const defaults = defaultFilterKeys(d)
+    setFilterKeys(new Set(defaults))
+    storage.limitLadderBoard.set(defaults)
   }, [])
 
   const toggleConcept = useCallback(() => {

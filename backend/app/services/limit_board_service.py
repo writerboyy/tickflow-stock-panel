@@ -334,6 +334,13 @@ class LimitBoardService:
         all_realtime = bool(quotes) and all(
             row.get("source") == "realtime" for row in quotes.values()
         )
+        if not self._sector_candidates_by_symbol:
+            self._refresh_sector_candidate_universe(cn_today())
+        sector_links = {
+            symbol: [dict(item) for item in self._sector_candidates_by_symbol.get(symbol, [])]
+            for symbol in requested
+            if self._sector_candidates_by_symbol.get(symbol)
+        }
         return {
             "state": (
                 "live" if len(quotes) == len(requested) and all_realtime
@@ -342,6 +349,7 @@ class LimitBoardService:
             ),
             "as_of": max(timestamps) if timestamps else None,
             "quotes": quotes,
+            "sector_links": sector_links,
             "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
         }
 

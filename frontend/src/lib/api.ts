@@ -1271,6 +1271,7 @@ export interface LimitBoardQuoteSnapshot {
     timestamp?: string | number | null
     source?: 'realtime' | 'daily_snapshot'
   }>
+  sector_links: Record<string, Array<{ plate_id: string; plate_name: string }>>
   missing_symbols: string[]
 }
 

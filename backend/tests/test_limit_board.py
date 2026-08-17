@@ -198,6 +198,9 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
 
 def test_heat_quote_snapshot_registers_batch_consumer_and_returns_quotes(tmp_path):
     service, quotes, _config = make_service(tmp_path)
+    service._sector_candidates_by_symbol = {
+        "600000.SH": [{"plate_id": "801001", "plate_name": "人工智能"}],
+    }
     quotes.latest_quotes = [{
         "symbol": "600000.SH",
         "name": "浦发银行",
@@ -214,6 +217,9 @@ def test_heat_quote_snapshot_registers_batch_consumer_and_returns_quotes(tmp_pat
     assert snapshot["as_of"] == "2026-08-18T10:00:00+08:00"
     assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.25
     assert snapshot["quotes"]["600000.SH"]["change_pct"] == 0.025
+    assert snapshot["sector_links"] == {
+        "600000.SH": [{"plate_id": "801001", "plate_name": "人工智能"}],
+    }
     assert snapshot["missing_symbols"] == ["600001.SH"]
 
 

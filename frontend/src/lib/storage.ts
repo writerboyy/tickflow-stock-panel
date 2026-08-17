@@ -66,6 +66,9 @@ export const storage = {
   /** 连板梯队板块筛选 */
   limitLadderBoard:     kv<string[]>('limit-ladder-board-filter'),
 
+  /** 连板梯队状态筛选全选默认值已迁移 */
+  limitLadderStatusDefaultV2: kv<boolean>('limit-ladder-status-default-v2'),
+
   /** 连板梯队 ext 字段配置 */
   limitLadderExtFields: kv<Record<string, any>>('limit-ladder-ext-fields'),
 
