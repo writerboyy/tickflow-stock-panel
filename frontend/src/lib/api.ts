@@ -1257,6 +1257,70 @@ export interface LimitBoardRow {
   first_board_broken_rate?: number
 }
 
+export interface LimitBoardSectorStrengthRow {
+  plate_id: string
+  plate_name?: string | null
+  parent_plate_id?: string | null
+  is_child?: boolean
+  strength?: number | null
+  change_pct?: number | null
+  speed_pct?: number | null
+  amount?: number | null
+  main_net?: number | null
+  main_buy?: number | null
+  main_sell?: number | null
+  volume_ratio?: number | null
+  institution_increase?: number | null
+  rank?: number
+  rank_count?: number
+}
+
+export interface LimitBoardSectorStrengthSnapshot {
+  provider: 'kaipanla'
+  state: 'live' | 'unavailable'
+  as_of: string
+  refreshed_at?: string | null
+  institution_label?: string | null
+  history_state: 'live' | 'closed' | 'unavailable'
+  timeline: string[]
+  rows: LimitBoardSectorStrengthRow[]
+}
+
+export interface LimitBoardSectorConstituent {
+  plate_id: string
+  symbol: string
+  code: string
+  name?: string | null
+  tags?: string | null
+  last_price?: number | null
+  change_pct?: number | null
+  amount?: number | null
+  turnover_rate?: number | null
+  float_market_value?: number | null
+  main_net?: number | null
+  limit_tag?: string | null
+  rank_tag?: string | null
+  limit_count?: number | null
+  quote_available: boolean
+  rank: number
+  rank_count: number
+}
+
+export interface LimitBoardSectorConstituents {
+  provider: 'kaipanla'
+  state: 'live' | 'unavailable'
+  as_of: string
+  captured_at: string
+  membership_as_of: string
+  quote_provider: 'tickflow'
+  quote_state: 'live' | 'paused' | 'closed' | 'historical_unavailable' | 'unavailable'
+  quote_as_of?: string | null
+  quote_available: boolean
+  plate_id: string
+  plate_name?: string | null
+  rows: LimitBoardSectorConstituent[]
+}
+
 export interface LimitBoardView {
   revision: number
   settings: {
@@ -1291,6 +1355,7 @@ export interface LimitBoardView {
     market_evaluation?: string | null
     max_consecutive?: number | null
   } | null
+  sector_strength: LimitBoardSectorStrengthSnapshot | null
   events: Array<Record<string, any>>
   runtime: {
     trading_date: string
@@ -2521,6 +2586,14 @@ export const api = {
   qmtCancelOrder: (order_sys_id: string) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
   limitBoard: () => request<LimitBoardView>('/api/limit-board'),
+  limitBoardSectorStrength: (capturedAt: string) =>
+    request<LimitBoardSectorStrengthSnapshot>(
+      `/api/limit-board/sector-strength?captured_at=${encodeURIComponent(capturedAt)}`,
+    ),
+  limitBoardSectorConstituents: (plateId: string, capturedAt: string) =>
+    request<LimitBoardSectorConstituents>(
+      `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents?captured_at=${encodeURIComponent(capturedAt)}`,
+    ),
   limitBoardNotificationsUpdate: (
     notifications: LimitBoardView['settings']['notifications'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {

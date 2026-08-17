@@ -51,12 +51,16 @@ from app.plugins.kaipanla.storage import (
     SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
+    append_sector_strength_snapshot,
     archive_raw,
     atomic_upsert,
     atomic_upsert_records,
     ensure_configs,
     has_auction_0925,
     recent_trading_dates,
+    read_sector_constituents,
+    read_sector_strength_snapshot,
+    read_sector_strength_timeline,
 )
 from app.services.ingestion_manifest import (
     load_ingestion_manifest,
@@ -72,6 +76,13 @@ _ROW_KEY = {115: "info", 30: "info", 100: "list"}
 _MAX_PAGES = 100
 _FUND_INTERVAL_PAGE_SIZE = 1000
 _REFERENCE_PAGE_SIZE = 1000
+
+
+def _in_sector_strength_window(value: clock_time) -> bool:
+    return (
+        clock_time(9, 25) <= value <= clock_time(11, 30)
+        or clock_time(13, 0) <= value <= clock_time(15, 0)
+    )
 
 
 def _shareholder_count_windows(payload: dict) -> list[tuple[date, date]]:
@@ -101,11 +112,14 @@ class KaipanlaCollector:
         self._bootstrap_task: asyncio.Task | None = None
         self._sentiment_task: asyncio.Task | None = None
         self._sector_strength_task: asyncio.Task | None = None
+        self._sector_constituents_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._sentiment_lock = threading.Lock()
         self._market_sentiment: dict | None = None
         self._sector_strength_lock = threading.Lock()
         self._sector_strength: dict | None = None
+        self._sector_constituents_lock = threading.Lock()
+        self._sector_constituents_cache: dict[tuple[date, str], list[dict]] = {}
 
     @property
     def configured(self) -> bool:
@@ -164,7 +178,7 @@ class KaipanlaCollector:
                     day_of_week="mon-fri",
                     hour="9-15",
                     minute="*",
-                    second="*/15",
+                    second="*/5",
                     timezone="Asia/Shanghai",
                 ),
                 id="kaipanla_sector_strength",
@@ -223,12 +237,12 @@ class KaipanlaCollector:
                 self._scheduled_sector_constituents,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
-                    hour=18,
-                    minute=30,
+                    hour=8,
+                    minute=45,
                     timezone="Asia/Shanghai",
                 ),
                 id="kaipanla_sector_constituents",
-                misfire_grace_time=14400,
+                misfire_grace_time=7200,
                 replace_existing=True,
             )
             scheduler.add_job(
@@ -287,6 +301,11 @@ class KaipanlaCollector:
                 ),
                 name="kaipanla-sector-strength",
             )
+        if self._sector_constituents_task is None or self._sector_constituents_task.done():
+            self._sector_constituents_task = asyncio.create_task(
+                self._scheduled_sector_constituents(),
+                name="kaipanla-sector-constituents",
+            )
 
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
@@ -295,9 +314,12 @@ class KaipanlaCollector:
             self._sentiment_task.cancel()
         if self._sector_strength_task and not self._sector_strength_task.done():
             self._sector_strength_task.cancel()
+        if self._sector_constituents_task and not self._sector_constituents_task.done():
+            self._sector_constituents_task.cancel()
         self._bootstrap_task = None
         self._sentiment_task = None
         self._sector_strength_task = None
+        self._sector_constituents_task = None
 
     async def _run_safely(self, name: str, func, *args) -> int:
         if not self.configured:
@@ -344,10 +366,7 @@ class KaipanlaCollector:
     async def _scheduled_sector_strength(self) -> int:
         now = cn_now()
         current = now.timetz().replace(tzinfo=None)
-        if not (
-            clock_time(9, 15) <= current <= clock_time(11, 30)
-            or clock_time(13, 0) <= current <= clock_time(15, 5)
-        ):
+        if not _in_sector_strength_window(current):
             return 0
         return await self._run_safely(
             "sector_strength",
@@ -387,17 +406,36 @@ class KaipanlaCollector:
             return dict(self._market_sentiment) if self._market_sentiment else None
 
     def sector_strength_snapshot(self) -> dict | None:
-        """Return today's in-memory Kaipanla sector-strength ranking."""
+        """Return today's live ranking, restoring the latest persisted point after restart."""
         with self._sector_strength_lock:
-            if not self._sector_strength:
-                return None
-            return {
-                **self._sector_strength,
-                "rows": [dict(row) for row in self._sector_strength.get("rows") or []],
-            }
+            current = self._sector_strength
+        if not current:
+            current = read_sector_strength_snapshot(self.data_dir, cn_today())
+            if current:
+                with self._sector_strength_lock:
+                    self._sector_strength = current
+        if not current:
+            return None
+        return {
+            **current,
+            "rows": [dict(row) for row in current.get("rows") or []],
+        }
+
+    def sector_strength_timeline(self, trade_date: date) -> list[str]:
+        return read_sector_strength_timeline(self.data_dir, trade_date)
+
+    def sector_strength_snapshot_at(self, trade_date: date, captured_at: str) -> dict | None:
+        return read_sector_strength_snapshot(self.data_dir, trade_date, captured_at)
+
+    def latest_completed_trading_date(self, trade_date: date) -> date | None:
+        return next(
+            (value for value in reversed(recent_trading_dates(self.data_dir)) if value < trade_date),
+            None,
+        )
 
     async def refresh_sector_strength(self, trade_date: date) -> int:
         """Poll today's board ranking without carrying an old trading day forward."""
+        institution_label = None
         try:
             async with self._client_factory() as client:
                 payload = await client.request(
@@ -414,19 +452,104 @@ class KaipanlaCollector:
             if reported not in (None, "") and parse_trade_date(reported) != trade_date:
                 raise ValueError("实时板块强度返回的交易日不是当天")
             rows = parse_sector_strength(payload)
+            titles = payload.get("Title") if isinstance(payload, dict) else None
+            if isinstance(titles, list) and titles:
+                institution_label = str(titles[0] or "").strip() or None
         except Exception:  # noqa: BLE001
             logger.debug("实时板块强度接口暂不可用", exc_info=True)
             rows = []
+        captured_now = cn_now()
+        in_capture_window = captured_now.date() == trade_date and _in_sector_strength_window(
+            captured_now.timetz().replace(tzinfo=None),
+        )
         snapshot = {
             "provider": "kaipanla",
             "state": "live" if rows else "unavailable",
             "as_of": trade_date.isoformat(),
-            "refreshed_at": cn_now().isoformat(),
+            "refreshed_at": captured_now.isoformat(),
+            "institution_label": institution_label,
+            "history_state": "closed" if rows and not in_capture_window else "unavailable",
             "rows": rows,
         }
+        if rows and in_capture_window:
+            try:
+                await asyncio.to_thread(
+                    append_sector_strength_snapshot,
+                    self.data_dir,
+                    trade_date,
+                    snapshot,
+                )
+                snapshot["history_state"] = "live"
+            except Exception:  # noqa: BLE001
+                logger.warning("实时板块强度快照落库失败", exc_info=True)
         with self._sector_strength_lock:
             self._sector_strength = snapshot
         return len(rows)
+
+    async def sector_constituents_at(
+        self,
+        trade_date: date,
+        plate_id: str,
+        end_hhmm: str | None = None,
+    ) -> list[dict]:
+        """Fetch one board's historical members, optionally at an intraday minute."""
+        cache_key = (trade_date, plate_id)
+        if end_hhmm is None:
+            with self._sector_constituents_lock:
+                cached = self._sector_constituents_cache.get(cache_key)
+            if cached is not None:
+                return [dict(row) for row in cached]
+            persisted = await asyncio.to_thread(
+                read_sector_constituents,
+                self.data_dir,
+                trade_date,
+                plate_id,
+            )
+            if persisted:
+                with self._sector_constituents_lock:
+                    self._sector_constituents_cache[cache_key] = [dict(row) for row in persisted]
+                return persisted
+        rows = []
+        seen_codes: set[str] = set()
+        async with self._client_factory() as client:
+            for offset in range(0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE):
+                params: dict[str, object] = {
+                    "PlateID": plate_id,
+                    "Date": trade_date.isoformat(),
+                    "Index": offset,
+                    "st": _REFERENCE_PAGE_SIZE,
+                }
+                if end_hhmm is not None:
+                    params.update({"RStart": "0925", "REnd": end_hhmm, "Type": "1"})
+                payload = await client.request(
+                    "sector_constituents",
+                    params,
+                )
+                parsed = parse_sector_constituents(payload, plate_id)
+                fresh = [row for row in parsed if row["code"] not in seen_codes]
+                if not fresh:
+                    break
+                seen_codes.update(row["code"] for row in fresh)
+                rows.extend(fresh)
+                if len(parsed) < _REFERENCE_PAGE_SIZE:
+                    break
+            else:
+                raise RuntimeError("开盘啦板块成分分页超过安全上限")
+        if end_hhmm is None:
+            if rows:
+                self._write_records(
+                    SECTOR_CONSTITUENT_TABLE,
+                    [
+                        {**row, "report_date": trade_date.isoformat()}
+                        for row in rows
+                    ],
+                    ("plate_id", "symbol"),
+                )
+            with self._sector_constituents_lock:
+                if len(self._sector_constituents_cache) >= 128:
+                    self._sector_constituents_cache.pop(next(iter(self._sector_constituents_cache)))
+                self._sector_constituents_cache[cache_key] = [dict(row) for row in rows]
+        return rows
 
     async def refresh_market_sentiment(self, trade_date: date) -> int:
         """Poll today's live sentiment endpoints without substituting an old close."""
@@ -481,8 +604,30 @@ class KaipanlaCollector:
         )
 
     async def _scheduled_sector_constituents(self) -> int:
+        today = cn_today()
+        trade_date = self.latest_completed_trading_date(today)
+        if trade_date is None:
+            logger.warning("开盘啦板块成分采集缺少上一完整交易日")
+            return 0
+        manifest = load_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            SECTOR_CONSTITUENT_TABLE,
+            trade_date.isoformat(),
+        )
+        expected = [str(value) for value in manifest.get("expected_batches") or []]
+        batches = manifest.get("batches") or {}
+        if expected and not manifest.get("failed_batches") and all(
+            isinstance(batches.get(plate_id), dict)
+            and batches[plate_id].get("status") in {"completed", "valid_empty"}
+            for plate_id in expected
+        ):
+            return int(manifest.get("published_rows") or 0)
         return await self._run_safely(
-            "sector_constituents", self.collect_sector_constituents, cn_today(), self._northbound_plate_ids()
+            "sector_constituents",
+            self.collect_sector_constituents,
+            trade_date,
+            None,
         )
 
     def _stock_codes(self, trade_date: date) -> list[str]:
@@ -512,20 +657,6 @@ class KaipanlaCollector:
             return sorted({str(code) for code in frame["code"].to_list() if code})
         except Exception as exc:  # noqa: BLE001
             logger.warning("开盘啦资金池读取失败 (%s)", type(exc).__name__)
-            return []
-
-    def _northbound_plate_ids(self) -> list[str]:
-        root = self.data_dir / "ext_data" / NORTHBOUND_SECTOR_TABLE / "timeseries"
-        partitions = sorted(root.glob("date=*/part.parquet"))
-        if not partitions:
-            return []
-        try:
-            import polars as pl
-
-            frame = pl.read_parquet(partitions[-1], columns=["plate_id"])
-            return sorted({str(value) for value in frame["plate_id"].to_list() if value})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("开盘啦北向板块池读取失败 (%s)", type(exc).__name__)
             return []
 
     async def collect_funds(self, trade_date: date) -> int:

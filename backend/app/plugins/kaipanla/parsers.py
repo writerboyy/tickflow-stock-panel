@@ -435,21 +435,26 @@ def parse_dragon_tiger_details(payload: dict, code: str) -> list[dict]:
 
 def parse_sector_strength(payload: dict) -> list[dict]:
     """解析板块强度榜，同时保留盘中实时排名与资金字段。"""
-    source_rows = [*_rows(payload, "list")]
+    source_rows = [(row, None) for row in _rows(payload, "list")]
     extra_rows = payload.get("list_soninfo")
     if extra_rows is not None:
         if not isinstance(extra_rows, list):
             raise ResponseShapeError("list_soninfo 不是数组")
-        source_rows.extend(extra_rows)
+        parent_ids = payload.get("list_son")
+        if not isinstance(parent_ids, list) or len(parent_ids) != len(extra_rows):
+            raise ResponseShapeError("list_son 与 list_soninfo 数量不一致")
+        source_rows.extend(zip(extra_rows, parent_ids, strict=True))
     rows = []
     rank_count = len(source_rows)
-    for index, row in enumerate(source_rows):
+    for index, (row, parent_id) in enumerate(source_rows):
         if not isinstance(row, list) or len(row) < 11:
             raise ResponseShapeError(f"list[{index}] 至少需要 11 列")
         rows.append(
             {
                 "plate_id": _text(row[0], f"list[{index}].plate_id", required=True),
                 "plate_name": _text(row[1], f"list[{index}].plate_name"),
+                "parent_plate_id": _text(parent_id, f"list[{index}].parent_plate_id"),
+                "is_child": parent_id is not None,
                 "strength": _float(row[2], f"list[{index}].strength"),
                 "change_pct_pct": _float(row[3], f"list[{index}].change_pct"),
                 "speed_pct_pct": _float(row[4], f"list[{index}].speed_pct"),
@@ -460,24 +465,24 @@ def parse_sector_strength(payload: dict) -> list[dict]:
                 "volume_ratio": _float(row[9], f"list[{index}].volume_ratio"),
                 "float_market_value": _float(row[10], f"list[{index}].float_market_value"),
                 "large_order_amount_3m": (
-                    _float(row[11], f"list[{index}].large_order_amount_3m")
-                    if len(row) > 11 else None
-                ),
-                "market_value": (
-                    _float(row[12], f"list[{index}].market_value")
+                    _float(row[12], f"list[{index}].large_order_amount_3m")
                     if len(row) > 12 else None
                 ),
-                "institution_increase": (
-                    _float(row[13], f"list[{index}].institution_increase")
+                "market_value": (
+                    _float(row[13], f"list[{index}].market_value")
                     if len(row) > 13 else None
                 ),
-                "pe_current": (
-                    _float(row[14], f"list[{index}].pe_current")
+                "institution_increase": (
+                    _float(row[14], f"list[{index}].institution_increase")
                     if len(row) > 14 else None
                 ),
-                "pe_forward": (
-                    _float(row[15], f"list[{index}].pe_forward")
+                "pe_current": (
+                    _float(row[15], f"list[{index}].pe_current")
                     if len(row) > 15 else None
+                ),
+                "pe_forward": (
+                    _float(row[16], f"list[{index}].pe_forward")
+                    if len(row) > 16 else None
                 ),
                 "rank": index + 1,
                 "rank_count": rank_count,

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import polars as pl
@@ -48,6 +48,8 @@ class FakeQuotes:
         self.consumers = {}
         self.enriched = pl.DataFrame()
         self.enriched_date = None
+        self.latest_quotes = []
+        self.final_sync_done = False
 
     def publish_external_alerts(self, events):
         self.events.extend(events)
@@ -58,8 +60,16 @@ class FakeQuotes:
             event["ext_gn_ths__所属概念"] = "银行;金融科技"
             event["concept"] = "银行;金融科技"
 
-    def get_latest_quotes(self, _symbols=None):
-        return []
+    def get_latest_quotes(self, symbols=None):
+        if not symbols:
+            return [dict(row) for row in self.latest_quotes]
+        return [
+            dict(row) for row in self.latest_quotes
+            if str(row.get("symbol") or "").strip().upper() in symbols
+        ]
+
+    def status(self):
+        return {"final_sync_done": self.final_sync_done}
 
     def get_enriched_today(self):
         return self.enriched, self.enriched_date
@@ -1515,6 +1525,294 @@ def test_limit_board_view_exposes_market_sentiment_guard(tmp_path):
     assert "自动打板已停止" in result["runtime"]["trading_reason"]
 
 
+def test_limit_board_view_exposes_live_sector_strength_tree(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    current_at = "2026-08-17T10:00:00+08:00"
+    previous_at = "2026-08-17T09:30:05+08:00"
+    current_rows = [
+        {"plate_id": "P1", "plate_name": "通信", "strength": 100, "main_net": 20},
+        {"plate_id": "P2", "plate_name": "算力", "strength": 90, "main_net": 10},
+        {
+            "plate_id": "C1",
+            "plate_name": "光模块",
+            "parent_plate_id": "P1",
+            "is_child": True,
+            "strength": 80,
+            "main_net": 5,
+        },
+    ]
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": current_at,
+            "institution_label": "第二季度机构增仓",
+            "history_state": "live",
+            "rows": current_rows,
+        },
+        sector_strength_timeline=lambda _day: [previous_at, current_at],
+        sector_strength_snapshot_at=lambda _day, captured_at: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": captured_at,
+            "institution_label": "第二季度机构增仓",
+            "history_state": "live",
+            "rows": [{"plate_id": "P1", "plate_name": "通信", "strength": 70}],
+        },
+    )
+
+    result = service.view()
+
+    snapshot = result["sector_strength"]
+    assert snapshot["state"] == "live"
+    assert snapshot["institution_label"] == "第二季度机构增仓"
+    assert snapshot["history_state"] == "live"
+    assert snapshot["timeline"] == [previous_at, current_at]
+    assert [row["plate_name"] for row in snapshot["rows"]] == ["通信", "光模块", "算力"]
+    assert snapshot["rows"][1]["parent_plate_id"] == "P1"
+    historical = service.sector_strength_view(previous_at)
+    assert historical["refreshed_at"] == previous_at
+    assert historical["rows"][0]["strength"] == 70
+    with pytest.raises(ValueError, match="时间点格式无效"):
+        service.sector_strength_view("not-a-time")
+
+
+@pytest.mark.asyncio
+async def test_sector_constituents_use_previous_membership_and_tickflow_close(
+    tmp_path,
+    monkeypatch,
+):
+    service, quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    membership_date = date(2026, 8, 14)
+    captured_at = "2026-08-17T15:00:00+08:00"
+    calls = []
+
+    async def constituents_at(trade_date, plate_id):
+        calls.append((trade_date, plate_id))
+        return [
+            {
+                "plate_id": plate_id,
+                "symbol": "600000",
+                "code": "600000",
+                "name": "浦发银行",
+                "last_price": 10.1,
+                "change_pct": 2.18,
+                "turnover_rate": 3.5,
+                "amount": 100,
+                "main_net": 20,
+                "limit_count": 1,
+            },
+            {
+                "plate_id": plate_id,
+                "symbol": "600001",
+                "code": "600001",
+                "name": "邯郸钢铁",
+                "last_price": 11.0,
+                "change_pct": 10.0,
+                "turnover_rate": 5.5,
+                "amount": 200,
+                "main_net": 40,
+                "limit_count": 2,
+            },
+        ]
+
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 17, 21, 4, 53, tzinfo=CN_TZ),
+    )
+    quotes.final_sync_done = True
+    quotes.latest_quotes = [
+        {
+            "symbol": "600000.SH",
+            "name": "浦发银行",
+            "last_price": 10.1,
+            "prev_close": 10.0,
+            "change_pct": 0.01,
+            "turnover_rate": 0.035,
+            "amount": 300,
+            "timestamp": "2026-08-17T15:31:00+08:00",
+        },
+        {
+            "symbol": "600001.SH",
+            "name": "邯郸钢铁",
+            "last_price": 11.0,
+            "prev_close": 10.0,
+            "change_pct": 0.10,
+            "turnover_rate": 0.055,
+            "amount": 400,
+            "timestamp": "2026-08-17T15:31:00+08:00",
+        },
+    ]
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-17T21:04:53+08:00",
+            "history_state": "closed",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 16807}],
+        },
+        sector_strength_snapshot_at=lambda _day, selected_at: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": selected_at,
+            "history_state": "live",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 16807}],
+        },
+        sector_strength_timeline=lambda _day: [captured_at],
+        latest_completed_trading_date=lambda _day: membership_date,
+        sector_constituents_at=constituents_at,
+    )
+
+    result = await service.sector_constituents_view("801001", captured_at)
+
+    assert calls == [(membership_date, "801001")]
+    assert result["plate_name"] == "芯片"
+    assert result["membership_as_of"] == "2026-08-14"
+    assert result["quote_provider"] == "tickflow"
+    assert result["quote_state"] == "closed"
+    assert result["quote_as_of"] == "2026-08-17T15:00:00+08:00"
+    assert [row["symbol"] for row in result["rows"]] == ["600001.SH", "600000.SH"]
+    assert result["rows"][0]["change_pct"] == 0.10
+    assert result["rows"][0]["turnover_rate"] == 0.055
+    assert result["rows"][0]["amount"] == 400
+    assert result["rows"][0]["main_net"] is None
+    assert result["rows"][0]["limit_count"] is None
+    assert result["rows"][0]["limit_tag"] == "涨停"
+    assert result["rows"][0]["rank"] == 1
+    after_close = await service.sector_constituents_view(
+        "801001",
+        "2026-08-17T21:04:53+08:00",
+    )
+    assert calls[-1] == (membership_date, "801001")
+    assert after_close["captured_at"] == "2026-08-17T15:00:00+08:00"
+    with pytest.raises(ValueError, match="选定时间点不可用"):
+        await service.sector_constituents_view("999999", captured_at)
+
+
+@pytest.mark.asyncio
+async def test_sector_constituents_do_not_reuse_historical_quote_fields(
+    tmp_path,
+    monkeypatch,
+):
+    service, quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    captured_at = "2026-08-17T10:00:00+08:00"
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ),
+    )
+
+    async def constituents_at(_trade_date, plate_id):
+        return [{
+            "plate_id": plate_id,
+            "symbol": "600000",
+            "code": "600000",
+            "name": "浦发银行",
+            "last_price": 99.0,
+            "change_pct": 9.9,
+            "amount": 999,
+            "main_net": 888,
+            "limit_count": 3,
+        }]
+
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": captured_at,
+            "history_state": "live",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 100}],
+        },
+        sector_strength_snapshot_at=lambda _day, selected_at: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": selected_at,
+            "history_state": "live",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 100}],
+        },
+        sector_strength_timeline=lambda _day: [captured_at],
+        latest_completed_trading_date=lambda _day: date(2026, 8, 14),
+        sector_constituents_at=constituents_at,
+    )
+
+    result = await service.sector_constituents_view("801001", captured_at)
+
+    assert result["quote_state"] == "unavailable"
+    assert result["quote_available"] is False
+    assert result["rows"][0]["last_price"] is None
+    assert result["rows"][0]["change_pct"] is None
+    assert result["rows"][0]["amount"] is None
+    assert result["rows"][0]["main_net"] is None
+    assert result["rows"][0]["limit_count"] is None
+    assert quotes.consumers["limit_board"] == {"600000.SH"}
+
+
+@pytest.mark.asyncio
+async def test_historical_sector_point_does_not_show_current_stock_quotes(
+    tmp_path,
+    monkeypatch,
+):
+    service, quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 17)
+    current_at = "2026-08-17T10:00:00+08:00"
+    selected_at = "2026-08-17T09:35:00+08:00"
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ),
+    )
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH",
+        "last_price": 10.1,
+        "prev_close": 10.0,
+        "change_pct": 0.01,
+        "timestamp": current_at,
+    }]
+
+    async def constituents_at(_trade_date, plate_id):
+        return [{"plate_id": plate_id, "code": "600000", "name": "浦发银行"}]
+
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": current_at,
+            "history_state": "live",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 100}],
+        },
+        sector_strength_snapshot_at=lambda _day, captured_at: {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": captured_at,
+            "history_state": "live",
+            "rows": [{"plate_id": "801001", "plate_name": "芯片", "strength": 80}],
+        },
+        sector_strength_timeline=lambda _day: [selected_at, current_at],
+        latest_completed_trading_date=lambda _day: date(2026, 8, 14),
+        sector_constituents_at=constituents_at,
+    )
+
+    result = await service.sector_constituents_view("801001", selected_at)
+
+    assert result["quote_state"] == "historical_unavailable"
+    assert result["quote_available"] is False
+    assert result["quote_as_of"] is None
+    assert result["rows"][0]["last_price"] is None
+
+
 def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
@@ -1652,6 +1950,58 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
         json={"symbol": "600001.SH", "revision": 0},
     )
     assert stale.status_code == 409
+
+
+def test_limit_board_api_exposes_selected_sector_strength_snapshot(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = "2026-08-17T09:30:05+08:00"
+    service.sector_strength_view = lambda value=None: {
+        "state": "live",
+        "refreshed_at": value,
+        "rows": [{"plate_id": "P1", "strength": 16807}],
+    }
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/limit-board/sector-strength",
+        params={"captured_at": captured_at},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["refreshed_at"] == captured_at
+    assert response.json()["rows"][0]["strength"] == 16807
+
+
+def test_limit_board_api_exposes_sector_constituents_at_selected_time(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = "2026-08-17T09:35:05+08:00"
+
+    async def constituents_view(plate_id, value=None):
+        return {
+            "state": "live",
+            "plate_id": plate_id,
+            "captured_at": value,
+            "rows": [{"symbol": "600000.SH", "name": "浦发银行"}],
+        }
+
+    service.sector_constituents_view = constituents_view
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/limit-board/sector-strength/801001/constituents",
+        params={"captured_at": captured_at},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["plate_id"] == "801001"
+    assert response.json()["captured_at"] == captured_at
+    assert response.json()["rows"][0]["symbol"] == "600000.SH"
 
 
 def test_legacy_selected_api_remains_compatible(tmp_path):

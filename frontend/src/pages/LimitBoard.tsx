@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Ban,
@@ -8,6 +8,7 @@ import {
   CircleDot,
   Crosshair,
   Flame,
+  Layers3,
   ListFilter,
   Plus,
   Radio,
@@ -23,11 +24,17 @@ import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
-import { api, type LimitBoardRow, type LimitBoardView } from '@/lib/api'
+import {
+  api,
+  type LimitBoardRow,
+  type LimitBoardSectorConstituent,
+  type LimitBoardSectorStrengthRow,
+  type LimitBoardView,
+} from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type Tab = 'first' | 'candidate' | 'pool' | 'events'
-type TableMode = Exclude<Tab, 'events'>
+type Tab = 'sector' | 'first' | 'candidate' | 'pool' | 'events'
+type TableMode = Exclude<Tab, 'sector' | 'events'>
 type NotificationSettings = LimitBoardView['settings']['notifications']
 type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
 
@@ -86,6 +93,18 @@ function percentValue(value: number | null | undefined): string {
 
 function plainPercentValue(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) ? '--' : `${value.toFixed(2)}%`
+}
+
+function moneyYi(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '--'
+  const amount = value / 100_000_000
+  const digits = Math.abs(amount) >= 1000 ? 0 : Math.abs(amount) >= 100 ? 1 : 2
+  return `${amount.toFixed(digits)}亿`
+}
+
+function financialTone(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value === 0) return 'text-secondary'
+  return value > 0 ? 'text-bull' : 'text-bear'
 }
 
 const LEADERSHIP = {
@@ -333,6 +352,222 @@ function Table(props: TableProps) {
   )
 }
 
+type SectorSortKey = 'strength' | 'main_net' | 'institution_increase'
+const SECTOR_TIMELINE_START = 9 * 3600 + 25 * 60
+const SECTOR_TIMELINE_END = 15 * 3600
+
+function sectorTimelineOffset(value: string | null | undefined): number {
+  const match = /T(\d{2}):(\d{2}):(\d{2})/.exec(value ?? '')
+  if (!match) return 0
+  const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])
+  return Math.max(0, Math.min(SECTOR_TIMELINE_END - SECTOR_TIMELINE_START, seconds - SECTOR_TIMELINE_START))
+}
+
+function sectorTradingCapturedAt(
+  value: string | null | undefined,
+  historyState: 'live' | 'closed' | 'unavailable' | undefined,
+): string | null {
+  if (!value) return null
+  if (historyState !== 'closed') return value
+  const match = /T(\d{2}):(\d{2}):(\d{2})/.exec(value)
+  if (!match || Number(match[1]) < 15) return value
+  return value.replace(/T\d{2}:\d{2}:\d{2}/, 'T15:00:00')
+}
+
+function sectorConstituentStatus(row: LimitBoardSectorConstituent): string {
+  if (row.limit_tag) return row.limit_tag
+  if ((row.limit_count ?? 0) > 1) return `${row.limit_count}连板`
+  if (row.limit_count === 1) return '首板'
+  return '--'
+}
+
+function SectorStrengthTable({
+  snapshot,
+  onOpenStock,
+}: {
+  snapshot: LimitBoardView['sector_strength']
+  onOpenStock: (symbol: string, name?: string) => void
+}) {
+  const [sortKey, setSortKey] = useState<SectorSortKey>('strength')
+  const [descending, setDescending] = useState(true)
+  const [cursorIndex, setCursorIndex] = useState<number | null>(null)
+  const [requestedAt, setRequestedAt] = useState<string | null>(null)
+  const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
+  const timeline = snapshot?.timeline ?? []
+  const latestIndex = Math.max(0, timeline.length - 1)
+  const activeIndex = cursorIndex == null ? latestIndex : Math.min(cursorIndex, latestIndex)
+  const cursorAt = timeline[activeIndex] ?? null
+  const activeOffset = sectorTimelineOffset(cursorAt)
+  const isLive = (!cursorAt || activeIndex === latestIndex) && snapshot?.history_state !== 'closed'
+  useEffect(() => {
+    const handle = window.setTimeout(() => setRequestedAt(isLive ? null : cursorAt), 120)
+    return () => window.clearTimeout(handle)
+  }, [cursorAt, isLive])
+  useEffect(() => {
+    if (cursorIndex != null && cursorIndex > latestIndex) setCursorIndex(null)
+  }, [cursorIndex, latestIndex])
+  const historical = useQuery({
+    queryKey: QK.limitBoardSectorStrength(requestedAt ?? 'live'),
+    queryFn: () => api.limitBoardSectorStrength(requestedAt as string),
+    enabled: requestedAt != null,
+    placeholderData: previous => previous,
+  })
+  const activeSnapshot = requestedAt ? historical.data ?? snapshot : snapshot
+  const historyLabel = snapshot?.history_state === 'live'
+    ? '盘中时序已落库'
+    : snapshot?.history_state === 'closed' ? '非落库时段' : '盘中时序落库不可用'
+  const rows = useMemo(() => {
+    const values = [...(activeSnapshot?.rows ?? [])]
+    const children = new Map<string, LimitBoardSectorStrengthRow[]>()
+    const roots: LimitBoardSectorStrengthRow[] = []
+    const orphans: LimitBoardSectorStrengthRow[] = []
+    const rootIds = new Set(values.filter(row => !row.parent_plate_id).map(row => row.plate_id))
+    for (const row of values) {
+      if (!row.parent_plate_id) roots.push(row)
+      else if (rootIds.has(row.parent_plate_id)) children.set(row.parent_plate_id, [...(children.get(row.parent_plate_id) ?? []), row])
+      else orphans.push(row)
+    }
+    const compare = (left: LimitBoardSectorStrengthRow, right: LimitBoardSectorStrengthRow) => {
+      const a = left[sortKey]
+      const b = right[sortKey]
+      const numeric = (Number(a ?? 0) - Number(b ?? 0)) * (descending ? -1 : 1)
+      return numeric || left.plate_id.localeCompare(right.plate_id)
+    }
+    roots.sort(compare)
+    orphans.sort(compare)
+    return roots.flatMap(row => [row, ...(children.get(row.plate_id) ?? []).sort(compare)]).concat(orphans)
+  }, [activeSnapshot?.rows, descending, sortKey])
+  const selectedPlate = rows.find(row => row.plate_id === selectedPlateId) ?? rows[0] ?? null
+  const activeCapturedAt = isLive
+    ? activeSnapshot?.refreshed_at ?? cursorAt
+    : cursorAt ?? sectorTradingCapturedAt(
+      activeSnapshot?.refreshed_at,
+      snapshot?.history_state,
+    )
+  const activeSnapshotReady = isLive
+    || cursorAt == null
+    || activeSnapshot?.refreshed_at === activeCapturedAt
+  const constituents = useQuery({
+    queryKey: QK.limitBoardSectorConstituents(
+      selectedPlate?.plate_id ?? '',
+      activeCapturedAt ?? '',
+    ),
+    queryFn: () => api.limitBoardSectorConstituents(
+      selectedPlate!.plate_id,
+      activeCapturedAt!,
+    ),
+    enabled: selectedPlate != null && activeCapturedAt != null && activeSnapshotReady,
+    placeholderData: previous => previous,
+    refetchInterval: isLive ? 5000 : false,
+  })
+  const constituentData = constituents.data?.plate_id === selectedPlate?.plate_id
+    ? constituents.data
+    : null
+  const constituentQuoteLabel = !constituentData
+    ? '等待成分数据'
+    : constituentData.quote_state === 'live'
+      ? `TickFlow 实时 ${scoreTime(constituentData.quote_as_of)}`
+      : constituentData.quote_state === 'closed'
+        ? `TickFlow 收盘 ${scoreTime(constituentData.quote_as_of)}`
+        : constituentData.quote_state === 'paused'
+          ? `TickFlow 最新 ${scoreTime(constituentData.quote_as_of)}`
+          : constituentData.quote_state === 'historical_unavailable'
+            ? '该回看时间没有个股分钟截面'
+            : '等待 TickFlow 批量行情'
+  const changeSort = (key: SectorSortKey) => {
+    if (sortKey === key) setDescending(value => !value)
+    else {
+      setSortKey(key)
+      setDescending(true)
+    }
+  }
+  const header = (key: SectorSortKey, label: string) => (
+    <button type="button" onClick={() => changeSort(key)} className="inline-flex items-center gap-1 whitespace-nowrap font-medium hover:text-foreground" aria-label={`按${label}${sortKey === key && descending ? '升序' : '降序'}排序`}>
+      {label}<span className={sortKey === key ? 'text-accent' : 'text-muted'}>{sortKey === key ? (descending ? '↓' : '↑') : '↕'}</span>
+    </button>
+  )
+  return <section className="overflow-hidden rounded-btn border border-border bg-surface">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+      <div><div className="text-xs font-medium">板块强度</div><div className="mt-0.5 text-[10px] text-muted">开盘啦精选板块，5 秒刷新</div></div>
+      <div className="flex items-center gap-2 text-[10px] text-muted"><span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span><span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : cursorAt ? '回看' : '收盘'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span></div>
+    </div>
+    {rows.length ? <div className="grid min-w-0 lg:grid-cols-[minmax(340px,44%)_minmax(480px,56%)]">
+      <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
+        <table className="w-full min-w-[520px] border-collapse">
+          <thead className="text-left text-[10px] text-muted"><tr><th className="w-[34%] px-3 py-2">板块</th><th className="w-[18%] bg-accent/10 px-3 py-2 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[24%] px-3 py-2 text-right">{header('main_net', '主力净额')}</th><th className="w-[24%] px-3 py-2 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
+          <tbody>{rows.map(row => {
+            const selected = row.plate_id === selectedPlate?.plate_id
+            return <tr
+              key={row.plate_id}
+              role="button"
+              tabIndex={0}
+              aria-selected={selected}
+              onClick={() => setSelectedPlateId(row.plate_id)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  setSelectedPlateId(row.plate_id)
+                }
+              }}
+              className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected ? 'bg-accent/10' : ''}`}
+            >
+              <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="text-sm font-medium">{row.plate_name || '--'}</div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
+              <td className="bg-accent/10 px-3 py-2.5 text-right font-mono text-base font-semibold tabular-nums text-foreground">{row.strength?.toFixed(0) ?? '--'}</td>
+              <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.main_net)}`}>{moneyYi(row.main_net)}</td>
+              <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.institution_increase)}`}>{moneyYi(row.institution_increase)}</td>
+            </tr>
+          })}</tbody>
+        </table>
+      </div>
+      <div className="min-w-0">
+        <div className="flex min-h-12 items-center justify-between gap-3 border-b border-border px-3 py-2">
+          <div className="min-w-0"><div className="truncate text-xs font-medium">{selectedPlate?.plate_name || '板块成分股'}</div><div className="mt-0.5 text-[10px] text-muted">{constituentData ? `成分截至 ${constituentData.membership_as_of} · ${constituentQuoteLabel}` : constituentQuoteLabel} · {constituentData?.rows.length ?? '--'} 只</div></div>
+          {constituents.isFetching ? <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-muted" aria-label="正在刷新板块成分股" /> : null}
+        </div>
+        {constituents.isError && !constituentData ? <div className="px-4 py-12 text-center text-xs text-danger">实时板块成分股加载失败</div> : constituentData?.rows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
+          <table className="w-full min-w-[620px] border-collapse">
+            <thead className="sticky top-0 z-10 bg-surface text-left text-[10px] text-muted"><tr><th className="w-[28%] px-3 py-2">股票</th><th className="w-[13%] px-3 py-2 text-right">现价</th><th className="w-[14%] px-3 py-2 text-right">涨幅</th><th className="w-[15%] px-3 py-2 text-right">板状态</th><th className="w-[15%] px-3 py-2 text-right">换手率</th><th className="w-[15%] px-3 py-2 text-right">成交额</th></tr></thead>
+            <tbody>{constituentData.rows.map(row => <tr key={row.symbol} className="border-t border-border/70 hover:bg-elevated/30">
+              <td className="px-3 py-2.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-sm font-medium">{row.name || row.code}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted">#{row.rank} {row.symbol}{row.tags ? ` · ${row.tags}` : ''}</span></button></td>
+              <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
+              <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.change_pct)}`}>{scorePct(row.change_pct, 2)}</td>
+              <td className="px-3 py-2.5 text-right text-xs text-secondary">{sectorConstituentStatus(row)}</td>
+              <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
+              <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{moneyYi(row.amount)}</td>
+            </tr>)}</tbody>
+          </table>
+        </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending ? '正在读取实时板块成分股' : '该时间点没有可用的成分股数据'}</div>}
+      </div>
+    </div> : <div className="px-4 py-12 text-center text-xs text-muted">当前没有可用的实时板块强度数据</div>}
+    <div className="border-t border-border px-4 py-3">
+      <div className="mb-2 flex items-center justify-between font-mono text-[10px] text-muted"><span>09:25</span><span className="text-secondary">{isLive ? '实时' : scoreTime(cursorAt)}</span><span>15:00</span></div>
+      <input
+        type="range"
+        min={0}
+        max={SECTOR_TIMELINE_END - SECTOR_TIMELINE_START}
+        step={5}
+        value={activeOffset}
+        disabled={timeline.length < 2}
+        onInput={event => {
+          const target = Number(event.currentTarget.value)
+          let nearestIndex = 0
+          let nearestDistance = Number.POSITIVE_INFINITY
+          timeline.forEach((point, index) => {
+            const distance = Math.abs(sectorTimelineOffset(point) - target)
+            if (distance < nearestDistance) {
+              nearestDistance = distance
+              nearestIndex = index
+            }
+          })
+          setCursorIndex(nearestIndex === latestIndex ? null : nearestIndex)
+        }}
+        aria-label="选择盘中板块强度时间点"
+        className="h-1 w-full cursor-pointer accent-accent disabled:cursor-not-allowed disabled:opacity-40"
+      />
+    </div>
+  </section>
+}
+
 function NotificationDialog({
   value,
   pending,
@@ -499,9 +734,9 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
 
 export function LimitBoard() {
   const queryClient = useQueryClient()
-  const [tab, setTab] = useState<Tab>('first')
+  const [tab, setTab] = useState<Tab>('sector')
   const [search, setSearch] = useState('')
-  const [preview, setPreview] = useState<LimitBoardRow | null>(null)
+  const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
@@ -568,7 +803,7 @@ export function LimitBoard() {
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
-  const rows = tab === 'first' ? data.first_board : tab === 'candidate' ? data.candidate_pool : data.board_pool
+  const rows = tab === 'first' ? data.first_board : tab === 'candidate' ? data.candidate_pool : tab === 'pool' ? data.board_pool : []
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
   const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
@@ -612,6 +847,7 @@ export function LimitBoard() {
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
+          ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['first', '首板/反包', data.first_board.length, Flame],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
@@ -624,7 +860,7 @@ export function LimitBoard() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5">
-        {tab !== 'events' ? (
+        {tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>

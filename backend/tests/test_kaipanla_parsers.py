@@ -326,6 +326,7 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
     child_strength_row = ["P2", "子板块", 77.0, 2.1, 0.3, 80, 8, 40, 32, 1.2, 400]
     strengths = parse_sector_strength({
         "list": [strength_row],
+        "list_son": ["P1"],
         "list_soninfo": [child_strength_row],
     })
 
@@ -343,7 +344,27 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
     assert strengths[0]["rank"] == 1
     assert strengths[0]["rank_count"] == 2
     assert strengths[1]["plate_name"] == "子板块"
+    assert strengths[1]["parent_plate_id"] == "P1"
+    assert strengths[1]["is_child"] is True
     assert strengths[1]["rank"] == 2
+
+
+def test_sector_strength_parser_uses_documented_live_money_columns():
+    row = [
+        "801001", "芯片", 16807, 3.254, 0.54,
+        1_178_079_082_397, 38_070_711_178, 297_956_763_365, -259_886_052_187,
+        1.086, 28_956_977_205_536, 2.9, 18_355_851_969, 39_545_448_949_952,
+        212_572_237_165, 67.7139, 45.5848, 16807, 3.254,
+    ]
+
+    parsed = parse_sector_strength({"list": [row]})[0]
+
+    assert parsed["main_net"] == 38_070_711_178
+    assert parsed["large_order_amount_3m"] == 18_355_851_969
+    assert parsed["market_value"] == 39_545_448_949_952
+    assert parsed["institution_increase"] == 212_572_237_165
+    assert parsed["pe_current"] == 67.7139
+    assert parsed["pe_forward"] == 45.5848
 
 
 def test_lhb_detail_parser_preserves_source_identity_across_reason_groups():

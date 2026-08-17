@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, time
 
 import polars as pl
 import pytest
 
+from app.market_time import CN_TZ
 from app.plugins.kaipanla import collector as collector_module
 from app.plugins.kaipanla.collector import KaipanlaCollector
 from app.plugins.kaipanla.credentials import KaipanlaCredentials
@@ -156,12 +157,19 @@ async def test_sector_strength_snapshot_keeps_live_fields_and_rejects_old_day(
     tmp_path, monkeypatch,
 ):
     _configured(monkeypatch)
+    now = datetime(2026, 5, 15, 10, 0, 5, tzinfo=CN_TZ)
+    monkeypatch.setattr(collector_module, "cn_now", lambda: now)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: now.date())
     row = ["P1", "人工智能", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500, 20, 900, 2.1, 35, 30]
     calls = []
     collector = KaipanlaCollector(
         tmp_path,
         lambda: FakeClient(
-            {"sector_strength": {"Day": ["2026-05-15"], "list": [row]}},
+            {"sector_strength": {
+                "Day": ["2026-05-15"],
+                "Title": ["第二季度机构增仓"],
+                "list": [row],
+            }},
             calls,
         ),
     )
@@ -171,6 +179,12 @@ async def test_sector_strength_snapshot_keeps_live_fields_and_rejects_old_day(
     assert snapshot["state"] == "live"
     assert snapshot["rows"][0]["change_pct_pct"] == 3.2
     assert snapshot["rows"][0]["main_net"] == 12.0
+    assert snapshot["institution_label"] == "第二季度机构增仓"
+    assert snapshot["history_state"] == "live"
+    assert collector.sector_strength_timeline(now.date()) == [now.isoformat()]
+
+    restored = KaipanlaCollector(tmp_path, lambda: FakeClient({}, []))
+    assert restored.sector_strength_snapshot()["rows"][0]["strength"] == 88.5
 
     collector._client_factory = lambda: FakeClient(
         {"sector_strength": {"Day": ["2026-05-14"], "list": [row]}},
@@ -178,6 +192,26 @@ async def test_sector_strength_snapshot_keeps_live_fields_and_rejects_old_day(
     )
     assert await collector.refresh_sector_strength(date(2026, 5, 15)) == 0
     assert collector.sector_strength_snapshot()["state"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_sector_strength_does_not_persist_after_market_close(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    now = datetime(2026, 5, 15, 20, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr(collector_module, "cn_now", lambda: now)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: now.date())
+    row = ["P1", "人工智能", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500]
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {"sector_strength": {"Day": ["2026-05-15"], "list": [row]}},
+            [],
+        ),
+    )
+
+    assert await collector.refresh_sector_strength(now.date()) == 1
+    assert collector.sector_strength_snapshot()["history_state"] == "closed"
+    assert collector.sector_strength_timeline(now.date()) == []
 
 
 @pytest.mark.asyncio
@@ -493,6 +527,51 @@ async def test_scheduled_funds_collects_latest_completed_trading_date(tmp_path, 
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_sector_constituents_collects_previous_trading_day(
+    tmp_path,
+    monkeypatch,
+):
+    _configured(monkeypatch)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: date(2026, 8, 17))
+    monkeypatch.setattr(
+        collector_module,
+        "recent_trading_dates",
+        lambda _data_dir, _limit=60: [date(2026, 8, 14), date(2026, 8, 17)],
+    )
+    strength_row = ["801001", "芯片", 100, 2.5, 0.1, 1000, 20, 60, 40, 1.2, 500]
+    stock_row = [None] * 41
+    stock_row[0], stock_row[1] = "600000", "浦发银行"
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                "sector_strength": {
+                    "Day": ["2026-08-14"],
+                    "list": [strength_row],
+                },
+                "sector_constituents": {"list": [stock_row]},
+            },
+            calls,
+        ),
+    )
+
+    assert await collector._scheduled_sector_constituents() == 1
+
+    assert calls[0] == (
+        "sector_strength",
+        {"Day": "2026-08-14", "Index": 0, "st": 1000},
+    )
+    assert calls[1][0] == "sector_constituents"
+    assert calls[1][1]["Date"] == "2026-08-14"
+    partition = (
+        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE
+        / "timeseries" / "date=2026-08-14" / "part.parquet"
+    )
+    assert pl.read_parquet(partition)["symbol"].to_list() == ["600000.SH"]
 
 
 def test_stock_codes_exclude_symbols_outside_target_trading_window(tmp_path):
@@ -914,6 +993,62 @@ async def test_sector_partial_plate_batch_does_not_publish(tmp_path, monkeypatch
     assert manifest["failed_batches"] == ["801002"]
 
 
+@pytest.mark.asyncio
+async def test_sector_constituents_at_uses_selected_intraday_window(tmp_path):
+    row = [None] * 41
+    row[0], row[1], row[5], row[6] = "600126", "杭钢股份", 9.2, 2.18
+    row[7], row[8], row[13], row[23], row[40] = 1000, 3.5, 60, "首板", 1
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"sector_constituents": {"list": [row]}}, calls),
+    )
+
+    result = await collector.sector_constituents_at(
+        date(2026, 8, 17),
+        "801001",
+        "1035",
+    )
+
+    assert result[0]["code"] == "600126"
+    assert result[0]["change_pct"] == 2.18
+    assert calls == [(
+        "sector_constituents",
+        {
+            "PlateID": "801001",
+            "Date": "2026-08-17",
+            "RStart": "0925",
+            "REnd": "1035",
+            "Index": 0,
+            "st": 1000,
+            "Type": "1",
+        },
+    )]
+
+
+@pytest.mark.asyncio
+async def test_sector_constituents_at_persists_and_reuses_completed_membership(tmp_path):
+    row = [None] * 41
+    row[0], row[1] = "600126", "杭钢股份"
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"sector_constituents": {"list": [row]}}, calls),
+    )
+
+    first = await collector.sector_constituents_at(date(2026, 8, 14), "801001")
+    restored_calls = []
+    restored = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient({"sector_constituents": RuntimeError("must not fetch")}, restored_calls),
+    )
+    second = await restored.sector_constituents_at(date(2026, 8, 14), "801001")
+
+    assert first[0]["code"] == "600126"
+    assert second[0]["symbol"] == "600126.SH"
+    assert restored_calls == []
+
+
 def test_fund_stock_pool_requires_current_code_and_type_schema(tmp_path):
     (tmp_path / "instruments").mkdir()
     pl.DataFrame({"code": ["600126", "510300"], "type": ["stock", "etf"]}).write_parquet(
@@ -937,9 +1072,11 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     class Scheduler:
         def __init__(self):
             self.jobs = []
+            self.triggers = {}
 
         def add_job(self, _func, **kwargs):
             self.jobs.append(kwargs["id"])
+            self.triggers[kwargs["id"]] = kwargs["trigger"]
 
     scheduler = Scheduler()
     collector = KaipanlaCollector(tmp_path)
@@ -948,11 +1085,24 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     assert len(scheduler.jobs) == 14
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
+    assert "second='*/5'" in str(scheduler.triggers["kaipanla_sector_strength"])
     assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
     assert "kaipanla_sector_constituents" in scheduler.jobs
+    assert "hour='8'" in str(scheduler.triggers["kaipanla_sector_constituents"])
+    assert "minute='45'" in str(scheduler.triggers["kaipanla_sector_constituents"])
     assert collector._bootstrap_task is None
+
+
+def test_sector_strength_capture_window_matches_slider_boundaries():
+    assert collector_module._in_sector_strength_window(time(9, 24, 59)) is False
+    assert collector_module._in_sector_strength_window(time(9, 25)) is True
+    assert collector_module._in_sector_strength_window(time(11, 30)) is True
+    assert collector_module._in_sector_strength_window(time(11, 30, 1)) is False
+    assert collector_module._in_sector_strength_window(time(13, 0)) is True
+    assert collector_module._in_sector_strength_window(time(15, 0)) is True
+    assert collector_module._in_sector_strength_window(time(15, 0, 1)) is False
 
 
 def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch):

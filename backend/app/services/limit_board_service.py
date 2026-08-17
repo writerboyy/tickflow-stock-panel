@@ -165,6 +165,7 @@ class LimitBoardService:
         self._ws_registered = False
         self._ws_symbols: set[str] = set()
         self._quotes: dict[str, dict[str, Any]] = {}
+        self._sector_quote_symbols: set[str] = set()
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=10))
         self._history_date: date | None = None
         self._name_map_date: date | None = None
@@ -242,25 +243,52 @@ class LimitBoardService:
             return None
         return value if isinstance(value, dict) else None
 
-    def _sector_strength_snapshot(self, today: date) -> dict[str, dict[str, Any]]:
+    def _sector_strength_view(
+        self,
+        today: date,
+        captured_at: str | None = None,
+        *,
+        include_timeline: bool = False,
+    ) -> dict[str, Any] | None:
         collector = getattr(self.app_state, "kaipanla_collector", None)
         if collector is None:
-            return {}
-        getter = getattr(collector, "sector_strength_snapshot", None)
+            return None
+        getter = getattr(
+            collector,
+            "sector_strength_snapshot_at" if captured_at else "sector_strength_snapshot",
+            None,
+        )
         if not callable(getter):
-            return {}
+            return None
         try:
-            snapshot = getter()
+            snapshot = getter(today, captured_at) if captured_at else getter()
         except Exception:  # noqa: BLE001
             logger.debug("读取开盘啦实时板块强度快照失败", exc_info=True)
-            return {}
+            return None
+        timeline = []
+        if include_timeline:
+            timeline_getter = getattr(collector, "sector_strength_timeline", None)
+            if callable(timeline_getter):
+                try:
+                    timeline = [str(value) for value in timeline_getter(today) if value]
+                except Exception:  # noqa: BLE001
+                    logger.debug("读取开盘啦板块强度时间轴失败", exc_info=True)
         if (
             not isinstance(snapshot, dict)
             or snapshot.get("state") != "live"
             or snapshot.get("as_of") != today.isoformat()
         ):
-            return {}
-        result = {}
+            return {
+                "provider": "kaipanla",
+                "state": "unavailable",
+                "as_of": today.isoformat(),
+                "refreshed_at": snapshot.get("refreshed_at") if isinstance(snapshot, dict) else None,
+                "institution_label": None,
+                "history_state": "live" if timeline else "unavailable",
+                "timeline": timeline,
+                "rows": [],
+            }
+        normalized = []
         for row in snapshot.get("rows") or []:
             if not isinstance(row, dict):
                 continue
@@ -274,8 +302,294 @@ class LimitBoardService:
                 "change_pct": change_pct_pct / 100.0 if change_pct_pct is not None else None,
                 "speed_pct": speed_pct_pct / 100.0 if speed_pct_pct is not None else None,
             }
-            result[name] = value
-        return result
+            normalized.append(value)
+
+        children: dict[str, list[dict[str, Any]]] = {}
+        roots = []
+        for row in normalized:
+            parent_id = str(row.get("parent_plate_id") or "").strip()
+            if parent_id:
+                children.setdefault(parent_id, []).append(row)
+            else:
+                roots.append(row)
+        ordered = []
+        seen_children = set()
+        for row in roots:
+            ordered.append(row)
+            for child in children.get(str(row.get("plate_id") or ""), []):
+                ordered.append(child)
+                seen_children.add(str(child.get("plate_id") or ""))
+        ordered.extend(
+            row for row in normalized
+            if row.get("is_child") and str(row.get("plate_id") or "") not in seen_children
+        )
+        return {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": snapshot.get("as_of"),
+            "refreshed_at": snapshot.get("refreshed_at"),
+            "institution_label": snapshot.get("institution_label") or "机构增仓",
+            "history_state": snapshot.get("history_state") or ("live" if timeline else "unavailable"),
+            "timeline": timeline,
+            "rows": ordered,
+        }
+
+    def sector_strength_view(self, captured_at: str | None = None) -> dict[str, Any] | None:
+        today = cn_today()
+        if captured_at:
+            try:
+                point = datetime.fromisoformat(captured_at)
+            except ValueError as exc:
+                raise ValueError("板块强度时间点格式无效") from exc
+            if point.tzinfo is None or point.astimezone(CN_TZ).date() != today:
+                raise ValueError("只能回看当前交易日的板块强度")
+        return self._sector_strength_view(today, captured_at, include_timeline=True)
+
+    async def sector_constituents_view(
+        self,
+        plate_id: str,
+        captured_at: str | None = None,
+    ) -> dict[str, Any]:
+        today = cn_today()
+        requested_point: datetime | None = None
+        if captured_at:
+            try:
+                requested_point = datetime.fromisoformat(captured_at)
+            except ValueError as exc:
+                raise ValueError("板块强度时间点格式无效") from exc
+            if requested_point.tzinfo is None or requested_point.astimezone(CN_TZ).date() != today:
+                raise ValueError("只能查看当前交易日的板块成分")
+            requested_point = requested_point.astimezone(CN_TZ)
+        current_snapshot = self.sector_strength_view()
+        after_close = (
+            requested_point is not None
+            and requested_point.timetz().replace(tzinfo=None) >= clock_time(15, 0)
+            and isinstance(current_snapshot, dict)
+            and current_snapshot.get("history_state") == "closed"
+        )
+        snapshot = current_snapshot if after_close or requested_point is None else (
+            self.sector_strength_view(captured_at)
+        )
+        rows = snapshot.get("rows") if isinstance(snapshot, dict) else []
+        selected = next(
+            (
+                row for row in rows or []
+                if isinstance(row, dict) and str(row.get("plate_id") or "") == plate_id
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError("该板块在选定时间点不可用")
+
+        selected_at = requested_point or snapshot.get("refreshed_at")
+        if not selected_at:
+            raise ValueError("板块强度时间点不可用")
+        if isinstance(selected_at, datetime):
+            point = selected_at
+        else:
+            try:
+                point = datetime.fromisoformat(str(selected_at))
+            except ValueError as exc:
+                raise ValueError("板块强度时间点格式无效") from exc
+        if point.tzinfo is None or point.astimezone(CN_TZ).date() != today:
+            raise ValueError("只能查看当前交易日的板块成分")
+        point = point.astimezone(CN_TZ)
+        if point.timetz().replace(tzinfo=None) > clock_time(15, 0):
+            point = point.replace(hour=15, minute=0, second=0, microsecond=0)
+        if not clock_time(9, 25) <= point.timetz().replace(tzinfo=None) <= clock_time(15, 0):
+            raise ValueError("板块成分时间点必须在 09:25 至 15:00 之间")
+
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        membership_date_getter = getattr(collector, "latest_completed_trading_date", None)
+        if not callable(membership_date_getter):
+            raise RuntimeError("开盘啦板块成分交易日暂不可用")
+        membership_date = membership_date_getter(today)
+        if not isinstance(membership_date, date):
+            raise RuntimeError("开盘啦板块成分缺少上一完整交易日")
+        getter = getattr(collector, "sector_constituents_at", None)
+        if not callable(getter):
+            raise RuntimeError("开盘啦板块成分历史数据暂不可用")
+        try:
+            source_rows = await getter(membership_date, plate_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("查询开盘啦板块成分失败 (%s)", type(exc).__name__)
+            raise RuntimeError("开盘啦板块成分历史数据暂不可用") from exc
+
+        symbol_lookup: dict[str, str] = {}
+        try:
+            instruments = self.repo.get_instruments()
+            if "symbol" in instruments.columns:
+                symbol_lookup = {
+                    str(symbol).split(".", 1)[0]: str(symbol)
+                    for symbol in instruments["symbol"].to_list()
+                    if symbol
+                }
+        except Exception:  # noqa: BLE001
+            logger.debug("板块成分股代码维表暂不可用", exc_info=True)
+
+        members = []
+        for row in source_rows:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("code") or row.get("symbol") or "").split(".", 1)[0]
+            if not code:
+                continue
+            symbol = symbol_lookup.get(code)
+            if not symbol:
+                exchange = "SH" if code.startswith(("6", "9")) else "BJ" if code.startswith(("4", "8")) else "SZ"
+                symbol = f"{code}.{exchange}"
+            members.append({
+                "plate_id": plate_id,
+                "symbol": symbol,
+                "code": code,
+                "name": str(row.get("name") or "").strip() or None,
+                "tags": str(row.get("tags") or "").strip() or None,
+            })
+
+        symbols = {str(row["symbol"]) for row in members}
+        with self._lock:
+            self._sector_quote_symbols = symbols
+        self._refresh_symbol_consumer()
+
+        latest_at = _quote_time(
+            current_snapshot.get("refreshed_at")
+            if isinstance(current_snapshot, dict)
+            else None,
+        )
+        historical_point = (
+            requested_point is not None
+            and not after_close
+            and latest_at is not None
+            and requested_point < latest_at
+        )
+        quote_rows = [] if historical_point else self.quote_service.get_latest_quotes(symbols)
+        quotes_by_symbol: dict[str, dict[str, Any]] = {}
+        quote_dates: dict[date, int] = defaultdict(int)
+        for quote in quote_rows:
+            symbol = str(quote.get("symbol") or "").strip().upper()
+            quote_at = _quote_time(quote.get("timestamp"))
+            if symbol in symbols and quote_at is not None:
+                quotes_by_symbol[symbol] = quote
+                quote_dates[quote_at.date()] += 1
+
+        quote_date: date | None = None
+        if quote_dates.get(today):
+            quote_date = today
+        elif not _is_trading_time(cn_now()) and quote_dates.get(membership_date):
+            quote_date = membership_date
+        if quote_date is not None:
+            quotes_by_symbol = {
+                symbol: quote
+                for symbol, quote in quotes_by_symbol.items()
+                if (_quote_time(quote.get("timestamp")) or datetime.min.replace(tzinfo=CN_TZ)).date()
+                == quote_date
+            }
+        else:
+            quotes_by_symbol = {}
+
+        normalized = []
+        quote_times = []
+        for member in members:
+            symbol = str(member["symbol"])
+            quote = quotes_by_symbol.get(symbol)
+            quote_at = _quote_time(quote.get("timestamp")) if quote else None
+            if quote_at is not None:
+                quote_times.append(quote_at)
+            name = str((quote or {}).get("name") or member.get("name") or "").strip() or None
+            last_price = _finite((quote or {}).get("last_price", (quote or {}).get("close")))
+            limit_up = self._limit_up(quote or {}, symbol, name or "", quote_date or today)
+            at_limit = (
+                last_price is not None
+                and limit_up is not None
+                and last_price >= limit_up - 0.005
+            )
+            normalized.append({
+                **member,
+                "name": name,
+                "last_price": last_price,
+                "change_pct": _finite((quote or {}).get("change_pct")),
+                "amount": _finite((quote or {}).get("amount")),
+                "turnover_rate": _finite((quote or {}).get("turnover_rate")),
+                "float_market_value": None,
+                "main_net": None,
+                "limit_tag": "涨停" if at_limit else None,
+                "rank_tag": None,
+                "limit_count": None,
+                "quote_available": quote is not None and last_price is not None,
+            })
+        normalized.sort(key=lambda row: (
+            row.get("change_pct") is None,
+            -float(row.get("change_pct") or 0),
+            -float(row.get("amount") or 0),
+            str(row.get("code") or ""),
+        ))
+        for index, row in enumerate(normalized):
+            row["rank"] = index + 1
+            row["rank_count"] = len(normalized)
+
+        now = cn_now()
+        quote_service_status = getattr(self.quote_service, "status", None)
+        status = quote_service_status() if callable(quote_service_status) else {}
+        latest_quote_at = max(quote_times) if quote_times else None
+        closed_snapshot = (
+            quote_date is not None
+            and (
+                quote_date < today
+                or (
+                    now.timetz().replace(tzinfo=None) >= clock_time(15, 0)
+                    and (
+                        bool(status.get("final_sync_done"))
+                        or (
+                            latest_quote_at is not None
+                            and latest_quote_at.timetz().replace(tzinfo=None)
+                            >= clock_time(15, 0)
+                        )
+                    )
+                )
+            )
+        )
+        if historical_point:
+            quote_state = "historical_unavailable"
+        elif quote_date is None:
+            quote_state = "unavailable"
+        elif closed_snapshot:
+            quote_state = "closed"
+        elif _is_trading_time(now):
+            quote_state = "live"
+        else:
+            quote_state = "paused"
+        quote_as_of = latest_quote_at
+        if quote_state == "closed" and quote_date is not None:
+            quote_as_of = datetime.combine(
+                quote_date,
+                clock_time(15, 0),
+                tzinfo=CN_TZ,
+            )
+
+        return {
+            "provider": "kaipanla",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "captured_at": point.isoformat(),
+            "membership_as_of": membership_date.isoformat(),
+            "quote_provider": "tickflow",
+            "quote_state": quote_state,
+            "quote_as_of": quote_as_of.isoformat() if quote_as_of else None,
+            "quote_available": bool(quotes_by_symbol),
+            "plate_id": plate_id,
+            "plate_name": selected.get("plate_name"),
+            "rows": normalized,
+        }
+
+    def _sector_strength_snapshot(self, today: date) -> dict[str, dict[str, Any]]:
+        view = self._sector_strength_view(today)
+        if not view or view.get("state") != "live":
+            return {}
+        return {
+            str(row.get("plate_name") or "").strip(): row
+            for row in view.get("rows") or []
+            if str(row.get("plate_name") or "").strip()
+        }
 
     def _sentiment_guard(self, config: dict[str, Any]) -> dict[str, Any]:
         threshold = _finite(
@@ -1106,6 +1420,8 @@ class LimitBoardService:
             symbol for symbol in symbols
             if not is_risk_warning_name(self._resolve_name(symbol))
         }
+        with self._lock:
+            symbols.update(self._sector_quote_symbols)
         self.quote_service.set_symbol_consumer(_ACCOUNT_ID, symbols)
 
     def _enrich_concepts(self, rows: list[dict[str, Any]]) -> None:
@@ -1704,6 +2020,7 @@ class LimitBoardService:
                 if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
             ],
             "market_sentiment": self._market_sentiment_snapshot(),
+            "sector_strength": self.sector_strength_view(),
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],

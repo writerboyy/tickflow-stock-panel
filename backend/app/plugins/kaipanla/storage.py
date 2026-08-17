@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import os
 import re
+import sqlite3
 import threading
 from datetime import date
 from pathlib import Path
@@ -37,6 +38,7 @@ SHAREHOLDER_COUNT_TABLE = "ext_kpl_shareholder_counts"
 LHB_MOVEMENT_TABLE = "ext_kpl_lhb_movement"
 LHB_DETAIL_TABLE = "ext_kpl_lhb_detail"
 SECTOR_CONSTITUENT_TABLE = "ext_kpl_sector_constituents"
+SECTOR_STRENGTH_INTRADAY_DB = "sector_strength.sqlite3"
 TABLE_IDS = (
     AUCTION_TABLE,
     LIMITUP_TABLE,
@@ -456,6 +458,26 @@ def _partition_path(data_dir: Path, table_id: str, trade_date: date) -> Path:
     return data_dir / "ext_data" / table_id / "timeseries" / f"date={trade_date}" / "part.parquet"
 
 
+def read_sector_constituents(
+    data_dir: Path,
+    trade_date: date,
+    plate_id: str,
+) -> list[dict]:
+    """Read one board's persisted membership for a completed trading day."""
+    path = _partition_path(data_dir, SECTOR_CONSTITUENT_TABLE, trade_date)
+    if not path.exists():
+        return []
+    try:
+        frame = pl.scan_parquet(path).filter(
+            pl.col("plate_id") == str(plate_id),
+        ).collect()
+    except (OSError, pl.exceptions.PolarsError):
+        return []
+    if frame.is_empty():
+        return []
+    return frame.to_dicts()
+
+
 def read_funds_large_order_reference(
     data_dir: Path,
     trade_date: date,
@@ -688,6 +710,121 @@ def archive_raw(
         if tmp.exists():
             tmp.unlink()
     return path
+
+
+def _sector_strength_db_path(data_dir: Path) -> Path:
+    return data_dir / "ext_data" / "_kaipanla_live" / SECTOR_STRENGTH_INTRADAY_DB
+
+
+def _sector_strength_connect(data_dir: Path) -> sqlite3.Connection:
+    path = _sector_strength_db_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=10)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sector_strength_snapshots (
+            trading_date TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            institution_label TEXT,
+            rows_json TEXT NOT NULL,
+            PRIMARY KEY (trading_date, captured_at)
+        )
+        """
+    )
+    return connection
+
+
+def append_sector_strength_snapshot(
+    data_dir: Path,
+    trade_date: date,
+    snapshot: dict,
+) -> int:
+    """Append one live sector-strength snapshot for intraday replay."""
+    rows = snapshot.get("rows")
+    captured_at = str(snapshot.get("refreshed_at") or "").strip()
+    if snapshot.get("state") != "live" or not isinstance(rows, list) or not rows or not captured_at:
+        return 0
+    with _sector_strength_connect(data_dir) as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO sector_strength_snapshots
+                (trading_date, captured_at, institution_label, rows_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                trade_date.isoformat(),
+                captured_at,
+                snapshot.get("institution_label"),
+                json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+    return len(rows)
+
+
+def read_sector_strength_timeline(data_dir: Path, trade_date: date) -> list[str]:
+    """Return persisted intraday snapshot timestamps in chronological order."""
+    if not _sector_strength_db_path(data_dir).exists():
+        return []
+    with _sector_strength_connect(data_dir) as connection:
+        rows = connection.execute(
+            """
+            SELECT captured_at
+            FROM sector_strength_snapshots
+            WHERE trading_date = ?
+              AND substr(captured_at, 12, 8) BETWEEN '09:25:00' AND '15:00:00'
+            ORDER BY captured_at
+            """,
+            (trade_date.isoformat(),),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def read_sector_strength_snapshot(
+    data_dir: Path,
+    trade_date: date,
+    captured_at: str | None = None,
+) -> dict | None:
+    """Read an exact intraday snapshot, or the latest one when omitted."""
+    if not _sector_strength_db_path(data_dir).exists():
+        return None
+    where = (
+        "trading_date = ? "
+        "AND substr(captured_at, 12, 8) BETWEEN '09:25:00' AND '15:00:00'"
+    )
+    params: tuple[str, ...] = (trade_date.isoformat(),)
+    if captured_at:
+        where += " AND captured_at = ?"
+        params += (captured_at,)
+    with _sector_strength_connect(data_dir) as connection:
+        row = connection.execute(
+            f"""
+            SELECT captured_at, institution_label, rows_json
+            FROM sector_strength_snapshots
+            WHERE {where}
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """,  # noqa: S608 - where is assembled only from fixed SQL fragments.
+            params,
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        rows = json.loads(row[2])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(rows, list) or not rows:
+        return None
+    return {
+        "provider": "kaipanla",
+        "state": "live",
+        "as_of": trade_date.isoformat(),
+        "refreshed_at": str(row[0]),
+        "institution_label": row[1],
+        "history_state": "live",
+        "rows": rows,
+    }
 
 
 def recent_trading_dates(data_dir: Path, limit: int = 60) -> list[date]:

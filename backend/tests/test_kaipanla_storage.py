@@ -9,12 +9,17 @@ import polars as pl
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     NORTHBOUND_SECTOR_TABLE,
+    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     TABLE_IDS,
+    append_sector_strength_snapshot,
     archive_raw,
     atomic_upsert,
     atomic_upsert_records,
     ensure_configs,
+    read_sector_constituents,
+    read_sector_strength_snapshot,
+    read_sector_strength_timeline,
 )
 from app.services.ext_data import ExtConfigStore
 
@@ -109,6 +114,26 @@ def test_atomic_upsert_records_keeps_multiple_plate_rows(tmp_path):
     assert rows[1]["plate_name"] == "板块乙"
 
 
+def test_read_sector_constituents_filters_persisted_membership(tmp_path):
+    trade_date = date(2026, 8, 14)
+    atomic_upsert_records(
+        tmp_path,
+        SECTOR_CONSTITUENT_TABLE,
+        trade_date,
+        [
+            {"plate_id": "P1", "code": "600000", "name": "浦发银行"},
+            {"plate_id": "P2", "code": "600001", "name": "邯郸钢铁"},
+        ],
+        ("plate_id", "symbol"),
+    )
+
+    rows = read_sector_constituents(tmp_path, trade_date, "P1")
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "600000.SH"
+    assert rows[0]["name"] == "浦发银行"
+    assert read_sector_constituents(tmp_path, trade_date, "missing") == []
+
+
 def test_atomic_upsert_records_repairs_stale_exchange_suffix(tmp_path):
     trade_date = date(2026, 6, 30)
     atomic_upsert_records(
@@ -179,3 +204,40 @@ def test_archive_raw_can_keep_plain_json_for_operator_debug(tmp_path):
 
     assert path.suffix == ".json"
     assert json.loads(path.read_text(encoding="utf-8"))["endpoint"] == "/15"
+
+
+def test_sector_strength_intraday_store_keeps_timeline_and_exact_snapshots(tmp_path):
+    trade_date = date(2026, 8, 17)
+    first = {
+        "state": "live",
+        "refreshed_at": "2026-08-17T09:30:05+08:00",
+        "institution_label": "第二季度机构增仓",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 16807}],
+    }
+    second = {
+        **first,
+        "refreshed_at": "2026-08-17T09:30:10+08:00",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 16910}],
+    }
+    after_hours = {
+        **first,
+        "refreshed_at": "2026-08-17T20:30:00+08:00",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 17000}],
+    }
+
+    assert append_sector_strength_snapshot(tmp_path, trade_date, first) == 1
+    assert append_sector_strength_snapshot(tmp_path, trade_date, second) == 1
+    assert append_sector_strength_snapshot(tmp_path, trade_date, after_hours) == 1
+    assert read_sector_strength_timeline(tmp_path, trade_date) == [
+        first["refreshed_at"],
+        second["refreshed_at"],
+    ]
+    assert read_sector_strength_snapshot(
+        tmp_path, trade_date, first["refreshed_at"],
+    )["rows"][0]["strength"] == 16807
+    latest = read_sector_strength_snapshot(tmp_path, trade_date)
+    assert latest["refreshed_at"] == second["refreshed_at"]
+    assert latest["rows"][0]["strength"] == 16910
+    assert read_sector_strength_snapshot(
+        tmp_path, trade_date, after_hours["refreshed_at"],
+    ) is None

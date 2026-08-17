@@ -67,6 +67,28 @@ def view(request: Request):
     return _service(request).view()
 
 
+@router.get("/sector-strength")
+def sector_strength(request: Request, captured_at: str | None = None):
+    try:
+        return _service(request).sector_strength_view(captured_at)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/sector-strength/{plate_id}/constituents")
+async def sector_constituents(
+    plate_id: str,
+    request: Request,
+    captured_at: str | None = None,
+):
+    try:
+        return await _service(request).sector_constituents_view(plate_id, captured_at)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 @router.put("/settings/notifications")
 def update_notifications(payload: NotificationSettingsWrite, request: Request):
     try:
