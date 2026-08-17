@@ -571,7 +571,7 @@ function SectorStrengthTable({
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[520px] border-collapse">
-          <thead className="text-left text-[10px] text-muted"><tr><th className="w-[34%] px-3 py-2">板块</th><th className="w-[18%] bg-accent/10 px-3 py-2 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[24%] px-3 py-2 text-right">{header('main_net', '主力净额')}</th><th className="w-[24%] px-3 py-2 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
+          <thead className="text-left text-[10px] text-muted"><tr><th className="w-[34%] px-3 py-2">板块</th><th className="w-[18%] px-3 py-2 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[24%] px-3 py-2 text-right">{header('main_net', '主力净额')}</th><th className="w-[24%] px-3 py-2 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
           <tbody>{rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
             const linked = linkedPlateIds.has(row.plate_id)
@@ -594,7 +594,7 @@ function SectorStrengthTable({
               className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected && linked ? 'bg-warning/25 ring-1 ring-inset ring-warning/60' : linked ? 'bg-warning/10' : selected ? 'bg-accent/20' : ''}`}
             >
               <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1.5 text-sm font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
-              <td className="bg-accent/10 px-3 py-2.5 text-right font-mono text-base font-semibold tabular-nums text-foreground">{row.strength?.toFixed(0) ?? '--'}</td>
+              <td className="px-3 py-2.5 text-right font-mono text-base font-semibold tabular-nums text-foreground">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.main_net)}`}>{moneyYi(row.main_net)}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.institution_increase)}`}>{moneyYi(row.institution_increase)}</td>
             </tr>
