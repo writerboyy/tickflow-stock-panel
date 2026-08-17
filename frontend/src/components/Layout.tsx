@@ -54,11 +54,14 @@ import {
   Menu,
   ChevronDown,
   ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { toggleTheme, useTheme } from '@/lib/theme'
+import { storage } from '@/lib/storage'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
@@ -154,19 +157,22 @@ function MonitorBadge({ active }: { active: boolean }) {
   )
 }
 
-function SidebarNavLink({ item, nested, isDataSyncing, dataSyncJustDone }: {
+function SidebarNavLink({ item, nested, collapsed, isDataSyncing, dataSyncJustDone }: {
   item: NavItem
   nested?: boolean
+  collapsed?: boolean
   isDataSyncing: boolean
   dataSyncJustDone: boolean
 }) {
   return (
     <NavLink
       to={item.to}
+      title={collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cn(
-          'flex items-center gap-3 rounded-btn px-3 py-2 text-sm transition-colors duration-150 ease-smooth',
+          'relative flex items-center gap-3 rounded-btn px-3 py-2 text-sm transition-colors duration-150 ease-smooth',
           nested && 'ml-5 border-l border-border/70 pl-4',
+          collapsed && 'md:ml-0 md:justify-center md:border-l-0 md:px-0 md:pl-0',
           isActive
             ? 'bg-elevated text-foreground font-medium'
             : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
@@ -176,9 +182,9 @@ function SidebarNavLink({ item, nested, isDataSyncing, dataSyncJustDone }: {
       {({ isActive }) => (
         <>
           <item.icon className="h-4 w-4 shrink-0" />
-          <span className="flex-1">{item.label}</span>
+          <span className={cn('flex-1', collapsed && 'md:hidden')}>{item.label}</span>
           {item.badge && (
-            <span className="ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+            <span className={cn('ml-auto inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0', collapsed && 'md:hidden')}>
               {item.badge}
             </span>
           )}
@@ -386,6 +392,7 @@ export function Layout() {
   const location = useLocation()
   const navigate = useNavigate()
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => storage.layoutSidebarCollapsed.get(false))
   const version = versionData?.version
   const realtimeEnabled = prefs?.realtime_quotes_enabled ?? false
   // Free 档监控限制提示: 可手动关闭, 不持久化 (刷新后恢复显示)
@@ -510,46 +517,65 @@ export function Layout() {
     }
   }
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed(collapsed => {
+      const next = !collapsed
+      storage.layoutSidebarCollapsed.set(next)
+      return next
+    })
+  }
+
   return (
-    <div className="h-screen grid grid-cols-1 md:grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
+    <div className={cn('h-screen grid grid-cols-1 bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth', sidebarCollapsed ? 'md:grid-cols-[4rem_1fr]' : 'md:grid-cols-[14rem_1fr]')}>
       <aside className={`fixed inset-y-0 left-0 z-40 w-56 border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden transition-transform duration-200 ease-smooth md:static md:z-auto md:w-auto md:translate-x-0 ${mobileNavOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="px-5 py-5 border-b border-border shrink-0">
+        <div className={cn('border-b border-border px-5 py-5 shrink-0', sidebarCollapsed && 'md:px-2 md:py-3')}>
           {/* Brand block — 原创 logo + 等宽 wordmark */}
-          <div className="flex items-center gap-2.5">
+          <div className={cn('flex items-center gap-2.5', sidebarCollapsed && 'md:flex-col md:gap-2')}>
             <Logo
               size={28}
               className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
               style={{ color: BRAND }}
             />
             <div
-              className="font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight"
+              className={cn('font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight', sidebarCollapsed && 'md:hidden')}
               style={{ textShadow: `0 0 10px ${BRAND}44` }}
             >
               <div>TickFlow</div>
               <div>Stock Panel</div>
             </div>
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-label={sidebarCollapsed ? '展开导航' : '收起导航'}
+              title={sidebarCollapsed ? '展开导航' : '收起导航'}
+              className={cn('ml-auto hidden h-8 w-8 shrink-0 items-center justify-center rounded-btn text-muted transition-colors hover:bg-elevated hover:text-foreground md:inline-flex', sidebarCollapsed && 'md:ml-0')}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </button>
           </div>
 
-          <div className="mt-2.5 text-[10px] uppercase tracking-[0.22em] text-secondary">
+          <div className={cn('mt-2.5 text-[10px] uppercase tracking-[0.22em] text-secondary', sidebarCollapsed && 'md:hidden')}>
             Quant · Terminal
           </div>
 
           <div
-            className="mt-3 h-px"
+            className={cn('mt-3 h-px', sidebarCollapsed && 'md:hidden')}
             style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
           />
 
-          <TierBadge
-            label={caps?.label ?? ''}
-            hasKey={settingsState?.mode !== 'none'}
-          />
-          <AIConfigBadge
-            configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
-            model={settingsState?.ai_model}
-          />
+          <div className={cn(sidebarCollapsed && 'md:hidden')}>
+            <TierBadge
+              label={caps?.label ?? ''}
+              hasKey={settingsState?.mode !== 'none'}
+            />
+            <AIConfigBadge
+              configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
+              model={settingsState?.ai_model}
+            />
+          </div>
         </div>
 
-        <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
+        <nav className={cn('flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5', sidebarCollapsed && 'md:px-1')}>
           {visibleNavItems.map(item => item.children ? (
             <div key={item.to}>
               <button
@@ -558,6 +584,7 @@ export function Layout() {
                 onClick={() => setCustomExpanded(expanded => !expanded)}
                 className={cn(
                   'flex w-full items-center gap-3 rounded-btn px-3 py-2 text-left text-sm transition-colors duration-150 ease-smooth',
+                  sidebarCollapsed && 'md:justify-center md:px-0',
                   customActive
                     ? 'bg-elevated text-foreground font-medium'
                     : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
@@ -565,16 +592,17 @@ export function Layout() {
                 title={customExpanded ? '收起自定义菜单' : '展开自定义菜单'}
               >
                 <item.icon className="h-4 w-4 shrink-0" />
-                <span className="flex-1">{item.label}</span>
-                {customExpanded
+                <span className={cn('flex-1', sidebarCollapsed && 'md:hidden')}>{item.label}</span>
+                <span className={cn(sidebarCollapsed && 'md:hidden')}>{customExpanded
                   ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted" />
-                  : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" />}
+                  : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted" />}</span>
               </button>
               {customExpanded && item.children.map(child => (
                 <SidebarNavLink
                   key={child.to}
                   item={child}
                   nested
+                  collapsed={sidebarCollapsed}
                   isDataSyncing={isDataSyncing}
                   dataSyncJustDone={dataSyncJustDone}
                 />
@@ -584,6 +612,7 @@ export function Layout() {
             <SidebarNavLink
               key={item.to}
               item={item}
+              collapsed={sidebarCollapsed}
               isDataSyncing={isDataSyncing}
               dataSyncJustDone={dataSyncJustDone}
             />
@@ -593,7 +622,7 @@ export function Layout() {
         {/* 数据源状态条 */}
         <button
           onClick={() => navigate('/settings?tab=data-sources')}
-          className="mx-2 mb-1 flex items-center gap-2 rounded-btn px-2.5 py-2 text-left transition-colors hover:bg-elevated/60 shrink-0 group"
+          className={cn('mx-2 mb-1 flex items-center gap-2 rounded-btn px-2.5 py-2 text-left transition-colors hover:bg-elevated/60 shrink-0 group', sidebarCollapsed && 'md:justify-center md:px-0')}
           title="数据源设置"
         >
           <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
@@ -601,7 +630,7 @@ export function Layout() {
           }`}>
             <Database className={`h-3 w-3 ${isCustomActive ? 'text-accent' : 'text-muted'}`} />
           </span>
-          <div className="min-w-0 flex-1">
+          <div className={cn('min-w-0 flex-1', sidebarCollapsed && 'md:hidden')}>
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-medium text-secondary truncate group-hover:text-foreground transition-colors">
                 {activeProviderName}
@@ -633,7 +662,7 @@ export function Layout() {
         </button>
 
         {/* 全局行情开关 */}
-        <div className="border-t border-border px-3 py-2.5 shrink-0">
+        <div className={cn('border-t border-border px-3 py-2.5 shrink-0', sidebarCollapsed && 'md:hidden')}>
           {isNoneTier && !realtimeProviderName ? (
             <div>
               <div className="flex items-center justify-between">
@@ -728,14 +757,33 @@ export function Layout() {
           )}
         </div>
 
-        <div className="border-t border-border px-2 py-3 shrink-0">
-          <div className="flex items-center gap-1">
+        {sidebarCollapsed ? <div className="hidden shrink-0 justify-center border-t border-border py-2.5 md:flex">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={realtimeEnabled}
+            aria-label="实时行情"
+            onClick={() => {
+              if (isNoneTier && !realtimeProviderName) navigate('/settings?tab=account')
+              else handleToggle(!realtimeEnabled)
+            }}
+            disabled={toggleQuote.isPending || isPaused}
+            title={isNoneTier && !realtimeProviderName ? '配置实时行情' : `实时行情·${realtimeEnabled ? '已开启' : '已关闭'}`}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-btn transition-colors hover:bg-elevated disabled:opacity-50"
+          >
+            <span className={`h-2 w-2 rounded-full ${realtimeEnabled ? 'bg-accent' : 'bg-muted'}`} />
+          </button>
+        </div> : null}
+
+        <div className={cn('border-t border-border px-2 py-3 shrink-0', sidebarCollapsed && 'md:px-1')}>
+          <div className={cn('flex items-center gap-1', sidebarCollapsed && 'md:flex-col')}>
             <ThemeToggle />
             <NavLink
               to="/settings"
               className={({ isActive }) =>
                 cn(
                   'flex flex-1 items-center justify-between gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                  sidebarCollapsed && 'md:h-8 md:w-8 md:flex-none md:justify-center md:px-0',
                   isActive
                     ? 'bg-elevated text-foreground font-medium'
                     : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
@@ -744,9 +792,9 @@ export function Layout() {
             >
               <span className="flex items-center gap-3">
                 <Settings className="h-4 w-4 shrink-0" />
-                <span>设置</span>
+                <span className={cn(sidebarCollapsed && 'md:hidden')}>设置</span>
               </span>
-              <span className="font-mono text-[10px] text-muted/50 select-none">
+              <span className={cn('font-mono text-[10px] text-muted/50 select-none', sidebarCollapsed && 'md:hidden')}>
                 {version ?? ''}
               </span>
             </NavLink>

@@ -21,6 +21,9 @@ function kv<T>(key: string) {
 }
 
 export const storage = {
+  /** 桌面端全局侧边栏收起状态 */
+  layoutSidebarCollapsed: kv<boolean>('layout-sidebar-collapsed'),
+
   /** 查询轮询 / SSE 配置 */
   queryConfig:          kv<unknown>('tf-stocks-query-config'),
 

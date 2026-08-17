@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Ban,
@@ -33,8 +33,8 @@ import {
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
-type Tab = 'sector' | 'first' | 'candidate' | 'pool' | 'events'
-type TableMode = Exclude<Tab, 'sector' | 'events'>
+type Tab = 'sector' | 'candidate' | 'pool' | 'events'
+type TableMode = 'candidate' | 'pool'
 type NotificationSettings = LimitBoardView['settings']['notifications']
 type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
 
@@ -172,9 +172,6 @@ function Row({
           <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
           {mode !== 'pool' && rebound ? <div className="mt-0.5 text-[10px] text-warning">反包候选</div> : null}
-          {mode === 'first' && row.limit_up_count != null ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted" title={`涨停 ${row.limit_up_count} 次；次日红盘率 ${((row.next_day_red_rate ?? 0) * 100).toFixed(0)}%；首板破板率 ${((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%`}>
-            {row.limit_up_count}次 · 红{((row.next_day_red_rate ?? 0) * 100).toFixed(0)}% · 破{((row.first_board_broken_rate ?? 0) * 100).toFixed(0)}%
-          </div> : null}
         </button>
       </td>
       <td className="w-[160px] max-w-[160px] px-2">
@@ -381,11 +378,28 @@ function sectorConstituentStatus(row: LimitBoardSectorConstituent): string {
   return '--'
 }
 
+function sectorNameKey(value: string | null | undefined): string {
+  return String(value ?? '').replace(/\s+/g, '').trim()
+}
+
+function signalSectorNames(row: LimitBoardRow): string[] {
+  const values = [row.candidate_score_detail?.sector?.name, ...themes(row.concept)]
+  const seen = new Set<string>()
+  return values.filter((value): value is string => {
+    const key = sectorNameKey(value)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function SectorStrengthTable({
   snapshot,
+  signalRows = [],
   onOpenStock,
 }: {
   snapshot: LimitBoardView['sector_strength']
+  signalRows?: LimitBoardRow[]
   onOpenStock: (symbol: string, name?: string) => void
 }) {
   const [sortKey, setSortKey] = useState<SectorSortKey>('strength')
@@ -393,6 +407,9 @@ function SectorStrengthTable({
   const [cursorIndex, setCursorIndex] = useState<number | null>(null)
   const [requestedAt, setRequestedAt] = useState<string | null>(null)
   const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
+  const [selectedSignalSymbol, setSelectedSignalSymbol] = useState<string | null>(null)
+  const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
+  const lastScrolledConstituent = useRef<string | null>(null)
   const timeline = snapshot?.timeline ?? []
   const latestIndex = Math.max(0, timeline.length - 1)
   const activeIndex = cursorIndex == null ? latestIndex : Math.min(cursorIndex, latestIndex)
@@ -437,6 +454,12 @@ function SectorStrengthTable({
     orphans.sort(compare)
     return roots.flatMap(row => [row, ...(children.get(row.plate_id) ?? []).sort(compare)]).concat(orphans)
   }, [activeSnapshot?.rows, descending, sortKey])
+  const selectedSignal = signalRows.find(row => row.symbol === selectedSignalSymbol) ?? null
+  const linkedPlateIds = useMemo(() => {
+    if (!selectedSignal) return new Set<string>()
+    const names = new Set(signalSectorNames(selectedSignal).map(sectorNameKey))
+    return new Set(rows.filter(row => names.has(sectorNameKey(row.plate_name))).map(row => row.plate_id))
+  }, [rows, selectedSignal])
   const selectedPlate = rows.find(row => row.plate_id === selectedPlateId) ?? rows[0] ?? null
   const activeCapturedAt = isLive
     ? activeSnapshot?.refreshed_at ?? cursorAt
@@ -463,6 +486,16 @@ function SectorStrengthTable({
   const constituentData = constituents.data?.plate_id === selectedPlate?.plate_id
     ? constituents.data
     : null
+  useEffect(() => {
+    if (!selectedSignalSymbol || !selectedPlate || !constituentData?.rows.some(row => row.symbol === selectedSignalSymbol)) return
+    const scrollKey = `${selectedPlate.plate_id}:${selectedSignalSymbol}`
+    if (lastScrolledConstituent.current === scrollKey) return
+    const frame = window.requestAnimationFrame(() => {
+      constituentRowRefs.current.get(selectedSignalSymbol)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      lastScrolledConstituent.current = scrollKey
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [constituentData?.rows, selectedPlate, selectedSignalSymbol])
   const constituentQuoteLabel = !constituentData
     ? '等待成分数据'
     : constituentData.quote_state === 'live'
@@ -486,32 +519,81 @@ function SectorStrengthTable({
       {label}<span className={sortKey === key ? 'text-accent' : 'text-muted'}>{sortKey === key ? (descending ? '↓' : '↑') : '↕'}</span>
     </button>
   )
+  const selectSignal = (signal: LimitBoardRow) => {
+    setSelectedSignalSymbol(signal.symbol)
+    lastScrolledConstituent.current = null
+    const names = new Set(signalSectorNames(signal).map(sectorNameKey))
+    const matches = rows.filter(row => names.has(sectorNameKey(row.plate_name)))
+    if (!matches.length) return
+    const strongest = matches.reduce((best, row) => Number(row.strength ?? 0) > Number(best.strength ?? 0) ? row : best)
+    setSelectedPlateId(strongest.plate_id)
+  }
   return <section className="overflow-hidden rounded-btn border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
       <div><div className="text-xs font-medium">板块强度</div><div className="mt-0.5 text-[10px] text-muted">开盘啦精选板块，5 秒刷新</div></div>
       <div className="flex items-center gap-2 text-[10px] text-muted"><span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span><span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : cursorAt ? '回看' : '收盘'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span></div>
     </div>
-    {rows.length ? <div className="grid min-w-0 lg:grid-cols-[minmax(340px,44%)_minmax(480px,56%)]">
+    {rows.length ? <div className="grid min-w-0 lg:grid-cols-[190px_minmax(280px,36%)_minmax(340px,1fr)]">
+      <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
+        <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
+          <div className="inline-flex items-center gap-1.5 text-xs font-medium"><Flame className="h-3.5 w-3.5 text-accent" />首板 / 反包</div>
+          <div className="shrink-0 font-mono text-[10px] text-muted">{signalRows.length} 只</div>
+        </div>
+        {signalRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
+          <div className="flex w-max gap-2 lg:w-full lg:flex-col">
+            {signalRows.map(signal => {
+              const selected = signal.symbol === selectedSignalSymbol
+              const status = STATUS[signal.status || 'watching'] || STATUS.watching
+              const rebound = signal.source === 'rebound_board' || signal.source_modes?.includes('rebound_board')
+              const atLimit = signal.limit_gap_pct != null && signal.limit_gap_pct <= 0.0001
+              const names = new Set(signalSectorNames(signal).map(sectorNameKey))
+              const matchedPlates = rows.filter(row => names.has(sectorNameKey(row.plate_name)))
+              const displayThemes = matchedPlates.length
+                ? matchedPlates.slice(0, 2).map(row => row.plate_name).filter((value): value is string => Boolean(value))
+                : themes(signal.concept).slice(0, 2)
+              return <button
+                key={signal.symbol}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => selectSignal(signal)}
+                className={`h-[92px] w-[174px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-accent/50 hover:bg-elevated/50 focus-visible:ring-1 focus-visible:ring-accent lg:w-full ${selected ? 'border-accent bg-accent/10' : 'border-border bg-surface'}`}
+              >
+                <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{signal.name || signal.symbol}</span><span className="shrink-0 text-[9px] text-secondary">{rebound ? '反包' : '首板'}</span></div>
+                <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
+                <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[9px] text-secondary">
+                  {displayThemes.length ? displayThemes.map(name => <span key={name} className="max-w-[70px] truncate rounded-sm bg-elevated px-1 py-0.5">{name}</span>) : <span className="truncate text-muted">未匹配实时板块</span>}
+                </div>
+                <div className="mt-1 flex items-center justify-between text-[9px]"><span className={status.tone}>{status.label}</span><span className="font-mono text-muted">距涨停 {signal.limit_gap_pct == null ? '--' : scorePct(signal.limit_gap_pct, 2)}</span></div>
+              </button>
+            })}
+          </div>
+        </div> : <div className="px-3 py-10 text-center text-xs text-muted">暂无标的</div>}
+      </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[520px] border-collapse">
           <thead className="text-left text-[10px] text-muted"><tr><th className="w-[34%] px-3 py-2">板块</th><th className="w-[18%] bg-accent/10 px-3 py-2 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[24%] px-3 py-2 text-right">{header('main_net', '主力净额')}</th><th className="w-[24%] px-3 py-2 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
           <tbody>{rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
+            const linked = linkedPlateIds.has(row.plate_id)
             return <tr
               key={row.plate_id}
               role="button"
               tabIndex={0}
               aria-selected={selected}
-              onClick={() => setSelectedPlateId(row.plate_id)}
+              onClick={() => {
+                setSelectedSignalSymbol(null)
+                setSelectedPlateId(row.plate_id)
+              }}
               onKeyDown={event => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
+                  setSelectedSignalSymbol(null)
                   setSelectedPlateId(row.plate_id)
                 }
               }}
-              className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected ? 'bg-accent/10' : ''}`}
+              className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected ? 'bg-accent/20' : linked ? 'bg-accent/10' : ''}`}
             >
-              <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="text-sm font-medium">{row.plate_name || '--'}</div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
+              <td className="px-3 py-2.5"><div className={row.is_child ? 'relative ml-3 pl-4 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2.5 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1.5 text-sm font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="mt-0.5 font-mono text-[10px] text-muted">{row.plate_id}</div></div></td>
               <td className="bg-accent/10 px-3 py-2.5 text-right font-mono text-base font-semibold tabular-nums text-foreground">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.main_net)}`}>{moneyYi(row.main_net)}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.institution_increase)}`}>{moneyYi(row.institution_increase)}</td>
@@ -527,14 +609,24 @@ function SectorStrengthTable({
         {constituents.isError && !constituentData ? <div className="px-4 py-12 text-center text-xs text-danger">实时板块成分股加载失败</div> : constituentData?.rows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[620px] border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[10px] text-muted"><tr><th className="w-[28%] px-3 py-2">股票</th><th className="w-[13%] px-3 py-2 text-right">现价</th><th className="w-[14%] px-3 py-2 text-right">涨幅</th><th className="w-[15%] px-3 py-2 text-right">板状态</th><th className="w-[15%] px-3 py-2 text-right">换手率</th><th className="w-[15%] px-3 py-2 text-right">成交额</th></tr></thead>
-            <tbody>{constituentData.rows.map(row => <tr key={row.symbol} className="border-t border-border/70 hover:bg-elevated/30">
+            <tbody>{constituentData.rows.map(row => {
+              const linked = row.symbol === selectedSignalSymbol
+              return <tr
+                key={row.symbol}
+                ref={element => {
+                  if (element) constituentRowRefs.current.set(row.symbol, element)
+                  else constituentRowRefs.current.delete(row.symbol)
+                }}
+                className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-accent/15 ring-1 ring-inset ring-accent/40' : ''}`}
+              >
               <td className="px-3 py-2.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-sm font-medium">{row.name || row.code}</span><span className="mt-0.5 block truncate font-mono text-[10px] text-muted">#{row.rank} {row.symbol}{row.tags ? ` · ${row.tags}` : ''}</span></button></td>
               <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
               <td className={`px-3 py-2.5 text-right font-mono text-xs font-medium tabular-nums ${financialTone(row.change_pct)}`}>{scorePct(row.change_pct, 2)}</td>
               <td className="px-3 py-2.5 text-right text-xs text-secondary">{sectorConstituentStatus(row)}</td>
               <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
               <td className="px-3 py-2.5 text-right font-mono text-xs tabular-nums text-secondary">{moneyYi(row.amount)}</td>
-            </tr>)}</tbody>
+              </tr>
+            })}</tbody>
           </table>
         </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending ? '正在读取实时板块成分股' : '该时间点没有可用的成分股数据'}</div>}
       </div>
@@ -803,14 +895,12 @@ export function LimitBoard() {
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="打板专区加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
-  const rows = tab === 'first' ? data.first_board : tab === 'candidate' ? data.candidate_pool : tab === 'pool' ? data.board_pool : []
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'candidate' ? 'candidate' : 'first'
-  const tableTitle = tab === 'first' ? '全市场首板/反包候选' : tab === 'candidate' ? '备选池' : '实盘打板池'
+  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'pool' ? data.board_pool : []
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : 'candidate'
+  const tableTitle = tab === 'candidate' ? '备选池' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
-    : tab === 'candidate'
-    ? '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
-    : '自动过滤：近 200 日涨停≥4次、次日红盘率≥80%、首板破板率≤75%；不接入 WS'
+    : '自动候选通过历史门槛后与手工标的合并，备选池仅使用实时轮询'
   const marketEmotion = overview.data?.emotion
 
   return (
@@ -848,7 +938,6 @@ export function LimitBoard() {
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
-          ['first', '首板/反包', data.first_board.length, Flame],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
@@ -860,7 +949,7 @@ export function LimitBoard() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5">
-        {tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
+        {tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
