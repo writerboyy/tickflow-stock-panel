@@ -544,7 +544,7 @@ function SectorStrengthTable({
     ),
     queryFn: () => api.limitBoardSectorConstituents(
       selectedPlate!.plate_id,
-      activeCapturedAt!,
+      isLive ? undefined : activeCapturedAt!,
     ),
     enabled: selectedPlate != null && activeCapturedAt != null && activeSnapshotReady,
     placeholderData: previous => previous,

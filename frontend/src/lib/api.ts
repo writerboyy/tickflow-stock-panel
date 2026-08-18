@@ -2688,9 +2688,9 @@ export const api = {
     request<LimitBoardSectorStrengthSnapshot>(
       `/api/limit-board/sector-strength?captured_at=${encodeURIComponent(capturedAt)}`,
     ),
-  limitBoardSectorConstituents: (plateId: string, capturedAt: string) =>
+  limitBoardSectorConstituents: (plateId: string, capturedAt?: string) =>
     request<LimitBoardSectorConstituents>(
-      `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents?captured_at=${encodeURIComponent(capturedAt)}`,
+      `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents${capturedAt ? `?captured_at=${encodeURIComponent(capturedAt)}` : ''}`,
       { quiet: true },
     ),
   limitBoardQuotes: (symbols: string[], quiet = false) =>

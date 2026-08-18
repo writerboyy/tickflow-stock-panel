@@ -613,9 +613,14 @@ class LimitBoardService:
             and isinstance(current_snapshot, dict)
             and current_snapshot.get("history_state") == "closed"
         )
-        snapshot = current_snapshot if after_close or requested_point is None else (
-            self.sector_strength_view(captured_at)
+        current_point = _quote_time(
+            current_snapshot.get("refreshed_at")
+            if isinstance(current_snapshot, dict)
+            else None,
         )
+        if requested_point is not None and requested_point != current_point and not after_close:
+            raise ValueError("开盘啦当日成分行情不提供历史时点回看")
+        snapshot = current_snapshot
         rows = snapshot.get("rows") if isinstance(snapshot, dict) else []
         selected = next(
             (
@@ -636,8 +641,6 @@ class LimitBoardService:
             or live_snapshot.get("as_of") != today.isoformat()
         ):
             raise RuntimeError("开盘啦当日成分行情暂不可用")
-        if captured_at:
-            raise ValueError("开盘啦当日成分行情不提供历史时点回看")
         try:
             instruments = self.repo.get_instruments()
             symbol_lookup = {

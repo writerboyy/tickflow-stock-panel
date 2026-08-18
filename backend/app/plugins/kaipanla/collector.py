@@ -305,7 +305,7 @@ class KaipanlaCollector:
             )
         if self._sector_strength_task is None or self._sector_strength_task.done():
             self._sector_strength_task = asyncio.create_task(
-                self._scheduled_sector_strength(),
+                self._bootstrap_sector_strength(),
                 name="kaipanla-sector-strength",
             )
         if self._sector_constituents_task is None or self._sector_constituents_task.done():
@@ -387,6 +387,24 @@ class KaipanlaCollector:
                 now.date(),
             )
         return count
+
+    async def _bootstrap_sector_strength(self) -> int:
+        now = cn_now()
+        current = now.timetz().replace(tzinfo=None)
+        if _in_sector_strength_window(current):
+            return await self._scheduled_sector_strength()
+        snapshot = self.sector_strength_snapshot()
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("as_of") != now.date().isoformat()
+            or not snapshot.get("rows")
+        ):
+            return 0
+        return await self._run_safely(
+            "shortline_constituents",
+            self.refresh_shortline_constituents,
+            now.date(),
+        )
 
     async def _scheduled_lhb(self) -> int:
         return await self._run_safely("lhb", self.collect_lhb)
