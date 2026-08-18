@@ -73,8 +73,11 @@ _KIND_SCHEMA: dict[str, dict[str, pl.DataType]] = {
         "side": pl.String,
         "side_code": pl.Int8,
         "limit_flag": pl.Boolean,
+        "limit_flag_code": pl.Int8,
         "cancel_flag": pl.Boolean,
+        "cancel_flag_code": pl.Int8,
         "event_time": pl.String,
+        "raw_tail": pl.String,
     },
     "orderbook_snapshot": {
         **_COMMON_SCHEMA,
@@ -90,6 +93,7 @@ _KIND_SCHEMA: dict[str, dict[str, pl.DataType]] = {
 }
 
 _RAW_DATASETS = {
+    "kaipanla_net_flow": "large_order_net_flow",
     "kaipanla_trade": "large_order_trades",
     "kaipanla_intent": "large_order_intents",
 }
@@ -688,7 +692,9 @@ class LargeOrderStore:
                 normalized[field] = _as_float(value)
             elif field == "freshness_ms":
                 normalized[field] = _as_int(value)
-            elif field in {"direction_code", "side_code", "side"}:
+            elif field in {
+                "direction_code", "side_code", "side", "limit_flag_code", "cancel_flag_code",
+            }:
                 normalized[field] = _as_int(value) if field != "side" or isinstance(value, (int, float)) else value
             elif field in {"limit_flag", "cancel_flag"}:
                 normalized[field] = _as_bool(value)

@@ -14,6 +14,7 @@ from app.plugins.kaipanla.parsers import (
     parse_dragon_tiger_movement,
     parse_interval_stock,
     parse_large_order_statistics,
+    parse_large_order_net_flow,
     parse_large_order_trades,
     parse_large_order_intents,
     parse_lhb_detail,
@@ -52,6 +53,40 @@ def test_large_order_trade_parser_maps_direction_and_deduplicates():
         parse_large_order_trades({"List": [["2"]]}, "600126")
 
 
+def test_large_order_net_flow_parser_keeps_cumulative_main_net_contract():
+    rows = parse_large_order_net_flow(
+        {
+            "code": "600309",
+            "day": "20260818",
+            "dadanjinge": [["09:30", -2_213_928], ["09:31", -6_751_311]],
+        },
+        "600309.SH",
+    )
+
+    assert rows == [
+        {
+            "event_id": "600309.SH:2026-08-18:09:30",
+            "symbol": "600309.SH",
+            "code": "600309.SH",
+            "trade_date": "2026-08-18",
+            "time": "09:30",
+            "net_amount": -2_213_928.0,
+            "source": "kaipanla_13_net_flow",
+        },
+        {
+            "event_id": "600309.SH:2026-08-18:09:31",
+            "symbol": "600309.SH",
+            "code": "600309.SH",
+            "trade_date": "2026-08-18",
+            "time": "09:31",
+            "net_amount": -6_751_311.0,
+            "source": "kaipanla_13_net_flow",
+        },
+    ]
+    with pytest.raises(ResponseShapeError, match="dadanjinge"):
+        parse_large_order_net_flow({"List": []}, "600309.SH")
+
+
 def test_large_order_intent_parser_keeps_cancel_and_limit_flags():
     rows = parse_large_order_intents(
         {
@@ -61,8 +96,16 @@ def test_large_order_intent_parser_keeps_cancel_and_limit_flags():
     )
     assert rows[0]["side"] == "buy"
     assert rows[0]["limit_flag"] is True
+    assert rows[0]["limit_flag_code"] == 1
     assert rows[0]["cancel_flag"] is False
+    assert rows[0]["cancel_flag_code"] == 0
     assert rows[0]["raw_tail"] == "unknown"
+    unknown_limit = parse_large_order_intents(
+        {"List": [["09:30:02", "124", "10.5", "1000", "1050000", "1", "x", "2", "0", "1778651942"]]},
+        "000001",
+    )[0]
+    assert unknown_limit["limit_flag"] is None
+    assert unknown_limit["limit_flag_code"] == 2
     with pytest.raises(ResponseShapeError, match="撤单标记"):
         parse_large_order_intents(
             {"List": [["09:30:01", "123", "10.5", "1000", "1050000", "1", "x", "1", "2", "1778651941"]]},

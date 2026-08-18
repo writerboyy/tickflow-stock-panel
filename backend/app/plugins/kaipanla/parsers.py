@@ -170,6 +170,32 @@ def parse_large_order_statistics(payload: dict, code: str, trade_date: date) -> 
     return None
 
 
+def parse_large_order_net_flow(payload: dict, code: str) -> list[dict]:
+    """解析开盘啦 /13 主力净额分钟趋势。"""
+    trade_date = parse_trade_date(payload.get("day"))
+    result: list[dict] = []
+    for index, row in enumerate(_rows(payload, "dadanjinge")):
+        if not isinstance(row, list) or len(row) != 2:
+            raise ResponseShapeError(f"dadanjinge[{index}] 必须恰好包含 2 列")
+        event_time = _text(row[0], f"dadanjinge[{index}].time", required=True)
+        net_amount = _float(row[1], f"dadanjinge[{index}].net_amount")
+        if net_amount is None:
+            raise ResponseShapeError(f"dadanjinge[{index}].net_amount 缺失")
+        day = trade_date.isoformat() if trade_date is not None else None
+        result.append(
+            {
+                "event_id": _event_id(code, day or "", event_time),
+                "symbol": code,
+                "code": code,
+                "trade_date": day,
+                "time": event_time,
+                "net_amount": net_amount,
+                "source": "kaipanla_13_net_flow",
+            }
+        )
+    return result
+
+
 def parse_large_order_trades(payload: dict, code: str) -> list[dict]:
     """解析开盘啦 /13 大单成交，严格保留六列已知字段。"""
     rows = _rows(payload, "List")
@@ -209,7 +235,7 @@ def parse_large_order_trades(payload: dict, code: str) -> list[dict]:
 
 
 def parse_large_order_intents(payload: dict, code: str) -> list[dict]:
-    """解析开盘啦 /14 委托；未知的第十列只作为 raw_tail 保存。"""
+    """解析开盘啦 /14 委托；未知的第七列只作为 raw_tail 保存。"""
     rows = _rows(payload, "List")
     result: list[dict] = []
     seen: set[str] = set()
@@ -224,12 +250,12 @@ def parse_large_order_intents(payload: dict, code: str) -> list[dict]:
         price = _float(row[2], f"List[{index}].price")
         volume = _float(row[3], f"List[{index}].volume")
         amount = _float(row[4], f"List[{index}].amount")
-        limit_flag = _int(row[7], f"List[{index}].limit_flag")
-        cancel_flag = _int(row[8], f"List[{index}].cancel_flag")
-        if limit_flag not in (0, 1) or cancel_flag not in (0, 1):
-            raise ResponseShapeError(f"List[{index}] 涨停/撤单标记无效")
+        limit_flag_code = _int(row[7], f"List[{index}].limit_flag")
+        cancel_flag_code = _int(row[8], f"List[{index}].cancel_flag")
+        if cancel_flag_code not in (0, 1):
+            raise ResponseShapeError(f"List[{index}] 撤单标记无效")
         timestamp = _int(row[9], f"List[{index}].timestamp")
-        event_id = _event_id(code, order_id, event_time, side_code, amount, cancel_flag)
+        event_id = _event_id(code, order_id, event_time, side_code, amount, cancel_flag_code)
         if event_id in seen:
             continue
         seen.add(event_id)
@@ -245,8 +271,10 @@ def parse_large_order_intents(payload: dict, code: str) -> list[dict]:
                 "amount": amount,
                 "side_code": side_code,
                 "side": "buy" if side_code == 1 else "sell",
-                "limit_flag": bool(limit_flag),
-                "cancel_flag": bool(cancel_flag),
+                "limit_flag": bool(limit_flag_code) if limit_flag_code in (0, 1) else None,
+                "limit_flag_code": limit_flag_code,
+                "cancel_flag": bool(cancel_flag_code),
+                "cancel_flag_code": cancel_flag_code,
                 "timestamp": timestamp,
                 "raw_tail": row[6],
                 "source": "kaipanla_14",

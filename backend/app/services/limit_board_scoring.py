@@ -150,9 +150,8 @@ def intraday_flow_detail(
 ) -> dict[str, Any] | None:
     """Score live intraday trend and capital-flow direction.
 
-    Minute bars are the required live input.  When a large-order source exposes
-    buy/sell ratios, those values are preferred; otherwise the minute bar
-    amount and direction provide a clearly labelled price-flow proxy.
+    Minute bars are the required live input.  Active buy/sell ratios remain
+    distinct from the Kaipanla cumulative main-net-flow speed contract.
     """
     if not isinstance(intraday, dict) or not intraday.get("available"):
         return None
@@ -179,11 +178,17 @@ def intraday_flow_detail(
 
     buy_ratio = finite((external_flow or {}).get("buy_ratio"))
     sell_ratio = finite((external_flow or {}).get("sell_ratio"))
+    net_flow_speed = finite((external_flow or {}).get("net_flow_speed"))
+    net_flow_delta = finite((external_flow or {}).get("net_flow_delta"))
+    net_flow_amount = finite((external_flow or {}).get("net_flow_amount"))
+    external_source = str((external_flow or {}).get("source") or "large_order")
+    if external_source == "kaipanla_net_flow":
+        buy_ratio = sell_ratio = None
     capital_available = (
-        (buy_ratio is not None or sell_ratio is not None)
+        (buy_ratio is not None or sell_ratio is not None or net_flow_speed is not None)
         and str((external_flow or {}).get("data_quality") or "") != "proxy_only"
     )
-    flow_source = str((external_flow or {}).get("source") or "large_order") if capital_available else "unavailable"
+    flow_source = external_source if capital_available else "unavailable"
     if buy_ratio is None and sell_ratio is not None:
         buy_ratio = 1.0 - sell_ratio
     elif sell_ratio is None and buy_ratio is not None:
@@ -206,6 +211,13 @@ def intraday_flow_detail(
 
     amounts = [max(0.0, finite(row.get("amount")) or 0.0) for row in bars]
     recent_amount = sum(amounts[-3:]) / max(1, len(amounts[-3:]))
+    net_flow_speed_ratio = (
+        _clamp(net_flow_speed / recent_amount, -1.0, 1.0)
+        if net_flow_speed is not None and recent_amount > 0
+        else None
+    )
+    if net_flow_ratio is None:
+        net_flow_ratio = net_flow_speed_ratio
     earlier_amounts = amounts[:-3]
     earlier_amount = sum(earlier_amounts) / len(earlier_amounts) if earlier_amounts else None
     amount_growth = (
@@ -234,6 +246,13 @@ def intraday_flow_detail(
     if not capital_available:
         flow_state = "unavailable"
         capital_source_label = "暂无实时主动资金"
+    elif external_source == "kaipanla_net_flow":
+        flow_state = (
+            "inflow" if (net_flow_ratio or 0.0) >= 0.10
+            else "outflow" if (net_flow_ratio or 0.0) <= -0.10
+            else "balanced"
+        )
+        capital_source_label = "开盘啦主力净额涨速"
     elif net_flow_ratio is not None and net_flow_ratio >= 0.10:
         flow_state = "inflow"
         capital_source_label = "实时主动大单"
@@ -261,6 +280,13 @@ def intraday_flow_detail(
         "buy_ratio": buy_ratio,
         "sell_ratio": sell_ratio,
         "net_flow_ratio": net_flow_ratio,
+        "net_flow_amount": net_flow_amount,
+        "net_flow_delta": net_flow_delta,
+        "net_flow_speed": net_flow_speed,
+        "net_flow_speed_ratio": net_flow_speed_ratio,
+        "net_flow_window_minutes": finite((external_flow or {}).get("net_flow_window_minutes")),
+        "net_flow_as_of": (external_flow or {}).get("net_flow_as_of"),
+        "flow_metric": "main_net_speed" if external_source == "kaipanla_net_flow" else "active_ratio",
         "outflow_streak": outflow_streak,
         "flow_source": flow_source,
         "capital_available": capital_available,

@@ -1,6 +1,6 @@
 """实时大单候选与开盘啦深挖服务。
 
-热路径只消费 QuoteService 已经缓存的快照；开盘啦请求在独立线程中按预算执行。
+热路径只消费 QuoteService 已经缓存的快照；开盘啦请求在独立线程中执行。
 """
 
 from __future__ import annotations
@@ -21,7 +21,11 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
 from app.plugins.kaipanla.credentials import load_credentials
-from app.plugins.kaipanla.parsers import ResponseShapeError, parse_large_order_intents, parse_large_order_trades
+from app.plugins.kaipanla.parsers import (
+    ResponseShapeError,
+    parse_large_order_intents,
+    parse_large_order_net_flow,
+)
 from app.services.large_order_store import LargeOrderStore, SCHEMA_VERSION
 from app.services.ingestion_manifest import stable_content_hash
 
@@ -45,7 +49,6 @@ DEFAULTS: dict[str, Any] = {
     "market_segments": ("main", "star", "chinext"),
     "exclude_bse": True,
     "exclude_st": True,
-    "daily_call_budget": 60,
     "version": "large_orders_v2",
 }
 
@@ -96,6 +99,22 @@ def _as_datetime(value: object) -> datetime | None:
             return parsed.astimezone(CN_TZ) if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
         except ValueError:
             return None
+    return None
+
+
+def _session_datetime(value: object, trade_date: date) -> datetime | None:
+    text = str(value or "").strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(
+            year=trade_date.year,
+            month=trade_date.month,
+            day=trade_date.day,
+            tzinfo=CN_TZ,
+        )
     return None
 
 
@@ -264,8 +283,10 @@ class LargeOrderService:
             },
             "trade_events": deque(maxlen=300),
             "intent_events": deque(maxlen=300),
+            "net_flow_points": deque(maxlen=360),
             "trade_ids": set(),
             "intent_ids": set(),
+            "net_flow_ids": set(),
             "last_side": 0,
             "deep_source": "proxy_only",
             "deep_error": None,
@@ -656,6 +677,35 @@ class LargeOrderService:
             "cancel_rate": cancel_count / len(intents) if intents else 0.0,
         }
 
+    def _net_flow_metrics_locked(self, state: dict[str, Any]) -> dict[str, Any]:
+        points = [
+            item
+            for item in state["net_flow_points"]
+            if _finite(item.get("net_amount")) is not None
+            and _as_datetime(item.get("timestamp")) is not None
+        ]
+        if not points:
+            return {"available": False}
+        points.sort(key=lambda item: float(item["timestamp"]))
+        latest = points[-1]
+        latest_ts = float(latest["timestamp"])
+        window_points = points[-6:]
+        baseline = window_points[0]
+        latest_amount = float(latest["net_amount"])
+        baseline_amount = float(baseline["net_amount"])
+        elapsed_minutes = float(max(len(window_points) - 1, 1))
+        delta = latest_amount - baseline_amount
+        speed = delta / elapsed_minutes
+        return {
+            "available": True,
+            "net_flow_amount": latest_amount,
+            "net_flow_delta": delta,
+            "net_flow_speed": speed,
+            "net_flow_direction": "rising" if speed > 0 else "falling" if speed < 0 else "flat",
+            "net_flow_as_of": datetime.fromtimestamp(latest_ts, tz=CN_TZ).isoformat(),
+            "net_flow_window_minutes": elapsed_minutes,
+        }
+
     def _build_rankings_locked(
         self,
         now_ts: float,
@@ -679,7 +729,11 @@ class LargeOrderService:
                 window: self._window_metrics_locked(state, window, now_ts)
                 for window in WINDOWS
             }
-            if not any(metrics["amount"] > 0 for metrics in metrics_by_window.values()):
+            net_flow = self._net_flow_metrics_locked(state)
+            if (
+                not any(metrics["amount"] > 0 for metrics in metrics_by_window.values())
+                and not net_flow["available"]
+            ):
                 continue
             limit_gap = _finite(state.get("limit_up_gap_pct"))
             latest = state["snapshots"][-1] if state["snapshots"] else {}
@@ -695,7 +749,7 @@ class LargeOrderService:
                 for window, metrics in metrics_by_window.items()
             }
             for window, metrics in metrics_by_window.items():
-                if metrics["amount"] <= 0:
+                if metrics["amount"] <= 0 and not net_flow["available"]:
                     continue
                 price_confirmed = (change_pct is not None and change_pct > 0) or metrics["buy_ratio"] >= 0.65
                 score = (
@@ -706,6 +760,7 @@ class LargeOrderService:
                     + min(1.0, max(0.0, imbalance)) * 10.0
                 )
                 deep = bool(metrics["precise"])
+                net_flow_available = bool(net_flow["available"])
                 confidence = (
                     "high"
                     if deep and score >= 75 and metrics["buy_ratio"] >= 0.65
@@ -716,8 +771,16 @@ class LargeOrderService:
                     "name": state["name"],
                     "score": round(min(100.0, score), 2),
                     "confidence": confidence,
-                    "source": "kaipanla" if deep else "tick_proxy",
-                    "data_quality": "precise" if deep else "proxy_only",
+                    "source": (
+                        "kaipanla" if deep
+                        else "kaipanla_net_flow" if net_flow_available
+                        else "tick_proxy"
+                    ),
+                    "data_quality": (
+                        "precise" if deep
+                        else "net_flow" if net_flow_available
+                        else "proxy_only"
+                    ),
                     "active_buy_amount": round(metrics["buy"], 2),
                     "active_sell_amount": round(metrics["sell"], 2),
                     "net_buy_amount": round(metrics["net"], 2),
@@ -734,6 +797,7 @@ class LargeOrderService:
                     "zscore": round(metrics["zscore"], 3),
                     "ofi": round(float(book.get("ofi") or 0), 2),
                     "book_imbalance": round(imbalance, 4),
+                    **net_flow,
                     "windows": serialized_windows,
                     "explanation": self._explanation(metrics, deep, price_confirmed),
                 })
@@ -790,9 +854,6 @@ class LargeOrderService:
                 else list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
             )
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
-            budget = max(0, int(self._config.get("daily_call_budget", 60)))
-            available_symbols = max(0, (budget - self._deep_calls_used) // 2)
-            limit = min(limit, available_symbols)
             interval = max(15.0, float(self._config.get("deep_dive_interval_seconds", 60)))
             for symbol in symbols:
                 if len(self._deep_pending) >= limit or symbol in self._deep_pending:
@@ -815,12 +876,13 @@ class LargeOrderService:
         credentials = load_credentials()
         if credentials is None:
             return
-        trade_payload: dict[str, Any] | None = None
+        net_flow_payload: dict[str, Any] | None = None
         intent_payload: dict[str, Any] | None = None
+        stock_id = symbol.split(".", 1)[0]
         try:
             async with KaipanlaClient(credentials=credentials, attempts=1) as client:
-                trade_payload = await client.request(13, {"StockID": symbol})
-                intent_payload = await client.request(14, {"StockID": symbol})
+                net_flow_payload = await client.request(13, {"StockID": stock_id})
+                intent_payload = await client.request(14, {"StockID": stock_id})
         except (KaipanlaRequestError, ValueError) as exc:
             with self._lock:
                 state = self._states.get(symbol)
@@ -832,7 +894,7 @@ class LargeOrderService:
         if self._storage is not None:
             raw_batch = int(time.time() * 1000)
             for kind, payload, endpoint in (
-                ("kaipanla_trade", trade_payload, 13),
+                ("kaipanla_net_flow", net_flow_payload, 13),
                 ("kaipanla_intent", intent_payload, 14),
             ):
                 if payload is None:
@@ -849,8 +911,12 @@ class LargeOrderService:
                     self._last_error = f"开盘啦原始响应归档失败: {exc}"
                     logger.exception("开盘啦原始响应归档失败 symbol=%s endpoint=%s", symbol, endpoint)
         try:
-            trades = parse_large_order_trades(trade_payload or {}, symbol)
-            intents = parse_large_order_intents(intent_payload or {}, symbol)
+            net_flow_points = parse_large_order_net_flow(net_flow_payload or {}, symbol)
+            if any(
+                point.get("trade_date") != self._trade_date.isoformat()
+                for point in net_flow_points
+            ):
+                raise ResponseShapeError("开盘啦主力净额非当前交易日")
         except (ResponseShapeError, ValueError) as exc:
             with self._lock:
                 state = self._states.get(symbol)
@@ -859,8 +925,13 @@ class LargeOrderService:
                     state["deep_source"] = "proxy_only"
             self._last_error = "开盘啦深挖响应解析失败"
             return
+        intent_error = None
+        try:
+            intents = parse_large_order_intents(intent_payload or {}, symbol)
+        except (ResponseShapeError, ValueError) as exc:
+            intents = []
+            intent_error = str(exc)
         now_ms = int(time.time() * 1000)
-        trade_rows: list[dict[str, Any]] = []
         intent_rows: list[dict[str, Any]] = []
         calculation_started = time.perf_counter()
         with self._lock:
@@ -868,28 +939,22 @@ class LargeOrderService:
             if state is None:
                 state = self._new_state(symbol, symbol, time.time())
                 self._states[symbol] = state
-            for event in trades:
-                if event["event_id"] not in state["trade_ids"]:
-                    state["trade_ids"].add(event["event_id"])
-                    state["trade_events"].append({**event, "event_time": event.get("time")})
-                    trade_ts = _as_datetime(event.get("timestamp") or event.get("time"))
-                    trade_rows.append({
-                        "trade_date": self._trade_date,
-                        "event_ts_ms": int(trade_ts.timestamp() * 1000) if trade_ts else now_ms,
-                        "symbol": symbol,
-                        "name": state["name"],
-                        "price": event.get("price"),
-                        "amount": event.get("amount"),
-                        "volume": event.get("volume"),
-                        "source": "kaipanla_13",
-                        "event_id": event["event_id"],
-                        "received_at_ms": now_ms,
-                        "schema_version": SCHEMA_VERSION,
-                        "parser_version": "kaipanla_v1",
-                        "direction": event.get("direction"),
-                        "direction_code": event.get("direction_code"),
-                        "event_time": event.get("time"),
-                    })
+            for event in net_flow_points:
+                event_time = _session_datetime(event.get("time"), self._trade_date)
+                if event_time is None:
+                    continue
+                normalized = {**event, "timestamp": event_time.timestamp()}
+                if event["event_id"] in state["net_flow_ids"]:
+                    state["net_flow_points"] = deque(
+                        (
+                            normalized if item["event_id"] == event["event_id"] else item
+                            for item in state["net_flow_points"]
+                        ),
+                        maxlen=360,
+                    )
+                else:
+                    state["net_flow_ids"].add(event["event_id"])
+                    state["net_flow_points"].append(normalized)
             for event in intents:
                 if event["event_id"] not in state["intent_ids"]:
                     state["intent_ids"].add(event["event_id"])
@@ -912,13 +977,17 @@ class LargeOrderService:
                         "side": event.get("side"),
                         "side_code": event.get("side_code"),
                         "limit_flag": event.get("limit_flag"),
+                        "limit_flag_code": event.get("limit_flag_code"),
                         "cancel_flag": event.get("cancel_flag"),
+                        "cancel_flag_code": event.get("cancel_flag_code"),
                         "event_time": event.get("time"),
+                        "raw_tail": event.get("raw_tail"),
                     })
             state["trade_ids"] = {item["event_id"] for item in state["trade_events"]}
             state["intent_ids"] = {item["event_id"] for item in state["intent_events"]}
-            state["deep_source"] = "kaipanla"
-            state["deep_error"] = None
+            state["net_flow_ids"] = {item["event_id"] for item in state["net_flow_points"]}
+            state["deep_source"] = "kaipanla_net_flow"
+            state["deep_error"] = intent_error
             state["last_deep_ms"] = now_ms
             rankings, filtered_near_limit, unassessable = self._build_rankings_locked(time.time())
             self._rankings = rankings
@@ -927,9 +996,8 @@ class LargeOrderService:
             alerts = self._build_alerts_locked(symbol)
             self._last_update_ms = now_ms
             self._last_calculation_ms = (time.perf_counter() - calculation_started) * 1000
-            self._last_error = None
+            self._last_error = "开盘啦委托响应解析失败" if intent_error else None
         if self._storage is not None:
-            self._storage.submit("kaipanla_trade", trade_rows)
             self._storage.submit("kaipanla_intent", intent_rows)
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()
@@ -1024,7 +1092,8 @@ class LargeOrderService:
         interval = float(quote_status.get("interval_s") or 6)
         stale = quote_age is None or quote_age < 0 or quote_age > max(interval * 2, 30) * 1000
         ranking = self._rankings.get(60, ())
-        precise = sum(1 for row in ranking if row.get("source") == "kaipanla")
+        precise = sum(1 for row in ranking if row.get("data_quality") == "precise")
+        net_flow = sum(1 for row in ranking if row.get("data_quality") == "net_flow")
         return {
             "enabled": bool(self._config.get("enabled", True)),
             "running": self._running,
@@ -1034,6 +1103,7 @@ class LargeOrderService:
             "coverage_count": quote_status.get("symbol_count", 0),
             "candidate_count": len(ranking),
             "precise_count": precise,
+            "net_flow_count": net_flow,
             "filtered_near_limit_count": self._filtered_near_limit_count,
             "unassessable_count": self._unassessable_count,
             "last_updated_ms": self._last_update_ms,
@@ -1042,9 +1112,8 @@ class LargeOrderService:
             "market_phase": quote_status.get("market_phase"),
             "is_trading_hours": quote_status.get("is_trading_hours", False),
             "config_version": self._config["version"],
-            "deep_dive_budget": int(self._config.get("max_deep_dive_symbols", 3)),
-            "deep_dive_calls_used": self._deep_calls_used,
-            "deep_dive_calls_remaining": max(0, int(self._config.get("daily_call_budget", 60)) - self._deep_calls_used),
+            "deep_dive_symbol_limit": int(self._config.get("max_deep_dive_symbols", 3)),
+            "deep_dive_request_count": self._deep_calls_used,
             "storage": self._storage.status() if self._storage is not None else {
                 "enabled": False,
                 "queued_rows": 0,
@@ -1357,6 +1426,7 @@ class LargeOrderService:
                 "name": state["name"],
                 "trades": list(state["trade_events"]),
                 "intents": list(state["intent_events"]),
+                "net_flow": list(state["net_flow_points"]),
                 "timeline": timeline,
                 "source": state["deep_source"],
                 "last_deep_ms": state["last_deep_ms"],

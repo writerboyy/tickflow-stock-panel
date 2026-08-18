@@ -141,6 +141,38 @@ def test_intraday_flow_prefers_realtime_large_order_ratios_and_requires_live_min
     assert intraday_flow_detail({"available": False}, previous_close=10.0) is None
 
 
+def test_intraday_flow_scores_kaipanla_main_net_speed_without_claiming_active_trades():
+    detail = intraday_flow_detail({
+        "available": True,
+        "session_vwap": 10.0,
+        "closed_bars": [
+            {"open": 10.0, "close": 10.1, "amount": 1_000_000},
+            {"open": 10.1, "close": 10.2, "amount": 1_000_000},
+        ],
+    }, previous_close=10.0, external_flow={
+        "source": "kaipanla_net_flow",
+        "data_quality": "net_flow",
+        "buy_ratio": 0.0,
+        "sell_ratio": 1.0,
+        "net_flow_amount": 8_000_000,
+        "net_flow_delta": 1_000_000,
+        "net_flow_speed": 200_000,
+        "net_flow_window_minutes": 5,
+        "net_flow_as_of": "2026-08-18T10:00:00+08:00",
+    })
+
+    assert detail is not None
+    assert detail["capital_available"] is True
+    assert detail["flow_source"] == "kaipanla_net_flow"
+    assert detail["flow_metric"] == "main_net_speed"
+    assert detail["capital_source_label"] == "开盘啦主力净额涨速"
+    assert detail["buy_ratio"] is None
+    assert detail["sell_ratio"] is None
+    assert detail["net_flow_speed_ratio"] == pytest.approx(0.2)
+    assert detail["net_flow_ratio"] == pytest.approx(0.2)
+    assert detail["flow_state"] == "inflow"
+
+
 def test_rotation_uses_five_completed_trading_days_and_marks_rising():
     detail = rotation_detail(_rotation(), "人工智能", date(2026, 8, 17))
 

@@ -2232,11 +2232,12 @@ class LimitBoardService:
         if not callable(getter) or not symbols:
             return {}
         try:
+            freshness_seconds = 180 if _is_trading_time(now) else 24 * 60 * 60
             value = getter(
                 symbols,
                 asset_type="stock",
                 now=now,
-                freshness_seconds=180,
+                freshness_seconds=freshness_seconds,
             )
         except TypeError:
             try:

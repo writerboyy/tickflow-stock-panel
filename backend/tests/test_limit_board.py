@@ -844,7 +844,16 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     )
     service.app_state.large_order_service = SimpleNamespace(
         ranking=lambda **_kwargs: {
-            "rows": [{"symbol": "600000.SH", "buy_ratio": 0.8, "sell_ratio": 0.2}]
+            "rows": [{
+                "symbol": "600000.SH",
+                "source": "kaipanla_net_flow",
+                "data_quality": "net_flow",
+                "net_flow_amount": 8_000_000,
+                "net_flow_delta": 1_000_000,
+                "net_flow_speed": 200_000,
+                "net_flow_window_minutes": 5,
+                "net_flow_as_of": now.isoformat(),
+            }]
         },
     )
     service._premium_stats["600000.SH"] = {
@@ -921,6 +930,8 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_score"] is not None
     assert row["candidate_score_state"] == "live"
     assert row["candidate_score_detail"]["intraday_flow"]["max_score"] == 15.0
+    assert row["candidate_score_detail"]["intraday_flow"]["flow_metric"] == "main_net_speed"
+    assert row["candidate_score_detail"]["intraday_flow"]["capital_available"] is True
     assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
     assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
     assert row["candidate_score_detail"]["technical"]["score"] == 5.0
@@ -965,6 +976,24 @@ def test_candidate_score_refresh_uses_five_second_window_and_bypasses_for_new_sy
     current_mono[0] = 110.0
     service._refresh_candidate_scores(runtime, second, now)
     assert calls[0] == 3
+
+
+def test_candidate_intraday_features_allow_same_day_final_bars_after_close(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    captured = {}
+
+    def get_intraday_features(symbols, **kwargs):
+        captured.update(kwargs)
+        return {symbol: {"available": True} for symbol in symbols}
+
+    quotes.get_intraday_features = get_intraday_features
+    result = service._candidate_intraday_features(
+        {"600000.SH"},
+        datetime(2026, 8, 18, 15, 30, tzinfo=CN_TZ),
+    )
+
+    assert result["600000.SH"]["available"] is True
+    assert captured["freshness_seconds"] == 24 * 60 * 60
 
 
 def test_candidate_score_refresh_requires_current_day_capital_when_source_is_missing(

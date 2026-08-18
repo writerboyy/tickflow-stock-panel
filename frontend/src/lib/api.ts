@@ -314,6 +314,7 @@ export interface LargeOrderStatus {
   coverage_count: number
   candidate_count: number
   precise_count: number
+  net_flow_count?: number
   filtered_near_limit_count: number
   unassessable_count: number
   last_updated_ms: number | null
@@ -322,9 +323,8 @@ export interface LargeOrderStatus {
   market_phase?: string | null
   is_trading_hours?: boolean
   config_version?: string
-  deep_dive_budget?: number
-  deep_dive_calls_used?: number
-  deep_dive_calls_remaining?: number
+  deep_dive_symbol_limit?: number
+  deep_dive_request_count?: number
   storage?: {
     enabled: boolean
     queued_rows: number
@@ -342,8 +342,8 @@ export interface LargeOrderRow {
   name: string
   score: number
   confidence: 'high' | 'medium' | 'low' | string
-  source: 'kaipanla' | 'tick_proxy' | string
-  data_quality: 'precise' | 'proxy_only' | string
+  source: 'kaipanla' | 'kaipanla_net_flow' | 'tick_proxy' | string
+  data_quality: 'precise' | 'net_flow' | 'proxy_only' | string
   active_buy_amount: number
   active_sell_amount: number
   net_buy_amount: number
@@ -360,6 +360,12 @@ export interface LargeOrderRow {
   zscore: number
   ofi?: number
   book_imbalance?: number
+  net_flow_amount?: number | null
+  net_flow_delta?: number | null
+  net_flow_speed?: number | null
+  net_flow_direction?: 'rising' | 'falling' | 'flat' | string
+  net_flow_as_of?: string | null
+  net_flow_window_minutes?: number | null
   explanation: string
   windows?: Record<string, {
     amount: number
@@ -381,6 +387,7 @@ export interface LargeOrderTape {
   error?: string | null
   trades: Array<Record<string, any>>
   intents: Array<Record<string, any>>
+  net_flow: Array<Record<string, any>>
   timeline: Array<{ ts: number; amount: number; buy: number; sell: number; price: number }>
 }
 
@@ -434,7 +441,10 @@ export interface LargeOrderHistoryEvent {
   event_time?: string | null
   order_id?: string | null
   limit_flag?: boolean | null
+  limit_flag_code?: number | null
   cancel_flag?: boolean | null
+  cancel_flag_code?: number | null
+  raw_tail?: string | null
   bid_prices?: number[] | null
   bid_volumes?: number[] | null
   ask_prices?: number[] | null
@@ -1175,8 +1185,15 @@ export interface LimitBoardRow {
       buy_ratio?: number
       sell_ratio?: number
       net_flow_ratio?: number
+      net_flow_amount?: number | null
+      net_flow_delta?: number | null
+      net_flow_speed?: number | null
+      net_flow_speed_ratio?: number | null
+      net_flow_window_minutes?: number | null
+      net_flow_as_of?: string | null
+      flow_metric?: 'active_ratio' | 'main_net_speed'
       outflow_streak?: number
-      flow_source?: 'kaipanla' | 'large_order' | 'tick_proxy' | 'unavailable'
+      flow_source?: 'kaipanla' | 'kaipanla_net_flow' | 'large_order' | 'tick_proxy' | 'unavailable'
       capital_available?: boolean
       amount_growth?: number | null
       bars?: number
