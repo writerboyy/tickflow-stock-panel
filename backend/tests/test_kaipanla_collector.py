@@ -555,51 +555,6 @@ async def test_scheduled_funds_collects_latest_completed_trading_date(tmp_path, 
     ]
 
 
-@pytest.mark.asyncio
-async def test_scheduled_sector_constituents_collects_previous_trading_day(
-    tmp_path,
-    monkeypatch,
-):
-    _configured(monkeypatch)
-    monkeypatch.setattr(collector_module, "cn_today", lambda: date(2026, 8, 17))
-    monkeypatch.setattr(
-        collector_module,
-        "recent_trading_dates",
-        lambda _data_dir, _limit=60: [date(2026, 8, 14), date(2026, 8, 17)],
-    )
-    strength_row = ["801001", "芯片", 100, 2.5, 0.1, 1000, 20, 60, 40, 1.2, 500]
-    stock_row = [None] * 41
-    stock_row[0], stock_row[1] = "600000", "浦发银行"
-    calls = []
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient(
-            {
-                "sector_strength": {
-                    "Day": ["2026-08-14"],
-                    "list": [strength_row],
-                },
-                "sector_constituents": {"list": [stock_row]},
-            },
-            calls,
-        ),
-    )
-
-    assert await collector._scheduled_sector_constituents() == 1
-
-    assert calls[0] == (
-        "sector_strength",
-        {"Day": "2026-08-14", "Index": 0, "st": 1000},
-    )
-    assert calls[1][0] == "sector_constituents"
-    assert calls[1][1]["Date"] == "2026-08-14"
-    partition = (
-        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE
-        / "timeseries" / "date=2026-08-14" / "part.parquet"
-    )
-    assert pl.read_parquet(partition)["symbol"].to_list() == ["600000.SH"]
-
-
 def test_stock_codes_exclude_symbols_outside_target_trading_window(tmp_path):
     (tmp_path / "instruments").mkdir()
     pl.DataFrame({
@@ -1113,7 +1068,7 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 15
+    assert len(scheduler.jobs) == 14
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
     assert "second='*/5'" in str(scheduler.triggers["kaipanla_sector_strength"])
@@ -1123,9 +1078,7 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
-    assert "kaipanla_sector_constituents" in scheduler.jobs
-    assert "hour='8'" in str(scheduler.triggers["kaipanla_sector_constituents"])
-    assert "minute='45'" in str(scheduler.triggers["kaipanla_sector_constituents"])
+    assert "kaipanla_sector_constituents" not in scheduler.jobs
     assert collector._bootstrap_task is None
 
 
@@ -1154,5 +1107,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 15
+    assert len(scheduler.jobs) == 14
     assert collector._bootstrap_task is None

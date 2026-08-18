@@ -121,7 +121,6 @@ class KaipanlaCollector:
         self._bootstrap_task: asyncio.Task | None = None
         self._sentiment_task: asyncio.Task | None = None
         self._sector_strength_task: asyncio.Task | None = None
-        self._sector_constituents_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._sentiment_lock = threading.Lock()
         self._market_sentiment: dict | None = None
@@ -258,18 +257,6 @@ class KaipanlaCollector:
                 replace_existing=True,
             )
             scheduler.add_job(
-                self._scheduled_sector_constituents,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour=8,
-                    minute=45,
-                    timezone="Asia/Shanghai",
-                ),
-                id="kaipanla_sector_constituents",
-                misfire_grace_time=7200,
-                replace_existing=True,
-            )
-            scheduler.add_job(
                 self._scheduled_lhb,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
@@ -321,11 +308,6 @@ class KaipanlaCollector:
                 self._bootstrap_sector_strength(),
                 name="kaipanla-sector-strength",
             )
-        if self._sector_constituents_task is None or self._sector_constituents_task.done():
-            self._sector_constituents_task = asyncio.create_task(
-                self._scheduled_sector_constituents(),
-                name="kaipanla-sector-constituents",
-            )
 
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
@@ -334,12 +316,9 @@ class KaipanlaCollector:
             self._sentiment_task.cancel()
         if self._sector_strength_task and not self._sector_strength_task.done():
             self._sector_strength_task.cancel()
-        if self._sector_constituents_task and not self._sector_constituents_task.done():
-            self._sector_constituents_task.cancel()
         self._bootstrap_task = None
         self._sentiment_task = None
         self._sector_strength_task = None
-        self._sector_constituents_task = None
 
     async def _run_safely(self, name: str, func, *args) -> int:
         if not self.configured:
@@ -803,33 +782,6 @@ class KaipanlaCollector:
     async def _scheduled_shareholder_counts(self) -> int:
         return await self._run_safely(
             "shareholder_counts", self.collect_shareholder_counts, cn_today(), cn_today()
-        )
-
-    async def _scheduled_sector_constituents(self) -> int:
-        today = cn_today()
-        trade_date = self.latest_completed_trading_date(today)
-        if trade_date is None:
-            logger.warning("开盘啦板块成分采集缺少上一完整交易日")
-            return 0
-        manifest = load_ingestion_manifest(
-            self.data_dir,
-            "kaipanla",
-            SECTOR_CONSTITUENT_TABLE,
-            trade_date.isoformat(),
-        )
-        expected = [str(value) for value in manifest.get("expected_batches") or []]
-        batches = manifest.get("batches") or {}
-        if expected and not manifest.get("failed_batches") and all(
-            isinstance(batches.get(plate_id), dict)
-            and batches[plate_id].get("status") in {"completed", "valid_empty"}
-            for plate_id in expected
-        ):
-            return int(manifest.get("published_rows") or 0)
-        return await self._run_safely(
-            "sector_constituents",
-            self.collect_sector_constituents,
-            trade_date,
-            None,
         )
 
     def _stock_codes(self, trade_date: date) -> list[str]:

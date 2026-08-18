@@ -121,6 +121,48 @@ def test_shortline_service_uses_socket_quotes_without_tickflow(tmp_path, monkeyp
     assert quotes.consumers == {}
 
 
+def test_shortline_scope_keeps_top_ten_target_when_upstream_returns_nine(
+    tmp_path,
+):
+    today = date(2026, 8, 18)
+    strength_rows = [
+        {
+            "plate_id": f"P{rank}", "plate_name": f"板块{rank}",
+            "rank": rank, "strength": 100 - rank,
+        }
+        for rank in range(1, 10)
+    ]
+    constituent_rows = [
+        {
+            "plate_id": f"P{rank}", "code": f"600{rank:03d}",
+            "name": f"股票{rank}", "last_price": 10 + rank,
+        }
+        for rank in range(1, 10)
+    ]
+    service = LimitBoardService(
+        Path(tmp_path), FakeRepo(), FakeQuotes(),
+        SimpleNamespace(paper_supervisor=None, qmt_trading_service=None),
+    )
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla", "state": "live", "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-18T10:00:00+08:00", "rows": strength_rows,
+        },
+        shortline_constituents_snapshot=lambda: {
+            "provider": "kaipanla_socket", "state": "live", "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-18T10:00:01+08:00", "rows": constituent_rows,
+        },
+    )
+
+    symbols = service._refresh_sector_candidate_universe(today)
+
+    assert len(symbols) == 9
+    assert service._sector_candidate_scope["state"] == "live"
+    assert service._sector_candidate_scope["reason"].startswith(
+        "仅扫描开盘啦实时板块强度前 10 名范围（当前返回 9 个有效板块）"
+    )
+
+
 @pytest.mark.asyncio
 async def test_shortline_constituents_accept_current_point_and_reject_history(
     tmp_path,

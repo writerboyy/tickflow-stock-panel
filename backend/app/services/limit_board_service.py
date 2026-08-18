@@ -1023,11 +1023,14 @@ class LimitBoardService:
         self._sector_candidate_plate_ids = set(matched_plate_ids)
         self._sector_candidates_by_symbol = by_symbol
         scope_state = "partial" if missing_plate_ids else "live"
+        scope_label = f"开盘啦实时板块强度前 {_SECTOR_CANDIDATE_LIMIT} 名范围"
+        if len(plate_ids) < _SECTOR_CANDIDATE_LIMIT:
+            scope_label += f"（当前返回 {len(plate_ids)} 个有效板块）"
         scope_reason = (
-                f"仅扫描实时板块强度前 {len(plate_ids)} 名的开盘啦当日 {len(by_symbol)} 只去重成分"
+                f"仅扫描{scope_label}内的当日 {len(by_symbol)} 只去重成分"
             if not missing_plate_ids
             else (
-                f"实时板块强度前 {len(plate_ids)} 名中 {len(matched_plate_ids)} 个有开盘啦当日成分，"
+                f"{scope_label}中 {len(matched_plate_ids)} 个有当日成分，"
                 f"共 {len(by_symbol)} 只去重成分；{len(missing_plate_ids)} 个板块缺口已跳过"
             )
         )

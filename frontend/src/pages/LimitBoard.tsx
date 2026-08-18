@@ -916,7 +916,7 @@ function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
         <ol className="mt-2 grid gap-2 sm:grid-cols-3">
           {[
             ['1', '板块入围', '只取开盘啦实时板块强度前 10 名。'],
-            ['2', '成分去重', '使用上一完整交易日盘前落库的板块成分。'],
+            ['2', '成分去重', '盘中通过开盘啦 socket 获取当天实时板块成分。'],
             ['3', '保留 Top 30', '首板、反包合并打分后只保留自动排名前 30。'],
           ].map(([step, title, detail]) => <li key={step} className="flex gap-2 border-t border-border pt-2"><span className="font-mono text-accent">{step}</span><span><strong className="font-medium text-foreground">{title}</strong><span className="mt-0.5 block text-[11px] leading-5 text-muted">{detail}</span></span></li>)}
         </ol>
@@ -967,7 +967,7 @@ function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
         <div className="mt-2 grid gap-x-5 gap-y-2 text-[11px] leading-5 sm:grid-cols-2">
           <p><strong className="font-medium text-foreground">完整性：</strong>板块及 5 日轮动、涨停基因、分时、实时主动资金和技术面必须全部可用，才会生成总分。缺实时资金时不把代理数据伪装成真实分数。</p>
           <p><strong className="font-medium text-foreground">排序顺序：</strong>可计算状态 → 实时板块可用 → 板块实时排名 → 板块强度 → 板块分 → 龙头地位与成分排名 → 总分 → 基因 → 分时资金 → 技术面 → 股票代码。</p>
-          <p className="sm:col-span-2"><strong className="font-medium text-foreground">缓存：</strong>5 秒一轮批量更新。同一交易日某项短暂缺数时可沿用最后有效值并标记“缓存”；跨交易日清空。实时板块或盘前成分数据缺失时，自动候选严格停止，不使用本地聚合降级。</p>
+          <p className="sm:col-span-2"><strong className="font-medium text-foreground">缓存：</strong>5 秒一轮批量更新。同一交易日某项短暂缺数时可沿用最后有效值并标记“缓存”；跨交易日清空。实时板块或当日实时成分缺失时，自动候选严格停止，不使用本地聚合降级。</p>
         </div>
       </section>
     </div>
