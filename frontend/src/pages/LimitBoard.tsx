@@ -204,7 +204,7 @@ function Row({
       </td>
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
-          {row.candidate_score == null ? <div className="text-muted">待补数据</div> : <>
+          {row.candidate_score == null ? <div className={intradayFlow?.capital_available === false ? 'text-warning' : 'text-muted'}>{intradayFlow?.capital_available === false ? '实时资金待补' : '待补数据'}</div> : <>
             <div className="font-mono text-sm font-semibold tabular-nums text-accent">#{row.candidate_rank} · {row.candidate_score.toFixed(1)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">分{intradayFlow?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>

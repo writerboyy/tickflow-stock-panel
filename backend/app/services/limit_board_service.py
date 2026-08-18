@@ -2502,7 +2502,8 @@ class LimitBoardService:
                     if value is not None:
                         detail[key] = value
                     elif (
-                        previous_detail.get(key)
+                        key != "intraday_flow"
+                        and previous_detail.get(key)
                         and (
                             key != "sector"
                             or previous_detail[key].get("realtime_available") is True

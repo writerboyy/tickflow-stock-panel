@@ -967,7 +967,7 @@ def test_candidate_score_refresh_uses_five_second_window_and_bypasses_for_new_sy
     assert calls[0] == 3
 
 
-def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missing(
+def test_candidate_score_refresh_requires_current_day_capital_when_source_is_missing(
     tmp_path, monkeypatch,
 ):
     service, _quotes, _config = make_service(tmp_path)
@@ -1005,9 +1005,12 @@ def test_candidate_score_refresh_reuses_same_day_components_when_source_is_missi
 
     cached = runtime["candidate_scores"]["600000.SH"]
     assert changed is True
-    assert cached["candidate_score"] == 70.0
-    assert cached["candidate_score_state"] == "cached"
-    assert cached["candidate_score_detail"] == previous_detail
+    assert cached["candidate_score"] is None
+    assert cached["candidate_score_state"] == "unavailable"
+    assert "intraday_flow" not in cached["candidate_score_detail"]
+    assert cached["candidate_score_detail"]["sector"] == previous_detail["sector"]
+    assert cached["candidate_score_detail"]["premium_gene"] == previous_detail["premium_gene"]
+    assert cached["candidate_score_detail"]["technical"] == previous_detail["technical"]
 
 
 def test_candidate_score_refresh_drops_legacy_local_sector_cache(tmp_path, monkeypatch):
