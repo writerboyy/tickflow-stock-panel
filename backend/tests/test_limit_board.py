@@ -2057,7 +2057,7 @@ def test_sector_strength_exposes_stable_five_minute_horizontal_trend(
     today = date(2026, 8, 17)
     points = [
         "2026-08-17T09:35:00+08:00",
-        "2026-08-17T10:00:00+08:00",
+        "2026-08-17T09:59:55+08:00",
         "2026-08-17T10:05:00+08:00",
         "2026-08-17T10:05:05+08:00",
     ]
@@ -2110,15 +2110,21 @@ def test_sector_strength_exposes_stable_five_minute_horizontal_trend(
     assert trend["state"] == "accelerating"
     assert trend["captured_at"] == points[2]
     assert trend["base_at"] == points[1]
+    assert trend["elapsed_minutes"] == pytest.approx(305 / 60)
     assert trend["strength_delta"] == pytest.approx(10.0)
     assert trend["main_net_delta"] == pytest.approx(10.0)
     assert trend["comparable_count"] == 1
     assert result["rows"][0]["strength_delta_5m"] == pytest.approx(10.0)
     assert result["rows"][0]["main_net_delta_5m"] == pytest.approx(10.0)
+    assert result["rows"][0]["strength_speed_per_min_5m"] == pytest.approx(120 / 61)
+    assert result["rows"][0]["main_net_speed_per_min_5m"] == pytest.approx(120 / 61)
     assert result["trend_30m"]["captured_at"] == points[2]
     assert result["trend_30m"]["base_at"] == points[0]
+    assert result["trend_30m"]["elapsed_minutes"] == pytest.approx(30.0)
     assert result["rows"][0]["strength_delta_30m"] == pytest.approx(30.0)
     assert result["rows"][0]["main_net_delta_30m"] == pytest.approx(25.0)
+    assert result["rows"][0]["strength_speed_per_min_30m"] == pytest.approx(1.0)
+    assert result["rows"][0]["main_net_speed_per_min_30m"] == pytest.approx(5 / 6)
 
 
 @pytest.mark.asyncio

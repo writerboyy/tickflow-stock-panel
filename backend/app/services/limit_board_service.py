@@ -388,6 +388,9 @@ class LimitBoardService:
         )
         if base is None:
             return None, {}
+        elapsed_minutes = (current[0] - base[0]).total_seconds() / 60.0
+        if elapsed_minutes <= 0:
+            return None, {}
         cache_key = (today, window_minutes, current[1], base[1])
         cached = self._sector_trend_cache.get(cache_key)
         if cached is not None:
@@ -432,6 +435,14 @@ class LimitBoardService:
             by_plate[plate_id] = {
                 f"strength_delta_{window_minutes}m": strength_delta,
                 f"main_net_delta_{window_minutes}m": main_net_delta,
+                f"strength_speed_per_min_{window_minutes}m": (
+                    strength_delta / elapsed_minutes
+                    if strength_delta is not None else None
+                ),
+                f"main_net_speed_per_min_{window_minutes}m": (
+                    main_net_delta / elapsed_minutes
+                    if main_net_delta is not None else None
+                ),
                 f"trend_{window_minutes}m_state": self._trend_state(
                     strength_delta, main_net_delta,
                 ),
@@ -462,6 +473,7 @@ class LimitBoardService:
             summary = {
                 "state": self._trend_state(strength_delta, main_net_delta),
                 "window_minutes": window_minutes,
+                "elapsed_minutes": elapsed_minutes,
                 "captured_at": current[1],
                 "base_at": base[1],
                 "strength_delta": strength_delta,

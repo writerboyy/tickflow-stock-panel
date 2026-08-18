@@ -400,6 +400,11 @@ function sectorConstituentStatus(row: LimitBoardSectorConstituent): string {
   return '--'
 }
 
+function sectorStrengthSpeed(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '--'
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)}`
+}
+
 function sectorNameKey(value: string | null | undefined): string {
   return String(value ?? '').replace(/\s+/g, '').trim()
 }
@@ -428,6 +433,7 @@ function SectorStrengthTable({
   hotLoading = false,
   hotError = false,
   refreshIntervalSeconds = 5,
+  refreshCycleUpdatedAt = 0,
   onOpenAlgorithm,
   onOpenStock,
 }: {
@@ -439,6 +445,7 @@ function SectorStrengthTable({
   hotLoading?: boolean
   hotError?: boolean
   refreshIntervalSeconds?: number
+  refreshCycleUpdatedAt?: number
   onOpenAlgorithm: () => void
   onOpenStock: (symbol: string, name?: string) => void
 }) {
@@ -462,10 +469,10 @@ function SectorStrengthTable({
   const isLive = (!cursorAt || activeIndex === latestIndex) && snapshot?.history_state !== 'closed'
   const isClosedLatest = snapshot?.history_state === 'closed' && activeIndex === latestIndex
   useEffect(() => {
-    const now = Date.now()
+    const now = refreshCycleUpdatedAt || Date.now()
     setCycleStartedAt(now)
     setProgressClock(now)
-  }, [snapshot?.refreshed_at])
+  }, [refreshCycleUpdatedAt])
   useEffect(() => {
     if (!isLive) return undefined
     const handle = window.setInterval(() => setProgressClock(Date.now()), 200)
@@ -613,6 +620,10 @@ function SectorStrengthTable({
     const strongest = matches.reduce((best, row) => Number(row.strength ?? 0) > Number(best.strength ?? 0) ? row : best)
     setSelectedPlateId(strongest.plate_id)
   }
+  const selectPlate = (plateId: string) => {
+    setSelectedStockSymbol(null)
+    setSelectedPlateId(plateId)
+  }
   const progressDuration = Math.max(1, refreshIntervalSeconds) * 1000
   const refreshProgress = isLive
     ? Math.min(100, Math.max(0, ((progressClock - cycleStartedAt) / progressDuration) * 100))
@@ -620,45 +631,34 @@ function SectorStrengthTable({
   const trend = rankingWindowMinutes === 5
     ? activeSnapshot?.trend_5m
     : activeSnapshot?.trend_30m
-  const mainNetDelta = (row: LimitBoardSectorStrengthRow) => (
-    rankingWindowMinutes === 5 ? row.main_net_delta_5m : row.main_net_delta_30m
+  const strengthSpeed = (row: LimitBoardSectorStrengthRow) => (
+    rankingWindowMinutes === 5
+      ? row.strength_speed_per_min_5m
+      : row.strength_speed_per_min_30m
+  )
+  const mainNetSpeed = (row: LimitBoardSectorStrengthRow) => (
+    rankingWindowMinutes === 5
+      ? row.main_net_speed_per_min_5m
+      : row.main_net_speed_per_min_30m
   )
   const windowRisingRanking = [...rows]
     .filter(row => {
-      const value = mainNetDelta(row)
+      const value = strengthSpeed(row)
       return value != null && Number.isFinite(value) && value > 0
     })
-    .sort((left, right) => Number(mainNetDelta(right)) - Number(mainNetDelta(left)))
+    .sort((left, right) => Number(strengthSpeed(right)) - Number(strengthSpeed(left)))
     .slice(0, 3)
   const windowFallingRanking = [...rows]
     .filter(row => {
-      const value = mainNetDelta(row)
+      const value = strengthSpeed(row)
       return value != null && Number.isFinite(value) && value < 0
     })
-    .sort((left, right) => Number(mainNetDelta(left)) - Number(mainNetDelta(right)))
+    .sort((left, right) => Number(strengthSpeed(left)) - Number(strengthSpeed(right)))
     .slice(0, 3)
-  return <div className="space-y-3">
-    <section className="overflow-hidden rounded-btn border border-border bg-surface">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
-        <div><div className="text-xs font-medium">板块区间排序</div><div className="mt-0.5 text-[10px] text-muted">{trend ? `${scoreTime(trend.base_at)} → ${scoreTime(trend.captured_at)} · 按同一板块两个截面的变化量排序` : `正在积累 ${rankingWindowMinutes} 分钟可比截面`}</div></div>
-        <div className="inline-flex overflow-hidden rounded-btn border border-border bg-base" aria-label="选择板块排序周期">
-          {([5, 30] as const).map(minutes => <button key={minutes} type="button" aria-pressed={rankingWindowMinutes === minutes} onClick={() => setRankingWindowMinutes(minutes)} className={`h-7 px-3 text-[10px] ${rankingWindowMinutes === minutes ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{minutes} 分钟</button>)}
-        </div>
-      </div>
-      <div className="grid min-w-[720px] grid-cols-2 divide-x divide-border overflow-x-auto">
-        <div className="min-w-0">
-          <div className="grid grid-cols-[42px_1fr_100px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟主力净额涨速</span></div>
-          {windowRisingRanking.length ? windowRisingRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_100px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bull">{moneyYi(mainNetDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">暂无主力净额涨速数据</div>}
-        </div>
-        <div className="min-w-0">
-          <div className="grid grid-cols-[42px_1fr_100px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟主力净额跌速</span></div>
-          {windowFallingRanking.length ? windowFallingRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_100px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bear">{moneyYi(mainNetDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">暂无主力净额跌速数据</div>}
-        </div>
-      </div>
-    </section>
+  return <div className="grid min-w-0 gap-3 min-[1600px]:grid-cols-[minmax(0,1fr)_340px] min-[1600px]:items-start">
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
-      <div><div className="text-xs font-medium">板块强度</div><div className="mt-0.5 text-[10px] text-muted">热股雷达在左侧独立展示；强势股打分、板块和成分股 {refreshIntervalSeconds} 秒统一刷新</div></div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><div className="shrink-0 text-xs font-medium">板块强度</div><span className="truncate text-[10px] text-muted">强势股、板块与成分股按同一截面每 {refreshIntervalSeconds} 秒刷新</span></div>
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
         <span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span>
         <span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : isClosedLatest ? '收盘' : '回看'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span>
@@ -666,7 +666,7 @@ function SectorStrengthTable({
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
     <div className="overflow-x-auto overscroll-x-contain">
-    <div className="grid min-w-0 lg:min-w-[1020px] lg:grid-cols-[18%_18%_24%_40%]">
+    <div className="grid min-w-0 lg:min-w-[1020px] lg:grid-cols-[16%_16%_28%_40%]">
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center justify-between gap-2 border-b border-border px-3 py-2">
           <div className="inline-flex items-center gap-1.5 text-xs font-medium"><Flame className="h-3.5 w-3.5 text-accent" />热股雷达</div>
@@ -744,15 +744,11 @@ function SectorStrengthTable({
               role="button"
               tabIndex={0}
               aria-selected={selected}
-              onClick={() => {
-                setSelectedStockSymbol(null)
-                setSelectedPlateId(row.plate_id)
-              }}
+              onClick={() => selectPlate(row.plate_id)}
               onKeyDown={event => {
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault()
-                  setSelectedStockSymbol(null)
-                  setSelectedPlateId(row.plate_id)
+                  selectPlate(row.plate_id)
                 }
               }}
               className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected && linked ? 'bg-warning/25 ring-1 ring-inset ring-warning/60' : linked ? 'bg-warning/10' : selected ? 'bg-accent/20' : ''}`}
@@ -819,6 +815,47 @@ function SectorStrengthTable({
       />
     </div>
     </section>
+    <aside className="overflow-hidden rounded-btn border border-border bg-surface min-[1600px]:sticky min-[1600px]:top-3 min-[1600px]:shadow-lg">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
+        <span className="shrink-0 text-xs font-medium">板块区间排序</span>
+        <span
+          className="ml-auto min-w-0 truncate font-mono text-[9px] text-muted"
+          title={trend ? `同板块强度变化除以实际 ${trend.elapsed_minutes.toFixed(1)} 分钟；主力净额速度仅作辅助` : undefined}
+        >
+          {trend ? `${scoreTime(trend.base_at)} → ${scoreTime(trend.captured_at)}` : `积累 ${rankingWindowMinutes} 分钟截面`}
+        </span>
+        <div className="inline-flex shrink-0 overflow-hidden rounded-btn border border-border bg-base" aria-label="选择板块排序周期">
+          {([5, 30] as const).map(minutes => <button key={minutes} type="button" aria-pressed={rankingWindowMinutes === minutes} onClick={() => setRankingWindowMinutes(minutes)} className={`h-6 px-2 text-[9px] ${rankingWindowMinutes === minutes ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{minutes}分</button>)}
+        </div>
+      </div>
+      <div className="grid grid-cols-[30px_minmax(0,1fr)_68px_82px] border-b border-border px-3 py-1.5 text-[9px] text-muted"><span>#</span><span>板块</span><span className="text-right">强度/分</span><span className="text-right">主力/分</span></div>
+      <div className="border-b border-border">
+        <div className="px-3 py-1.5 text-[10px] font-medium text-bull">强度涨速</div>
+        {windowRisingRanking.length ? windowRisingRanking.map((row, index) => <button
+          key={row.plate_id}
+          type="button"
+          aria-pressed={row.plate_id === selectedPlate?.plate_id}
+          onClick={() => selectPlate(row.plate_id)}
+          className={`grid w-full grid-cols-[30px_minmax(0,1fr)_68px_82px] items-center border-t border-border/70 px-3 py-2 text-left text-[10px] hover:bg-elevated/50 ${row.plate_id === selectedPlate?.plate_id ? 'bg-accent/15' : ''}`}
+          title="选择该板块并联动成分股"
+        >
+          <span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bull">{sectorStrengthSpeed(strengthSpeed(row))}</span><span className={`text-right font-mono ${financialTone(mainNetSpeed(row))}`}>{moneyYi(mainNetSpeed(row))}</span>
+        </button>) : <div className="px-3 py-5 text-center text-[10px] text-muted">暂无强度上涨板块</div>}
+      </div>
+      <div>
+        <div className="px-3 py-1.5 text-[10px] font-medium text-bear">强度跌速</div>
+        {windowFallingRanking.length ? windowFallingRanking.map((row, index) => <button
+          key={row.plate_id}
+          type="button"
+          aria-pressed={row.plate_id === selectedPlate?.plate_id}
+          onClick={() => selectPlate(row.plate_id)}
+          className={`grid w-full grid-cols-[30px_minmax(0,1fr)_68px_82px] items-center border-t border-border/70 px-3 py-2 text-left text-[10px] hover:bg-elevated/50 ${row.plate_id === selectedPlate?.plate_id ? 'bg-accent/15' : ''}`}
+          title="选择该板块并联动成分股"
+        >
+          <span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bear">{sectorStrengthSpeed(strengthSpeed(row))}</span><span className={`text-right font-mono ${financialTone(mainNetSpeed(row))}`}>{moneyYi(mainNetSpeed(row))}</span>
+        </button>) : <div className="px-3 py-5 text-center text-[10px] text-muted">暂无强度下跌板块</div>}
+      </div>
+    </aside>
   </div>
 }
 
@@ -1057,7 +1094,19 @@ export function LimitBoard() {
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
-  const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
+  const view = useQuery({
+    queryKey: QK.limitBoard,
+    queryFn: api.limitBoard,
+    refetchInterval: query => Math.max(
+      1,
+      query.state.data?.runtime.refresh_cycle.interval_seconds ?? 5,
+    ) * 1000,
+    placeholderData: previous => previous,
+  })
+  const unifiedRefreshIntervalMs = Math.max(
+    1,
+    view.data?.runtime.refresh_cycle.interval_seconds ?? 5,
+  ) * 1000
   const heat = useQuery({
     queryKey: QK.marketHeatRadar(30),
     queryFn: () => api.marketHeatRadar(30, true),
@@ -1074,8 +1123,8 @@ export function LimitBoard() {
     queryKey: QK.limitBoardQuotes(heatSymbols.join(',')),
     queryFn: () => api.limitBoardQuotes(heatSymbols, true),
     enabled: tab === 'sector' && heatSymbols.length > 0,
-    refetchInterval: tab === 'sector' ? 5000 : false,
-    staleTime: 4000,
+    refetchInterval: tab === 'sector' ? unifiedRefreshIntervalMs : false,
+    staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
   const searchQuery = useQuery({
@@ -1160,15 +1209,19 @@ export function LimitBoard() {
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
         title="短线猎手"
-        titleExtra={<span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-[10px] text-secondary"><Radio className="h-3 w-3 text-accent" />打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>}
+        titleExtra={<div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+          <span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-secondary"><Radio className="h-3 w-3 text-accent" />打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>
+          <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '打板池已接入 WS' : '备选池仅实时轮询'}</span>
+          <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
+          <span
+            className={`max-w-[520px] truncate ${!runtime.first_board_enabled || runtime.candidate_scope.state === 'partial' ? 'text-warning' : ''}`}
+            title={!runtime.first_board_enabled ? `强势股打分暂不可用：${runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}` : runtime.candidate_scope.reason}
+          >
+            {!runtime.first_board_enabled ? `强势股打分暂不可用：${runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}` : runtime.candidate_scope.reason}
+          </span>
+        </div>}
         right={<div className="flex flex-wrap items-center justify-end gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setAdvancedOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5" />高级设置</button><button type="button" onClick={() => setNotificationOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><Bell className="h-3.5 w-3.5" />通知设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
-
-      <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
-        <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '打板池已接入 WS' : '备选池仅实时轮询'}</span>
-        <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
-        {!runtime.first_board_enabled ? <span className="text-warning">强势股打分暂不可用：{runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}</span> : <span className={runtime.candidate_scope.state === 'partial' ? 'text-warning' : undefined}>{runtime.candidate_scope.reason}</span>}
-      </div>
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
@@ -1185,7 +1238,7 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>

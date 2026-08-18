@@ -1308,9 +1308,13 @@ export interface LimitBoardSectorStrengthRow {
   institution_increase?: number | null
   strength_delta_5m?: number | null
   main_net_delta_5m?: number | null
+  strength_speed_per_min_5m?: number | null
+  main_net_speed_per_min_5m?: number | null
   trend_5m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
   strength_delta_30m?: number | null
   main_net_delta_30m?: number | null
+  strength_speed_per_min_30m?: number | null
+  main_net_speed_per_min_30m?: number | null
   trend_30m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
   rank?: number
   rank_count?: number
@@ -1319,6 +1323,7 @@ export interface LimitBoardSectorStrengthRow {
 export interface LimitBoardSectorWindowTrend {
   state: 'accelerating' | 'stable' | 'weakening' | 'divergent'
   window_minutes: number
+  elapsed_minutes: number
   captured_at: string
   base_at: string
   strength_delta: number
