@@ -9,7 +9,7 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -840,13 +840,23 @@ def read_sector_strength_snapshot(
         return None
     if not isinstance(rows, list) or not rows:
         return None
+    captured_at = str(row[0])
+    try:
+        captured_point = datetime.fromisoformat(captured_at)
+    except ValueError:
+        return None
+    history_state = (
+        "closed"
+        if (captured_point.hour, captured_point.minute, captured_point.second) == (15, 0, 0)
+        else "live"
+    )
     return {
         "provider": "kaipanla",
         "state": "live",
         "as_of": trade_date.isoformat(),
-        "refreshed_at": str(row[0]),
+        "refreshed_at": captured_at,
         "institution_label": row[1],
-        "history_state": "live",
+        "history_state": history_state,
         "rows": rows,
     }
 

@@ -460,6 +460,7 @@ function SectorStrengthTable({
   const cursorAt = timeline[activeIndex] ?? null
   const activeOffset = sectorTimelineOffset(cursorAt)
   const isLive = (!cursorAt || activeIndex === latestIndex) && snapshot?.history_state !== 'closed'
+  const isClosedLatest = snapshot?.history_state === 'closed' && activeIndex === latestIndex
   useEffect(() => {
     const now = Date.now()
     setCycleStartedAt(now)
@@ -486,7 +487,7 @@ function SectorStrengthTable({
   const activeSnapshot = requestedAt ? historical.data ?? snapshot : snapshot
   const historyLabel = snapshot?.history_state === 'live'
     ? '盘中时序已落库'
-    : snapshot?.history_state === 'closed' ? '非落库时段' : '盘中时序落库不可用'
+    : snapshot?.history_state === 'closed' ? '收盘快照已落库' : '盘中时序落库不可用'
   const rows = useMemo(() => {
     const values = [...(activeSnapshot?.rows ?? [])]
     const children = new Map<string, LimitBoardSectorStrengthRow[]>()
@@ -660,7 +661,7 @@ function SectorStrengthTable({
       <div><div className="text-xs font-medium">板块强度</div><div className="mt-0.5 text-[10px] text-muted">热股雷达在左侧独立展示；强势股打分、板块和成分股 {refreshIntervalSeconds} 秒统一刷新</div></div>
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
         <span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span>
-        <span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : cursorAt ? '回看' : '收盘'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span>
+        <span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : isClosedLatest ? '收盘' : '回看'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span>
       </div>
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>

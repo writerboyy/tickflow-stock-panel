@@ -46,19 +46,25 @@ def test_shortline_socket_snapshot_uses_current_top_boards(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_shortline_bootstrap_restores_current_day_socket_snapshot_after_close(
+async def test_shortline_bootstrap_refreshes_close_snapshot_after_close(
     tmp_path,
     monkeypatch,
 ):
     collector = KaipanlaCollector(tmp_path)
     today = date(2026, 8, 18)
-    strength = {
-        "state": "live",
-        "as_of": today.isoformat(),
-        "refreshed_at": "2026-08-18T14:59:55+08:00",
-        "rows": [{"plate_id": "801248", "rank": 1, "strength": 100}],
-    }
+    close_refreshed = []
     refreshed = []
+
+    async def refresh_strength(trade_date, close_snapshot):
+        close_refreshed.append((trade_date, close_snapshot))
+        collector._sector_strength = {
+            "state": "live",
+            "as_of": trade_date.isoformat(),
+            "refreshed_at": "2026-08-18T15:00:00+08:00",
+            "history_state": "closed",
+            "rows": [{"plate_id": "801248", "rank": 1, "strength": 120}],
+        }
+        return 1
 
     async def refresh_shortline(trade_date):
         refreshed.append(trade_date)
@@ -67,21 +73,18 @@ async def test_shortline_bootstrap_restores_current_day_socket_snapshot_after_cl
     async def run_safely(_name, func, *args):
         return await func(*args)
 
-    monkeypatch.setattr("app.plugins.kaipanla.collector.cn_today", lambda: today)
     monkeypatch.setattr(
         "app.plugins.kaipanla.collector.cn_now",
         lambda: datetime(2026, 8, 18, 20, 30, tzinfo=CN_TZ),
     )
-    monkeypatch.setattr(
-        "app.plugins.kaipanla.collector.read_sector_strength_snapshot",
-        lambda _data_dir, trade_date: strength if trade_date == today else None,
-    )
+    monkeypatch.setattr(collector, "refresh_sector_strength", refresh_strength)
     monkeypatch.setattr(collector, "refresh_shortline_constituents", refresh_shortline)
     monkeypatch.setattr(collector, "_run_safely", run_safely)
 
     assert await collector._bootstrap_sector_strength() == 1
+    assert close_refreshed == [(today, True)]
     assert refreshed == [today]
-    assert collector.sector_strength_snapshot()["refreshed_at"] == strength["refreshed_at"]
+    assert collector.sector_strength_snapshot()["refreshed_at"] == "2026-08-18T15:00:00+08:00"
 
 
 def test_shortline_service_uses_socket_quotes_without_tickflow(tmp_path, monkeypatch):

@@ -197,6 +197,19 @@ class KaipanlaCollector:
                 replace_existing=True,
             )
             scheduler.add_job(
+                self._scheduled_sector_strength_close,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=15,
+                    minute="0-1",
+                    second=5,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_sector_strength_close",
+                misfire_grace_time=30,
+                replace_existing=True,
+            )
+            scheduler.add_job(
                 self._scheduled_catch_up,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
@@ -393,6 +406,8 @@ class KaipanlaCollector:
         current = now.timetz().replace(tzinfo=None)
         if _in_sector_strength_window(current):
             return await self._scheduled_sector_strength()
+        if current > clock_time(15, 0):
+            return await self._scheduled_sector_strength_close()
         snapshot = self.sector_strength_snapshot()
         if (
             not isinstance(snapshot, dict)
@@ -405,6 +420,22 @@ class KaipanlaCollector:
             self.refresh_shortline_constituents,
             now.date(),
         )
+
+    async def _scheduled_sector_strength_close(self) -> int:
+        today = cn_today()
+        count = await self._run_safely(
+            "sector_strength_close",
+            self.refresh_sector_strength,
+            today,
+            True,
+        )
+        if count:
+            await self._run_safely(
+                "shortline_constituents",
+                self.refresh_shortline_constituents,
+                today,
+            )
+        return count
 
     async def _scheduled_lhb(self) -> int:
         return await self._run_safely("lhb", self.collect_lhb)
@@ -482,7 +513,11 @@ class KaipanlaCollector:
                 "rows": [dict(row) for row in snapshot.get("rows") or []],
             }
 
-    async def refresh_sector_strength(self, trade_date: date) -> int:
+    async def refresh_sector_strength(
+        self,
+        trade_date: date,
+        close_snapshot: bool = False,
+    ) -> int:
         """Poll today's board ranking without carrying an old trading day forward."""
         institution_label = None
         try:
@@ -508,19 +543,29 @@ class KaipanlaCollector:
             logger.debug("实时板块强度接口暂不可用", exc_info=True)
             rows = []
         captured_now = cn_now()
+        is_close_snapshot = (
+            close_snapshot
+            and captured_now.date() == trade_date
+            and captured_now.timetz().replace(tzinfo=None) > clock_time(15, 0)
+        )
+        captured_at = (
+            captured_now.replace(hour=15, minute=0, second=0, microsecond=0)
+            if is_close_snapshot else captured_now
+        )
         in_capture_window = captured_now.date() == trade_date and _in_sector_strength_window(
             captured_now.timetz().replace(tzinfo=None),
         )
+        should_persist = in_capture_window or is_close_snapshot
         snapshot = {
             "provider": "kaipanla",
             "state": "live" if rows else "unavailable",
             "as_of": trade_date.isoformat(),
-            "refreshed_at": captured_now.isoformat(),
+            "refreshed_at": captured_at.isoformat(),
             "institution_label": institution_label,
             "history_state": "closed" if rows and not in_capture_window else "unavailable",
             "rows": rows,
         }
-        if rows and in_capture_window:
+        if rows and should_persist:
             try:
                 await asyncio.to_thread(
                     append_sector_strength_snapshot,
@@ -528,7 +573,7 @@ class KaipanlaCollector:
                     trade_date,
                     snapshot,
                 )
-                snapshot["history_state"] = "live"
+                snapshot["history_state"] = "closed" if is_close_snapshot else "live"
             except Exception:  # noqa: BLE001
                 logger.warning("实时板块强度快照落库失败", exc_info=True)
         with self._sector_strength_lock:

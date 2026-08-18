@@ -215,6 +215,32 @@ async def test_sector_strength_does_not_persist_after_market_close(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_sector_strength_close_snapshot_persists_at_market_close(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    now = datetime(2026, 5, 15, 15, 1, 5, tzinfo=CN_TZ)
+    monkeypatch.setattr(collector_module, "cn_now", lambda: now)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: now.date())
+    row = ["P1", "人工智能", 99.0, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500]
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {"sector_strength": {"Day": ["2026-05-15"], "list": [row]}},
+            [],
+        ),
+    )
+
+    assert await collector.refresh_sector_strength(now.date(), True) == 1
+    snapshot = collector.sector_strength_snapshot()
+    assert snapshot["refreshed_at"] == "2026-05-15T15:00:00+08:00"
+    assert snapshot["history_state"] == "closed"
+    assert collector.sector_strength_timeline(now.date()) == [snapshot["refreshed_at"]]
+
+    restored = KaipanlaCollector(tmp_path, lambda: FakeClient({}, []))
+    assert restored.sector_strength_snapshot()["history_state"] == "closed"
+    assert restored.sector_strength_snapshot()["rows"][0]["strength"] == 99.0
+
+
+@pytest.mark.asyncio
 async def test_auction_manifest_requires_all_live_checkpoints_and_bid_details(tmp_path, monkeypatch):
     _configured(monkeypatch)
     responses = {
@@ -1087,10 +1113,13 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 14
+    assert len(scheduler.jobs) == 15
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
     assert "second='*/5'" in str(scheduler.triggers["kaipanla_sector_strength"])
+    assert "kaipanla_sector_strength_close" in scheduler.jobs
+    assert "minute='0-1'" in str(scheduler.triggers["kaipanla_sector_strength_close"])
+    assert "second='5'" in str(scheduler.triggers["kaipanla_sector_strength_close"])
     assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
@@ -1125,5 +1154,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 14
+    assert len(scheduler.jobs) == 15
     assert collector._bootstrap_task is None

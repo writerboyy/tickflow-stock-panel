@@ -219,6 +219,11 @@ def test_sector_strength_intraday_store_keeps_timeline_and_exact_snapshots(tmp_p
         "refreshed_at": "2026-08-17T09:30:10+08:00",
         "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 16910}],
     }
+    close = {
+        **first,
+        "refreshed_at": "2026-08-17T15:00:00+08:00",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 17100}],
+    }
     after_hours = {
         **first,
         "refreshed_at": "2026-08-17T20:30:00+08:00",
@@ -227,17 +232,20 @@ def test_sector_strength_intraday_store_keeps_timeline_and_exact_snapshots(tmp_p
 
     assert append_sector_strength_snapshot(tmp_path, trade_date, first) == 1
     assert append_sector_strength_snapshot(tmp_path, trade_date, second) == 1
+    assert append_sector_strength_snapshot(tmp_path, trade_date, close) == 1
     assert append_sector_strength_snapshot(tmp_path, trade_date, after_hours) == 1
     assert read_sector_strength_timeline(tmp_path, trade_date) == [
         first["refreshed_at"],
         second["refreshed_at"],
+        close["refreshed_at"],
     ]
     assert read_sector_strength_snapshot(
         tmp_path, trade_date, first["refreshed_at"],
     )["rows"][0]["strength"] == 16807
     latest = read_sector_strength_snapshot(tmp_path, trade_date)
-    assert latest["refreshed_at"] == second["refreshed_at"]
-    assert latest["rows"][0]["strength"] == 16910
+    assert latest["refreshed_at"] == close["refreshed_at"]
+    assert latest["history_state"] == "closed"
+    assert latest["rows"][0]["strength"] == 17100
     assert read_sector_strength_snapshot(
         tmp_path, trade_date, after_hours["refreshed_at"],
     ) is None
