@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlsplit
 
 from app import secrets_store
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_HOSTS = frozenset(
     {
@@ -27,6 +30,7 @@ _PARAMS = {
     "apiv": "apiv",
 }
 SECRET_KEYS = tuple(f"kaipanla_{name}" for name in _PARAMS)
+SOCKET_LOGIN_PACKET_KEY = "kaipanla_socket_login_packet"
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,31 @@ def save_authorized_url(source_url: str) -> KaipanlaCredentials:
 
 
 def clear_credentials() -> None:
-    secrets_store.clear(*SECRET_KEYS)
+    secrets_store.clear(*SECRET_KEYS, SOCKET_LOGIN_PACKET_KEY)
+
+
+def load_socket_login_packet() -> bytes | None:
+    """Load the vendor socket login packet from the local secrets store."""
+    value = str(secrets_store.load().get(SOCKET_LOGIN_PACKET_KEY) or "")
+    normalized = "".join(value.split())
+    if not normalized:
+        return None
+    try:
+        return bytes.fromhex(normalized)
+    except ValueError:
+        logger.warning("开盘啦 socket 登录包格式无效")
+        return None
+
+
+def save_socket_login_packet(value: str) -> None:
+    normalized = "".join(str(value).split())
+    if not normalized:
+        raise ValueError("开盘啦 socket 登录包为空")
+    try:
+        bytes.fromhex(normalized)
+    except ValueError as exc:
+        raise ValueError("开盘啦 socket 登录包不是有效十六进制") from exc
+    secrets_store.save({SOCKET_LOGIN_PACKET_KEY: normalized})
 
 
 def credential_status(credentials: KaipanlaCredentials | None = None) -> dict:

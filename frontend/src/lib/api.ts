@@ -1365,8 +1365,8 @@ export interface LimitBoardSectorConstituents {
   as_of: string
   captured_at: string
   membership_as_of: string
-  quote_provider: 'tickflow'
-  quote_state: 'live' | 'paused' | 'closed' | 'historical_unavailable' | 'unavailable'
+  quote_provider: 'tickflow' | 'kaipanla_socket'
+  quote_state: 'live' | 'partial' | 'paused' | 'closed' | 'historical_unavailable' | 'unavailable'
   quote_as_of?: string | null
   quote_available: boolean
   plate_id: string

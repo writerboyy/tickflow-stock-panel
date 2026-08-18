@@ -186,6 +186,7 @@ class LimitBoardService:
         self._premium_stats: dict[str, dict[str, Any]] = {}
         self._sector_membership_date: date | None = None
         self._sector_memberships = pl.DataFrame()
+        self._sector_live_quotes: dict[str, dict[str, Any]] = {}
         self._sector_candidate_key: tuple[date, str, tuple[str, ...]] | None = None
         self._sector_candidate_symbols: set[str] = set()
         self._sector_candidate_plate_ids: set[str] = set()
@@ -263,80 +264,27 @@ class LimitBoardService:
             str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
         ))[:30]
         requested_set = set(requested)
+        self._refresh_sector_candidate_universe(cn_today())
         with self._lock:
-            changed = requested_set != self._heat_quote_symbols
-            self._heat_quote_symbols = requested_set
-        if changed:
-            self._refresh_symbol_consumer()
-
-        rows = self.quote_service.get_latest_quotes(requested_set)
-        quotes: dict[str, dict[str, Any]] = {}
-        for raw in rows:
-            symbol = str(raw.get("symbol") or "").strip().upper()
-            if symbol not in requested_set:
-                continue
-            quotes[symbol] = {
+            source_rows = {symbol: dict(self._sector_live_quotes.get(symbol) or {}) for symbol in requested_set}
+        quotes = {
+            symbol: {
                 "symbol": symbol,
                 "name": raw.get("name"),
                 "last_price": _finite(raw.get("last_price")),
                 "change_pct": _finite(raw.get("change_pct")),
-                "limit_up": _finite(raw.get("limit_up")),
+                "limit_up": None,
                 "timestamp": raw.get("timestamp"),
-                "source": "realtime",
+                "source": "kaipanla_socket",
             }
-        missing = requested_set - quotes.keys()
-        enriched_as_of: date | None = None
-        enriched_getter = getattr(self.quote_service, "get_enriched_today", None)
-        if missing and callable(enriched_getter):
-            try:
-                enriched, enriched_as_of = enriched_getter()
-            except Exception:  # noqa: BLE001
-                logger.debug("读取热股收盘行情快照失败", exc_info=True)
-            else:
-                if isinstance(enriched, pl.DataFrame) and not enriched.is_empty() and "symbol" in enriched.columns:
-                    columns = [
-                        column for column in (
-                            "symbol", "name", "last_price", "close", "change_pct",
-                            "prev_close", "limit_up",
-                        )
-                        if column in enriched.columns
-                    ]
-                    snapshot_rows = (
-                        enriched
-                        .filter(
-                            pl.col("symbol").cast(pl.Utf8).str.to_uppercase().is_in(sorted(missing))
-                        )
-                        .select(columns)
-                        .to_dicts()
-                    )
-                    snapshot_date = enriched_as_of or cn_today()
-                    for raw in snapshot_rows:
-                        symbol = str(raw.get("symbol") or "").strip().upper()
-                        price = _finite(raw.get("last_price"))
-                        if price is None:
-                            price = _finite(raw.get("close"))
-                        if symbol not in missing or price is None:
-                            continue
-                        name = raw.get("name")
-                        quotes[symbol] = {
-                            "symbol": symbol,
-                            "name": name,
-                            "last_price": price,
-                            "change_pct": _finite(raw.get("change_pct")),
-                            "limit_up": self._limit_up(raw, symbol, str(name or ""), snapshot_date),
-                            "timestamp": snapshot_date.isoformat(),
-                            "source": "daily_snapshot",
-                        }
+            for symbol, raw in source_rows.items()
+            if _finite(raw.get("last_price")) is not None
+        }
         timestamps = [
             str(row["timestamp"])
             for row in quotes.values()
             if row.get("timestamp")
         ]
-        all_realtime = bool(quotes) and all(
-            row.get("source") == "realtime" for row in quotes.values()
-        )
-        if not self._sector_candidates_by_symbol:
-            self._refresh_sector_candidate_universe(cn_today())
         sector_links = {
             symbol: [dict(item) for item in self._sector_candidates_by_symbol.get(symbol, [])]
             for symbol in requested
@@ -344,8 +292,7 @@ class LimitBoardService:
         }
         return {
             "state": (
-                "live" if len(quotes) == len(requested) and all_realtime
-                else "snapshot" if len(quotes) == len(requested)
+                "live" if len(quotes) == len(requested)
                 else "partial" if quotes else "unavailable"
             ),
             "as_of": max(timestamps) if timestamps else None,
@@ -680,6 +627,76 @@ class LimitBoardService:
         if selected is None:
             raise ValueError("该板块在选定时间点不可用")
 
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        snapshot_getter = getattr(collector, "shortline_constituents_snapshot", None)
+        live_snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        if (
+            not isinstance(live_snapshot, dict)
+            or live_snapshot.get("state") not in {"live", "partial"}
+            or live_snapshot.get("as_of") != today.isoformat()
+        ):
+            raise RuntimeError("开盘啦当日成分行情暂不可用")
+        if captured_at:
+            raise ValueError("开盘啦当日成分行情不提供历史时点回看")
+        try:
+            instruments = self.repo.get_instruments()
+            symbol_lookup = {
+                str(symbol).split(".", 1)[0]: str(symbol).upper()
+                for symbol in instruments.get_column("symbol").to_list()
+            } if "symbol" in instruments.columns else {}
+        except Exception:  # noqa: BLE001
+            symbol_lookup = {}
+        members = []
+        for row in live_snapshot.get("rows") or []:
+            if not isinstance(row, dict) or str(row.get("plate_id") or "") != plate_id:
+                continue
+            code = str(row.get("code") or row.get("symbol") or "").split(".", 1)[0]
+            if not code:
+                continue
+            symbol = symbol_lookup.get(code) or f"{code}.{'SH' if code.startswith(('6', '9')) else 'BJ' if code.startswith(('4', '8')) else 'SZ'}"
+            members.append({
+                "plate_id": plate_id,
+                "symbol": symbol,
+                "code": code,
+                "name": str(row.get("name") or "").strip() or None,
+                "tags": str(row.get("tags") or "").strip() or None,
+                "last_price": _finite(row.get("last_price")),
+                "change_pct": _finite(row.get("change_pct")),
+                "amount": _finite(row.get("amount")),
+                "turnover_rate": _finite(row.get("turnover_rate")),
+                "float_market_value": None,
+                "main_net": _finite(row.get("main_net")),
+                "limit_tag": str(row.get("limit_tag") or "").strip() or None,
+                "rank_tag": None,
+                "limit_count": None,
+                "quote_available": _finite(row.get("last_price")) is not None,
+            })
+        if not members:
+            raise RuntimeError("开盘啦当日成分行情暂不可用")
+        members.sort(key=lambda row: (
+            row.get("change_pct") is None,
+            -float(row.get("change_pct") or 0),
+            -float(row.get("amount") or 0),
+            str(row.get("code") or ""),
+        ))
+        for index, row in enumerate(members, start=1):
+            row["rank"] = index
+            row["rank_count"] = len(members)
+        return {
+            "provider": "kaipanla_socket",
+            "state": str(live_snapshot.get("state")),
+            "as_of": today.isoformat(),
+            "captured_at": live_snapshot.get("refreshed_at"),
+            "membership_as_of": today.isoformat(),
+            "quote_provider": "kaipanla_socket",
+            "quote_state": str(live_snapshot.get("state")),
+            "quote_as_of": live_snapshot.get("refreshed_at"),
+            "quote_available": True,
+            "plate_id": plate_id,
+            "plate_name": selected.get("plate_name"),
+            "rows": members,
+        }
+
         selected_at = requested_point or snapshot.get("refreshed_at")
         if not selected_at:
             raise ValueError("板块强度时间点不可用")
@@ -917,43 +934,52 @@ class LimitBoardService:
             return set(self._sector_candidate_symbols)
 
         collector = getattr(self.app_state, "kaipanla_collector", None)
-        date_getter = getattr(collector, "latest_completed_trading_date", None)
-        membership_getter = getattr(collector, "sector_constituent_memberships", None)
-        if not callable(date_getter) or not callable(membership_getter):
-            return self._set_sector_candidate_unavailable("板块成分批量数据暂不可用")
-        membership_date = date_getter(today)
-        if not isinstance(membership_date, date):
-            return self._set_sector_candidate_unavailable("缺少上一完整交易日板块成分")
-        if self._sector_membership_date != membership_date or self._sector_memberships.is_empty():
-            try:
-                memberships = membership_getter(membership_date)
-            except Exception:  # noqa: BLE001
-                logger.debug("批量读取开盘啦板块成分失败", exc_info=True)
-                return self._set_sector_candidate_unavailable("板块成分批量数据读取失败")
-            if isinstance(memberships, list):
-                memberships = pl.DataFrame(memberships)
-            if (
-                not isinstance(memberships, pl.DataFrame)
-                or memberships.is_empty()
-                or not {"plate_id", "symbol"}.issubset(memberships.columns)
-            ):
-                return self._set_sector_candidate_unavailable("上一完整交易日板块成分为空")
-            self._sector_membership_date = membership_date
-            self._sector_memberships = memberships.select("plate_id", "symbol").with_columns(
-                pl.col("plate_id").cast(pl.String).str.strip_chars(),
-                pl.col("symbol").cast(pl.String).str.strip_chars().str.to_uppercase(),
-            ).filter(
-                pl.col("plate_id").is_not_null()
-                & (pl.col("plate_id") != "")
-                & pl.col("symbol").is_not_null()
-                & (pl.col("symbol") != "")
-            ).unique()
+        snapshot_getter = getattr(collector, "shortline_constituents_snapshot", None)
+        if not callable(snapshot_getter):
+            return self._set_sector_candidate_unavailable("开盘啦当日成分行情暂不可用")
+        snapshot = snapshot_getter()
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("state") not in {"live", "partial"}
+            or snapshot.get("as_of") != today.isoformat()
+        ):
+            return self._set_sector_candidate_unavailable("开盘啦当日成分行情暂不可用")
+        source_rows = [row for row in snapshot.get("rows") or [] if isinstance(row, dict)]
+        if not source_rows:
+            return self._set_sector_candidate_unavailable("开盘啦当日成分行情为空")
+        try:
+            instruments = self.repo.get_instruments()
+            symbol_lookup = {
+                str(symbol).split(".", 1)[0]: str(symbol).upper()
+                for symbol in instruments.get_column("symbol").to_list()
+            } if "symbol" in instruments.columns else {}
+        except Exception:  # noqa: BLE001
+            symbol_lookup = {}
+        memberships_rows = []
+        live_quotes: dict[str, dict[str, Any]] = {}
+        for row in source_rows:
+            code = str(row.get("code") or row.get("symbol") or "").split(".", 1)[0]
+            plate_id = str(row.get("plate_id") or "").strip()
+            if not code or not plate_id:
+                continue
+            symbol = symbol_lookup.get(code) or f"{code}.{'SH' if code.startswith(('6', '9')) else 'BJ' if code.startswith(('4', '8')) else 'SZ'}"
+            memberships_rows.append({"plate_id": plate_id, "symbol": symbol})
+            live_quotes.setdefault(symbol, {
+                **row,
+                "symbol": symbol,
+                "timestamp": snapshot.get("refreshed_at"),
+                "source": "kaipanla_socket",
+            })
+        if not memberships_rows:
+            return self._set_sector_candidate_unavailable("开盘啦当日成分代码无效")
+        self._sector_memberships = pl.DataFrame(memberships_rows).unique()
+        self._sector_live_quotes = live_quotes
 
         selected = self._sector_memberships.filter(
             pl.col("plate_id").is_in(plate_ids),
         )
         if selected.is_empty():
-            return self._set_sector_candidate_unavailable("前 10 板块未匹配上一完整交易日成分")
+            return self._set_sector_candidate_unavailable("前 10 板块未匹配开盘啦当日成分")
         matched_plate_ids = set(selected.get_column("plate_id").unique().to_list())
         missing_plate_ids = set(plate_ids) - matched_plate_ids
         names = {str(row["plate_id"]): str(row.get("plate_name") or "") for row in top_rows}
@@ -971,17 +997,17 @@ class LimitBoardService:
         self._sector_candidates_by_symbol = by_symbol
         scope_state = "partial" if missing_plate_ids else "live"
         scope_reason = (
-            f"仅扫描实时板块强度前 {len(plate_ids)} 名的 {len(by_symbol)} 只去重成分"
+                f"仅扫描实时板块强度前 {len(plate_ids)} 名的开盘啦当日 {len(by_symbol)} 只去重成分"
             if not missing_plate_ids
             else (
-                f"实时板块强度前 {len(plate_ids)} 名中 {len(matched_plate_ids)} 个有上一完整交易日成分，"
+                f"实时板块强度前 {len(plate_ids)} 名中 {len(matched_plate_ids)} 个有开盘啦当日成分，"
                 f"共 {len(by_symbol)} 只去重成分；{len(missing_plate_ids)} 个板块缺口已跳过"
             )
         )
         self._sector_candidate_scope = {
             "state": scope_state,
             "as_of": snapshot_at or None,
-            "membership_as_of": membership_date.isoformat(),
+            "membership_as_of": today.isoformat(),
             "plate_count": len(matched_plate_ids),
             "symbol_count": len(by_symbol),
             "plate_ids": sorted(matched_plate_ids),
@@ -1056,7 +1082,8 @@ class LimitBoardService:
         }
         if self._market_mode() == "full_market":
             symbols.update(self._automatic_candidate_symbols(cn_today()))
-        quotes = self.quote_service.get_latest_quotes(symbols) if symbols else []
+        with self._lock:
+            quotes = [dict(self._sector_live_quotes[symbol]) for symbol in symbols if symbol in self._sector_live_quotes]
         self._enqueue({"type": "market", "quotes": quotes})
 
     def _market_mode(self) -> str:
@@ -1338,9 +1365,7 @@ class LimitBoardService:
             if is_risk_warning_name(name):
                 continue
             limit_up = self._limit_up(raw, symbol, name, now.date())
-            if limit_up is None:
-                continue
-            gap = max(0.0, limit_up / price - 1.0)
+            gap = max(0.0, limit_up / price - 1.0) if limit_up is not None else None
             source_modes = []
             if symbol in board_pool:
                 source_modes.append("board_pool")
@@ -1377,7 +1402,11 @@ class LimitBoardService:
         updates = self._preselect_automatic_updates(updates)
         with self._lock:
             self._quotes.update(updates)
-        self._evaluate_quotes(updates, runtime, config)
+        self._evaluate_quotes(
+            {symbol: quote for symbol, quote in updates.items() if quote.get("limit_up") is not None},
+            runtime,
+            config,
+        )
         rows, selected_rows, board_rows = self._view_collections(runtime, config)
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected_rows, board_rows,
@@ -1616,6 +1645,10 @@ class LimitBoardService:
         trigger_mode: str = "queue",
         queue_confirmed_snapshots: int = 0,
     ) -> None:
+        if quote.get("source") == "kaipanla_socket":
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = "开盘啦成分行情缺少五档盘口与可验证逐笔时效，已阻止自动委托"
+            return
         member = next(
             (item for item in config["board_pool"] if str(item.get("symbol")).strip().upper() == symbol),
             None,
@@ -1815,6 +1848,18 @@ class LimitBoardService:
         self._notify_updated()
 
     def _sync_websocket(self, runtime: dict[str, Any], config: dict[str, Any]) -> None:
+        # The shortline workspace now uses Kaipanla constituent snapshots only.
+        # They have no verifiable per-tick timestamp or five-level order book.
+        hub = self._hub()
+        if hub is not None and self._ws_registered:
+            try:
+                hub.unregister(_ACCOUNT_ID)
+            except Exception:  # noqa: BLE001
+                logger.debug("打板专区移除 WS 订阅失败", exc_info=True)
+        self._ws_registered = False
+        self._ws_symbols.clear()
+        return
+
         hub = self._hub()
         if hub is None:
             self._last_error = "共享 WebSocket Hub 不可用"
@@ -1926,20 +1971,9 @@ class LimitBoardService:
             notify()
 
     def _refresh_symbol_consumer(self) -> None:
-        config = self.store.load_config()
-        symbols = {
-            str(item["symbol"]).strip().upper()
-            for key in ("selected", "board_pool")
-            for item in config[key]
-        }
-        symbols = {
-            symbol for symbol in symbols
-            if not is_risk_warning_name(self._resolve_name(symbol))
-        }
-        with self._lock:
-            symbols.update(self._sector_quote_symbols)
-            symbols.update(self._heat_quote_symbols)
-        self.quote_service.set_symbol_consumer(_ACCOUNT_ID, symbols)
+        remover = getattr(self.quote_service, "remove_symbol_consumer", None)
+        if callable(remover):
+            remover(_ACCOUNT_ID)
 
     def _enrich_concepts(self, rows: list[dict[str, Any]]) -> None:
         enrich = getattr(self.quote_service, "enrich_external_alerts", None)
@@ -2752,7 +2786,7 @@ class LimitBoardService:
             runtime["candidate_excluded"] = sorted(excluded)
             self._persist_runtime(runtime)
         self._refresh_symbol_consumer()
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
+        self._on_market_fetch()
         self._notify_updated()
         return saved
 
@@ -2819,7 +2853,7 @@ class LimitBoardService:
 
         saved = self.store.update(revision, update)
         self._refresh_symbol_consumer()
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
+        self._on_market_fetch()
         self._notify_updated()
         return saved
 
@@ -2846,7 +2880,7 @@ class LimitBoardService:
             member["order_mode"] = cleaned_mode
 
         saved = self.store.update(revision, update)
-        self._enqueue({"type": "market", "quotes": self.quote_service.get_latest_quotes({cleaned})})
+        self._on_market_fetch()
         self._notify_updated()
         return saved
 

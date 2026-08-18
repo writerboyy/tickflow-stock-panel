@@ -14,7 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.market_time import cn_now, cn_today
 from app.plugins.kaipanla.client import KaipanlaClient
-from app.plugins.kaipanla.credentials import load_credentials
+from app.plugins.kaipanla.credentials import load_credentials, load_socket_login_packet
 from app.plugins.kaipanla.parsers import (
     parse_capital_net,
     parse_auction,
@@ -63,6 +63,7 @@ from app.plugins.kaipanla.storage import (
     read_sector_strength_snapshot,
     read_sector_strength_timeline,
 )
+from app.plugins.kaipanla.socket_client import KaipanlaSocketClient
 from app.services.ingestion_manifest import (
     load_ingestion_manifest,
     record_ingestion_batch,
@@ -84,6 +85,13 @@ def _in_sector_strength_window(value: clock_time) -> bool:
         clock_time(9, 25) <= value <= clock_time(11, 30)
         or clock_time(13, 0) <= value <= clock_time(15, 0)
     )
+
+
+def _number(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _shareholder_count_windows(payload: dict) -> list[tuple[date, date]]:
@@ -121,6 +129,8 @@ class KaipanlaCollector:
         self._sector_strength: dict | None = None
         self._sector_constituents_lock = threading.Lock()
         self._sector_constituents_cache: dict[tuple[date, str], list[dict]] = {}
+        self._shortline_constituents_lock = threading.Lock()
+        self._shortline_constituents: dict | None = None
 
     @property
     def configured(self) -> bool:
@@ -295,11 +305,7 @@ class KaipanlaCollector:
             )
         if self._sector_strength_task is None or self._sector_strength_task.done():
             self._sector_strength_task = asyncio.create_task(
-                self._run_safely(
-                    "sector_strength",
-                    self.refresh_sector_strength,
-                    cn_today(),
-                ),
+                self._scheduled_sector_strength(),
                 name="kaipanla-sector-strength",
             )
         if self._sector_constituents_task is None or self._sector_constituents_task.done():
@@ -369,11 +375,18 @@ class KaipanlaCollector:
         current = now.timetz().replace(tzinfo=None)
         if not _in_sector_strength_window(current):
             return 0
-        return await self._run_safely(
+        count = await self._run_safely(
             "sector_strength",
             self.refresh_sector_strength,
             now.date(),
         )
+        if count:
+            await self._run_safely(
+                "shortline_constituents",
+                self.refresh_shortline_constituents,
+                now.date(),
+            )
+        return count
 
     async def _scheduled_lhb(self) -> int:
         return await self._run_safely("lhb", self.collect_lhb)
@@ -438,6 +451,19 @@ class KaipanlaCollector:
         """Return the completed-day membership table for batched consumers."""
         return read_sector_constituent_memberships(self.data_dir, trade_date)
 
+    def shortline_constituents_snapshot(self) -> dict | None:
+        """Return the current socket snapshot used by the shortline workspace."""
+        with self._shortline_constituents_lock:
+            snapshot = self._shortline_constituents
+            if snapshot is None:
+                return None
+            return {
+                **snapshot,
+                "plate_ids": list(snapshot.get("plate_ids") or []),
+                "missing_plate_ids": list(snapshot.get("missing_plate_ids") or []),
+                "rows": [dict(row) for row in snapshot.get("rows") or []],
+            }
+
     async def refresh_sector_strength(self, trade_date: date) -> int:
         """Poll today's board ranking without carrying an old trading day forward."""
         institution_label = None
@@ -489,6 +515,51 @@ class KaipanlaCollector:
                 logger.warning("实时板块强度快照落库失败", exc_info=True)
         with self._sector_strength_lock:
             self._sector_strength = snapshot
+        return len(rows)
+
+    async def refresh_shortline_constituents(self, trade_date: date) -> int:
+        """Refresh top-board constituents and quote fields from the live socket feed."""
+        strength = self.sector_strength_snapshot()
+        strength_rows = strength.get("rows") if isinstance(strength, dict) else []
+        ranked = [
+            row for row in strength_rows or []
+            if isinstance(row, dict) and str(row.get("plate_id") or "").strip()
+        ]
+        ranked.sort(key=lambda row: (
+            _number(row.get("rank"), float("inf")),
+            -_number(row.get("strength"), float("-inf")),
+            str(row.get("plate_id") or ""),
+        ))
+        plate_ids = list(dict.fromkeys(
+            str(row.get("plate_id") or "").strip() for row in ranked[:10]
+        ))
+        captured_at = cn_now().isoformat()
+        login_packet = load_socket_login_packet()
+        if login_packet and plate_ids:
+            try:
+                values = await asyncio.to_thread(
+                    KaipanlaSocketClient(login_packet).fetch_blocks,
+                    plate_ids,
+                )
+                missing = [plate_id for plate_id in plate_ids if not values.get(plate_id)]
+                rows = [row for plate_id in plate_ids for row in values.get(plate_id, [])]
+                state = "live" if rows and not missing else "partial" if rows else "unavailable"
+            except Exception:  # noqa: BLE001
+                logger.debug("短线猎手开盘啦成分行情刷新失败", exc_info=True)
+                missing, rows, state = plate_ids, [], "unavailable"
+        else:
+            missing, rows, state = plate_ids, [], "unavailable"
+        snapshot = {
+            "provider": "kaipanla_socket",
+            "state": state,
+            "as_of": trade_date.isoformat(),
+            "refreshed_at": captured_at,
+            "plate_ids": plate_ids,
+            "missing_plate_ids": missing,
+            "rows": rows,
+        }
+        with self._shortline_constituents_lock:
+            self._shortline_constituents = snapshot
         return len(rows)
 
     async def sector_constituents_at(

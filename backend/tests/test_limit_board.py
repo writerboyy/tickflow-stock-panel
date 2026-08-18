@@ -251,6 +251,7 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
     assert quotes.events[0]["message"] == "浦发银行：涨停"
 
 
+@pytest.mark.skip(reason="短线猎手已改为开盘啦 socket 行情，不再订阅 TickFlow")
 def test_heat_quote_snapshot_registers_batch_consumer_and_returns_quotes(tmp_path):
     service, quotes, _config = make_service(tmp_path)
     service._sector_candidates_by_symbol = {
@@ -278,6 +279,7 @@ def test_heat_quote_snapshot_registers_batch_consumer_and_returns_quotes(tmp_pat
     assert snapshot["missing_symbols"] == ["600001.SH"]
 
 
+@pytest.mark.skip(reason="短线猎手已改为开盘啦 socket 行情，不再回退日线快照")
 def test_heat_quote_snapshot_uses_daily_snapshot_when_realtime_is_empty(tmp_path):
     service, quotes, _config = make_service(tmp_path)
     quotes.enriched = pl.DataFrame({
@@ -1310,6 +1312,7 @@ def test_manual_candidate_add_clears_same_day_exclusion(tmp_path, monkeypatch):
     assert [row["symbol"] for row in service.view()["candidate_pool"]] == ["600000.SH"]
 
 
+@pytest.mark.skip(reason="开盘啦 socket 不提供五档盘口，短线猎手不再注册 TickFlow WS")
 def test_candidate_pool_does_not_consume_websocket_capacity(tmp_path, monkeypatch):
     class FakeHub:
         def __init__(self):
@@ -1913,6 +1916,7 @@ def test_limit_board_view_exposes_live_sector_strength_tree(tmp_path, monkeypatc
         service.sector_strength_view("not-a-time")
 
 
+@pytest.mark.skip(reason="短线猎手改用开盘啦当日 socket 成分，不再读取上一交易日分区")
 def test_sector_candidate_universe_uses_top_ten_and_one_membership_batch(
     tmp_path,
     monkeypatch,
@@ -1962,6 +1966,7 @@ def test_sector_candidate_universe_uses_top_ten_and_one_membership_batch(
     assert calls == [membership_date]
 
 
+@pytest.mark.skip(reason="短线猎手改用开盘啦当日 socket 成分，不再读取上一交易日分区")
 def test_sector_candidate_universe_uses_available_memberships_when_one_is_missing(
     tmp_path,
 ):
@@ -1999,6 +2004,7 @@ def test_sector_candidate_universe_uses_available_memberships_when_one_is_missin
     assert "1 个板块缺口已跳过" in service._sector_candidate_scope["reason"]
 
 
+@pytest.mark.skip(reason="短线猎手候选行情已由开盘啦 socket 快照提供")
 def test_market_fetch_requests_only_top_ten_sector_candidates(tmp_path, monkeypatch):
     service, quotes, _config = make_service(tmp_path)
     today = date(2026, 8, 17)
@@ -2116,6 +2122,7 @@ def test_sector_strength_exposes_stable_five_minute_horizontal_trend(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="短线猎手成分详情已改为开盘啦 socket 当日快照")
 async def test_sector_constituents_use_previous_membership_and_tickflow_close(
     tmp_path,
     monkeypatch,
@@ -2232,6 +2239,7 @@ async def test_sector_constituents_use_previous_membership_and_tickflow_close(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="短线猎手成分详情已改为开盘啦 socket 当日快照")
 async def test_sector_constituents_do_not_reuse_historical_quote_fields(
     tmp_path,
     monkeypatch,
@@ -2293,6 +2301,7 @@ async def test_sector_constituents_do_not_reuse_historical_quote_fields(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="开盘啦 socket 不提供历史时点快照")
 async def test_historical_sector_point_does_not_show_current_stock_quotes(
     tmp_path,
     monkeypatch,
