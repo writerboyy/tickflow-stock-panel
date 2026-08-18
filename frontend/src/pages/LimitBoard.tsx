@@ -10,6 +10,8 @@ import {
   Flame,
   Layers3,
   ListFilter,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   Radio,
   RefreshCw,
@@ -456,6 +458,9 @@ function SectorStrengthTable({
   const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
   const [selectedStockSymbol, setSelectedStockSymbol] = useState<string | null>(null)
   const [rankingWindowMinutes, setRankingWindowMinutes] = useState<5 | 30>(5)
+  const [rankingOpen, setRankingOpen] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
+  ))
   const [progressClock, setProgressClock] = useState(() => Date.now())
   const [cycleStartedAt, setCycleStartedAt] = useState(() => Date.now())
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
@@ -655,13 +660,24 @@ function SectorStrengthTable({
     })
     .sort((left, right) => Number(strengthSpeed(left)) - Number(strengthSpeed(right)))
     .slice(0, 3)
-  return <div className="grid min-w-0 gap-3 min-[1600px]:grid-cols-[minmax(0,1fr)_340px] min-[1600px]:items-start">
+  return <div className="relative min-w-0">
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><div className="shrink-0 text-xs font-medium">板块强度</div><span className="truncate text-[10px] text-muted">强势股、板块与成分股按同一截面每 {refreshIntervalSeconds} 秒刷新</span></div>
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
         <span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span>
         <span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : isClosedLatest ? '收盘' : '回看'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span>
+        <button
+          type="button"
+          aria-expanded={rankingOpen}
+          aria-controls="sector-interval-ranking"
+          onClick={() => setRankingOpen(value => !value)}
+          className="inline-flex h-6 items-center gap-1 rounded-btn border border-border px-2 text-[9px] text-secondary hover:bg-elevated hover:text-foreground"
+          title={rankingOpen ? '收起板块区间排序' : '展开板块区间排序'}
+        >
+          {rankingOpen ? <PanelRightClose className="h-3 w-3" /> : <PanelRightOpen className="h-3 w-3" />}
+          {rankingOpen ? '收起区间榜' : '区间榜'}
+        </button>
       </div>
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
@@ -762,7 +778,7 @@ function SectorStrengthTable({
         </table>
       </div>
       <div className="min-w-0">
-        {constituents.isError && !constituentData ? <div className="px-4 py-12 text-center text-xs text-danger">实时板块成分股加载失败</div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
+        {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[480px] table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[28%] px-2 py-1.5">股票</th><th className="w-[12%] px-2 py-1.5 text-right">现价</th><th className="w-[12%] px-2 py-1.5 text-right">涨幅</th><th className="w-[14%] px-2 py-1.5 text-right">板状态</th><th className="w-[14%] px-2 py-1.5 text-right">换手率</th><th className="w-[20%] px-2 py-1.5 text-right">成交额</th></tr></thead>
             <tbody>{constituentRows.map(row => {
@@ -784,7 +800,7 @@ function SectorStrengthTable({
               </tr>
             })}</tbody>
           </table>
-        </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending ? '正在读取实时板块成分股' : '该时间点没有可用的成分股数据'}</div>}
+        </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending || constituents.isFetching ? '正在读取实时板块成分股' : '该时间点没有可用的成分股数据'}</div>}
       </div>
     </div>
     </div>
@@ -815,7 +831,7 @@ function SectorStrengthTable({
       />
     </div>
     </section>
-    <aside className="overflow-hidden rounded-btn border border-border bg-surface min-[1600px]:sticky min-[1600px]:top-3 min-[1600px]:shadow-lg">
+    {rankingOpen ? <aside id="sector-interval-ranking" className="absolute right-2 top-12 z-30 max-h-[calc(100vh-180px)] w-[min(340px,calc(100%-1rem))] overflow-y-auto rounded-btn border border-border bg-surface shadow-2xl">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
         <span className="shrink-0 text-xs font-medium">板块区间排序</span>
         <span
@@ -827,6 +843,7 @@ function SectorStrengthTable({
         <div className="inline-flex shrink-0 overflow-hidden rounded-btn border border-border bg-base" aria-label="选择板块排序周期">
           {([5, 30] as const).map(minutes => <button key={minutes} type="button" aria-pressed={rankingWindowMinutes === minutes} onClick={() => setRankingWindowMinutes(minutes)} className={`h-6 px-2 text-[9px] ${rankingWindowMinutes === minutes ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{minutes}分</button>)}
         </div>
+        <button type="button" onClick={() => setRankingOpen(false)} className="grid h-6 w-6 shrink-0 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="收起板块区间排序"><X className="h-3.5 w-3.5" /></button>
       </div>
       <div className="grid grid-cols-[30px_minmax(0,1fr)_68px_82px] border-b border-border px-3 py-1.5 text-[9px] text-muted"><span>#</span><span>板块</span><span className="text-right">强度/分</span><span className="text-right">主力/分</span></div>
       <div className="border-b border-border">
@@ -855,7 +872,7 @@ function SectorStrengthTable({
           <span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bear">{sectorStrengthSpeed(strengthSpeed(row))}</span><span className={`text-right font-mono ${financialTone(mainNetSpeed(row))}`}>{moneyYi(mainNetSpeed(row))}</span>
         </button>) : <div className="px-3 py-5 text-center text-[10px] text-muted">暂无强度下跌板块</div>}
       </div>
-    </aside>
+    </aside> : null}
   </div>
 }
 

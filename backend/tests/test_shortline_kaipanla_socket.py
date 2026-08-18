@@ -165,3 +165,63 @@ async def test_shortline_constituents_accept_current_point_and_reject_history(
             "801248",
             "2026-08-18T10:00:00+08:00",
         )
+
+
+@pytest.mark.asyncio
+async def test_shortline_constituents_fetches_plate_outside_preloaded_top_boards(
+    tmp_path,
+    monkeypatch,
+):
+    today = date(2026, 8, 18)
+    current_at = "2026-08-18T14:59:55+08:00"
+    collector = KaipanlaCollector(tmp_path)
+    collector._shortline_constituents = {
+        "provider": "kaipanla_socket",
+        "state": "live",
+        "as_of": today.isoformat(),
+        "refreshed_at": current_at,
+        "plate_ids": ["801248"],
+        "missing_plate_ids": [],
+        "rows": [{
+            "plate_id": "801248", "code": "600000", "name": "浦发银行",
+            "last_price": 10.2, "change_pct": 0.02,
+        }],
+    }
+    calls = []
+
+    class SocketClient:
+        def __init__(self, _packet):
+            pass
+
+        @staticmethod
+        def fetch_blocks(plate_ids):
+            calls.append(list(plate_ids))
+            return {"801999": [{
+                "plate_id": "801999", "code": "000001", "name": "平安银行",
+                "last_price": 11.2, "change_pct": -0.01,
+            }]}
+
+    monkeypatch.setattr("app.plugins.kaipanla.collector.load_socket_login_packet", lambda: b"packet")
+    monkeypatch.setattr("app.plugins.kaipanla.collector.KaipanlaSocketClient", SocketClient)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    service = LimitBoardService(
+        Path(tmp_path), FakeRepo(), FakeQuotes(),
+        SimpleNamespace(paper_supervisor=None, qmt_trading_service=None),
+    )
+    service.app_state.kaipanla_collector = collector
+    collector._sector_strength = {
+        "state": "live", "as_of": today.isoformat(),
+        "refreshed_at": current_at,
+        "rows": [
+            {"plate_id": "801248", "plate_name": "汽车零部件", "rank": 1, "strength": 100},
+            {"plate_id": "801999", "plate_name": "区间涨速板块", "rank": 18, "strength": 40},
+        ],
+    }
+
+    result = await service.sector_constituents_view("801999", current_at)
+    cached = collector.shortline_constituents_snapshot()
+
+    assert calls == [["801999"]]
+    assert result["plate_name"] == "区间涨速板块"
+    assert result["rows"][0]["symbol"] == "000001.SZ"
+    assert {row["plate_id"] for row in cached["rows"]} == {"801248", "801999"}

@@ -513,6 +513,69 @@ class KaipanlaCollector:
                 "rows": [dict(row) for row in snapshot.get("rows") or []],
             }
 
+    async def shortline_constituents_for_plate(
+        self,
+        trade_date: date,
+        plate_id: str,
+    ) -> dict | None:
+        """Return one live board, fetching it when the top-board preload missed it."""
+        def covered(snapshot: dict | None) -> bool:
+            return (
+                isinstance(snapshot, dict)
+                and snapshot.get("as_of") == trade_date.isoformat()
+                and snapshot.get("state") in {"live", "partial"}
+                and any(
+                    isinstance(row, dict) and str(row.get("plate_id") or "") == plate_id
+                    for row in snapshot.get("rows") or []
+                )
+            )
+
+        snapshot = self.shortline_constituents_snapshot()
+        if covered(snapshot):
+            return snapshot
+        lock = self._locks.setdefault(f"shortline_constituents:{plate_id}", asyncio.Lock())
+        async with lock:
+            snapshot = self.shortline_constituents_snapshot()
+            if covered(snapshot):
+                return snapshot
+            login_packet = load_socket_login_packet()
+            if not login_packet:
+                raise RuntimeError("开盘啦 socket 登录信息不可用")
+            values = await asyncio.to_thread(
+                KaipanlaSocketClient(login_packet).fetch_blocks,
+                [plate_id],
+            )
+            plate_rows = values.get(plate_id) or []
+            if not plate_rows:
+                raise RuntimeError("开盘啦当日成分行情暂不可用")
+            with self._shortline_constituents_lock:
+                current = self._shortline_constituents
+                if not isinstance(current, dict) or current.get("as_of") != trade_date.isoformat():
+                    current = {}
+                rows = [
+                    dict(row) for row in current.get("rows") or []
+                    if isinstance(row, dict) and str(row.get("plate_id") or "") != plate_id
+                ]
+                rows.extend(dict(row) for row in plate_rows)
+                plate_ids = list(dict.fromkeys([
+                    *[str(value) for value in current.get("plate_ids") or []],
+                    plate_id,
+                ]))
+                missing = [
+                    str(value) for value in current.get("missing_plate_ids") or []
+                    if str(value) != plate_id
+                ]
+                self._shortline_constituents = {
+                    "provider": "kaipanla_socket",
+                    "state": "live" if rows and not missing else "partial",
+                    "as_of": trade_date.isoformat(),
+                    "refreshed_at": cn_now().isoformat(),
+                    "plate_ids": plate_ids,
+                    "missing_plate_ids": missing,
+                    "rows": rows,
+                }
+            return self.shortline_constituents_snapshot()
+
     async def refresh_sector_strength(
         self,
         trade_date: date,

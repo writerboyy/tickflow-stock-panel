@@ -647,6 +647,18 @@ class LimitBoardService:
         collector = getattr(self.app_state, "kaipanla_collector", None)
         snapshot_getter = getattr(collector, "shortline_constituents_snapshot", None)
         live_snapshot = snapshot_getter() if callable(snapshot_getter) else None
+        plate_loader = getattr(collector, "shortline_constituents_for_plate", None)
+        has_selected_plate = (
+            isinstance(live_snapshot, dict)
+            and live_snapshot.get("as_of") == today.isoformat()
+            and live_snapshot.get("state") in {"live", "partial"}
+            and any(
+                isinstance(row, dict) and str(row.get("plate_id") or "") == plate_id
+                for row in live_snapshot.get("rows") or []
+            )
+        )
+        if not has_selected_plate and callable(plate_loader):
+            live_snapshot = await plate_loader(today, plate_id)
         if (
             not isinstance(live_snapshot, dict)
             or live_snapshot.get("state") not in {"live", "partial"}
