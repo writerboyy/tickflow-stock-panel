@@ -131,5 +131,4 @@ export const SSE_INVALIDATE_PREFIXES = [
   'limit-ladder',
   'large-orders',
   'position-risk',
-  'limit-board',
 ] as const

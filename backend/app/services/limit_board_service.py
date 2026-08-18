@@ -43,6 +43,7 @@ _PREMIUM_FILTER_COLUMNS = {
 }
 _SCORE_REFRESH_SECONDS = 5.0
 _SECTOR_CANDIDATE_LIMIT = 10
+_AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_CANDIDATE_LIMIT = 30
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
@@ -955,10 +956,6 @@ class LimitBoardService:
             return self._set_sector_candidate_unavailable("前 10 板块未匹配上一完整交易日成分")
         matched_plate_ids = set(selected.get_column("plate_id").unique().to_list())
         missing_plate_ids = set(plate_ids) - matched_plate_ids
-        if missing_plate_ids:
-            return self._set_sector_candidate_unavailable(
-                f"前 10 板块有 {len(missing_plate_ids)} 个缺少上一完整交易日成分",
-            )
         names = {str(row["plate_id"]): str(row.get("plate_name") or "") for row in top_rows}
         by_symbol: dict[str, list[dict[str, str]]] = {}
         grouped = selected.group_by("symbol").agg(pl.col("plate_id").sort())
@@ -970,16 +967,25 @@ class LimitBoardService:
             ]
         self._sector_candidate_key = candidate_key
         self._sector_candidate_symbols = set(by_symbol)
-        self._sector_candidate_plate_ids = set(plate_ids)
+        self._sector_candidate_plate_ids = set(matched_plate_ids)
         self._sector_candidates_by_symbol = by_symbol
+        scope_state = "partial" if missing_plate_ids else "live"
+        scope_reason = (
+            f"仅扫描实时板块强度前 {len(plate_ids)} 名的 {len(by_symbol)} 只去重成分"
+            if not missing_plate_ids
+            else (
+                f"实时板块强度前 {len(plate_ids)} 名中 {len(matched_plate_ids)} 个有上一完整交易日成分，"
+                f"共 {len(by_symbol)} 只去重成分；{len(missing_plate_ids)} 个板块缺口已跳过"
+            )
+        )
         self._sector_candidate_scope = {
-            "state": "live",
+            "state": scope_state,
             "as_of": snapshot_at or None,
             "membership_as_of": membership_date.isoformat(),
-            "plate_count": len(plate_ids),
+            "plate_count": len(matched_plate_ids),
             "symbol_count": len(by_symbol),
-            "plate_ids": list(plate_ids),
-            "reason": f"仅扫描实时板块强度前 {len(plate_ids)} 名的 {len(by_symbol)} 只去重成分",
+            "plate_ids": sorted(matched_plate_ids),
+            "reason": scope_reason,
         }
         return set(self._sector_candidate_symbols)
 
@@ -1246,6 +1252,45 @@ class LimitBoardService:
             return str(quote_name).strip()
         return symbol
 
+    @staticmethod
+    def _preselect_automatic_updates(
+        updates: dict[str, dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        retained = {
+            symbol
+            for symbol, quote in updates.items()
+            if {"selected", "board_pool"} & set(quote.get("source_modes") or [])
+        }
+        by_sector: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for symbol, quote in updates.items():
+            modes = set(quote.get("source_modes") or [])
+            if not {"first_board", "rebound_board"} & modes:
+                continue
+            plate_ids = [str(value) for value in quote.get("top_sector_ids") or [] if value]
+            if not plate_ids:
+                retained.add(symbol)
+                continue
+            for plate_id in plate_ids:
+                by_sector[plate_id].append(quote)
+
+        def rank_key(quote: dict[str, Any]) -> tuple[float, float, float, str]:
+            change_pct = _finite(quote.get("change_pct"))
+            limit_gap_pct = _finite(quote.get("limit_gap_pct"))
+            amount = _finite(quote.get("amount"))
+            return (
+                -(change_pct if change_pct is not None else float("-inf")),
+                limit_gap_pct if limit_gap_pct is not None else float("inf"),
+                -(amount if amount is not None else 0.0),
+                str(quote.get("symbol") or ""),
+            )
+
+        for quotes in by_sector.values():
+            retained.update(
+                str(quote["symbol"])
+                for quote in sorted(quotes, key=rank_key)[:_AUTOMATIC_CANDIDATES_PER_SECTOR]
+            )
+        return {symbol: quote for symbol, quote in updates.items() if symbol in retained}
+
     def _process_quotes(self, records: list[dict[str, Any]]) -> None:
         config = self.store.load_config()
         self._refresh_history(config)
@@ -1329,6 +1374,7 @@ class LimitBoardService:
                 ],
             }
             updates[symbol] = quote
+        updates = self._preselect_automatic_updates(updates)
         with self._lock:
             self._quotes.update(updates)
         self._evaluate_quotes(updates, runtime, config)
@@ -2039,11 +2085,20 @@ class LimitBoardService:
             automatic_rows,
             runtime.get("candidate_scores") or {},
         )
-        retained_order = [
+        scored_order = [
             str(row["symbol"]).strip().upper()
             for row in ranked
             if row.get("candidate_score") is not None
         ][:_AUTOMATIC_CANDIDATE_LIMIT]
+        retained_order = [*scored_order]
+        if len(retained_order) < _AUTOMATIC_CANDIDATE_LIMIT:
+            retained_order.extend(
+                str(row["symbol"]).strip().upper()
+                for row in ranked
+                if row.get("candidate_score") is None
+                and str(row["symbol"]).strip().upper() not in retained_order
+            )
+            retained_order = retained_order[:_AUTOMATIC_CANDIDATE_LIMIT]
         retained = set(retained_order)
         for symbol, state in list(runtime_by_symbol.items()):
             modes = set(state.get("source_modes") or [])
@@ -2585,7 +2640,7 @@ class LimitBoardService:
         first_board_enabled = (
             market_mode == "full_market"
             and self._history_ready
-            and self._sector_candidate_scope.get("state") == "live"
+            and self._sector_candidate_scope.get("state") in {"live", "partial"}
         )
         return {
             "revision": config["revision"],

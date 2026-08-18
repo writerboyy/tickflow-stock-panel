@@ -188,7 +188,7 @@ export function useQuoteStream(
       })
 
       es.addEventListener('limit_board_updated', () => {
-        qc.invalidateQueries({ queryKey: QK.limitBoard })
+        qc.invalidateQueries({ queryKey: QK.limitBoard, exact: true })
       })
 
       es.addEventListener('strategy_alert', (e: MessageEvent) => {

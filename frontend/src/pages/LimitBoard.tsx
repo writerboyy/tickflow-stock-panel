@@ -124,10 +124,6 @@ function moneyYi(value: number | null | undefined): string {
   return `${amount.toFixed(digits)}亿`
 }
 
-function signedValue(value: number | null | undefined, digits = 1): string {
-  return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
-}
-
 function financialTone(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value) || value === 0) return 'text-secondary'
   return value > 0 ? 'text-bull' : 'text-bear'
@@ -457,6 +453,7 @@ function SectorStrengthTable({
   const [cycleStartedAt, setCycleStartedAt] = useState(() => Date.now())
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
   const lastScrolledConstituent = useRef<string | null>(null)
+  const constituentOrder = useRef<{ key: string; symbols: string[] }>({ key: '', symbols: [] })
   const timeline = snapshot?.timeline ?? []
   const latestIndex = Math.max(0, timeline.length - 1)
   const activeIndex = cursorIndex == null ? latestIndex : Math.min(cursorIndex, latestIndex)
@@ -526,6 +523,11 @@ function SectorStrengthTable({
     return new Set(rows.filter(row => ids.has(row.plate_id) || names.has(sectorNameKey(row.plate_name))).map(row => row.plate_id))
   }, [hotSectorLinks, rows, selectedSignal, selectedStockSymbol])
   const selectedPlate = rows.find(row => row.plate_id === selectedPlateId) ?? rows[0] ?? null
+  useEffect(() => {
+    if (selectedPlateId == null || rows.some(row => row.plate_id === selectedPlateId)) return
+    setSelectedPlateId(rows[0]?.plate_id ?? null)
+    setSelectedStockSymbol(null)
+  }, [rows, selectedPlateId])
   const activeCapturedAt = isLive
     ? activeSnapshot?.refreshed_at ?? cursorAt
     : cursorAt ?? sectorTradingCapturedAt(
@@ -550,6 +552,25 @@ function SectorStrengthTable({
   const constituentData = constituents.data?.plate_id === selectedPlate?.plate_id
     ? constituents.data
     : null
+  const constituentRows = useMemo(() => {
+    const values = constituentData?.rows ?? []
+    const orderKey = `${selectedPlate?.plate_id ?? ''}:${isLive ? 'live' : activeCapturedAt ?? ''}`
+    const available = new Set(values.map(row => row.symbol))
+    if (constituentOrder.current.key !== orderKey) {
+      constituentOrder.current = { key: orderKey, symbols: values.map(row => row.symbol) }
+    } else {
+      const retained = constituentOrder.current.symbols.filter(symbol => available.has(symbol))
+      const retainedSet = new Set(retained)
+      constituentOrder.current.symbols = [
+        ...retained,
+        ...values.map(row => row.symbol).filter(symbol => !retainedSet.has(symbol)),
+      ]
+    }
+    const bySymbol = new Map(values.map(row => [row.symbol, row]))
+    return constituentOrder.current.symbols
+      .map(symbol => bySymbol.get(symbol))
+      .filter((row): row is LimitBoardSectorConstituent => row != null)
+  }, [activeCapturedAt, constituentData?.rows, isLive, selectedPlate?.plate_id])
   useEffect(() => {
     if (!selectedStockSymbol || !selectedPlate || !constituentData?.rows.some(row => row.symbol === selectedStockSymbol)) return
     const scrollKey = `${selectedPlate.plate_id}:${selectedStockSymbol}`
@@ -598,20 +619,23 @@ function SectorStrengthTable({
   const trend = rankingWindowMinutes === 5
     ? activeSnapshot?.trend_5m
     : activeSnapshot?.trend_30m
-  const strengthDelta = (row: LimitBoardSectorStrengthRow) => (
-    rankingWindowMinutes === 5 ? row.strength_delta_5m : row.strength_delta_30m
-  )
   const mainNetDelta = (row: LimitBoardSectorStrengthRow) => (
     rankingWindowMinutes === 5 ? row.main_net_delta_5m : row.main_net_delta_30m
   )
-  const windowStrengthRanking = [...rows]
-    .filter(row => strengthDelta(row) != null && Number.isFinite(strengthDelta(row)))
-    .sort((left, right) => Number(strengthDelta(right)) - Number(strengthDelta(left)))
-    .slice(0, 10)
-  const windowMainNetRanking = [...rows]
-    .filter(row => mainNetDelta(row) != null && Number.isFinite(mainNetDelta(row)))
+  const windowRisingRanking = [...rows]
+    .filter(row => {
+      const value = mainNetDelta(row)
+      return value != null && Number.isFinite(value) && value > 0
+    })
     .sort((left, right) => Number(mainNetDelta(right)) - Number(mainNetDelta(left)))
-    .slice(0, 10)
+    .slice(0, 3)
+  const windowFallingRanking = [...rows]
+    .filter(row => {
+      const value = mainNetDelta(row)
+      return value != null && Number.isFinite(value) && value < 0
+    })
+    .sort((left, right) => Number(mainNetDelta(left)) - Number(mainNetDelta(right)))
+    .slice(0, 3)
   return <div className="space-y-3">
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
@@ -622,12 +646,12 @@ function SectorStrengthTable({
       </div>
       <div className="grid min-w-[720px] grid-cols-2 divide-x divide-border overflow-x-auto">
         <div className="min-w-0">
-          <div className="grid grid-cols-[42px_1fr_100px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟强度</span></div>
-          {windowStrengthRanking.length ? windowStrengthRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_100px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-secondary">{signedValue(strengthDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">{rankingWindowMinutes} 分钟强度排序待形成</div>}
+          <div className="grid grid-cols-[42px_1fr_100px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟主力净额涨速</span></div>
+          {windowRisingRanking.length ? windowRisingRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_100px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bull">{moneyYi(mainNetDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">暂无主力净额涨速数据</div>}
         </div>
         <div className="min-w-0">
-          <div className="grid grid-cols-[42px_1fr_110px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟主力净额</span></div>
-          {windowMainNetRanking.length ? windowMainNetRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_110px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-secondary">{moneyYi(mainNetDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">{rankingWindowMinutes} 分钟主力净额排序待形成</div>}
+          <div className="grid grid-cols-[42px_1fr_100px] border-b border-border px-3 py-2 text-[10px] text-muted"><span>排名</span><span>板块</span><span className="text-right">{rankingWindowMinutes} 分钟主力净额跌速</span></div>
+          {windowFallingRanking.length ? windowFallingRanking.map((row, index) => <div key={row.plate_id} className="grid grid-cols-[42px_1fr_100px] border-b border-border/70 px-3 py-2 text-xs last:border-b-0"><span className="font-mono text-muted">#{index + 1}</span><span className="truncate text-secondary">{row.plate_name || row.plate_id}</span><span className="text-right font-mono font-medium text-bear">{moneyYi(mainNetDelta(row))}</span></div>) : <div className="px-3 py-8 text-center text-xs text-muted">暂无主力净额跌速数据</div>}
         </div>
       </div>
     </section>
@@ -697,7 +721,7 @@ function SectorStrengthTable({
                 onClick={() => selectStock(signal.symbol)}
                 className={`h-[92px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
               >
-                <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{signal.name || signal.symbol}</span><span className="shrink-0 text-[9px] text-secondary">{rebound ? '反包' : '首板'}</span></div>
+                <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{signal.name || signal.symbol}</span><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{rebound ? '反包' : '首板'}</span><span className="block font-mono text-accent" title="强势股打分最终总分">总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
                 <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
                 <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[9px] text-secondary">
                   {displayThemes.length ? displayThemes.map(name => <span key={name} className="max-w-[70px] truncate rounded-sm bg-elevated px-1 py-0.5">{name}</span>) : <span className="truncate text-muted">未匹配实时板块</span>}
@@ -741,10 +765,10 @@ function SectorStrengthTable({
         </table>
       </div>
       <div className="min-w-0">
-        {constituents.isError && !constituentData ? <div className="px-4 py-12 text-center text-xs text-danger">实时板块成分股加载失败</div> : constituentData?.rows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
+        {constituents.isError && !constituentData ? <div className="px-4 py-12 text-center text-xs text-danger">实时板块成分股加载失败</div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[480px] table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[28%] px-2 py-1.5">股票</th><th className="w-[12%] px-2 py-1.5 text-right">现价</th><th className="w-[12%] px-2 py-1.5 text-right">涨幅</th><th className="w-[14%] px-2 py-1.5 text-right">板状态</th><th className="w-[14%] px-2 py-1.5 text-right">换手率</th><th className="w-[20%] px-2 py-1.5 text-right">成交额</th></tr></thead>
-            <tbody>{constituentData.rows.map(row => {
+            <tbody>{constituentRows.map(row => {
               const linked = row.symbol === selectedStockSymbol
               return <tr
                 key={row.symbol}
@@ -1141,7 +1165,7 @@ export function LimitBoard() {
       <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2 text-[11px] text-muted sm:px-5">
         <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '打板池已接入 WS' : '备选池仅实时轮询'}</span>
         <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
-        {!runtime.first_board_enabled ? <span className="text-warning">强势股打分暂不可用：{runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}</span> : <span>{runtime.candidate_scope.reason}</span>}
+        {!runtime.first_board_enabled ? <span className="text-warning">强势股打分暂不可用：{runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}</span> : <span className={runtime.candidate_scope.state === 'partial' ? 'text-warning' : undefined}>{runtime.candidate_scope.reason}</span>}
       </div>
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">

@@ -62,6 +62,7 @@ class SectorMonitorService:
         self._catalog: dict[str, list[dict]] = {kind: [] for kind in SECTOR_KINDS}
         self._targets_by_key: dict[str, dict] = {}
         self._members_by_key: dict[str, set[str]] = {}
+        self._target_keys_by_symbol: dict[str, set[str]] = {}
         self._history: dict[str, deque[tuple[float, float]]] = {}
         self._history_day: str | None = None
 
@@ -82,9 +83,9 @@ class SectorMonitorService:
         if not cleaned:
             return []
         targets = []
-        for target_key, members in self._members_by_key.items():
+        for target_key in self._target_keys_by_symbol.get(cleaned, set()):
             target = self._targets_by_key.get(target_key)
-            if cleaned not in members or not target:
+            if not target:
                 continue
             if kind is not None and target.get("kind") != kind:
                 continue
@@ -239,10 +240,16 @@ class SectorMonitorService:
                 target["member_count"] = len(members_by_key.get(target["key"], set()))
             catalog[kind].sort(key=lambda item: (item.get("level") or 0, item["name"], item["value"]))
 
+        target_keys_by_symbol: dict[str, set[str]] = {}
+        for target_key, members in members_by_key.items():
+            for symbol in members:
+                target_keys_by_symbol.setdefault(symbol, set()).add(target_key)
+
         self._catalog_signature = signature
         self._catalog = catalog
         self._targets_by_key = targets_by_key
         self._members_by_key = members_by_key
+        self._target_keys_by_symbol = target_keys_by_symbol
         self._history.clear()
 
     def _data_signature(self) -> tuple[tuple[str, int, int], ...]:

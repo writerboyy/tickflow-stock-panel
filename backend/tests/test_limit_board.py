@@ -333,6 +333,32 @@ def test_automatic_candidate_is_scored_without_near_limit_filter(tmp_path, monke
     assert state["source_modes"] == ["first_board"]
 
 
+def test_automatic_preselection_keeps_top_ten_per_sector_and_manual_rows():
+    updates = {
+        f"600{index:03d}.SH": {
+            "symbol": f"600{index:03d}.SH",
+            "change_pct": index / 100,
+            "limit_gap_pct": (20 - index) / 100,
+            "source_modes": ["first_board"],
+            "top_sector_ids": ["P01"],
+        }
+        for index in range(12)
+    }
+    updates["000001.SZ"] = {
+        "symbol": "000001.SZ",
+        "change_pct": -0.05,
+        "source_modes": ["selected"],
+        "top_sector_ids": [],
+    }
+
+    selected = LimitBoardService._preselect_automatic_updates(updates)
+
+    assert set(selected) == {
+        *(f"600{index:03d}.SH" for index in range(2, 12)),
+        "000001.SZ",
+    }
+
+
 def test_automatic_candidates_keep_only_scored_top_thirty(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     symbols = [f"{600000 + index}.SH" for index in range(35)]
@@ -360,6 +386,30 @@ def test_automatic_candidates_keep_only_scored_top_thirty(tmp_path):
     assert retained == set(symbols[:30])
     assert set(runtime["symbols"]) == {*symbols[:30], "300001.SZ"}
     assert set(runtime["candidate_scores"]) == {*symbols[:30], "300001.SZ"}
+
+
+def test_automatic_candidates_keep_unscored_rows_when_score_context_unavailable(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    symbols = [f"600{index:03d}.SH" for index in range(3)]
+    runtime = {
+        "symbols": {
+            symbol: {"source_modes": ["first_board"], "change_pct": 0.03 - index / 100}
+            for index, symbol in enumerate(symbols)
+        },
+        "candidate_scores": {
+            symbol: {
+                "candidate_score": None,
+                "candidate_score_state": "unavailable",
+                "candidate_score_detail": {},
+            }
+            for symbol in symbols
+        },
+    }
+
+    retained = service._trim_automatic_candidates(runtime)
+
+    assert retained == set(symbols)
+    assert set(runtime["symbols"]) == set(symbols)
 
 
 def test_main_board_only_filters_automatic_candidate_universe(tmp_path, monkeypatch):
@@ -1880,7 +1930,7 @@ def test_sector_candidate_universe_uses_top_ten_and_one_membership_batch(
     assert calls == [membership_date]
 
 
-def test_sector_candidate_universe_stops_when_a_top_ten_membership_is_missing(
+def test_sector_candidate_universe_uses_available_memberships_when_one_is_missing(
     tmp_path,
 ):
     service, _quotes, _config = make_service(tmp_path)
@@ -1909,9 +1959,12 @@ def test_sector_candidate_universe_stops_when_a_top_ten_membership_is_missing(
         }),
     )
 
-    assert service._refresh_sector_candidate_universe(today) == set()
-    assert service._sector_candidate_scope["state"] == "unavailable"
-    assert "1 个缺少" in service._sector_candidate_scope["reason"]
+    assert service._refresh_sector_candidate_universe(today) == {
+        *(f"600{rank:03d}.SH" for rank in range(1, 10)),
+    }
+    assert service._sector_candidate_scope["state"] == "partial"
+    assert service._sector_candidate_scope["plate_count"] == 9
+    assert "1 个板块缺口已跳过" in service._sector_candidate_scope["reason"]
 
 
 def test_market_fetch_requests_only_top_ten_sector_candidates(tmp_path, monkeypatch):

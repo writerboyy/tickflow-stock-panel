@@ -193,6 +193,37 @@ def test_concept_snapshot_uses_member_average_and_full_window(tmp_path):
     assert complete[target["key"]]["window_changes"][5] == pytest.approx(0.01)
 
 
+def test_targets_for_symbol_uses_reverse_membership_index(tmp_path):
+    config = ExtConfig(
+        id="concept_reverse_index",
+        label="概念反向索引",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol", "string", "标的代码"),
+            ExtField("concept", "string", "所属概念"),
+        ],
+    )
+    ExtConfigStore(tmp_path).upsert(config)
+    ext_dir = tmp_path / "ext_data" / config.id
+    pl.DataFrame({
+        "symbol": ["A", "B"],
+        "concept": ["人工智能;机器人", "机器人"],
+    }).write_parquet(ext_dir / "part.parquet")
+    service = SectorMonitorService(_Repo(tmp_path))
+    service.list_targets()
+
+    class NoFullScan(dict):
+        def items(self):
+            raise AssertionError("targets_for_symbol must not scan every membership set")
+
+    service._members_by_key = NoFullScan(service._members_by_key)
+
+    assert [target["name"] for target in service.targets_for_symbol("A", kind="concept")] == [
+        "人工智能",
+        "机器人",
+    ]
+
+
 def test_momentum_rule_triggers_after_complete_window(tmp_path):
     service = SectorMonitorService(_Repo(tmp_path))
     engine = MonitorRuleEngine()

@@ -1430,7 +1430,7 @@ export interface LimitBoardView {
     history_ready: boolean
     history_reason: string
     candidate_scope: {
-      state: 'live' | 'unavailable'
+      state: 'live' | 'partial' | 'unavailable'
       as_of?: string | null
       membership_as_of?: string | null
       plate_count: number
@@ -2674,6 +2674,7 @@ export const api = {
   limitBoardSectorConstituents: (plateId: string, capturedAt: string) =>
     request<LimitBoardSectorConstituents>(
       `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents?captured_at=${encodeURIComponent(capturedAt)}`,
+      { quiet: true },
     ),
   limitBoardQuotes: (symbols: string[]) =>
     request<LimitBoardQuoteSnapshot>('/api/limit-board/quotes', {
