@@ -1059,8 +1059,9 @@ export function LimitBoard() {
   const view = useQuery({ queryKey: QK.limitBoard, queryFn: api.limitBoard, refetchInterval: 5000, placeholderData: previous => previous })
   const heat = useQuery({
     queryKey: QK.marketHeatRadar(30),
-    queryFn: () => api.marketHeatRadar(30),
-    refetchInterval: 60_000,
+    queryFn: () => api.marketHeatRadar(30, true),
+    enabled: tab === 'sector',
+    refetchInterval: tab === 'sector' ? 60_000 : false,
     staleTime: 60_000,
     placeholderData: previous => previous,
   })
@@ -1070,9 +1071,9 @@ export function LimitBoard() {
   )
   const heatQuotes = useQuery({
     queryKey: QK.limitBoardQuotes(heatSymbols.join(',')),
-    queryFn: () => api.limitBoardQuotes(heatSymbols),
-    enabled: heatSymbols.length > 0,
-    refetchInterval: 5000,
+    queryFn: () => api.limitBoardQuotes(heatSymbols, true),
+    enabled: tab === 'sector' && heatSymbols.length > 0,
+    refetchInterval: tab === 'sector' ? 5000 : false,
     staleTime: 4000,
     placeholderData: previous => previous,
   })

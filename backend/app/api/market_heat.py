@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.error import HTTPError, URLError
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.plugins.hithink.client import HiThinkApiError, HiThinkAuthError
@@ -27,6 +29,11 @@ def market_heat_radar(
         raise HTTPException(
             status_code=status,
             detail=f"同花顺/Fuyao 特色数据请求失败：{exc.message or exc.code}{request_id}",
+        ) from exc
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="同花顺/Fuyao 热度服务暂时不可用，请稍后重试。",
         ) from exc
 
 
@@ -55,4 +62,9 @@ def market_heat_rank_trend(
         raise HTTPException(
             status_code=status,
             detail=f"同花顺/Fuyao 热股排名趋势请求失败：{exc.message or exc.code}{request_id}",
+        ) from exc
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="同花顺/Fuyao 热股排名服务暂时不可用，请稍后重试。",
         ) from exc

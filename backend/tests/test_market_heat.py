@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from io import BytesIO
 from typing import Any
+from urllib.error import HTTPError
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -198,6 +200,26 @@ def test_market_heat_api_reports_missing_hithink_key(monkeypatch) -> None:
 
     assert response.status_code == 503
     assert "未配置同花顺/Fuyao API Key" in response.json()["detail"]
+
+
+def test_market_heat_api_maps_upstream_http_error_to_bad_gateway(monkeypatch) -> None:
+    def _raise_upstream_error(*_args, **_kwargs):
+        raise HTTPError(
+            url="https://fuyao.aicubes.cn/api/a-share/special-data/hot-stock-list",
+            code=500,
+            msg="upstream error",
+            hdrs=None,
+            fp=BytesIO(b"upstream body"),
+        )
+
+    monkeypatch.setattr(market_heat, "build_market_heat_radar", _raise_upstream_error)
+    app = FastAPI()
+    app.include_router(market_heat.router)
+
+    response = TestClient(app).get("/api/market-heat/radar")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "同花顺/Fuyao 热度服务暂时不可用，请稍后重试。"
 
 
 def test_market_heat_router_is_registered_on_main_app() -> None:

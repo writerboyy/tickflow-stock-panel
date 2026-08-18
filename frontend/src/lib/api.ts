@@ -2676,9 +2676,10 @@ export const api = {
       `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents?captured_at=${encodeURIComponent(capturedAt)}`,
       { quiet: true },
     ),
-  limitBoardQuotes: (symbols: string[]) =>
+  limitBoardQuotes: (symbols: string[], quiet = false) =>
     request<LimitBoardQuoteSnapshot>('/api/limit-board/quotes', {
       method: 'POST', body: JSON.stringify({ symbols }),
+      quiet,
     }),
   limitBoardNotificationsUpdate: (
     notifications: LimitBoardView['settings']['notifications'], revision: number,
@@ -3138,8 +3139,8 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
-  marketHeatRadar: (trendDays = 30) =>
-    request<MarketHeatRadar>(`/api/market-heat/radar?trend_days=${trendDays}`),
+  marketHeatRadar: (trendDays = 30, quiet = false) =>
+    request<MarketHeatRadar>(`/api/market-heat/radar?trend_days=${trendDays}`, { quiet }),
   marketHeatRankTrend: (item: Pick<MarketHeatItem, 'thscode' | 'ticker' | 'name'>, trendDays = 30) => {
     const params = new URLSearchParams({
       thscode: item.thscode,
