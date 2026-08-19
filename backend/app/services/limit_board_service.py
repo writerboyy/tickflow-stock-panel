@@ -1586,7 +1586,7 @@ class LimitBoardService:
         )
         scoring_rows = {
             str(item.get("symbol") or "").strip().upper(): item
-            for item in [*candidates, *rows]
+            for item in self._strong_rows(rows)
             if item.get("symbol")
         }
         self._refresh_candidate_scores(runtime, list(scoring_rows.values()), now)
@@ -2228,6 +2228,14 @@ class LimitBoardService:
         return list(candidates.values())
 
     @staticmethod
+    def _strong_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return rows whose scores are shown in the strong-stock panel."""
+        return [
+            row for row in rows
+            if {"first_board", "rebound_board"} & set(row.get("source_modes", []))
+        ]
+
+    @staticmethod
     def _rank_candidates(
         candidates: list[dict[str, Any]], score_cache: dict[str, dict[str, Any]],
     ) -> list[dict[str, Any]]:
@@ -2240,7 +2248,7 @@ class LimitBoardService:
                 "candidate_score_state": "unavailable",
                 "candidate_score_as_of": None,
                 "candidate_score_detail": {},
-                "candidate_reasons": [],
+                "candidate_reasons": LimitBoardService._score_reasons(candidate, {}),
             }
             result.append({**candidate, **score})
         def sort_key(row: dict[str, Any]) -> tuple:
@@ -2769,28 +2777,23 @@ class LimitBoardService:
         )
         scoring_rows = {
             str(item.get("symbol") or "").strip().upper(): item
-            for item in [*candidates, *rows]
+            for item in self._strong_rows(rows)
             if item.get("symbol")
         }
         if self._refresh_candidate_scores(runtime, list(scoring_rows.values()), cn_now()):
             self._persist_runtime(runtime)
-        # Keep both API projections on the same per-symbol score snapshot.  The
-        # candidate queue and the strong-stock panel may sort different row
-        # sets, but their score and detail fields must never be recomputed per
-        # list.
+        # Keep both API projections on the same per-symbol score snapshot. The
+        # candidate queue only re-displays scores computed for strong-stock rows.
         score_cache = runtime.get("candidate_scores") or {}
         candidate_pool = self._rank_candidates(
             candidates, score_cache,
         )
         first_board = self._rank_candidates(
-            [
-                item for item in rows
-                if {"first_board", "rebound_board"} & set(item.get("source_modes", []))
-            ],
+            self._strong_rows(rows),
             score_cache,
         )
         rebound_board = self._rank_candidates(
-            [item for item in rows if "rebound_board" in item.get("source_modes", [])],
+            [item for item in self._strong_rows(rows) if "rebound_board" in item.get("source_modes", [])],
             score_cache,
         )
         qmt = self._qmt()

@@ -1399,6 +1399,48 @@ def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
     assert "手工加入" in view["candidate_pool"][0]["candidate_reasons"]
 
 
+def test_candidate_pool_reuses_strong_stock_scores_without_scoring_manual_rows(
+    tmp_path, monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {"source_modes": ["first_board"]},
+        "600001.SH": {"source_modes": ["selected"]},
+    }
+    service.store.update(
+        0,
+        lambda value: value["selected"].append({"symbol": "600001.SH", "name": "邯郸钢铁"}),
+    )
+    service.store.save_runtime(runtime)
+    calls: list[list[str]] = []
+
+    def score(runtime, rows, _now):
+        calls.append([str(row["symbol"]) for row in rows])
+        runtime["candidate_scores"] = {
+            "600000.SH": {
+                "candidate_score": 80.0,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": "2026-08-19T10:00:00+08:00",
+                "candidate_score_detail": {"sector": {"score": 50.0}},
+                "candidate_reasons": [],
+            },
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
+
+    view = service.view()
+    strong = view["first_board"][0]
+    automatic = next(row for row in view["candidate_pool"] if row["symbol"] == "600000.SH")
+    manual = next(row for row in view["candidate_pool"] if row["symbol"] == "600001.SH")
+
+    assert calls == [["600000.SH"]]
+    assert automatic["candidate_score"] == strong["candidate_score"] == 80.0
+    assert automatic["candidate_score_detail"] == strong["candidate_score_detail"]
+    assert manual["candidate_score"] is None
+
+
 def test_remove_automatic_candidate_excludes_it_for_current_trading_day(tmp_path, monkeypatch):
     service, _quotes, _config = make_service(tmp_path)
     current_day = [datetime(2026, 8, 13).date()]
