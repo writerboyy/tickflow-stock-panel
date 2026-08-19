@@ -341,6 +341,9 @@ from jqdata import *
     custom = store.save(
         "custom", "首板大成交", f"{source}\n# user change\n", {"timeframe": "1d"},
     )
+    joinquant = store.save(
+        "joinquant", "首板大成交", source, {"timeframe": "1d"}, dialect="joinquant",
+    )
     monkeypatch.setattr(
         free_strategy,
         "LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256",
@@ -357,6 +360,7 @@ from jqdata import *
     assert loaded["config"] == TEMPLATES["large_amount_first_board"]["config"]
     assert loaded["revision"] == 2
     assert store.get(custom["id"])["revision"] == 1
+    assert store.get(joinquant["id"])["revision"] == 1
 
 
 def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeypatch, tmp_path):
@@ -391,6 +395,27 @@ def test_backtest_snapshot_manifest_and_worker_payload_share_source_hash(monkeyp
         assert captured["strategy_source_sha256"] == digest
     finally:
         free_strategy._jobs.pop(job_id, None)
+
+
+def test_joinquant_unavailable_api_is_rejected_before_starting_backtest(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        None,
+        "缺 Tick 数据的聚宽策略",
+        "from jqdata import *\n\ndef handle_data(context, data):\n    get_ticks('000001.XSHE')\n",
+        {},
+        dialect="joinquant",
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    response = TestClient(app).post(
+        "/api/free-strategies/backtest",
+        json={"strategy_id": strategy["id"]},
+    )
+
+    assert response.status_code == 400
+    assert "get_ticks" in response.json()["detail"]
 
 
 def test_saved_backtest_routes_are_not_captured_by_strategy_id(tmp_path):
@@ -724,6 +749,30 @@ def test_create_paper_account_rolls_back_when_continuation_fails(monkeypatch, tm
     assert response.status_code == 409
     assert response.json()["detail"] == "参数不一致"
     assert PaperAccountStore(tmp_path).list() == []
+
+
+def test_create_paper_account_preserves_joinquant_runtime_contract(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "jq-paper",
+        "聚宽模拟策略",
+        "from jqdata import *\n\ndef handle_data(context, data):\n    pass\n",
+        {},
+        dialect="joinquant",
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    response = TestClient(app).post("/api/free-strategies/paper/accounts", json={
+        "strategy_id": strategy["id"],
+        "name": "聚宽模拟策略",
+        "timeframe": "1d",
+        "market_mode": "bar_1d",
+    })
+
+    assert response.status_code == 200
+    assert response.json()["dialect"] == "joinquant"
+    assert response.json()["compatibility_report"]["version"] == "jq-v1"
 
 
 def test_resume_restarts_missing_paper_process(monkeypatch, tmp_path):

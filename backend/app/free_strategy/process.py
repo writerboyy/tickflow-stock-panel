@@ -2175,6 +2175,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 end,
             ),
             callback_deadline=callback_deadline,
+            dialect=str(payload.get("dialect") or "native"),
         )
         engine.set_run_window(start, end)
         configure_strategy_data_loaders(
@@ -2259,6 +2260,11 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     Path(minute_root) if payload["timeframe"] != "1d" else Path(daily_root),
                 ],
             )
+            readiness_manifest["strategy_runtime"] = {
+                "dialect": engine.dialect,
+                "compatibility_version": engine.runtime.runtime_snapshot().get("compatibility_version"),
+                "compatibility_report": engine.compatibility_report,
+            }
         except ReadinessUnavailable as exc:
             if payload.get("run_dir"):
                 persist_readiness_report(Path(payload["run_dir"]), exc.report)
@@ -2532,6 +2538,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             "data_days": len(result.get("daily_equity_curve", [])),
             "source_revision": payload.get("source_revision"),
             "strategy_source_sha256": source_digest,
+            "dialect": engine.dialect,
+            "compatibility_version": engine.runtime.runtime_snapshot().get("compatibility_version"),
+            "compatibility_report": engine.compatibility_report,
             "resumed_from_checkpoint": bool(payload.get("checkpoint")),
             "warmup": warmup_metadata,
             "market_history": engine.market_history_metadata,

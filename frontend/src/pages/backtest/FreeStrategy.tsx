@@ -18,7 +18,13 @@ import {
   Trash2,
   WalletCards,
 } from 'lucide-react'
-import { api, type FreeBacktestConfig, type FreeBacktestResult } from '@/lib/api'
+import {
+  api,
+  type FreeBacktestConfig,
+  type FreeBacktestResult,
+  type StrategyCompatibilityReport,
+  type StrategyDialect,
+} from '@/lib/api'
 import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
 import { Modal } from '@/components/Modal'
@@ -47,7 +53,7 @@ def on_bar(context, bars):
     pass`
 
 type WorkspaceView = 'strategy' | 'backtests'
-type EditorSnapshot = { name: string; source: string; config: FreeBacktestConfig }
+type EditorSnapshot = { name: string; source: string; config: FreeBacktestConfig; dialect: StrategyDialect }
 type EditorAction = { type: 'select'; id: string } | { type: 'new' } | { type: 'template'; id: string }
 type RenameTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
 type DeleteTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
@@ -156,6 +162,8 @@ export function FreeStrategy() {
   const [name, setName] = useState('我的量化策略')
   const [source, setSource] = useState(DEFAULT_SOURCE)
   const [config, setConfig] = useState<FreeBacktestConfig>(DEFAULT_CONFIG)
+  const [dialect, setDialect] = useState<StrategyDialect>('native')
+  const [compatibilityReport, setCompatibilityReport] = useState<StrategyCompatibilityReport | undefined>()
   const [baseline, setBaseline] = useState<EditorSnapshot | null>(null)
   const [result, setResult] = useState<FreeBacktestResult | null>(null)
   const [progress, setProgress] = useState('')
@@ -195,8 +203,14 @@ export function FreeStrategy() {
   )
   const selected = list.find(item => item.id === selectedId)
   const selectedRun = strategyRuns.find(item => item.job_id === selectedRunId)
-  const draft = useMemo<EditorSnapshot>(() => ({ name, source, config }), [name, source, config])
+  const draft = useMemo<EditorSnapshot>(() => ({ name, source, config, dialect }), [name, source, config, dialect])
   const dirty = baseline === null || JSON.stringify(draft) !== JSON.stringify(baseline)
+  const runBlockedByCompatibility = !dirty
+    && dialect === 'joinquant'
+    && compatibilityReport?.summary_status === 'unavailable'
+  const compatibilityIssues = compatibilityReport?.apis.filter(
+    item => item.status === 'degraded' || item.status === 'unavailable',
+  ) ?? []
   const detailLoading = Boolean(selectedId) && (detail.isFetching || detail.data?.id !== selectedId)
   const dataHealth = useQuery({
     queryKey: QK.freeDataHealth(config.strategy_id, config.start, config.end, config.timeframe),
@@ -224,10 +238,17 @@ export function FreeStrategy() {
     const saved = detail.data
     if (!saved || saved.id !== selectedId) return
     const nextConfig = { ...DEFAULT_CONFIG, ...withoutLegacySymbols(saved.config ?? {}), strategy_id: saved.id }
-    const next = { name: saved.name, source: saved.source ?? '', config: nextConfig }
+    const next = {
+      name: saved.name,
+      source: saved.source ?? '',
+      config: nextConfig,
+      dialect: saved.dialect ?? ('native' as StrategyDialect),
+    }
     setName(next.name)
     setSource(next.source)
     setConfig(next.config)
+    setDialect(next.dialect)
+    setCompatibilityReport(saved.compatibility_report)
     setBaseline(next)
   }, [detail.data, selectedId])
   useEffect(() => {
@@ -241,6 +262,8 @@ export function FreeStrategy() {
     setName('我的量化策略')
     setSource(EMPTY_SOURCE)
     setConfig({ ...DEFAULT_CONFIG, strategy_id: '' })
+    setDialect('native')
+    setCompatibilityReport(undefined)
     setBaseline(null)
   }
 
@@ -260,6 +283,8 @@ export function FreeStrategy() {
     setName(template.name)
     setSource(template.source)
     setConfig(nextConfig)
+    setDialect(template.dialect ?? 'native')
+    setCompatibilityReport(undefined)
     setBaseline(null)
   }
 
@@ -279,15 +304,18 @@ export function FreeStrategy() {
       const sourceOrConfigChanged = baseline === null
         || source !== baseline.source
         || JSON.stringify(config) !== JSON.stringify(baseline.config)
+        || dialect !== baseline.dialect
       const saved = selectedId
         ? sourceOrConfigChanged
-          ? await api.updateFreeStrategy(selectedId, { name, source, config })
+          ? await api.updateFreeStrategy(selectedId, { name, source, config, dialect })
           : await api.renameFreeStrategy(selectedId, name)
-        : await api.saveFreeStrategy({ name, source, config })
+        : await api.saveFreeStrategy({ name, source, config, dialect })
       const nextConfig = { ...config, strategy_id: saved.id }
       setSelectedId(saved.id)
       setConfig(nextConfig)
-      setBaseline({ name: saved.name, source: saved.source ?? source, config: nextConfig })
+      setDialect(saved.dialect ?? dialect)
+      setCompatibilityReport(saved.compatibility_report)
+      setBaseline({ name: saved.name, source: saved.source ?? source, config: nextConfig, dialect: saved.dialect ?? dialect })
       await strategies.refetch()
       toast('策略已保存', 'success')
     } catch (err) {
@@ -479,6 +507,7 @@ export function FreeStrategy() {
       <section className="min-h-0 overflow-y-auto rounded-md border border-border bg-surface p-3 max-xl:col-span-2 max-md:col-span-1">
         <div className="mb-2 text-xs font-medium">运行设置</div>
         <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <label className="col-span-2">策略方言<select className={INPUT} value={dialect} onChange={event => setDialect(event.target.value as StrategyDialect)}><option value="native">系统原生</option><option value="joinquant">JoinQuant</option></select></label>
           <label>资产<select className={INPUT} value={config.asset_type} onChange={event => setConfig({ ...config, asset_type: event.target.value as FreeBacktestConfig['asset_type'] })}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
           <label>周期<select className={INPUT} value={config.timeframe} onChange={event => setConfig({ ...config, timeframe: event.target.value as FreeBacktestConfig['timeframe'] })}><option value="1d">1d</option><option value="30m">30m</option><option value="5m">5m</option><option value="1m">1m</option></select></label>
           <label className="col-span-2">基准<input className={INPUT} value={config.benchmark_symbol} onChange={event => setConfig({ ...config, benchmark_symbol: event.target.value.trim() })} /></label>
@@ -488,17 +517,23 @@ export function FreeStrategy() {
           <label>手续费<input type="number" step="0.0001" className={INPUT} value={config.fees_pct} onChange={event => setConfig({ ...config, fees_pct: Number(event.target.value) })} /></label><label>滑点(bps)<input type="number" className={INPUT} value={config.slippage_bps} onChange={event => setConfig({ ...config, slippage_bps: Number(event.target.value) })} /></label>
           <label>结算<select className={INPUT} value={config.settlement} onChange={event => setConfig({ ...config, settlement: event.target.value as FreeBacktestConfig['settlement'] })}><option value="t1">T+1（默认）</option><option value="t0">T+0</option></select></label><label>成交<select className={INPUT} value={config.fill_policy} onChange={event => setConfig({ ...config, fill_policy: event.target.value as FreeBacktestConfig['fill_policy'] })}><option value="next_open">下一根开盘</option><option value="close">当前收盘</option></select></label>
         </div>
+        {dialect === 'joinquant' ? <div className="mt-3 border-t border-border pt-3 text-[11px]">
+          {dirty ? <div className="text-muted">保存后检查 JoinQuant 兼容性</div> : compatibilityReport ? <div className={compatibilityReport.summary_status === 'unavailable' ? 'text-danger' : compatibilityReport.summary_status === 'degraded' ? 'text-warning' : 'text-success'}>
+            <div className="inline-flex items-center gap-1.5">{compatibilityReport.summary_status === 'unavailable' ? <CircleAlert className="h-3.5 w-3.5" /> : compatibilityReport.summary_status === 'degraded' ? <AlertTriangle className="h-3.5 w-3.5" /> : <CheckCircle2 className="h-3.5 w-3.5" />}JoinQuant 兼容性：{compatibilityReport.summary_status === 'unavailable' ? '不可运行' : compatibilityReport.summary_status === 'degraded' ? '存在降级' : '可运行'}</div>
+            {compatibilityIssues.length ? <div className="mt-1 break-words text-muted">{compatibilityIssues.map(item => item.name).join('、')}</div> : null}
+          </div> : <div className="text-muted">保存后检查 JoinQuant 兼容性</div>}
+        </div> : null}
         {config.asset_type === 'etf' && config.strategy_id && !dirty ? <div className="mt-3 border-t border-border pt-3 text-[11px]">
           {dataHealth.isFetching ? <div className="inline-flex items-center gap-1.5 text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在检查回测数据…</div> : dataHealth.isError ? <div className="flex items-center justify-between gap-2 text-muted"><span className="inline-flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" />数据预检暂不可用，不阻止回测</span><button type="button" onClick={openDataRepair} className="text-accent hover:underline">前往检查</button></div> : dataHealth.data?.status === 'issues' ? <div className="flex items-center justify-between gap-2 text-warning"><span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3.5 w-3.5" />发现 {dataHealth.data.issues.length} 个数据问题，可能影响结果</span><button type="button" onClick={openDataRepair} className="shrink-0 text-accent hover:underline">查看并修复</button></div> : dataHealth.data?.status === 'healthy' ? <div className="inline-flex items-center gap-1.5 text-success"><CheckCircle2 className="h-3.5 w-3.5" />回测数据完整 · 已检查 {dataHealth.data.symbol_count} 只 ETF</div> : null}
         </div> : null}
         {error ? <div className="mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
-        <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading} title={dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
+        <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading || runBlockedByCompatibility} title={runBlockedByCompatibility ? '当前 JoinQuant 能力不可运行' : dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>
         {progress ? <div className="mt-2 text-[11px] text-muted">{progress}</div> : null}
         <div className="my-4 border-t border-border" />
         <div className="flex items-start gap-2.5">
           <WalletCards className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
           <div className="min-w-0 flex-1"><div className="text-xs font-medium">模拟盘</div><div className="mt-1 text-[11px] leading-4 text-muted">账户、持仓、委托和运行日志已集中到独立工作台。</div></div>
-          <button type="button" onClick={createPaper} disabled={!config.strategy_id || dirty} className="shrink-0 rounded-btn border border-border px-2.5 py-1.5 text-[11px] hover:border-accent hover:text-accent disabled:opacity-40">创建模拟账户</button>
+          <button type="button" onClick={createPaper} disabled={!config.strategy_id || dirty || runBlockedByCompatibility} className="shrink-0 rounded-btn border border-border px-2.5 py-1.5 text-[11px] hover:border-accent hover:text-accent disabled:opacity-40">创建模拟账户</button>
         </div>
       </section>
     </div> : <div className="grid min-w-0 shrink-0 grid-cols-[200px_290px_minmax(0,1fr)] items-start gap-3 max-xl:grid-cols-[260px_minmax(0,1fr)] max-lg:grid-cols-1">

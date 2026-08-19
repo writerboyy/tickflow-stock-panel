@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from app.free_strategy.jq_compat.capabilities import analyze_source
 from app.market_time import cn_today
 
 
@@ -48,34 +49,72 @@ class FreeStrategyStore:
         for path in sorted(self.root.iterdir()):
             manifest = path / "manifest.json"
             if path.is_dir() and manifest.exists():
-                result.append(json.loads(manifest.read_text(encoding="utf-8")))
+                result.append(self._normalize_manifest(json.loads(manifest.read_text(encoding="utf-8"))))
         return result
 
     def get(self, strategy_id: str) -> dict[str, Any]:
         path = self._path(strategy_id)
-        manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        manifest = self._normalize_manifest(json.loads((path / "manifest.json").read_text(encoding="utf-8")))
         manifest["source"] = (path / "strategy.py").read_text(encoding="utf-8")
+        if manifest["dialect"] == "joinquant" and not isinstance(manifest.get("compatibility_report"), dict):
+            manifest["compatibility_report"] = analyze_source(manifest["source"])
         return manifest
 
-    def save(self, strategy_id: str | None, name: str, source: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+        result = dict(manifest)
+        dialect = str(result.get("dialect") or "native").strip().lower()
+        result["dialect"] = dialect if dialect in {"native", "joinquant"} else "native"
+        return result
+
+    def save(
+        self,
+        strategy_id: str | None,
+        name: str,
+        source: str,
+        config: dict[str, Any] | None = None,
+        *,
+        dialect: str | None = None,
+    ) -> dict[str, Any]:
         strategy_id = strategy_id or uuid.uuid4().hex[:12]
         path = self._path(strategy_id)
         path.mkdir(parents=True, exist_ok=True)
         manifest_path = path / "manifest.json"
-        previous = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        previous = self._normalize_manifest(json.loads(manifest_path.read_text(encoding="utf-8"))) if manifest_path.exists() else {}
+        resolved_dialect = str(dialect or previous.get("dialect") or "native").strip().lower()
+        if resolved_dialect not in {"native", "joinquant"}:
+            raise ValueError("策略运行方言只支持 native 或 joinquant")
         revision = int(previous.get("revision", 0)) + 1
         (path / "revisions").mkdir(exist_ok=True)
         (path / "revisions" / f"{revision:04d}.py").write_text(source, encoding="utf-8")
         (path / "strategy.py").write_text(source, encoding="utf-8")
-        manifest = {"id": strategy_id, "name": name.strip() or strategy_id, "config": config or previous.get("config", {}),
-                    "revision": revision, "updated_at": now_iso(), "created_at": previous.get("created_at", now_iso())}
+        compatibility_report = (
+            analyze_source(source)
+            if resolved_dialect == "joinquant"
+            else {
+                "version": None,
+                "dialect": "native",
+                "summary_status": "supported",
+                "apis": [],
+            }
+        )
+        manifest = {
+            "id": strategy_id,
+            "name": name.strip() or strategy_id,
+            "config": config or previous.get("config", {}),
+            "dialect": resolved_dialect,
+            "compatibility_report": compatibility_report,
+            "revision": revision,
+            "updated_at": now_iso(),
+            "created_at": previous.get("created_at", now_iso()),
+        }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return {**manifest, "source": source}
 
     def rename(self, strategy_id: str, name: str) -> dict[str, Any]:
         path = self._path(strategy_id)
         manifest_path = path / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = self._normalize_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
         manifest["name"] = name
         manifest["updated_at"] = now_iso()
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

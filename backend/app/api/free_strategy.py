@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config import settings
 from app.free_strategy.continuation import continue_account_from_backtest
+from app.free_strategy.jq_compat.capabilities import analyze_source
 from app.free_strategy.process import start_process
 from app.free_strategy.paper import MARKET_MODES, PaperTradingSupervisor
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore, now_iso
@@ -394,6 +395,8 @@ def migrate_legacy_external_large_amount_first_board(data_dir: Path) -> list[str
     for summary in store.list():
         strategy = store.get(str(summary["id"]))
         source = str(strategy["source"])
+        if strategy.get("dialect") == "joinquant":
+            continue
         if str(strategy.get("name") or "").strip() != "首板大成交":
             continue
         source_hash = sha256(source.encode("utf-8")).hexdigest()
@@ -408,6 +411,7 @@ def migrate_legacy_external_large_amount_first_board(data_dir: Path) -> list[str
             strategy["name"],
             replacement,
             dict(template["config"]),
+            dialect="native",
         )
         migrated.append(str(strategy["id"]))
     return migrated
@@ -505,6 +509,7 @@ class StrategyWrite(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     source: str = Field(min_length=1)
     config: dict[str, Any] = Field(default_factory=dict)
+    dialect: Literal["native", "joinquant"] | None = None
 
 
 class RenameWrite(BaseModel):
@@ -618,6 +623,25 @@ def _validate_paper_payload(req: PaperWrite, request: Request) -> None:
             raise HTTPException(status_code=403, detail=f"当前套餐最小行情间隔为 {quote_service.get_min_interval():g} 秒")
 
 
+def _validate_strategy_runtime(strategy: dict[str, Any]) -> dict[str, Any] | None:
+    """Fail before a worker starts when the saved JQ source needs missing data."""
+    if str(strategy.get("dialect") or "native") != "joinquant":
+        return None
+    report = analyze_source(str(strategy.get("source") or ""))
+    unavailable = [
+        str(item.get("name"))
+        for item in report.get("apis", [])
+        if item.get("status") == "unavailable"
+    ]
+    if unavailable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"聚宽策略包含当前不可用能力: {', '.join(unavailable)}",
+        )
+    strategy["compatibility_report"] = report
+    return report
+
+
 @router.get("")
 def list_strategies(request: Request):
     return {"strategies": _strategy_store(request).list(), "templates": [{"id": k, "name": v["name"]} for k, v in TEMPLATES.items()]}
@@ -630,7 +654,13 @@ def list_templates():
 
 @router.post("")
 def create_strategy(req: StrategyWrite, request: Request):
-    return _strategy_store(request).save(req.id, req.name, req.source, req.config)
+    return _strategy_store(request).save(
+        req.id,
+        req.name,
+        req.source,
+        req.config,
+        dialect=req.dialect,
+    )
 
 
 @router.get("/backtest")
@@ -748,7 +778,13 @@ def get_strategy(strategy_id: str, request: Request):
 
 @router.put("/{strategy_id}")
 def update_strategy(strategy_id: str, req: StrategyWrite, request: Request):
-    return _strategy_store(request).save(strategy_id, req.name, req.source, req.config)
+    return _strategy_store(request).save(
+        strategy_id,
+        req.name,
+        req.source,
+        req.config,
+        dialect=req.dialect,
+    )
 
 
 @router.patch("/{strategy_id}")
@@ -797,7 +833,9 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
     source_digest = sha256(strategy["source"].encode("utf-8")).hexdigest()
     return {"data_dir": str(getattr(request.app.state, "datastore", None).data_dir if hasattr(request.app.state, "datastore") else settings.data_dir),
             "source": strategy["source"], "strategy_id": strategy.get("id"), "strategy_name": strategy.get("name"),
-            "source_revision": strategy.get("revision"), "strategy_source_sha256": source_digest, "symbols": legacy_symbols,
+            "source_revision": strategy.get("revision"), "strategy_source_sha256": source_digest,
+            "dialect": strategy.get("dialect", "native"),
+            "compatibility_report": strategy.get("compatibility_report"), "symbols": legacy_symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
             "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
 
@@ -811,6 +849,7 @@ async def backtest_data_health(req: DataHealthWrite, request: Request):
         strategy = _strategy_store(request).get(req.strategy_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="量化策略不存在") from None
+    _validate_strategy_runtime(strategy)
 
     from datetime import time
 
@@ -830,7 +869,11 @@ async def backtest_data_health(req: DataHealthWrite, request: Request):
             date.fromisoformat(payload["end"]),
         )
         engine = FreeStrategyEngine(
-            strategy["source"], payload["timeframe"], config, instruments=instruments,
+            strategy["source"],
+            payload["timeframe"],
+            config,
+            instruments=instruments,
+            dialect=strategy.get("dialect", "native"),
         )
         symbols, universe_source = _resolve_symbols(engine, payload)
         scheduled_intraday = engine.execution_mode == "scheduled" and any(
@@ -862,6 +905,7 @@ def create_backtest(req: BacktestWrite, request: Request):
         strategy = _strategy_store(request).get(req.strategy_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="量化策略不存在") from None
+    _validate_strategy_runtime(strategy)
     job_id = uuid.uuid4().hex[:12]
     payload = _job_payload(req, strategy, request)
     run_root = _run_path(request, job_id)
@@ -967,7 +1011,12 @@ def _paper_loop(account_id: str, root: str) -> None:
         repo = KlineRepository(DataStore(Path(root).parent))
         instruments = _instrument_records(repo, asset_type, timeframe)
         engine = FreeStrategyEngine(
-            source, timeframe, engine_config, state=state.get("state", {}), instruments=instruments,
+            source,
+            timeframe,
+            engine_config,
+            state=state.get("state", {}),
+            instruments=instruments,
+            dialect=str(state.get("dialect") or "native"),
         )
         today = cn_today()
         try:
@@ -1159,6 +1208,7 @@ def list_paper_accounts(request: Request):
 def create_paper_account(req: PaperWrite, request: Request):
     _validate_paper_payload(req, request)
     strategy = _strategy_store(request).get(req.strategy_id)
+    _validate_strategy_runtime(strategy)
     account_id = uuid.uuid4().hex[:12]
     payload = req.model_dump(mode="json")
     risk_config = payload.pop("risk_config")
@@ -1169,6 +1219,8 @@ def create_paper_account(req: PaperWrite, request: Request):
         "strategy_id": req.strategy_id,
         "source_revision": strategy.get("revision"),
         "source_hash": sha256(strategy["source"].encode("utf-8")).hexdigest(),
+        "dialect": strategy.get("dialect", "native"),
+        "compatibility_report": strategy.get("compatibility_report"),
         "market_mode": req.market_mode,
         "risk_config": risk_config,
         "risk_status": {"daily_loss_locked": False, "drawdown_locked": False, "reason": None},

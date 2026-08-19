@@ -162,6 +162,33 @@ def test_continue_account_rejects_mismatched_source(tmp_path):
         continue_account_from_backtest(tmp_path, "paper", "run")
 
 
+def test_continue_account_rejects_mismatched_strategy_dialect(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({
+        "id": "paper",
+        "strategy_id": "five",
+        "source_hash": "source-hash",
+        "status": "paused",
+        "config": CONFIG,
+        "dialect": "joinquant",
+        "compatibility_report": {"version": "jq-v1"},
+    })
+    run = tmp_path / "free_strategy_runs" / "run"
+    write_json(run / "manifest.json", {
+        "strategy_id": "five",
+        "strategy_source_sha256": "source-hash",
+        "payload": {
+            "config": CONFIG,
+            "dialect": "native",
+            "compatibility_report": {"version": None},
+        },
+    })
+    write_json(run / "result.json", {})
+
+    with pytest.raises(ValueError, match="方言"):
+        continue_account_from_backtest(tmp_path, "paper", "run")
+
+
 def test_continue_account_rejects_mismatched_sell_commission(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({

@@ -40,6 +40,7 @@ class FreeStrategyConfig:
     stamp_tax_pct: float = 0.001
     transfer_fee_pct: float = 0.0
     slippage_bps: float = 5.0
+    fixed_slippage: float | None = None
     price_tick: float | None = None
     lot_size: int = 100
     max_exposure_pct: float = 1.0
@@ -900,7 +901,8 @@ class FreeStrategyEngine:
                  instrument_loader: Callable[[str], Iterable[dict[str, Any]]] | None = None,
                  risk_config: RiskConfig | None = None,
                  callback_deadline: Any = None,
-                 callback_label: Any = None) -> None:
+                 callback_label: Any = None,
+                 dialect: Literal["native", "joinquant"] = "native") -> None:
         self.source = source
         self.timeframe = timeframe
         self.config = config or FreeStrategyConfig()
@@ -979,26 +981,17 @@ class FreeStrategyEngine:
         self._limit_board_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self._strong_momentum_snapshot_loader: Callable[[date], dict[str, Any]] | None = None
         self.context = Context(self)
-        namespace: dict[str, Any] = {
-            "__name__": "free_strategy_snapshot",
-            "print": self._strategy_print,
-            "run_daily": self.context.run_daily,
-            "run_weekly": self.context.run_weekly,
-            "run_monthly": self.context.run_monthly,
-            "unschedule_all": self.context.unschedule_all,
-        }
+        from .runtime import create_runtime
+
+        self.runtime = create_runtime(dialect, self, source)
+        self.dialect = self.runtime.dialect
+        self.context.state = self.runtime.restore_state(self.context.state)
+        self.state = copy.deepcopy(self.context.state)
         # Trusted local execution is intentional for this feature: user scripts may import
         # installed packages and local modules. They run in a worker process at the API edge.
-        self._protected_call(
-            "策略加载",
-            lambda: exec(compile(source, "<free_strategy>", "exec"), namespace, namespace),
-        )
-        callback_names = ("initialize", "before_trading_start", "on_bar", "on_quote", "after_trading_end")
-        self._callbacks = {
-            name: namespace[name]
-            for name in callback_names
-            if callable(namespace.get(name))
-        }
+        self._protected_call("策略加载", self.runtime.load)
+        self._callbacks = self.runtime.callbacks
+        self.compatibility_report = self.runtime.compatibility_report
         self.execution_mode = (
             "quote"
             if "on_quote" in self._callbacks
@@ -1337,7 +1330,7 @@ class FreeStrategyEngine:
     def has_market_date(self, day: date) -> bool:
         return day in self._market_dates
 
-    def submit_order(self, side: str, symbol: str, **kwargs: Any) -> None:
+    def submit_order(self, side: str, symbol: str, **kwargs: Any) -> Order:
         self._counter += 1
         order = Order(
             id=f"o{self._counter}",
@@ -1349,11 +1342,12 @@ class FreeStrategyEngine:
         )
         self.account.orders.append(order)
         if self._reject_for_risk(order):
-            return
+            return order
         if self.config.fill_policy in {"close", "current_close"}:
             self._immediate.append(order)
         else:
             self.pending.append((order, self._next_timestamp))
+        return order
 
     def _order_increases_risk(self, order: Order) -> bool:
         if order.side == "buy":
@@ -1554,11 +1548,12 @@ class FreeStrategyEngine:
             order.status = "rejected"
             order.reason = "跌停，卖出未成交"
             return
-        price = (
-            raw_price
-            if limit_up_touch_fill
-            else raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
-        )
+        if limit_up_touch_fill:
+            price = raw_price
+        elif self.config.fixed_slippage is not None:
+            price = raw_price + self.config.fixed_slippage * (1 if side == "buy" else -1)
+        else:
+            price = raw_price * (1 + (self.config.slippage_bps / 10000) * (1 if side == "buy" else -1))
         if self.config.price_tick is not None:
             tick = self.config.price_tick
             price = math.floor(price / tick + 0.5 + 1e-10) * tick
@@ -1566,6 +1561,10 @@ class FreeStrategyEngine:
             price = min(price, bar.limit_up)
         elif side == "sell" and bar.limit_down is not None:
             price = max(price, bar.limit_down)
+        if not math.isfinite(price) or price <= 0:
+            order.status = "rejected"
+            order.reason = "滑点后成交价格无效"
+            return
         buy_commission_rate = self.config.commission_pct if self.config.commission_pct is not None else self.config.fees_pct
         commission_rate = (
             self.config.sell_commission_pct
@@ -1891,10 +1890,20 @@ class FreeStrategyEngine:
             "scheduled_completed": [task.done for task in self.context._scheduled],
             "callbacks_executed": self.callbacks_executed,
             "market_rows_consumed": self.market_rows_consumed,
+            "strategy_runtime": self.runtime.runtime_snapshot(),
         }
 
     def restore_runtime(self, raw: dict[str, Any] | None) -> None:
         raw = raw or {}
+        runtime = raw.get("strategy_runtime")
+        if isinstance(runtime, dict):
+            checkpoint_dialect = runtime.get("dialect")
+            if checkpoint_dialect and checkpoint_dialect != self.dialect:
+                raise ValueError("检查点策略运行方言与当前策略不一致")
+            checkpoint_version = runtime.get("compatibility_version")
+            current_version = self.runtime.runtime_snapshot().get("compatibility_version")
+            if checkpoint_version and current_version and checkpoint_version != current_version:
+                raise ValueError("检查点聚宽兼容层版本与当前策略不一致")
         session_date = raw.get("session_date")
         last_timestamp = raw.get("last_timestamp")
         self._active_session_date = date.fromisoformat(session_date) if session_date else None
@@ -1921,7 +1930,7 @@ class FreeStrategyEngine:
         }
         return {
             "account": self.account.snapshot(),
-            "state": self.context.state,
+            "state": self.runtime.serialize_state(self.context.state),
             "runtime": self.runtime_snapshot(),
             "universe": self.universe,
             "valuation_prices": valuation_prices,
@@ -1954,7 +1963,9 @@ class FreeStrategyEngine:
 
     def restore_checkpoint(self, raw: dict[str, Any]) -> None:
         self.account.restore(raw.get("account", {}))
-        self.context.state = copy.deepcopy(raw.get("state", self.context.state))
+        self.context.state = self.runtime.restore_state(
+            copy.deepcopy(raw.get("state", self.context.state))
+        )
         self.state = copy.deepcopy(self.context.state)
         if raw.get("universe"):
             self.context.set_universe(raw["universe"])
@@ -2646,7 +2657,10 @@ class FreeStrategyEngine:
                 "fills": [asdict(v) for v in self.account.fills], "attribution": attribution,
                 "capacity_analysis": capacity_analysis,
                 "corporate_actions": self.account.corporate_actions,
-                "positions": self.account.positions, "logs": self.logs, "state": self.state,
+                "positions": self.account.positions, "logs": self.logs,
+                "state": self.runtime.serialize_state(self.state),
+                "dialect": self.dialect,
+                "compatibility_report": self.compatibility_report,
                 "execution_mode": self.execution_mode,
                 "scheduled_times": self.scheduled_times,
                 "callbacks_executed": self.callbacks_executed,

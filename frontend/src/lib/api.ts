@@ -2067,11 +2067,27 @@ export interface StrategyAlertEvent {
 }
 
 // ===== 量化策略 =====
+export type StrategyDialect = 'native' | 'joinquant'
+
+export interface StrategyCompatibilityReport {
+  version: string | null
+  dialect: StrategyDialect
+  summary_status: 'supported' | 'degraded' | 'unavailable'
+  source_sha256?: string
+  apis: Array<{
+    name: string
+    status: 'supported' | 'emulated' | 'degraded' | 'unavailable'
+    detail: string
+  }>
+}
+
 export interface FreeStrategySummary {
   id: string
   name: string
   revision: number
   config: Record<string, any>
+  dialect?: StrategyDialect
+  compatibility_report?: StrategyCompatibilityReport
   created_at?: string
   updated_at?: string
   source?: string
@@ -2135,6 +2151,8 @@ export interface PaperAccount {
   strategy_id: string
   source_revision: number
   source_hash: string
+  dialect?: StrategyDialect
+  compatibility_report?: StrategyCompatibilityReport
   market_mode: PaperMarketMode | 'bar_5m' | 'bar_30m'
   status: 'running' | 'paused' | 'stopped'
   system_notify_enabled?: boolean
@@ -2436,9 +2454,9 @@ export const api = {
   freeStrategies: () => request<{ strategies: FreeStrategySummary[]; templates: { id: string; name: string }[] }>('/api/free-strategies'),
   freeStrategy: (id: string) => request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`),
   freeTemplates: () => request<{ templates: (FreeStrategySummary & { id: string; name: string; source: string })[] }>('/api/free-strategies/templates'),
-  saveFreeStrategy: (payload: { id?: string; name: string; source: string; config?: Record<string, any> }) =>
+  saveFreeStrategy: (payload: { id?: string; name: string; source: string; config?: Record<string, any>; dialect?: StrategyDialect }) =>
     request<FreeStrategySummary>('/api/free-strategies', { method: 'POST', body: JSON.stringify(payload) }),
-  updateFreeStrategy: (id: string, payload: { name: string; source: string; config?: Record<string, any> }) =>
+  updateFreeStrategy: (id: string, payload: { name: string; source: string; config?: Record<string, any>; dialect?: StrategyDialect }) =>
     request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
   renameFreeStrategy: (id: string, name: string) =>
     request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),

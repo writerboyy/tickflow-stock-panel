@@ -59,6 +59,17 @@ def _validate_compatibility(
         raise ValueError("回测策略与模拟账户策略不一致")
     if account.get("source_hash") != manifest.get("strategy_source_sha256"):
         raise ValueError("回测源码与模拟账户源码不一致")
+    payload = manifest.get("payload") if isinstance(manifest.get("payload"), dict) else {}
+    account_dialect = str(account.get("dialect") or "native")
+    backtest_dialect = str(payload.get("dialect") or "native")
+    if account_dialect != backtest_dialect:
+        raise ValueError("回测与模拟账户策略运行方言不一致")
+    account_report = account.get("compatibility_report") if isinstance(account.get("compatibility_report"), dict) else {}
+    backtest_report = payload.get("compatibility_report") if isinstance(payload.get("compatibility_report"), dict) else {}
+    account_version = account_report.get("version")
+    backtest_version = backtest_report.get("version")
+    if account_version and backtest_version and account_version != backtest_version:
+        raise ValueError("回测与模拟账户聚宽兼容层版本不一致")
     paper_config = account.get("config", {})
     backtest_config = manifest.get("payload", {}).get("config", {})
     mismatches = [

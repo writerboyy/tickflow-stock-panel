@@ -1240,6 +1240,7 @@ def _engine_from_state(
         risk_config=risk,
         callback_deadline=callback_deadline,
         callback_label=callback_label,
+        dialect=str(state.get("dialect") or "native"),
     )
     runtime_timestamp = (
         state.get("last_bar")
