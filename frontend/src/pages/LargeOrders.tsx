@@ -18,7 +18,7 @@ import { PositionRiskImportDialog } from '@/components/PositionRiskImportDialog'
 import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS, PositionRiskRulesDialog } from '@/components/PositionRiskRulesDialog'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toast } from '@/components/Toast'
-import { QmtTradePanel, type QmtTradePreset } from '@/components/QmtTradePanel'
+import { QmtTradePanel, type QmtRiskTradeContext, type QmtTradePreset } from '@/components/QmtTradePanel'
 import {
   api,
   type PositionRiskOptions,
@@ -203,42 +203,6 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
   const active = status === 'websocket'
   const warning = status === 'polling_degraded' || status === 'reconnecting'
   return <span className={cn('h-2 w-2 rounded-full', active ? 'bg-bear' : warning ? 'bg-warning' : 'bg-muted')} />
-}
-
-function ConfirmRiskAction({ event, row, tradeReady }: { event: PositionRiskEvent; row: PositionRiskPosition; tradeReady: boolean }) {
-  const queryClient = useQueryClient()
-  const action = event.trade_action === 'BUY' ? 'BUY' : 'SELL'
-  const actionPct = Math.max(0, Math.min(100, Number(event.action_pct ?? 0)))
-  const volume = action === 'SELL'
-    ? Math.floor(row.available * actionPct / 100 / 100) * 100
-    : 100
-  const mutation = useMutation({
-    mutationFn: () => api.qmtConfirmRiskAction({
-      fingerprint: event.fingerprint!, symbol: row.symbol, action, volume,
-    }),
-    onSuccess: result => {
-      toast(`委托结果：${qmtOrderStatus(result.order.status)}`, 'success')
-      queryClient.invalidateQueries({ queryKey: QK.positionRiskQmtOrders })
-      queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt })
-      queryClient.invalidateQueries({ queryKey: QK.positionRiskEvents })
-    },
-    onError: error => toast(error instanceof Error ? error.message : '确认委托失败，请检查行情和 QMT 状态'),
-  })
-  const disabled = !event.fingerprint || !event.action_eligible || !tradeReady || volume < 100 || mutation.isPending
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => {
-        if (!window.confirm(`确认${action === 'BUY' ? '买入' : '卖出'} ${row.name} ${volume} 股？确认后将按最新行情生成限价委托。`)) return
-        mutation.mutate()
-      }}
-      className={cn('h-7 rounded border px-2 text-[10px]', action === 'BUY' ? 'border-bull/50 text-bull' : 'border-bear/50 text-bear', 'disabled:cursor-not-allowed disabled:opacity-40')}
-      title={!tradeReady ? '请先开启实盘模式并确认 QMT 已连接' : volume < 100 ? '可用数量不足一手' : '确认后直接提交 QMT 限价委托'}
-    >
-      {mutation.isPending ? '提交中…' : `确认${action === 'BUY' ? '买入' : '卖出'}`}
-    </button>
-  )
 }
 
 function PositionInspector({ row, options, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; onClose: () => void }) {
@@ -611,6 +575,7 @@ export function LargeOrders() {
   const [selected, setSelected] = useState<PositionRiskPosition | null>(null)
   const [tradeRow, setTradeRow] = useState<PositionRiskPosition | null>(null)
   const [tradePreset, setTradePreset] = useState<QmtTradePreset | null>(null)
+  const [tradeRiskContext, setTradeRiskContext] = useState<QmtRiskTradeContext | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
@@ -652,19 +617,35 @@ export function LargeOrders() {
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
   const runtimeReason = compactRuntimeReason(data.runtime.reason)
-  const tradeReady = qmt.data?.state === 'ready' && qmt.data.trade_enabled === true
   const openTradeForRow = (row: PositionRiskPosition) => {
     setSelected(null)
     setTradeRow(row)
     setTradePreset(null)
+    setTradeRiskContext(null)
   }
-  const openTradeForEvent = (event: PositionRiskEvent) => {
+  const openTradeForEvent = (event: PositionRiskEvent, enforceRisk = false) => {
     if (!event.symbol || (event.trade_action !== 'BUY' && event.trade_action !== 'SELL')) return
     const row = data.positions.find(item => item.symbol === event.symbol)
     if (!row) return
+    const action = event.trade_action
+    const price = event.price ?? row.price
+    const actionPct = Math.max(0, Math.min(100, Number(event.action_pct ?? 0)))
     setSelected(null)
     setTradeRow(row)
-    setTradePreset({ action: event.trade_action, price: event.price ?? row.price, volume: 100 })
+    setTradePreset({
+      action,
+      price,
+      allocationMode: 'fixed',
+      allocationValue: price != null && Number.isFinite(price) ? price * 100 : 10_000,
+    })
+    setTradeRiskContext(
+      enforceRisk && event.fingerprint
+        ? {
+            fingerprint: event.fingerprint,
+            maxVolume: action === 'SELL' ? Math.floor(row.available * actionPct / 100 / 100) * 100 : null,
+          }
+        : null,
+    )
   }
 
   return (
@@ -748,7 +729,7 @@ export function LargeOrders() {
           <time className="font-mono text-muted"><span className="block">{new Date(event.ts).toLocaleString('zh-CN')}</span>{(event.occurrence_count ?? 1) > 1 && event.first_ts ? <span className="mt-0.5 block text-[10px]">首次 {new Date(event.first_ts).toLocaleTimeString('zh-CN')}</span> : null}</time>
           {event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}
           <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? `做T${event.trade_action === 'BUY' ? '买入' : event.trade_action === 'SELL' ? '卖出' : ''}` : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span></span>
-          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return event.action_eligible ? <ConfirmRiskAction event={event} row={row} tradeReady={tradeReady} /> : <button type="button" onClick={() => openTradeForEvent(event)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title="打开手动下单面板">手动下单</button> })() : null}</span>
+          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return <button type="button" onClick={() => openTradeForEvent(event, event.action_eligible === true)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title={event.action_eligible ? '打开统一交易面板并保留风控确认' : '打开手动下单面板'}>{event.action_eligible ? '确认委托' : '手动下单'}</button> })() : null}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 
@@ -781,7 +762,7 @@ export function LargeOrders() {
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
       <PositionRiskRulesDialog open={rulesOpen} portfolio={data} options={options.data} onClose={() => setRulesOpen(false)} />
       {selected && <PositionInspector row={selected} options={options.data} onClose={() => setSelected(null)} />}
-      {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} onClose={() => { setTradeRow(null); setTradePreset(null) }} />}
+      {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} riskContext={tradeRiskContext} onClose={() => { setTradeRow(null); setTradePreset(null); setTradeRiskContext(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )

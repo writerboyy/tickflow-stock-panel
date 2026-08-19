@@ -57,6 +57,14 @@ def _float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+_ALLOCATION_RATIOS = {
+    "quarter": 0.25,
+    "third": 1 / 3,
+    "half": 0.5,
+}
+_ALLOCATION_MODES = frozenset((*_ALLOCATION_RATIOS, "fixed"))
+
+
 def _parse_broker_time(value: Any, anchor: str | None) -> str | None:
     anchor_value = datetime.now(_CN_TZ)
     if anchor:
@@ -400,14 +408,14 @@ class QmtTradingService:
         return result
 
     @staticmethod
-    def _normalize_remote_order(order: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_remote_order(order: dict[str, Any], anchor: str | None = None) -> dict[str, Any]:
         value = dict(order)
         value["symbol"] = str(value.get("symbol") or value.get("stock_code") or "").strip().upper()
         value["order_sys_id"] = str(
             value.get("order_sys_id") or value.get("order_sysid") or value.get("order_id") or "",
         ) or None
         value["user_order_id"] = str(value.get("user_order_id") or value.get("remark") or "") or None
-        broker_at, broker_raw, broker_field = _broker_time(value, value.get("created_at"))
+        broker_at, broker_raw, broker_field = _broker_time(value, anchor or value.get("created_at"))
         if broker_raw is not None:
             value["broker_order_at"] = broker_at
             value["broker_order_time_raw"] = broker_raw
@@ -451,6 +459,10 @@ class QmtTradingService:
             if current is None:
                 merged_remote.append(remote)
                 continue
+            remote = self._normalize_remote_order(
+                raw,
+                str(current.get("created_at") or current.get("system_order_at") or "") or None,
+            )
             merged = dict(current)
             merged.update({key: value for key, value in remote.items() if value is not None})
             merged["idempotency_key"] = current["idempotency_key"]
@@ -590,6 +602,78 @@ class QmtTradingService:
                 raise ValueError("QMT 可用资金不足，已拒绝买入")
         return {"action": action, "symbol": symbol, "volume": volume, "price": price, "price_type": price_type}
 
+    def _allocation_preview(
+        self,
+        request: dict[str, Any],
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Calculate a lot-sized order from fresh cash/position availability."""
+        action = str(request.get("action") or "").upper()
+        symbol = str(request.get("symbol") or request.get("stock_code") or "").strip().upper()
+        if action not in {"BUY", "SELL"} or not symbol:
+            raise ValueError("交易方向和证券代码不能为空")
+        price_type = str(request.get("price_type") or "LIMIT").upper()
+        price = _float(request.get("price")) or 0.0
+        if price_type in {"LATEST", "LATEST_PRICE"}:
+            price = _float(request.get("reference_price")) or price
+        if price <= 0:
+            raise ValueError("金额下单需要有效的参考价格")
+        mode = str(request.get("allocation_mode") or "").strip().lower()
+        if mode not in _ALLOCATION_MODES:
+            raise ValueError("金额分配方式必须是可用金额四分之一、三分之一、二分之一或固定金额")
+
+        if action == "BUY":
+            basis_amount = _float((snapshot.get("account") or {}).get("cash"))
+            if basis_amount is None or basis_amount < 0:
+                raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
+            available_volume = None
+            basis_label = "可用资金"
+        else:
+            row = next(
+                (item for item in snapshot.get("positions") or [] if item.get("symbol") == symbol),
+                None,
+            )
+            available_volume = int((row or {}).get("available") or 0)
+            if row is None or available_volume <= 0:
+                raise ValueError("QMT 可用持仓不足，无法计算卖出金额")
+            basis_amount = available_volume * price
+            basis_label = "可用持仓市值"
+
+        if mode == "fixed":
+            requested_amount = _float(request.get("allocation_value"))
+            if requested_amount is None or requested_amount <= 0:
+                raise ValueError("固定金额必须大于 0")
+        else:
+            requested_amount = basis_amount * _ALLOCATION_RATIOS[mode]
+        target_amount = min(requested_amount, basis_amount)
+        volume = int(target_amount / price / 100) * 100
+        volume = min(volume, self.max_order_volume)
+        if available_volume is not None:
+            volume = min(volume, (available_volume // 100) * 100)
+        actual_amount = round(volume * price, 2)
+        return {
+            "action": action,
+            "symbol": symbol,
+            "price": price,
+            "price_type": price_type,
+            "allocation_mode": mode,
+            "allocation_value": requested_amount if mode == "fixed" else None,
+            "basis_label": basis_label,
+            "basis_amount": round(basis_amount, 2),
+            "target_amount": round(target_amount, 2),
+            "actual_amount": actual_amount,
+            "volume": volume,
+            "max_order_volume": self.max_order_volume,
+            "available_volume": available_volume,
+            "capped": target_amount < requested_amount or volume * price < target_amount,
+            "reason": "金额不足一手" if volume < 100 else None,
+        }
+
+    def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        action = str(request.get("action") or "").upper()
+        snapshot = self._order_preflight(action)
+        return self._allocation_preview(request, snapshot)
+
     def _order_preflight(self, action: str) -> dict[str, Any]:
         if action == "BUY":
             asset = self.client.call("get_asset", {"account_id": self.client.account_id})
@@ -628,6 +712,12 @@ class QmtTradingService:
                 return existing
             action = str(request.get("action") or "").upper()
             snapshot = self._order_preflight(action)
+            allocation = None
+            if request.get("allocation_mode"):
+                allocation = self._allocation_preview(request, snapshot)
+                request = {**request, "volume": allocation["volume"]}
+                if allocation["volume"] < 100:
+                    raise ValueError(allocation["reason"] or "金额不足一手")
             normalized = self._validate_order(request, snapshot)
             order_tag = f"{strategy_name}:{idempotency_key}"
             params = {
@@ -652,6 +742,14 @@ class QmtTradingService:
                 "broker_order_time_raw": None,
                 "broker_order_time_field": None,
             }
+            if allocation is not None:
+                row.update({
+                    "allocation_mode": allocation["allocation_mode"],
+                    "allocation_value": allocation["allocation_value"],
+                    "allocation_basis_amount": allocation["basis_amount"],
+                    "allocation_target_amount": allocation["target_amount"],
+                    "estimated_amount": allocation["actual_amount"],
+                })
             self._remember_order(row)
             row["qmt_submit_at"] = _now()
             try:

@@ -997,6 +997,24 @@ export interface QmtOrder {
   [key: string]: any
 }
 
+export interface QmtOrderPreview {
+  action: 'BUY' | 'SELL' | string
+  symbol: string
+  price: number
+  price_type: string
+  allocation_mode: string
+  allocation_value: number | null
+  basis_label: string
+  basis_amount: number
+  target_amount: number
+  actual_amount: number
+  volume: number
+  max_order_volume: number
+  available_volume: number | null
+  capped: boolean
+  reason: string | null
+}
+
 export interface PositionRiskOcrRow {
   code: string
   symbol: string | null
@@ -2683,7 +2701,9 @@ export const api = {
   qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
   qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
   qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
-  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume: number; price?: number | null; price_type: string; idempotency_key: string }) =>
+  qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null }, quiet = false) =>
+    request<{ ok: boolean; preview: QmtOrderPreview }>('/api/position-risk/qmt/orders/preview', { method: 'POST', body: JSON.stringify(payload), quiet }),
+  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume?: number | null; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode?: string | null; allocation_value?: number | null; idempotency_key: string }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
   qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/confirm-action', { method: 'POST', body: JSON.stringify(payload) }),

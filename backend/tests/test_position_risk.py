@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import polars as pl
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.api.position_risk import _collapse_timeline_events, router as position_risk_router
 from app.services import alert_store
@@ -494,6 +496,142 @@ def test_qmt_trading_service_enforces_one_lot_and_sell_available_volume(tmp_path
     with pytest.raises(ValueError, match="可用持仓不足"):
         service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, {"positions": [{"symbol": "600036.SH", "available": 0}]})
     assert service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, snapshot)["volume"] == 100
+
+
+def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
+    service = QmtTradingService(
+        tmp_path,
+        _qmt_settings(qmt_max_order_lots=1000),
+    )
+
+    def fake_call(method, _params):
+        if method == "get_asset":
+            return {"cash": 120_000}
+        if method == "get_positions":
+            return {"600036.SH": {"stock_code": "600036.SH", "available": 1_000}}
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+
+    buy = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+    assert buy["basis_amount"] == 120_000
+    assert buy["target_amount"] == 30_000
+    assert buy["volume"] == 800
+    assert buy["actual_amount"] == 28_000
+
+    sell = service.preview_order({
+        "action": "SELL",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "fixed",
+        "allocation_value": 5_000,
+    })
+    assert sell["basis_label"] == "可用持仓市值"
+    assert sell["basis_amount"] == 35_000
+    assert sell["volume"] == 100
+    assert sell["actual_amount"] == 3_500
+
+
+def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):
+    service = QmtTradingService(
+        tmp_path,
+        _qmt_settings(qmt_trade_enabled=True, qmt_max_order_lots=1000),
+    )
+    service.trade_enabled = True
+    calls = []
+
+    def fake_call(method, params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 120_000}
+        if method == "submit_orders_batch":
+            assert params["orders"][0]["volume"] == 800
+            return [{"success": True, "accepted": True, "order_sys_id": "allocated-1"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "allocated-request-1",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+
+    assert result["volume"] == 800
+    assert result["estimated_amount"] == 28_000
+    assert result["allocation_basis_amount"] == 120_000
+    assert calls == ["get_asset", "submit_orders_batch"]
+
+
+def test_qmt_order_preview_api_maps_success_and_service_errors():
+    class FakeQmt:
+        def preview_order(self, payload):
+            if payload["symbol"] == "ERROR.SH":
+                raise ValueError("固定金额必须大于 0")
+            if payload["symbol"] == "OFFLINE.SH":
+                raise QmtRpcError("QMT 资产响应不可用")
+            return {
+                "action": payload["action"],
+                "symbol": payload["symbol"],
+                "price": payload["price"],
+                "price_type": payload["price_type"],
+                "allocation_mode": payload["allocation_mode"],
+                "allocation_value": None,
+                "basis_label": "可用资金",
+                "basis_amount": 120_000,
+                "target_amount": 30_000,
+                "actual_amount": 28_000,
+                "volume": 800,
+                "max_order_volume": 100_000,
+                "available_volume": None,
+                "capped": True,
+                "reason": None,
+            }
+
+    app = FastAPI()
+    app.include_router(position_risk_router)
+    app.state.qmt_trading_service = FakeQmt()
+    client = TestClient(app)
+
+    response = client.post("/api/position-risk/qmt/orders/preview", json={
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+    assert response.status_code == 200
+    assert response.json()["preview"]["volume"] == 800
+
+    invalid = client.post("/api/position-risk/qmt/orders/preview", json={
+        "action": "BUY",
+        "symbol": "ERROR.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "fixed",
+        "allocation_value": 100,
+    })
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "固定金额必须大于 0"
+
+    unavailable = client.post("/api/position-risk/qmt/orders/preview", json={
+        "action": "BUY",
+        "symbol": "OFFLINE.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"] == "QMT 资产响应不可用"
 
 
 def test_qmt_runtime_trade_switch_defaults_to_authorized_state_and_requires_sync_to_reenable(tmp_path: Path):

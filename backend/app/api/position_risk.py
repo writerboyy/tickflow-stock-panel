@@ -38,10 +38,23 @@ class OverridePayload(BaseModel):
 class QmtOrderPayload(BaseModel):
     action: str
     symbol: str
-    volume: int
+    volume: int | None = Field(default=None, ge=100)
     price: float | None = None
     price_type: str = "LIMIT"
+    reference_price: float | None = Field(default=None, gt=0)
+    allocation_mode: str | None = None
+    allocation_value: float | None = Field(default=None, gt=0)
     idempotency_key: str = Field(min_length=8, max_length=120)
+
+
+class QmtOrderPreviewPayload(BaseModel):
+    action: str
+    symbol: str
+    price: float | None = None
+    price_type: str = "LIMIT"
+    reference_price: float | None = Field(default=None, gt=0)
+    allocation_mode: str = "quarter"
+    allocation_value: float | None = Field(default=None, gt=0)
 
 
 class QmtTradeTogglePayload(BaseModel):
@@ -358,6 +371,17 @@ def qmt_orders(request: Request):
         return {"orders": _qmt(request).list_orders()}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, str(exc)) from exc
+
+
+@router.post("/qmt/orders/preview")
+def qmt_preview_order(payload: QmtOrderPreviewPayload, request: Request):
+    try:
+        preview = _qmt(request).preview_order(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "preview": preview}
 
 
 @router.post("/qmt/orders")

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -13,10 +13,19 @@ export type QmtTradeInstrument = {
   price?: number | null
 }
 
+export type QmtAllocationMode = 'quarter' | 'third' | 'half' | 'fixed'
+
 export type QmtTradePreset = {
   action?: 'BUY' | 'SELL'
   price?: number | null
   volume?: number | null
+  allocationMode?: QmtAllocationMode
+  allocationValue?: number | null
+}
+
+export type QmtRiskTradeContext = {
+  fingerprint: string
+  maxVolume?: number | null
 }
 
 const QMT_ORDER_STATUS: Record<string, string> = {
@@ -37,6 +46,15 @@ const QMT_ORDER_STATUS: Record<string, string> = {
   '57': '废单',
 }
 
+const ALLOCATION_LABELS: Record<QmtAllocationMode, string> = {
+  quarter: '可用金额 1/4',
+  third: '可用金额 1/3',
+  half: '可用金额 1/2',
+  fixed: '固定金额',
+}
+
+const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
 function qmtOrderStatus(value?: string) {
   return value ? QMT_ORDER_STATUS[value] ?? `状态 ${value}` : '状态未知'
 }
@@ -45,13 +63,22 @@ function defaultPrice(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? String(value) : ''
 }
 
+function initialAllocationValue(instrument: QmtTradeInstrument, preset?: QmtTradePreset | null) {
+  if (preset?.allocationValue != null) return preset.allocationValue
+  const price = preset?.price ?? instrument.price
+  if (preset?.volume != null && price != null && Number.isFinite(price)) return preset.volume * price
+  return 10_000
+}
+
 export function QmtTradePanel({
   instrument,
   preset,
+  riskContext,
   onClose,
 }: {
   instrument: QmtTradeInstrument
   preset?: QmtTradePreset | null
+  riskContext?: QmtRiskTradeContext | null
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
@@ -65,38 +92,64 @@ export function QmtTradePanel({
   const [tradeAction, setTradeAction] = useState<'BUY' | 'SELL'>(preset?.action ?? 'SELL')
   const [tradePrice, setTradePrice] = useState(defaultPrice(preset?.price ?? instrument.price))
   const [tradePriceType, setTradePriceType] = useState<'LIMIT' | 'LATEST'>('LIMIT')
-  const [tradeVolume, setTradeVolume] = useState(preset?.volume ?? 100)
-
-  useEffect(() => {
-    setTradeAction(preset?.action ?? 'SELL')
-    setTradePrice(defaultPrice(preset?.price ?? instrument.price))
-    setTradePriceType('LIMIT')
-    setTradeVolume(preset?.volume ?? 100)
-  }, [instrument.symbol, instrument.price, preset?.action, preset?.price, preset?.volume])
+  const [allocationMode, setAllocationMode] = useState<QmtAllocationMode>(preset?.allocationMode ?? 'quarter')
+  const [allocationValue, setAllocationValue] = useState(initialAllocationValue(instrument, preset))
 
   const limitPrice = Number(tradePrice)
-  const validVolume = Number.isInteger(tradeVolume) && tradeVolume >= 100 && tradeVolume % 100 === 0
-  const validLimitPrice = tradePriceType === 'LATEST' || (Number.isFinite(limitPrice) && limitPrice > 0)
+  const referencePrice = tradePriceType === 'LIMIT' ? limitPrice : Number(instrument.price)
+  const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
+  const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
+  const previewPayload = {
+    action: tradeAction,
+    symbol: instrument.symbol,
+    price: tradePriceType === 'LIMIT' ? limitPrice : null,
+    price_type: tradePriceType,
+    reference_price: validReferencePrice ? referencePrice : null,
+    allocation_mode: allocationMode,
+    allocation_value: allocationMode === 'fixed' ? allocationValue : null,
+  }
+  const preview = useQuery({
+    queryKey: QK.positionRiskQmtPreview(
+      instrument.symbol,
+      tradeAction,
+      tradePriceType,
+      validReferencePrice ? referencePrice : null,
+      allocationMode,
+      allocationMode === 'fixed' ? allocationValue : null,
+    ),
+    queryFn: () => api.qmtPreviewOrder(previewPayload, true),
+    enabled: qmt.data?.configured === true && validReferencePrice && validAllocation,
+    retry: false,
+  })
+  const serverPreview = preview.data?.preview
+  const riskMaxVolume = riskContext?.maxVolume == null
+    ? null
+    : Math.floor(Math.max(0, riskContext.maxVolume) / 100) * 100
+  const tradeVolume = serverPreview
+    ? Math.min(serverPreview.volume, riskMaxVolume ?? serverPreview.volume)
+    : 0
+  const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
   const tradeReady = qmt.data?.trade_enabled === true && qmt.data.state === 'ready'
-  const canSubmit = tradeReady && validVolume && validLimitPrice
+  const canSubmit = tradeReady && tradeVolume >= 100 && validReferencePrice && validAllocation && !preview.isFetching
   const instrumentOrders = useMemo(
     () => (orders.data?.orders ?? []).filter(order => order.symbol === instrument.symbol && order.order_sys_id).slice(0, 5),
     [instrument.symbol, orders.data?.orders],
   )
 
   const tradeMutation = useMutation({
-    mutationFn: () => api.qmtSubmitOrder({
-      action: tradeAction,
-      symbol: instrument.symbol,
-      volume: tradeVolume,
-      price: tradePriceType === 'LIMIT' ? limitPrice : null,
-      price_type: tradePriceType,
-      idempotency_key: `manual-${instrument.symbol}-${tradeAction}-${Date.now()}`,
-    }),
+    mutationFn: () => riskContext
+      ? api.qmtConfirmRiskAction({ fingerprint: riskContext.fingerprint, symbol: instrument.symbol, action: tradeAction, volume: tradeVolume })
+      : api.qmtSubmitOrder({
+          ...previewPayload,
+          volume: tradeVolume,
+          idempotency_key: `manual-${instrument.symbol}-${tradeAction}-${Date.now()}`,
+        }),
     onSuccess: result => {
       toast(`委托结果：${qmtOrderStatus(result.order.status)}`, 'success')
       queryClient.invalidateQueries({ queryKey: QK.positionRiskQmtOrders })
       queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt })
+      queryClient.invalidateQueries({ queryKey: QK.positionRisk })
+      queryClient.invalidateQueries({ queryKey: QK.positionRiskEvents })
     },
     onError: error => toast(error instanceof Error ? error.message : '委托失败，请检查 QMT 状态和交易开关'),
   })
@@ -110,12 +163,16 @@ export function QmtTradePanel({
   })
 
   const submit = () => {
-    if (!validVolume) {
-      toast('数量必须是至少 100 股的整手')
+    if (!validReferencePrice) {
+      toast('请输入有效价格')
       return
     }
-    if (!validLimitPrice) {
-      toast('请输入有效限价')
+    if (!validAllocation) {
+      toast('固定金额必须大于 0')
+      return
+    }
+    if (tradeVolume < 100) {
+      toast(serverPreview?.reason || (preview.error instanceof Error ? preview.error.message : '可用金额不足一手'))
       return
     }
     if (!tradeReady) {
@@ -123,8 +180,8 @@ export function QmtTradePanel({
       return
     }
     const actionLabel = tradeAction === 'BUY' ? '买入' : '卖出'
-    const priceLabel = tradePriceType === 'LATEST' ? '最新价' : `限价 ${limitPrice.toFixed(3)}`
-    if (!window.confirm(`确认${actionLabel} ${instrument.name || instrument.symbol} ${tradeVolume} 股（${priceLabel}）？该操作将发送至真实 QMT 账户。`)) return
+    const priceLabel = tradePriceType === 'LATEST' ? `最新价（参考 ${referencePrice.toFixed(3)}）` : `限价 ${limitPrice.toFixed(3)}`
+    if (!window.confirm(`确认${actionLabel} ${instrument.name || instrument.symbol} ${tradeVolume} 股，预计 ${MONEY.format(actualAmount)} 元（${priceLabel}）？该操作将发送至真实 QMT 账户。`)) return
     tradeMutation.mutate()
   }
 
@@ -149,17 +206,26 @@ export function QmtTradePanel({
         <section className="border-y border-border py-3">
           <div className="flex items-center justify-between gap-3"><h3 className="text-xs font-semibold text-secondary">委托参数</h3><span className={cn('text-right text-[10px]', tradeReady ? 'text-warning' : 'text-muted')} title={qmt.data?.reason}>{readiness}</span></div>
           <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-muted">
-            <label>方向<select value={tradeAction} onChange={event => setTradeAction(event.target.value as 'BUY' | 'SELL')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
-            <label>数量<input type="number" min="100" step="100" value={tradeVolume} onChange={event => setTradeVolume(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label>
+            <label>方向<select value={tradeAction} disabled={Boolean(riskContext)} onChange={event => setTradeAction(event.target.value as 'BUY' | 'SELL')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px] disabled:opacity-60"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
+            <label>资金方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="quarter">可用金额 1/4</option><option value="third">可用金额 1/3</option><option value="half">可用金额 1/2</option><option value="fixed">固定金额</option></select></label>
             <label>价格方式<select value={tradePriceType} onChange={event => setTradePriceType(event.target.value as 'LIMIT' | 'LATEST')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="LIMIT">限价</option><option value="LATEST">最新价</option></select></label>
             <label className={tradePriceType === 'LATEST' ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={tradePrice} disabled={tradePriceType === 'LATEST'} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
+            {allocationMode === 'fixed' ? <label className="col-span-2">固定金额<input type="number" min="100" step="100" value={allocationValue} onChange={event => setAllocationValue(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label> : null}
           </div>
-          <button type="button" disabled={!canSubmit || tradeMutation.isPending} onClick={submit} className={cn('mt-2 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
+
+          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-border py-3 text-[10px]">
+            <div><span className="text-muted">{serverPreview?.basis_label || (tradeAction === 'BUY' ? '可用资金' : '可用持仓市值')}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
+            <div><span className="text-muted">{ALLOCATION_LABELS[allocationMode]}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
+            <div><span className="text-muted">委托数量</span><div className="mt-0.5 font-mono text-foreground">{tradeVolume >= 100 ? `${tradeVolume.toLocaleString()} 股` : '—'}</div></div>
+            <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>
+          </div>
+          {riskMaxVolume != null && serverPreview && serverPreview.volume > riskMaxVolume ? <p className="mt-2 text-[10px] text-warning">已按本次风控动作上限缩减至 {riskMaxVolume.toLocaleString()} 股。</p> : null}
+          {serverPreview?.capped && (!riskMaxVolume || serverPreview.volume <= riskMaxVolume) ? <p className="mt-2 text-[10px] text-muted">目标金额已按整手、可用余额和单笔最大手数向下调整。</p> : null}
+          {preview.isError ? <p className="mt-2 text-[10px] text-warning">{preview.error instanceof Error ? preview.error.message : '委托金额暂时无法计算'}</p> : null}
+          <button type="button" disabled={!canSubmit || tradeMutation.isPending} onClick={submit} className={cn('mt-3 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}
           </button>
-          {!validVolume ? <p className="mt-2 text-[10px] text-warning">数量需为至少 100 股的整手。</p> : null}
-          {!validLimitPrice ? <p className="mt-2 text-[10px] text-warning">限价不能为空且必须大于 0。</p> : null}
-          <p className="mt-2 text-[10px] leading-4 text-muted">提交前会再次确认。该委托进入真实 QMT 账户，成交结果以券商回报为准。</p>
+          <p className="mt-2 text-[10px] leading-4 text-muted">金额和股数由 QMT 最新可用资金或可用持仓计算，并向下取 100 股整手。成交结果以券商回报为准。</p>
         </section>
 
         {instrumentOrders.length ? <section className="border-b border-border py-3">
