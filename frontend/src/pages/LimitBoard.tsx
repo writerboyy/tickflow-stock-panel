@@ -694,18 +694,25 @@ function SectorStrengthTable({
               const selected = item.thscode.toUpperCase() === selectedStockSymbol
               const atLimit = quote?.last_price != null && quote.limit_up != null
                 && quote.last_price >= quote.limit_up - 0.001
-              return <button
+              return <div
                 key={item.thscode}
-                type="button"
+                role="button"
+                tabIndex={0}
                 aria-pressed={selected}
                 onClick={() => selectStock(item.thscode)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    selectStock(item.thscode)
+                  }
+                }}
                 className={`h-[68px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
                 title="联动强势股、实时板块与成分股"
               >
-                <div className="flex items-center justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{item.name || item.ticker}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span></div>
+                <div className="flex items-center justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span></div>
                 <div className="mt-0.5 flex items-center justify-between gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span><span className="shrink-0"><span className="text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span> <span className={financialTone(quote?.change_pct)}>{scorePct(quote?.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></span></div>
                 <div className="mt-0.5 truncate font-mono text-[8px] text-muted">热度 {item.heat == null ? '--' : item.heat.toFixed(0)} · 排名变化 {item.rank_change == null ? '--' : `${item.rank_change > 0 ? '+' : ''}${item.rank_change}`}</div>
-              </button>
+              </div>
             })}
           </div>
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取热股雷达' : hotError ? '热股雷达暂不可用' : '暂无热股数据'}</div>}
@@ -729,20 +736,27 @@ function SectorStrengthTable({
               const displayThemes = matchedPlates.length
                 ? matchedPlates.slice(0, 2).map(row => row.plate_name).filter((value): value is string => Boolean(value))
                 : themes(signal.concept).slice(0, 2)
-              return <button
+              return <div
                 key={signal.symbol}
-                type="button"
+                role="button"
+                tabIndex={0}
                 aria-pressed={selected}
                 onClick={() => selectStock(signal.symbol)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    selectStock(signal.symbol)
+                  }
+                }}
                 className={`h-[92px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
               >
-                <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-medium">{signal.name || signal.symbol}</span><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{rebound ? '反包' : '首板'}</span><span className="block font-mono text-accent" title="强势股打分最终总分">总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
+                <div className="flex items-start justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(signal.symbol, signal.name || signal.symbol) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{signal.name || signal.symbol}</button><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{rebound ? '反包' : '首板'}</span><span className="block font-mono text-accent" title="强势股打分最终总分">总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
                 <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
                 <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[9px] text-secondary">
                   {displayThemes.length ? displayThemes.map(name => <span key={name} className="max-w-[70px] truncate rounded-sm bg-elevated px-1 py-0.5">{name}</span>) : <span className="truncate text-muted">未匹配实时板块</span>}
                 </div>
                 <div className="mt-1 flex items-center justify-between text-[9px]"><span className={status.tone}>{status.label}</span><span className="font-mono text-muted">距涨停 {signal.limit_gap_pct == null ? '--' : scorePct(signal.limit_gap_pct, 2)}</span></div>
-              </button>
+              </div>
             })}
           </div>
         </div> : <div className="px-3 py-10 text-center text-xs text-muted">暂无标的</div>}
