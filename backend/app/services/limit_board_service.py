@@ -2774,6 +2774,10 @@ class LimitBoardService:
         }
         if self._refresh_candidate_scores(runtime, list(scoring_rows.values()), cn_now()):
             self._persist_runtime(runtime)
+        # Keep both API projections on the same per-symbol score snapshot.  The
+        # candidate queue and the strong-stock panel may sort different row
+        # sets, but their score and detail fields must never be recomputed per
+        # list.
         score_cache = runtime.get("candidate_scores") or {}
         candidate_pool = self._rank_candidates(
             candidates, score_cache,

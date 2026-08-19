@@ -1038,9 +1038,14 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
 
     view = service.view()
     row = view["candidate_pool"][0]
+    strong_row = view["first_board"][0]
 
     assert row["candidate_rank"] == 1
     assert row["candidate_score"] is not None
+    assert strong_row["symbol"] == row["symbol"]
+    assert strong_row["candidate_score"] == row["candidate_score"]
+    assert strong_row["candidate_score_as_of"] == row["candidate_score_as_of"]
+    assert strong_row["candidate_score_detail"] == row["candidate_score_detail"]
     assert row["candidate_score_state"] == "live"
     assert row["candidate_score_detail"]["intraday_flow"]["max_score"] == 15.0
     assert row["candidate_score_detail"]["intraday_flow"]["flow_metric"] == "main_net_speed"
