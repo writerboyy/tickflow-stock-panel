@@ -185,7 +185,10 @@ async def lifespan(app: FastAPI):
     try:
         from app.plugins.kaipanla import KaipanlaCollector
 
-        kaipanla_collector = KaipanlaCollector(store.data_dir)
+        kaipanla_collector = KaipanlaCollector(
+            store.data_dir,
+            realtime_interval_seconds=max(5.0, float(qs.get_min_interval())),
+        )
         kaipanla_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
         app.state.kaipanla_collector = kaipanla_collector
     except Exception as e:  # noqa: BLE001

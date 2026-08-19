@@ -1204,6 +1204,7 @@ export interface LimitBoardRow {
       max_score: number
       current_score: number
       rotation_score: number
+      data_source?: 'kaipanla_socket'
       kind?: 'concept' | 'industry'
       name?: string
       change_pct?: number | null

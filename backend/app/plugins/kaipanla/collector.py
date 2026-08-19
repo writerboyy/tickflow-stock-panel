@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from datetime import date, time as clock_time
 from pathlib import Path
@@ -115,9 +116,15 @@ class KaipanlaCollector:
         self,
         data_dir: Path,
         client_factory: Callable[[], KaipanlaClient] = KaipanlaClient,
+        realtime_interval_seconds: float = 5.0,
     ) -> None:
         self.data_dir = Path(data_dir)
         self._client_factory = client_factory
+        try:
+            self._realtime_interval_seconds = max(5.0, float(realtime_interval_seconds))
+        except (TypeError, ValueError):
+            self._realtime_interval_seconds = 5.0
+        self._last_sector_strength_refresh_mono = 0.0
         self._bootstrap_task: asyncio.Task | None = None
         self._sentiment_task: asyncio.Task | None = None
         self._sector_strength_task: asyncio.Task | None = None
@@ -367,6 +374,13 @@ class KaipanlaCollector:
         current = now.timetz().replace(tzinfo=None)
         if not _in_sector_strength_window(current):
             return 0
+        current_mono = time.monotonic()
+        if (
+            current_mono - self._last_sector_strength_refresh_mono
+            < self._realtime_interval_seconds
+        ):
+            return 0
+        self._last_sector_strength_refresh_mono = current_mono
         count = await self._run_safely(
             "sector_strength",
             self.refresh_sector_strength,

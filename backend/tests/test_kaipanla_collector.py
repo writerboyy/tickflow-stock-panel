@@ -1092,6 +1092,41 @@ def test_sector_strength_capture_window_matches_slider_boundaries():
     assert collector_module._in_sector_strength_window(time(15, 0, 1)) is False
 
 
+@pytest.mark.asyncio
+async def test_sector_strength_refresh_is_throttled_to_shared_realtime_interval(
+    tmp_path, monkeypatch,
+):
+    _configured(monkeypatch)
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=CN_TZ)
+    monotonic = [100.0]
+    strength_calls = []
+    constituent_calls = []
+    collector = KaipanlaCollector(tmp_path, realtime_interval_seconds=12.0)
+    monkeypatch.setattr(collector_module, "cn_now", lambda: now)
+    monkeypatch.setattr(collector_module.time, "monotonic", lambda: monotonic[0])
+
+    async def refresh_strength(*_args, **_kwargs):
+        strength_calls.append(True)
+        return 1
+
+    async def refresh_constituents(*_args, **_kwargs):
+        constituent_calls.append(True)
+        return 1
+
+    monkeypatch.setattr(collector, "refresh_sector_strength", refresh_strength)
+    monkeypatch.setattr(collector, "refresh_shortline_constituents", refresh_constituents)
+
+    assert await collector._scheduled_sector_strength() == 1
+    assert await collector._scheduled_sector_strength() == 0
+    assert strength_calls == [True]
+    assert constituent_calls == [True]
+
+    monotonic[0] = 112.0
+    assert await collector._scheduled_sector_strength() == 1
+    assert strength_calls == [True, True]
+    assert constituent_calls == [True, True]
+
+
 def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch):
     _configured(monkeypatch)
 

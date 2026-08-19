@@ -967,6 +967,63 @@ class LimitBoardService:
             if str(row.get("plate_name") or "").strip()
         }
 
+    def _kaipanla_sector_score_inputs(
+        self,
+        realtime: dict[str, Any],
+    ) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, Any]] | None:
+        """Build sector scoring inputs from the current Kaipanla socket snapshot."""
+        plate_id = str(realtime.get("plate_id") or "").strip()
+        if not plate_id:
+            return None
+        with self._lock:
+            memberships = self._sector_memberships.clone()
+            live_quotes = {
+                symbol: dict(value)
+                for symbol, value in self._sector_live_quotes.items()
+            }
+        if (
+            memberships.is_empty()
+            or "plate_id" not in memberships.columns
+            or "symbol" not in memberships.columns
+        ):
+            return None
+        member_symbols = {
+            str(symbol).strip().upper()
+            for symbol in memberships.filter(pl.col("plate_id") == plate_id)
+            .get_column("symbol")
+            .to_list()
+            if str(symbol).strip()
+        }
+        if not member_symbols:
+            return None
+        stock_rows = {
+            symbol: row
+            for symbol in member_symbols
+            if (row := live_quotes.get(symbol))
+            and str(row.get("source") or "").strip().lower() == "kaipanla_socket"
+        }
+        valid_rows = {
+            symbol: row
+            for symbol, row in stock_rows.items()
+            if _finite(row.get("change_pct")) is not None
+        }
+        total_count = len(member_symbols)
+        valid_count = len(valid_rows)
+        changes = [float(row["change_pct"]) for row in valid_rows.values()]
+        sector_change = _finite(realtime.get("change_pct"))
+        if sector_change is None and changes:
+            sector_change = sum(changes) / len(changes)
+        return stock_rows, member_symbols, {
+            "valid": total_count >= 5 and valid_count / total_count >= 0.8,
+            "change_pct": sector_change,
+            "coverage_ratio": valid_count / total_count if total_count else 0.0,
+            "valid_count": valid_count,
+            "total_count": total_count,
+            "up_count": sum(value > 0 for value in changes),
+            "down_count": sum(value < 0 for value in changes),
+            "data_source": "kaipanla_socket",
+        }
+
     def _set_sector_candidate_unavailable(self, reason: str) -> set[str]:
         self._sector_candidate_key = None
         self._sector_candidate_symbols.clear()
@@ -2498,7 +2555,7 @@ class LimitBoardService:
             missing = any(symbol not in previous_cache for symbol in symbols)
             if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
                 return False
-            stock_df, stock_rows = self._candidate_stock_snapshot(now)
+            _, stock_rows = self._candidate_stock_snapshot(now)
             intraday_features = self._candidate_intraday_features(symbols, now)
             large_orders = getattr(self.app_state, "large_order_service", None)
             set_score_symbols = getattr(large_orders, "set_score_symbols", None)
@@ -2515,7 +2572,6 @@ class LimitBoardService:
                 }
             sector_service = getattr(self.app_state, "sector_monitor_service", None)
             targets_by_symbol: dict[str, dict[str, list[dict[str, Any]]]] = {}
-            targets_by_key: dict[str, dict[str, Any]] = {}
             if sector_service is not None:
                 for symbol in symbols:
                     concepts = sector_service.targets_for_symbol(symbol, kind="concept")
@@ -2526,22 +2582,6 @@ class LimitBoardService:
                         "concept": concepts,
                         "industry": industries,
                     }
-                    for target in [*concepts, *industries]:
-                        targets_by_key[str(target.get("key") or "")] = target
-            snapshots = {}
-            if sector_service is not None and targets_by_key and not stock_df.is_empty():
-                index_getter = getattr(self.quote_service, "get_index_quotes", None)
-                index_df = index_getter() if callable(index_getter) else pl.DataFrame()
-                try:
-                    snapshots = sector_service.build_snapshots(
-                        stock_df,
-                        index_df,
-                        list(targets_by_key.values()),
-                        set(),
-                        now=now.timestamp(),
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.warning("打板备选池板块快照计算失败", exc_info=True)
             rotations = {
                 "concept": self._rotation("concept", None, now.date()),
                 "industry": self._rotation("industry", 2, now.date()),
@@ -2575,9 +2615,6 @@ class LimitBoardService:
                     available = []
                     for target in symbol_targets.get(kind, []):
                         key = str(target.get("key") or "")
-                        snapshot = snapshots.get(key)
-                        if snapshot is None:
-                            continue
                         realtime = (
                             realtime_sectors.get(str(target.get("name") or "").strip())
                             or realtime_sectors.get(
@@ -2586,18 +2623,24 @@ class LimitBoardService:
                         )
                         if realtime is None:
                             continue
+                        sector_inputs = self._kaipanla_sector_score_inputs(realtime)
+                        if sector_inputs is None:
+                            continue
+                        sector_stock_rows, sector_members, sector_snapshot = sector_inputs
                         value = sector_detail(
                             symbol=symbol,
                             target=target,
-                            snapshot=snapshot,
+                            snapshot=sector_snapshot,
                             rotation=rotations.get(kind) or {},
-                            stock_rows=stock_rows,
-                            member_symbols=sector_service.member_symbols(key),
+                            stock_rows=sector_stock_rows,
+                            member_symbols=sector_members,
                             today=now.date(),
                             realtime=realtime,
+                            realtime_snapshot=sector_snapshot,
                         )
                         if value is not None:
                             value["as_of"] = now.isoformat()
+                            value["data_source"] = "kaipanla_socket"
                             available.append(value)
                     if available:
                         sector = max(
@@ -2672,6 +2715,7 @@ class LimitBoardService:
     def view(self) -> dict[str, Any]:
         config = self.store.load_config()
         runtime = self._runtime_for_today()
+        self._refresh_sector_candidate_universe(cn_today())
         rows, selected, board_pool = self._view_collections(runtime, config)
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected, board_pool,
@@ -2765,7 +2809,6 @@ class LimitBoardService:
             trading_reason = "QMT 已连接，实盘模式未开启"
         else:
             trading_reason = str(qmt_status.get("reason") or "QMT 交易网关未就绪")
-        self._refresh_sector_candidate_universe(cn_today())
         sector_strength = self.sector_strength_view()
         market_mode = self._market_mode()
         first_board_enabled = (

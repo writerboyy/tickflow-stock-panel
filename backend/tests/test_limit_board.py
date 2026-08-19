@@ -887,6 +887,7 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
             "state": "live",
             "as_of": now.date().isoformat(),
             "rows": [{
+                "plate_id": "P-AI",
                 "plate_name": "人工智能",
                 "change_pct_pct": 2.0,
                 "speed_pct_pct": 0.2,
@@ -896,6 +897,24 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
             }],
         },
     )
+    service._sector_memberships = pl.DataFrame({
+        "plate_id": ["P-AI"] * 5,
+        "symbol": ["600000.SH", "600001.SH", "A", "B", "C"],
+    })
+    service._sector_live_quotes = {
+        symbol: {
+            "symbol": symbol,
+            "change_pct": change,
+            "amount": amount,
+            "source": "kaipanla_socket",
+        }
+        for symbol, change, amount in zip(
+            ["600000.SH", "600001.SH", "A", "B", "C"],
+            [0.02, 0.10, 0.03, 0.01, -0.01],
+            [200.0, 100.0, 100.0, 100.0, 100.0],
+            strict=True,
+        )
+    }
     service.app_state.large_order_service = SimpleNamespace(
         ranking=lambda **_kwargs: {
             "rows": [{
@@ -989,7 +1008,10 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
     assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
     assert row["candidate_score_detail"]["technical"]["score"] == 5.0
-    assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is True
+    assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is False
+    assert row["candidate_score_detail"]["sector"]["stock_rank"] == 3
+    assert row["candidate_score_detail"]["sector"]["leader"]["symbol"] == "600001.SH"
+    assert row["candidate_score_detail"]["sector"]["data_source"] == "kaipanla_socket"
     assert row["change_pct"] == pytest.approx(0.10)
     assert "proximity" not in row["candidate_score_detail"]
     assert view["board_pool"] == []
@@ -1245,6 +1267,7 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
             "as_of": now.date().isoformat(),
             "rows": [
                 {
+                    "plate_id": f"P-{index}",
                     "plate_name": name,
                     "change_pct_pct": 1.0,
                     "strength": 80.0,
@@ -1255,6 +1278,18 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
             ],
         },
     )
+    service._sector_memberships = pl.DataFrame({
+        "plate_id": ["P-0", "P-1", "P-2"],
+        "symbol": ["600000.SH"] * 3,
+    })
+    service._sector_live_quotes = {
+        "600000.SH": {
+            "symbol": "600000.SH",
+            "change_pct": 0.01,
+            "amount": 100.0,
+            "source": "kaipanla_socket",
+        },
+    }
     quotes.enriched_date = now.date()
     quotes.enriched = pl.DataFrame({"symbol": ["600000.SH"]})
     monkeypatch.setattr(

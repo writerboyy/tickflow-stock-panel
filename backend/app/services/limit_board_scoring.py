@@ -382,8 +382,15 @@ def sector_detail(
     member_symbols: set[str],
     today: date,
     realtime: dict[str, Any] | None = None,
+    realtime_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    if not snapshot.get("valid") or (finite(snapshot.get("coverage_ratio")) or 0.0) < 0.8:
+    effective_snapshot = {
+        **snapshot,
+        **(realtime_snapshot or {}),
+    }
+    if not effective_snapshot.get("valid") or (
+        finite(effective_snapshot.get("coverage_ratio")) or 0.0
+    ) < 0.8:
         return None
     history = rotation_detail(rotation, _rotation_name(target), today)
     stock = stock_rows.get(symbol)
@@ -403,7 +410,7 @@ def sector_detail(
             "rotation_label": None,
         }
     candidate_change = finite(stock.get("change_pct"))
-    local_sector_change = finite(snapshot.get("change_pct"))
+    local_sector_change = finite(effective_snapshot.get("change_pct"))
     realtime_sector_change = finite((realtime or {}).get("change_pct"))
     sector_change = (
         realtime_sector_change
@@ -425,7 +432,7 @@ def sector_detail(
             "amount": max(0.0, finite(member.get("amount")) or 0.0),
         })
     ranked.sort(key=lambda row: (-row["change_pct"], -row["amount"], row["symbol"]))
-    member_count = int(snapshot.get("total_count") or len(member_symbols))
+    member_count = int(effective_snapshot.get("total_count") or len(member_symbols))
     if member_count < 5 or not ranked:
         return None
     candidate_index = next(
@@ -451,8 +458,8 @@ def sector_detail(
     is_leader = candidate_change > 0 and leader_gap <= 0.001
     is_front = not is_leader and (candidate_index < 3 or leader_gap <= 0.01)
     leadership = "leader" if is_leader else "front" if is_front else "follower"
-    up_count = int(snapshot.get("up_count") or 0)
-    valid_count = int(snapshot.get("valid_count") or len(ranked))
+    up_count = int(effective_snapshot.get("up_count") or 0)
+    valid_count = int(effective_snapshot.get("valid_count") or len(ranked))
     up_ratio = up_count / valid_count if valid_count else 0.0
     current_components = {
         "sector_change": _linear(sector_change, -0.01, 0.04, 8.0),
@@ -478,7 +485,7 @@ def sector_detail(
         "name": target.get("name") or _rotation_name(target),
         "change_pct": sector_change,
         "up_ratio": up_ratio,
-        "coverage_ratio": finite(snapshot.get("coverage_ratio")),
+        "coverage_ratio": finite(effective_snapshot.get("coverage_ratio")),
         "valid_count": valid_count,
         "member_count": member_count,
         "leader": leader,
