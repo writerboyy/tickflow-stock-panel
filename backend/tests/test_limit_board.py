@@ -335,6 +335,36 @@ def test_automatic_candidate_is_scored_without_near_limit_filter(tmp_path, monke
     assert state["source_modes"] == ["first_board"]
 
 
+def test_automatic_candidate_is_retained_before_open_without_limit_price(
+    tmp_path, monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 13, 9, 25, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    monkeypatch.setattr(
+        service, "_automatic_candidate_symbols", lambda _day: {"600000.SH"},
+    )
+    monkeypatch.setattr(service, "_refresh_candidate_scores", lambda *_args: False)
+    service._history_date = now.date()
+
+    service._process_quotes([{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "last_price": 10.2,
+        "change_pct": 0.02,
+        "timestamp": now.isoformat(),
+        "source": "kaipanla_socket",
+    }])
+
+    state = service._runtime_for_today()["symbols"]["600000.SH"]
+    assert state["source_modes"] == ["first_board"]
+    assert state["status"] == "watching"
+    assert state["limit_up"] is None
+    assert state["limit_gap_pct"] is None
+    assert [row["symbol"] for row in service.view()["first_board"]] == ["600000.SH"]
+
+
 def test_automatic_preselection_keeps_top_ten_per_sector_and_manual_rows():
     updates = {
         f"600{index:03d}.SH": {

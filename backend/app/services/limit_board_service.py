@@ -280,6 +280,26 @@ class LimitBoardService:
             for symbol, raw in source_rows.items()
             if _finite(raw.get("last_price")) is not None
         }
+        missing = requested_set - quotes.keys()
+        fresh_getter = getattr(self.quote_service, "get_fresh_quotes", None)
+        fresh_payload = fresh_getter(missing) if missing and callable(fresh_getter) else {}
+        for symbol, raw in (fresh_payload.get("quotes") or {}).items():
+            normalized = str(symbol).strip().upper()
+            if normalized not in missing:
+                continue
+            price = _finite(raw.get("last_price", raw.get("close")))
+            if price is None:
+                continue
+            name = self._resolve_name(normalized, raw.get("name"))
+            quotes[normalized] = {
+                "symbol": normalized,
+                "name": name,
+                "last_price": price,
+                "change_pct": _finite(raw.get("change_pct")),
+                "limit_up": self._limit_up(raw, normalized, name, cn_today()),
+                "timestamp": raw.get("timestamp"),
+                "source": "shared_realtime",
+            }
         timestamps = [
             str(row["timestamp"])
             for row in quotes.values()
@@ -1432,11 +1452,7 @@ class LimitBoardService:
         updates = self._preselect_automatic_updates(updates)
         with self._lock:
             self._quotes.update(updates)
-        self._evaluate_quotes(
-            {symbol: quote for symbol, quote in updates.items() if quote.get("limit_up") is not None},
-            runtime,
-            config,
-        )
+        self._evaluate_quotes(updates, runtime, config)
         rows, selected_rows, board_rows = self._view_collections(runtime, config)
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected_rows, board_rows,
@@ -1473,14 +1489,15 @@ class LimitBoardService:
         self, updates: dict[str, dict[str, Any]], runtime: dict[str, Any], config: dict[str, Any],
     ) -> None:
         now = cn_now()
-        if not _is_trading_time(now):
-            return
+        trading_time = _is_trading_time(now)
+        now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
         symbols = runtime.setdefault("symbols", {})
         blacklist = set(runtime.setdefault("blacklist", []))
         for symbol, quote in updates.items():
             quote_at = _quote_time(quote.get("timestamp"))
-            now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
-            if quote_at is None or (now_aware - quote_at).total_seconds() > _DEPTH_FRESH_SECONDS:
+            if quote_at is None or quote_at.date() != now_aware.date():
+                continue
+            if trading_time and (now_aware - quote_at).total_seconds() > _DEPTH_FRESH_SECONDS:
                 continue
             state = symbols.setdefault(symbol, {})
             state.update({
@@ -1497,8 +1514,15 @@ class LimitBoardService:
             state.update({
                 key: value for key, value in self._premium_stats.get(symbol, {}).items()
             })
+            state.setdefault("status", "watching")
             if symbol in blacklist:
                 state["status"] = "blacklisted"
+                continue
+            if (
+                not trading_time
+                or quote.get("limit_up") is None
+                or quote.get("limit_gap_pct") is None
+            ):
                 continue
             at_limit = quote["last_price"] >= quote["limit_up"] - 0.005
             if at_limit and not state.get("touched"):
