@@ -731,6 +731,7 @@ function SectorStrengthTable({
               const status = STATUS[signal.status || 'watching'] || STATUS.watching
               const rebound = signal.source === 'rebound_board' || signal.source_modes?.includes('rebound_board')
               const atLimit = signal.limit_gap_pct != null && signal.limit_gap_pct <= 0.0001
+              const boardLabel = atLimit ? (rebound ? '反包' : '首板') : '观察'
               const names = new Set(signalSectorNames(signal).map(sectorNameKey))
               const matchedPlates = rows.filter(row => names.has(sectorNameKey(row.plate_name)))
               const displayThemes = matchedPlates.length
@@ -750,7 +751,7 @@ function SectorStrengthTable({
                 }}
                 className={`h-[92px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
               >
-                <div className="flex items-start justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(signal.symbol, signal.name || signal.symbol) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{signal.name || signal.symbol}</button><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{rebound ? '反包' : '首板'}</span><span className="block font-mono text-accent" title="强势股打分最终总分">总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
+                <div className="flex items-start justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(signal.symbol, signal.name || signal.symbol) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{signal.name || signal.symbol}</button><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{boardLabel}</span><span className="block font-mono text-accent" title="强势股打分最终总分">总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
                 <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
                 <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[9px] text-secondary">
                   {displayThemes.length ? displayThemes.map(name => <span key={name} className="max-w-[70px] truncate rounded-sm bg-elevated px-1 py-0.5">{name}</span>) : <span className="truncate text-muted">未匹配实时板块</span>}
@@ -934,7 +935,7 @@ function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
             ['3', '保留 Top 30', '首板、反包合并打分后只保留自动排名前 30。'],
           ].map(([step, title, detail]) => <li key={step} className="flex gap-2 border-t border-border pt-2"><span className="font-mono text-accent">{step}</span><span><strong className="font-medium text-foreground">{title}</strong><span className="mt-0.5 block text-[11px] leading-5 text-muted">{detail}</span></span></li>)}
         </ol>
-        <p className="mt-2 text-[11px] leading-5 text-muted">默认近 10 个交易日无涨停记录为首板；窗口内曾涨停，随后出现炸板或断板，且最近一日未涨停为反包。“仅沪深主板”只限制自动候选，手工加入不受影响；距涨停不参与入选和打分。</p>
+        <p className="mt-2 text-[11px] leading-5 text-muted">首板资格为回看窗口内无涨停记录；反包资格为窗口内曾涨停、随后炸板或断板，且最近一个完整交易日未涨停。两类只有当日真实触及涨停时才显示对应标签，未触及时显示“观察”。“仅沪深主板”只限制自动候选，手工加入不受影响；距涨停不参与入选和打分。</p>
       </section>
 
       <section className="mt-4 border-t border-border pt-4">

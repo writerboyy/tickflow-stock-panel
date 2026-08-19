@@ -181,6 +181,8 @@ class LimitBoardService:
         self._history_date: date | None = None
         self._name_map_date: date | None = None
         self._name_map: dict[str, str] = {}
+        self._instrument_limit_up_date: date | None = None
+        self._instrument_limit_up: dict[str, object] = {}
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
         self._premium_stats: dict[str, dict[str, Any]] = {}
@@ -323,7 +325,50 @@ class LimitBoardService:
         except Exception:  # noqa: BLE001
             logger.debug("读取 TickFlow 实时行情快照失败", exc_info=True)
             return {}
-        return payload if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict):
+            return {}
+
+        # QuoteService 缓存的是 TickFlow 原始报价，不包含 instruments 中的
+        # 当日涨跌停价。补入维表哨兵值后，_limit_up 才能识别新股首日无涨跌停。
+        today = cn_today()
+        if self._instrument_limit_up_date != today:
+            try:
+                instruments = self.repo.get_instruments()
+                if (
+                    instruments.is_empty()
+                    or "symbol" not in instruments.columns
+                    or "limit_up" not in instruments.columns
+                ):
+                    limit_map = {}
+                else:
+                    limit_map = {
+                        str(row["symbol"]).strip().upper(): row.get("limit_up")
+                        for row in instruments.select(["symbol", "limit_up"]).iter_rows(named=True)
+                        if str(row.get("symbol") or "").strip()
+                    }
+            except Exception:  # noqa: BLE001
+                logger.debug("读取股票涨停价维表失败", exc_info=True)
+                limit_map = {}
+            self._instrument_limit_up = limit_map
+            self._instrument_limit_up_date = today
+        limit_map = self._instrument_limit_up
+        if not limit_map:
+            return payload
+
+        quotes = payload.get("quotes")
+        if not isinstance(quotes, dict):
+            return payload
+        enriched_quotes = {}
+        for raw_symbol, raw_quote in quotes.items():
+            symbol = str(raw_symbol).strip().upper()
+            if not isinstance(raw_quote, dict):
+                enriched_quotes[raw_symbol] = raw_quote
+                continue
+            quote = dict(raw_quote)
+            if quote.get("limit_up") is None and symbol in limit_map:
+                quote["limit_up"] = limit_map[symbol]
+            enriched_quotes[raw_symbol] = quote
+        return {**payload, "quotes": enriched_quotes}
 
     def _refresh_interval_seconds(self) -> float:
         getter = getattr(self.quote_service, "get_min_interval", None)
@@ -1556,6 +1601,8 @@ class LimitBoardService:
         authoritative = _finite(raw.get("limit_up"))
         if authoritative is not None:
             if authoritative >= 10_000:
+                # instruments uses a large sentinel for IPO/new-stock sessions
+                # without a daily price limit. Do not infer a normal board limit.
                 return None
             if authoritative > 0:
                 return authoritative

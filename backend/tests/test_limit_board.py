@@ -387,6 +387,46 @@ def test_automatic_candidate_is_retained_before_open_without_limit_price(
     assert [row["symbol"] for row in service.view()["first_board"]] == ["600000.SH"]
 
 
+def test_new_stock_sentinel_does_not_infer_limit_price(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    service.repo.get_instruments = lambda: pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "limit_up": [100000.0],
+    })
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH",
+        "name": "新股",
+        "last_price": 20.0,
+        "prev_close": 10.0,
+        "change_pct": 1.0,
+        "timestamp": "2026-08-18T10:00:00+08:00",
+    }]
+
+    snapshot = service.quote_snapshot(["600000.SH"])
+
+    assert snapshot["quotes"]["600000.SH"]["limit_up"] is None
+
+
+def test_authoritative_limit_price_is_preserved_in_quote_snapshot(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    service.repo.get_instruments = lambda: pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "limit_up": [11.0],
+    })
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH",
+        "name": "浦发银行",
+        "last_price": 11.0,
+        "prev_close": 10.0,
+        "change_pct": 0.1,
+        "timestamp": "2026-08-18T10:00:00+08:00",
+    }]
+
+    snapshot = service.quote_snapshot(["600000.SH"])
+
+    assert snapshot["quotes"]["600000.SH"]["limit_up"] == 11.0
+
+
 def test_automatic_preselection_keeps_top_ten_per_sector_and_manual_rows():
     updates = {
         f"600{index:03d}.SH": {
