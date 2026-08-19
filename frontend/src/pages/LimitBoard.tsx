@@ -19,12 +19,14 @@ import {
   ShieldAlert,
   SlidersHorizontal,
   Trash2,
+  WalletCards,
   Wifi,
   X,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
+import { QmtTradePanel } from '@/components/QmtTradePanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import {
   api,
@@ -151,6 +153,7 @@ interface RowProps {
   onToggleAuto: (enabled: boolean) => void
   onChangeOrderMode: (mode: 'sweep' | 'queue') => void
   onRemovePool: () => void
+  onTrade: () => void
 }
 
 function Row({
@@ -167,6 +170,7 @@ function Row({
   onToggleAuto,
   onChangeOrderMode,
   onRemovePool,
+  onTrade,
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
@@ -181,7 +185,6 @@ function Row({
   const gene = scoreDetail?.premium_gene
   const technical = scoreDetail?.technical
   const leadership = LEADERSHIP[sector?.leadership ?? 'follower']
-  const rotationTitle = (sector?.days ?? []).map(day => `${day.date.slice(5)} ${scorePct(day.change_pct)} #${day.rank}/${day.rank_count}`).join('；')
   const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
@@ -213,48 +216,28 @@ function Row({
           </>}
           {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
         </td>
-        <td className="w-[92px] min-w-[92px] px-2 font-mono tabular-nums text-secondary">{change}</td>
-        <td className="w-[190px] min-w-[190px] px-2" title={intradayFlow ? `日内走势 ${intradayFlow.trend_score?.toFixed(1) ?? '--'}/${intradayFlow.trend_max_score?.toFixed(1) ?? '--'}；${intradayFlow.price_volume_rising ? '量价齐升' : '未形成量价齐升'}；资金源 ${intradayFlow.capital_source_label ?? '暂无'}` : undefined}>
-          {intradayFlow ? <>
-            <div className="font-mono text-[10px] text-secondary">走势 {intradayFlow.trend_score?.toFixed(1) ?? '--'}/{intradayFlow.trend_max_score?.toFixed(1) ?? '--'} · 资金 {intradayFlow.capital_available ? `${intradayFlow.capital_score?.toFixed(1) ?? '--'}/${intradayFlow.capital_max_score?.toFixed(1) ?? '--'}` : '待补'}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">{intradayFlow.trend_state === 'strong' ? '日内强势' : intradayFlow.trend_state === 'weak' ? '日内偏弱' : '日内中性'} · 水下 {ratioPct(intradayFlow.underwater_ratio)} · {intradayFlow.price_volume_rising ? '量价齐升' : '量价未齐升'}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">{intradayFlow.capital_available ? intradayFlow.flow_metric === 'main_net_speed' ? `${intradayFlow.capital_source_label ?? '主力净额涨速'} ${moneyYi(intradayFlow.net_flow_speed)}/分 · 净流向 ${scorePct(intradayFlow.net_flow_ratio, 0)}` : `${intradayFlow.capital_source_label ?? '实时主动资金'} · 净流向 ${scorePct(intradayFlow.net_flow_ratio, 0)} · 连续流出 ${intradayFlow.outflow_streak ?? 0} 根` : intradayFlow.capital_source_label ?? '实时主动资金待补'}</div>
-          </> : <div className="text-muted">分时待补</div>}
+        <td className="w-[118px] min-w-[118px] px-2" title={`涨幅 ${change}；距涨停 ${gap}；${status.label}`}>
+          <div className="font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'} <span className="text-secondary">{change}</span></div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="font-mono text-muted">距涨停 {gap}</span><span className={status.tone}>{status.label}</span></div>
         </td>
-        <td className="w-[210px] min-w-[210px] px-2" title={rotationTitle || allThemes.join('、') || undefined}>
-          {sector ? <>
-            <div className="flex items-center gap-1.5"><span className="max-w-[110px] truncate font-medium">{sector.name}</span><span className="text-secondary">{scorePct(sector.change_pct)}</span></div>
-            <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="text-secondary">{leadership}</span><span className="font-mono text-muted">#{sector.stock_rank ?? '--'}/{sector.member_count ?? '--'}</span><span className="text-secondary">{sector.rotation_label ?? '数据不足'}</span></div>
-            {sector.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-secondary" title="开盘啦实时板块强度"><span>强 {sector.realtime_strength?.toFixed(1) ?? '--'}</span><span className="ml-1.5">板 #{sector.realtime_rank ?? '--'}/{sector.realtime_rank_count ?? '--'}</span><span className="ml-1.5">速 {scorePct(sector.realtime_speed_pct, 2)}</span></div> : <div className="mt-0.5 whitespace-nowrap text-[9px] text-muted">实时板块强度待补</div>}
-            {sector.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">主净 {sector.realtime_main_net == null ? '--' : sector.realtime_main_net.toFixed(0)} · 量比 {sector.realtime_volume_ratio?.toFixed(2) ?? '--'}</div> : null}
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">5日 {scorePct(sector.five_day_change_pct)} · 昨 {scorePct(sector.yesterday_change_pct)}</div>
-            {sector.leader && !sector.is_sector_leader ? <div className="mt-0.5 max-w-[190px] truncate text-[9px] text-muted">龙头 {sector.leader.name || sector.leader.symbol} {scorePct(sector.leader.change_pct)}</div> : null}
-          </> : <div className="text-muted">实时板块强度待补</div>}
-        </td>
-        <td className="w-[170px] min-w-[170px] px-2" title={gene ? `快照 ${gene.as_of || '--'}；样本 ${gene.next_day_observation_count ?? 0}` : undefined}>
-          {gene ? <>
-            <div className="font-mono text-[10px] text-secondary">涨 {gene.limit_up_count ?? '--'} · 红 {scorePct(gene.next_day_red_rate, 0)}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">溢 {scorePct(gene.premium_5_rate, 0)} · 封 {scorePct(gene.first_board_seal_rate, 0)} · 晋 {scorePct(gene.consecutive_rate, 0)}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-secondary">{gene.score.toFixed(1)}/30</div>
-          </> : <div className="text-muted">基因待补</div>}
-        </td>
-        <td className="w-[180px] min-w-[180px] px-2" title={technical ? `MA5 ${technical.ma5?.toFixed(2) ?? '--'}；MA10 ${technical.ma10?.toFixed(2) ?? '--'}；MA20 ${technical.ma20?.toFixed(2) ?? '--'}；MA60 ${technical.ma60?.toFixed(2) ?? '--'}` : undefined}>
-          {technical ? <>
-            <div className="whitespace-nowrap font-mono text-[9px] text-secondary">均 {technical.components?.trend?.toFixed(2)}/1.75 · 动 {technical.components?.momentum?.toFixed(2)}/1.25</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量 {technical.components?.volume?.toFixed(2)}/0.75 · MACD {technical.components?.macd?.toFixed(2)}/0.75 · RSI {technical.components?.rsi?.toFixed(2)}/0.50</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">量比 {technical.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical.rsi_14?.toFixed(0) ?? '--'}</div>
-          </> : <div className="text-muted">技术面待补</div>}
+        <td className="w-[292px] min-w-[292px] px-2" title={(row.candidate_reasons || []).join('；')}>
+          <div className="truncate text-[10px] text-secondary">板 {sector?.name || '--'} · {leadership} · {sector?.score.toFixed(1) ?? '--'}/50</div>
+          <div className="mt-0.5 font-mono text-[9px] text-muted">基 涨{gene?.limit_up_count ?? '--'} · 红{scorePct(gene?.next_day_red_rate, 0)} · {gene?.score.toFixed(1) ?? '--'}/30</div>
+          <div className="mt-0.5 font-mono text-[9px] text-muted">分 {intradayFlow?.trend_state === 'strong' ? '强' : intradayFlow?.trend_state === 'weak' ? '弱' : '中'} · 资金 {intradayFlow?.capital_available ? intradayFlow.capital_score?.toFixed(1) ?? '--' : '待补'} · {intradayFlow?.score.toFixed(1) ?? '--'}/15</div>
+          <div className="mt-0.5 font-mono text-[9px] text-muted">技 量比 {technical?.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical?.rsi_14?.toFixed(0) ?? '--'} · {technical?.score.toFixed(1) ?? '--'}/5</div>
         </td>
       </> : null}
-      <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
-      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td> : null}
-      <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
-      <td className="px-2">
-        <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
-          <CircleDot className="h-3 w-3" />{status.label}
-        </span>
-      </td>
-      <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
+      {mode !== 'candidate' ? <>
+        <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
+        <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td>
+        <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
+        <td className="px-2">
+          <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
+            <CircleDot className="h-3 w-3" />{status.label}
+          </span>
+        </td>
+        <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
+      </> : null}
       {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td> : null}
       {mode !== 'candidate' ? <td className="px-2">
         <span className={mode === 'pool' && row.ws_active ? 'text-bear' : 'text-muted'}>{mode === 'pool' && row.ws_active ? 'WS' : '轮询'}</span>
@@ -297,6 +280,7 @@ function Row({
       ) : (
         <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 group-hover:bg-elevated">
           <div className="flex items-center justify-end gap-1">
+            {mode === 'candidate' ? <button type="button" title="打开 QMT 手动交易" disabled={busy} onClick={onTrade} className="inline-flex h-7 items-center gap-1 rounded-btn border border-border px-2 text-secondary hover:border-warning/50 hover:text-warning disabled:opacity-60"><WalletCards className="h-3.5 w-3.5" />交易</button> : null}
             <button
               type="button"
               title={inPool ? '已在打板池' : '加入打板池'}
@@ -331,6 +315,7 @@ interface TableProps {
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onChangeOrderMode: (row: LimitBoardRow, mode: 'sweep' | 'queue') => void
   onRemovePool: (row: LimitBoardRow) => void
+  onTrade: (row: LimitBoardRow) => void
 }
 
 function Table(props: TableProps) {
@@ -338,14 +323,14 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1670px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1000px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             <th className="w-[160px] px-2">题材</th>
-            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">总分</th><th className="w-[92px] min-w-[92px] whitespace-nowrap px-2">涨幅</th><th className="px-2">分时强度</th><th className="px-2">当前板块</th><th className="px-2">涨停基因</th><th className="px-2">技术面</th></> : null}
-            <th className="px-2">现价</th>{mode !== 'candidate' ? <th className="px-2">涨停价</th> : null}<th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th>{mode !== 'candidate' ? <><th className="px-2">买一封单</th><th className="px-2">行情</th></> : null}
-            {mode === 'pool' ? <><th className="px-2">委托状态</th><th className="sticky right-0 z-40 w-[220px] border-l border-border bg-surface px-2 text-right">操作</th></> : <th className="sticky right-0 z-40 w-[96px] border-l border-border bg-surface px-2 text-right">操作</th>}
+            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">评分</th><th className="w-[118px] min-w-[118px] whitespace-nowrap px-2">行情</th><th className="w-[292px] min-w-[292px] px-2">评分依据</th></> : null}
+            {mode !== 'candidate' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
+            <th className={`sticky right-0 z-40 border-l border-border bg-surface px-2 text-right ${mode === 'pool' ? 'w-[220px]' : 'w-[172px]'}`}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -365,6 +350,7 @@ function Table(props: TableProps) {
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onChangeOrderMode={mode => props.onChangeOrderMode(row, mode)}
               onRemovePool={() => props.onRemovePool(row)}
+              onTrade={() => props.onTrade(row)}
             />
           ))}
         </tbody>
@@ -1126,6 +1112,7 @@ export function LimitBoard() {
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
+  const [tradeRow, setTradeRow] = useState<LimitBoardRow | null>(null)
   const view = useQuery({
     queryKey: QK.limitBoard,
     queryFn: api.limitBoard,
@@ -1295,6 +1282,7 @@ export function LimitBoard() {
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
               onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
               onRemovePool={row => removePool.mutate(row)}
+              onTrade={setTradeRow}
             />
           </section>
         ) : (
@@ -1317,6 +1305,7 @@ export function LimitBoard() {
       {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
       {notificationOpen ? <NotificationDialog value={data.settings.notifications} pending={updateNotifications.isPending} onClose={() => setNotificationOpen(false)} onSave={value => updateNotifications.mutate(value)} /> : null}
       {candidateAlgorithmOpen ? <CandidateAlgorithmDialog onClose={() => setCandidateAlgorithmOpen(false)} /> : null}
+      {tradeRow ? <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.last_price }} preset={{ action: 'BUY' }} onClose={() => setTradeRow(null)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )
