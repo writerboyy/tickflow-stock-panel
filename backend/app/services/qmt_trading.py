@@ -62,7 +62,9 @@ _ALLOCATION_RATIOS = {
     "third": 1 / 3,
     "half": 0.5,
 }
-_ALLOCATION_MODES = frozenset((*_ALLOCATION_RATIOS, "fixed"))
+# ``lot`` is an internal compatibility mode for the old automatic board
+# order setting where zero amount meant one 100-share lot.
+_ALLOCATION_MODES = frozenset((*_ALLOCATION_RATIOS, "fixed", "lot"))
 
 
 def _parse_broker_time(value: Any, anchor: str | None) -> str | None:
@@ -620,7 +622,7 @@ class QmtTradingService:
             raise ValueError("金额下单需要有效的参考价格")
         mode = str(request.get("allocation_mode") or "").strip().lower()
         if mode not in _ALLOCATION_MODES:
-            raise ValueError("金额分配方式必须是可用金额四分之一、三分之一、二分之一或固定金额")
+            raise ValueError("金额分配方式必须是可用金额四分之一、三分之一、二分之一、固定金额或一手模式")
 
         if action == "BUY":
             basis_amount = _float((snapshot.get("account") or {}).get("cash"))
@@ -639,7 +641,9 @@ class QmtTradingService:
             basis_amount = available_volume * price
             basis_label = "可用持仓市值"
 
-        if mode == "fixed":
+        if mode == "lot":
+            requested_amount = price * 100
+        elif mode == "fixed":
             requested_amount = _float(request.get("allocation_value"))
             if requested_amount is None or requested_amount <= 0:
                 raise ValueError("固定金额必须大于 0")

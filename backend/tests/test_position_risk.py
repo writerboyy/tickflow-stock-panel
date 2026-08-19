@@ -525,6 +525,17 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     assert buy["volume"] == 800
     assert buy["actual_amount"] == 28_000
 
+    one_lot = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "lot",
+    })
+    assert one_lot["target_amount"] == 3_500
+    assert one_lot["volume"] == 100
+    assert one_lot["actual_amount"] == 3_500
+
     sell = service.preview_order({
         "action": "SELL",
         "symbol": "600036.SH",

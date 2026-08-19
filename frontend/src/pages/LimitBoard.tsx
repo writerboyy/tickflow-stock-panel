@@ -26,7 +26,7 @@ import {
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
-import { QmtTradePanel } from '@/components/QmtTradePanel'
+import { QMT_ALLOCATION_OPTIONS, QmtTradePanel, type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import {
   api,
@@ -245,7 +245,8 @@ function Row({
       {mode === 'pool' ? (
         <>
           <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
-            {orderStatus.label}
+            <div>{orderStatus.label}</div>
+            {row.auto_order_volume && row.auto_order_amount != null ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] font-normal text-muted">{row.auto_order_volume.toLocaleString('zh-CN')} 股 · {row.auto_order_amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 元</div> : null}
           </td>
           <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
             <div className="flex items-center justify-end gap-1.5">
@@ -1006,6 +1007,7 @@ function AdvancedSettingsDialog({
     && Number.isInteger(draft.queue_confirm_snapshots)
     && draft.queue_confirm_snapshots >= 0
     && draft.queue_confirm_snapshots <= 10
+    && QMT_ALLOCATION_OPTIONS.some(option => option.value === draft.order_allocation_mode)
     && Number.isFinite(draft.order_amount_per_board)
     && draft.order_amount_per_board >= 0
     && draft.order_amount_per_board <= 10000000
@@ -1046,9 +1048,15 @@ function AdvancedSettingsDialog({
         <span className="flex items-center gap-2"><input type="number" min={0} max={10} step={1} value={draft.queue_confirm_snapshots} disabled={pending} onChange={event => update('queue_confirm_snapshots', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
       </label>
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">单板下单资金</span><span className="mt-0.5 block text-[10px] text-muted">0 为当前一手模式</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={10000000} step={100} value={draft.order_amount_per_board} disabled={pending} onChange={event => update('order_amount_per_board', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">元</span></span>
+        <span><span className="block">自动下单资金方式</span><span className="mt-0.5 block text-[10px] text-muted">按 QMT 提交时的最新可用资金计算</span></span>
+        <select value={draft.order_allocation_mode} disabled={pending} onChange={event => update('order_allocation_mode', event.target.value as QmtAllocationMode)} className="h-8 w-36 rounded-btn border border-border bg-base px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
+          {QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
       </label>
+      {draft.order_allocation_mode === 'fixed' ? <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
+        <span><span className="block">单板固定金额</span><span className="mt-0.5 block text-[10px] text-muted">0 保留旧配置的一手模式</span></span>
+        <span className="flex items-center gap-2"><input type="number" min={0} max={10000000} step={100} value={draft.order_amount_per_board} disabled={pending} onChange={event => update('order_amount_per_board', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">元</span></span>
+      </label> : null}
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span><span className="block">每日自动打板上限</span><span className="mt-0.5 block text-[10px] text-muted">0 为不限制</span></span>
         <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={1} value={draft.max_auto_board_count} disabled={pending} onChange={event => update('max_auto_board_count', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">只</span></span>
@@ -1092,6 +1100,7 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
     sweep_price_levels: value.sweep_price_levels,
     queue_wait_seconds: value.queue_wait_seconds,
     queue_confirm_snapshots: value.queue_confirm_snapshots,
+    order_allocation_mode: value.order_allocation_mode ?? 'fixed',
     order_amount_per_board: value.order_amount_per_board,
     max_auto_board_count: value.max_auto_board_count,
     max_market_broken_rate_pct: value.max_market_broken_rate_pct,

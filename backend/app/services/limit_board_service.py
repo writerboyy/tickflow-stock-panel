@@ -1900,13 +1900,13 @@ class LimitBoardService:
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "自动委托队列已满"
             return
-        volume, volume_error = self._auto_order_volume(
+        allocation_mode, allocation_value, allocation_error = self._auto_order_allocation(
             float(quote["limit_up"]), config,
         )
-        if volume_error:
+        if allocation_error:
             self._order_slots.release()
             state["auto_order_status"] = "blocked"
-            state["auto_order_error"] = volume_error
+            state["auto_order_error"] = allocation_error
             return
         key = f"limit-board-{cn_today().strftime('%Y%m%d')}-{symbol}"
         trigger_at = cn_now().isoformat(timespec="milliseconds")
@@ -1919,8 +1919,10 @@ class LimitBoardService:
             "auto_order_at": system_order_at,
             "auto_order_trigger_at": trigger_at,
             "auto_order_system_at": system_order_at,
-            "auto_order_volume": volume,
-            "auto_order_amount": round(float(quote["limit_up"]) * volume, 2),
+            "auto_order_allocation_mode": allocation_mode,
+            "auto_order_allocation_value": allocation_value,
+            "auto_order_volume": None,
+            "auto_order_amount": None,
         })
         try:
             self._order_executor.submit(
@@ -1928,7 +1930,8 @@ class LimitBoardService:
                 symbol,
                 float(quote["limit_up"]),
                 key,
-                volume,
+                allocation_mode,
+                allocation_value,
                 trigger_at,
                 system_order_at,
             )
@@ -1938,27 +1941,34 @@ class LimitBoardService:
             state["auto_order_error"] = str(exc)
 
     @staticmethod
-    def _auto_order_volume(
+    def _auto_order_allocation(
         limit_up: float, config: dict[str, Any],
-    ) -> tuple[int, str | None]:
+    ) -> tuple[str, float | None, str | None]:
+        mode = str(config["settings"].get("order_allocation_mode") or "fixed").strip().lower()
         amount = _finite(config["settings"].get("order_amount_per_board", 0))
+        if mode not in {"quarter", "third", "half", "fixed"}:
+            return "fixed", None, "单板资金分配方式无效"
         if amount is None or amount < 0:
-            return 0, "单板下单资金配置无效"
+            return mode, None, "单板下单资金配置无效"
+        if mode != "fixed":
+            return mode, None, None
         if amount == 0:
-            return 100, None
+            # Preserve the historical zero-value setting while routing the
+            # actual calculation through QmtTradingService.
+            return "lot", None, None
         if limit_up <= 0 or limit_up != limit_up:
-            return 0, "涨停价无效，已阻止自动委托"
-        volume = int(amount / (limit_up * 100)) * 100
-        if volume < 100:
-            return 0, "单板下单资金不足一手，已阻止自动委托"
-        return volume, None
+            return mode, None, "涨停价无效，已阻止自动委托"
+        if amount < limit_up * 100:
+            return mode, amount, "单板下单资金不足一手，已阻止自动委托"
+        return mode, amount, None
 
     def _submit_auto_order(
         self,
         symbol: str,
         limit_up: float,
         key: str,
-        volume: int,
+        allocation_mode: str,
+        allocation_value: float | None,
         trigger_at: str,
         system_order_at: str,
     ) -> None:
@@ -1971,9 +1981,10 @@ class LimitBoardService:
                 "strategy_name": "limit_board",
                 "action": "BUY",
                 "symbol": symbol,
-                "volume": volume,
                 "price": limit_up,
                 "price_type": "LIMIT",
+                "allocation_mode": allocation_mode,
+                "allocation_value": allocation_value,
                 "trigger_at": trigger_at,
                 "system_order_at": system_order_at,
             })
@@ -1983,6 +1994,10 @@ class LimitBoardService:
                 "status": str(order.get("status") or "unknown"),
                 "order_sys_id": order.get("order_sys_id"),
                 "error": order.get("error"),
+                "volume": order.get("volume"),
+                "estimated_amount": order.get("estimated_amount"),
+                "allocation_mode": order.get("allocation_mode") or allocation_mode,
+                "allocation_value": order.get("allocation_value", allocation_value),
                 "trigger_at": order.get("trigger_at") or trigger_at,
                 "system_order_at": order.get("system_order_at") or system_order_at,
                 "qmt_submit_at": order.get("qmt_submit_at"),
@@ -1995,9 +2010,13 @@ class LimitBoardService:
             result = {
                 "symbol": symbol,
                 "key": key,
-                "status": "unknown",
+                "status": "blocked" if isinstance(exc, ValueError) else "unknown",
                 "order_sys_id": None,
                 "error": str(exc),
+                "volume": None,
+                "estimated_amount": None,
+                "allocation_mode": allocation_mode,
+                "allocation_value": allocation_value,
                 "trigger_at": trigger_at,
                 "system_order_at": system_order_at,
                 "qmt_submit_at": None,
@@ -2020,6 +2039,10 @@ class LimitBoardService:
             "auto_order_status": result.get("status") or "unknown",
             "auto_order_sys_id": result.get("order_sys_id"),
             "auto_order_error": result.get("error"),
+            "auto_order_volume": result.get("volume"),
+            "auto_order_amount": result.get("estimated_amount"),
+            "auto_order_allocation_mode": result.get("allocation_mode"),
+            "auto_order_allocation_value": result.get("allocation_value"),
             "auto_order_updated_at": cn_now().isoformat(),
             "auto_order_trigger_at": result.get("trigger_at"),
             "auto_order_system_at": result.get("system_order_at"),
@@ -2996,6 +3019,7 @@ class LimitBoardService:
             "sweep_price_levels": int(settings["sweep_price_levels"]),
             "queue_wait_seconds": int(settings["queue_wait_seconds"]),
             "queue_confirm_snapshots": int(settings["queue_confirm_snapshots"]),
+            "order_allocation_mode": str(settings.get("order_allocation_mode") or "fixed"),
             "order_amount_per_board": float(settings["order_amount_per_board"]),
             "max_auto_board_count": int(settings["max_auto_board_count"]),
             "max_market_broken_rate_pct": float(

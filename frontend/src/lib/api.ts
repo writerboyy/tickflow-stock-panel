@@ -1173,6 +1173,10 @@ export interface LimitBoardRow {
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
+  auto_order_allocation_mode?: 'quarter' | 'third' | 'half' | 'fixed' | 'lot'
+  auto_order_allocation_value?: number | null
+  auto_order_volume?: number | null
+  auto_order_amount?: number | null
   candidate_score?: number | null
   candidate_rank?: number | null
   candidate_score_state?: 'live' | 'cached' | 'unavailable'
@@ -1435,6 +1439,7 @@ export interface LimitBoardView {
     sweep_price_levels: number
     queue_wait_seconds: number
     queue_confirm_snapshots: number
+    order_allocation_mode: 'quarter' | 'third' | 'half' | 'fixed'
     order_amount_per_board: number
     max_auto_board_count: number
     max_market_broken_rate_pct: number

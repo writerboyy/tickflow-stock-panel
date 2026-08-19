@@ -20,6 +20,7 @@ def default_config() -> dict[str, Any]:
             "sweep_price_levels": 5,
             "queue_wait_seconds": 0,
             "queue_confirm_snapshots": 0,
+            "order_allocation_mode": "fixed",
             "order_amount_per_board": 0.0,
             "max_auto_board_count": 0,
             "max_market_broken_rate_pct": 40.0,

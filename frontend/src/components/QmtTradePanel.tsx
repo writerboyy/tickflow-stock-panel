@@ -15,6 +15,13 @@ export type QmtTradeInstrument = {
 
 export type QmtAllocationMode = 'quarter' | 'third' | 'half' | 'fixed'
 
+export const QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtAllocationMode; label: string }> = [
+  { value: 'quarter', label: '可用金额 1/4' },
+  { value: 'third', label: '可用金额 1/3' },
+  { value: 'half', label: '可用金额 1/2' },
+  { value: 'fixed', label: '固定金额' },
+]
+
 export type QmtTradePreset = {
   action?: 'BUY' | 'SELL'
   price?: number | null
@@ -46,12 +53,7 @@ const QMT_ORDER_STATUS: Record<string, string> = {
   '57': '废单',
 }
 
-const ALLOCATION_LABELS: Record<QmtAllocationMode, string> = {
-  quarter: '可用金额 1/4',
-  third: '可用金额 1/3',
-  half: '可用金额 1/2',
-  fixed: '固定金额',
-}
+const ALLOCATION_LABELS = Object.fromEntries(QMT_ALLOCATION_OPTIONS.map(option => [option.value, option.label])) as Record<QmtAllocationMode, string>
 
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -207,7 +209,7 @@ export function QmtTradePanel({
           <div className="flex items-center justify-between gap-3"><h3 className="text-xs font-semibold text-secondary">委托参数</h3><span className={cn('text-right text-[10px]', tradeReady ? 'text-warning' : 'text-muted')} title={qmt.data?.reason}>{readiness}</span></div>
           <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-muted">
             <label>方向<select value={tradeAction} disabled={Boolean(riskContext)} onChange={event => setTradeAction(event.target.value as 'BUY' | 'SELL')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px] disabled:opacity-60"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
-            <label>资金方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="quarter">可用金额 1/4</option><option value="third">可用金额 1/3</option><option value="half">可用金额 1/2</option><option value="fixed">固定金额</option></select></label>
+            <label>资金方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]">{QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
             <label>价格方式<select value={tradePriceType} onChange={event => setTradePriceType(event.target.value as 'LIMIT' | 'LATEST')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="LIMIT">限价</option><option value="LATEST">最新价</option></select></label>
             <label className={tradePriceType === 'LATEST' ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={tradePrice} disabled={tradePriceType === 'LATEST'} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
             {allocationMode === 'fixed' ? <label className="col-span-2">固定金额<input type="number" min="100" step="100" value={allocationValue} onChange={event => setAllocationValue(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label> : null}

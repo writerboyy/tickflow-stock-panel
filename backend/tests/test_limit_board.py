@@ -124,8 +124,28 @@ class FakeQmt:
         }
 
     def submit_order(self, request):
-        self.orders.append(request)
-        return {**request, "status": "accepted_pending", "order_sys_id": "qmt-1"}
+        order = dict(request)
+        if order.get("volume") is None:
+            price = float(order["price"])
+            mode = order.get("allocation_mode")
+            if mode == "lot":
+                volume = 100
+            elif mode == "fixed":
+                volume = int(float(order.get("allocation_value") or 0) / price / 100) * 100
+            elif mode == "quarter":
+                volume = int(120_000 * 0.25 / price / 100) * 100
+            elif mode == "third":
+                volume = int(120_000 / 3 / price / 100) * 100
+            elif mode == "half":
+                volume = int(120_000 * 0.5 / price / 100) * 100
+            else:
+                volume = 0
+            if volume < 100:
+                raise ValueError("金额不足一手")
+            order["volume"] = volume
+            order["estimated_amount"] = round(volume * price, 2)
+        self.orders.append(order)
+        return {**order, "status": "accepted_pending", "order_sys_id": "qmt-1"}
 
 
 class ImmediateExecutor:
@@ -1692,6 +1712,7 @@ def test_default_config_preserves_current_sweep_and_queue_triggers():
     assert settings["sweep_price_levels"] == 5
     assert settings["queue_wait_seconds"] == 0
     assert settings["queue_confirm_snapshots"] == 0
+    assert settings["order_allocation_mode"] == "fixed"
     assert settings["order_amount_per_board"] == 0.0
     assert settings["max_auto_board_count"] == 0
     assert settings["main_board_only"] is False
@@ -1917,8 +1938,11 @@ def test_board_pool_auto_trade_uses_configured_amount_per_board(tmp_path):
 
     assert len(qmt.orders) == 1
     assert qmt.orders[0]["volume"] == 900
-    assert state["auto_order_volume"] == 900
-    assert state["auto_order_amount"] == 9900.0
+    assert qmt.orders[0]["allocation_mode"] == "fixed"
+    assert qmt.orders[0]["allocation_value"] == 10_000
+    result = service._order_results.get_nowait()
+    assert result["volume"] == 900
+    assert result["estimated_amount"] == 9900.0
 
 
 def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):
@@ -1937,6 +1961,30 @@ def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):
     assert qmt.orders == []
     assert state["auto_order_status"] == "blocked"
     assert "一手" in state["auto_order_error"]
+
+
+def test_board_pool_auto_trade_passes_ratio_allocation_to_qmt(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["settings"]["order_allocation_mode"] = "quarter"
+    config["settings"]["order_amount_per_board"] = 0
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    service._maybe_auto_trade("600000.SH", quote(), {}, config)
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["allocation_mode"] == "quarter"
+    assert qmt.orders[0]["allocation_value"] is None
+    assert qmt.orders[0]["volume"] == 2_700
+    result = service._order_results.get_nowait()
+    assert result["allocation_mode"] == "quarter"
+    assert result["volume"] == 2_700
 
 
 def test_board_pool_auto_trade_respects_daily_board_limit(tmp_path):
@@ -2946,6 +2994,7 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
         "sweep_price_levels": 10,
         "queue_wait_seconds": 8,
         "queue_confirm_snapshots": 4,
+        "order_allocation_mode": "third",
         "order_amount_per_board": 20_000,
         "max_auto_board_count": 3,
         "max_market_broken_rate_pct": 35.5,
