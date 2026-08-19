@@ -310,6 +310,8 @@ def test_direct_parquet_matrix_reports_actionable_error_when_enriched_is_empty(t
 
 def test_direct_parquet_matrix_matches_panel_builder_and_reuses_mmap(tmp_path):
     market_root = tmp_path / "kline_daily_enriched"
+    (market_root / "metadata.json").parent.mkdir(parents=True)
+    (market_root / "metadata.json").write_text("{}", encoding="utf-8")
     days = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
     rows = []
     closes = {

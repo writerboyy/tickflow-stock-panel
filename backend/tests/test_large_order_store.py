@@ -172,6 +172,41 @@ def test_store_history_reads_legacy_parquet_with_missing_columns(tmp_path: Path)
     assert result["rows"][0]["event_kind"] == "proxy_flow"
 
 
+def test_store_compacts_mixed_legacy_and_current_schemas(tmp_path: Path):
+    day = date(2026, 8, 4)
+    day_root = tmp_path / "large_orders" / "kaipanla_intent" / f"date={day}"
+    (day_root / "hour=09").mkdir(parents=True)
+    (day_root / "hour=10").mkdir(parents=True)
+    pl.DataFrame({
+        "trade_date": [day],
+        "event_ts_ms": [_event_ts(9)],
+        "symbol": ["000001.SZ"],
+        "event_id": ["legacy-intent"],
+        "order_id": ["order-legacy"],
+        "limit_flag": [True],
+    }).write_parquet(day_root / "hour=09" / "part-legacy.parquet")
+    pl.DataFrame({
+        "trade_date": [day],
+        "event_ts_ms": [_event_ts(10)],
+        "symbol": ["000001.SZ"],
+        "event_id": ["current-intent"],
+        "order_id": ["order-current"],
+        "limit_flag": [False],
+        "limit_flag_code": [0],
+        "cancel_flag": [False],
+        "cancel_flag_code": [0],
+    }).write_parquet(day_root / "hour=10" / "part-current.parquet")
+    store = LargeOrderStore(tmp_path)
+
+    result = store.compact(day, kind="kaipanla_intent")
+
+    assert result == {"kaipanla_intent": 2}
+    compacted = pl.read_parquet(day_root / "part.parquet").sort("event_ts_ms")
+    assert compacted.schema["limit_flag_code"] == pl.Int8
+    assert compacted["limit_flag_code"].to_list() == [None, 0]
+    assert not (day_root / "hour=09" / "part-legacy.parquet").exists()
+
+
 def test_store_persists_orderbook_snapshots(tmp_path: Path):
     day = date(2026, 8, 4)
     store = LargeOrderStore(tmp_path, flush_interval=0.01)

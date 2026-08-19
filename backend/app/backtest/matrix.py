@@ -710,8 +710,15 @@ def load_market_data_matrix_from_parquet(
         pa.schema([("date", pa.date32())]),
         flavor="hive",
     )
+    parquet_files = sorted(
+        path
+        for path in root.glob("date=*/**/*.parquet")
+        if path.is_file()
+    )
+    if not parquet_files:
+        raise ValueError("本地指标数据为空，请先在数据页面同步日K并完成指标计算")
     dataset = pads.dataset(
-        str(root),
+        [str(path) for path in parquet_files],
         format="parquet",
         partitioning=partitioning,
     )

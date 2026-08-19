@@ -526,9 +526,9 @@ class LargeOrderStore:
             if not files:
                 result[current_kind] = 0
                 continue
-            frame = pl.read_parquet(files)
-            if "event_id" in frame.columns:
-                frame = frame.unique(subset=["event_id"], keep="last", maintain_order=True)
+            # Reuse the normalized reader so legacy fragments with missing
+            # columns can be compacted alongside current-schema fragments.
+            frame = self.read_day(current_kind, trade_date)
             frame = frame.sort("event_ts_ms")
             target = day_root / "part.parquet"
             target.parent.mkdir(parents=True, exist_ok=True)
