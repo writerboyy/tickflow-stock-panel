@@ -2351,7 +2351,7 @@ class LimitBoardService:
         if len(retained_order) < _AUTOMATIC_CANDIDATE_LIMIT:
             retained_order.extend(
                 str(row["symbol"]).strip().upper()
-                for row in ranked
+                for row in automatic_rows
                 if str(row["symbol"]).strip().upper() not in retained_order
             )
             retained_order = retained_order[:_AUTOMATIC_CANDIDATE_LIMIT]

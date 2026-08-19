@@ -464,6 +464,7 @@ def test_automatic_candidates_keep_only_scored_top_thirty(tmp_path):
         "candidate_scores": {
             symbol: {
                 "candidate_score": float(100 - index),
+                "candidate_score_state": "live",
                 "candidate_score_detail": {},
             }
             for index, symbol in enumerate(symbols)
@@ -480,6 +481,29 @@ def test_automatic_candidates_keep_only_scored_top_thirty(tmp_path):
     assert retained == set(symbols[:30])
     assert set(runtime["symbols"]) == {*symbols[:30], "300001.SZ"}
     assert set(runtime["candidate_scores"]) == {*symbols[:30], "300001.SZ"}
+
+
+def test_automatic_candidate_trim_does_not_prioritize_cached_scores(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    symbols = [f"{600000 + index}.SH" for index in range(35)]
+    runtime = {
+        "symbols": {
+            symbol: {"source_modes": ["first_board"]}
+            for symbol in symbols
+        },
+        "candidate_scores": {
+            symbol: {
+                "candidate_score": float(index),
+                "candidate_score_state": "cached",
+                "candidate_score_detail": {},
+            }
+            for index, symbol in enumerate(symbols)
+        },
+    }
+
+    retained = service._trim_automatic_candidates(runtime)
+
+    assert retained == set(symbols[:30])
 
 
 def test_automatic_candidates_keep_unscored_rows_when_score_context_unavailable(tmp_path):
