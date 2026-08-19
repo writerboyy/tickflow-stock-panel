@@ -51,6 +51,28 @@ class FakeQuotes:
         self.latest_quotes = []
         self.final_sync_done = False
 
+    @staticmethod
+    def realtime_provider():
+        return "tickflow"
+
+    def get_fresh_quotes(self, symbols):
+        requested = {str(symbol).strip().upper() for symbol in symbols}
+        rows = {
+            str(row.get("symbol") or "").strip().upper(): dict(row)
+            for row in self.latest_quotes
+            if str(row.get("symbol") or "").strip().upper() in requested
+        }
+        return {
+            "live": rows.keys() == requested,
+            "quotes": rows,
+            "missing_symbols": sorted(requested - rows.keys()),
+            "as_of": max((row.get("timestamp") for row in rows.values()), default=None),
+        }
+
+    @staticmethod
+    def get_min_interval():
+        return 5.0
+
     def publish_external_alerts(self, events):
         self.events.extend(events)
 
@@ -354,7 +376,7 @@ def test_automatic_candidate_is_retained_before_open_without_limit_price(
         "last_price": 10.2,
         "change_pct": 0.02,
         "timestamp": now.isoformat(),
-        "source": "kaipanla_socket",
+        "source": "tickflow",
     }])
 
     state = service._runtime_for_today()["symbols"]["600000.SH"]

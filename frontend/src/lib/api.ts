@@ -1286,7 +1286,7 @@ export interface LimitBoardQuoteSnapshot {
     change_pct?: number | null
     limit_up?: number | null
     timestamp?: string | number | null
-    source?: 'realtime' | 'daily_snapshot'
+    source?: 'tickflow' | 'daily_snapshot'
   }>
   sector_links: Record<string, Array<{ plate_id: string; plate_name: string }>>
   missing_symbols: string[]

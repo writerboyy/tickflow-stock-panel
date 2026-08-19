@@ -217,9 +217,7 @@ class LimitBoardService:
         self.quote_service.add_fetch_listener(self._on_market_fetch)
         self._refresh_symbol_consumer()
         try:
-            self.quote_service.acquire_temporary_polling(
-                max(1.0, float(self.quote_service.get_min_interval()))
-            )
+            self.quote_service.acquire_temporary_polling(self._refresh_interval_seconds())
             self._polling_lease = True
         except ValueError as exc:
             self._last_error = str(exc)
@@ -266,26 +264,13 @@ class LimitBoardService:
         requested_set = set(requested)
         self._refresh_sector_candidate_universe(cn_today())
         with self._lock:
-            source_rows = {symbol: dict(self._sector_live_quotes.get(symbol) or {}) for symbol in requested_set}
-        quotes = {
-            symbol: {
-                "symbol": symbol,
-                "name": raw.get("name"),
-                "last_price": _finite(raw.get("last_price")),
-                "change_pct": _finite(raw.get("change_pct")),
-                "limit_up": None,
-                "timestamp": raw.get("timestamp"),
-                "source": "kaipanla_socket",
-            }
-            for symbol, raw in source_rows.items()
-            if _finite(raw.get("last_price")) is not None
-        }
-        missing = requested_set - quotes.keys()
-        fresh_getter = getattr(self.quote_service, "get_fresh_quotes", None)
-        fresh_payload = fresh_getter(missing) if missing and callable(fresh_getter) else {}
+            self._heat_quote_symbols = requested_set
+        self._refresh_symbol_consumer()
+        fresh_payload = self._fresh_tickflow_quotes(requested_set)
+        quotes = {}
         for symbol, raw in (fresh_payload.get("quotes") or {}).items():
             normalized = str(symbol).strip().upper()
-            if normalized not in missing:
+            if normalized not in requested_set:
                 continue
             price = _finite(raw.get("last_price", raw.get("close")))
             if price is None:
@@ -298,7 +283,7 @@ class LimitBoardService:
                 "change_pct": _finite(raw.get("change_pct")),
                 "limit_up": self._limit_up(raw, normalized, name, cn_today()),
                 "timestamp": raw.get("timestamp"),
-                "source": "shared_realtime",
+                "source": "tickflow",
             }
         timestamps = [
             str(row["timestamp"])
@@ -320,6 +305,34 @@ class LimitBoardService:
             "sector_links": sector_links,
             "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
         }
+
+    def _fresh_tickflow_quotes(self, symbols: set[str]) -> dict[str, Any]:
+        provider_getter = getattr(self.quote_service, "realtime_provider", None)
+        if callable(provider_getter):
+            try:
+                if str(provider_getter()).strip().lower() != "tickflow":
+                    return {}
+            except Exception:  # noqa: BLE001
+                logger.debug("读取 TickFlow 实时行情 provider 失败", exc_info=True)
+                return {}
+        fresh_getter = getattr(self.quote_service, "get_fresh_quotes", None)
+        if not callable(fresh_getter) or not symbols:
+            return {}
+        try:
+            payload = fresh_getter(symbols)
+        except Exception:  # noqa: BLE001
+            logger.debug("读取 TickFlow 实时行情快照失败", exc_info=True)
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _refresh_interval_seconds(self) -> float:
+        getter = getattr(self.quote_service, "get_min_interval", None)
+        if not callable(getter):
+            return _SCORE_REFRESH_SECONDS
+        try:
+            return max(_SCORE_REFRESH_SECONDS, float(getter()))
+        except (TypeError, ValueError):
+            return _SCORE_REFRESH_SECONDS
 
     def _market_sentiment_snapshot(self) -> dict[str, Any] | None:
         collector = getattr(self.app_state, "kaipanla_collector", None)
@@ -1132,11 +1145,19 @@ class LimitBoardService:
         }
         if self._market_mode() == "full_market":
             symbols.update(self._automatic_candidate_symbols(cn_today()))
-        with self._lock:
-            quotes = [dict(self._sector_live_quotes[symbol]) for symbol in symbols if symbol in self._sector_live_quotes]
+        self._refresh_symbol_consumer(symbols)
+        fresh_payload = self._fresh_tickflow_quotes(symbols)
+        quotes = [dict(row) for row in (fresh_payload.get("quotes") or {}).values()]
         self._enqueue({"type": "market", "quotes": quotes})
 
     def _market_mode(self) -> str:
+        provider_getter = getattr(self.quote_service, "realtime_provider", None)
+        if callable(provider_getter):
+            try:
+                if str(provider_getter()).strip().lower() != "tickflow":
+                    return "none"
+            except Exception:  # noqa: BLE001
+                return "none"
         mode_getter = getattr(self.quote_service, "realtime_mode", None)
         if not callable(mode_getter):
             return "full_market"
@@ -1405,6 +1426,9 @@ class LimitBoardService:
             symbol = str(raw.get("symbol") or "").strip().upper()
             if not symbol:
                 continue
+            source = str(raw.get("source") or "").strip().lower()
+            if source and source != "tickflow":
+                continue
             quote_at = _quote_time(raw.get("timestamp"))
             if quote_at is None or quote_at.date() != now.date():
                 continue
@@ -1434,6 +1458,7 @@ class LimitBoardService:
                 "symbol": symbol,
                 "name": name,
                 "last_price": price,
+                "source": "tickflow",
                 "limit_up": limit_up,
                 "limit_gap_pct": gap,
                 "timestamp": quote_at.isoformat(),
@@ -2024,10 +2049,26 @@ class LimitBoardService:
         if callable(notify):
             notify()
 
-    def _refresh_symbol_consumer(self) -> None:
-        remover = getattr(self.quote_service, "remove_symbol_consumer", None)
-        if callable(remover):
-            remover(_ACCOUNT_ID)
+    def _refresh_symbol_consumer(self, additional_symbols: set[str] | None = None) -> None:
+        setter = getattr(self.quote_service, "set_symbol_consumer", None)
+        if not callable(setter):
+            return
+        config = self.store.load_config()
+        symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for key in ("selected", "board_pool")
+            for item in config.get(key, [])
+            if str(item.get("symbol") or "").strip()
+        }
+        with self._lock:
+            symbols.update(self._sector_quote_symbols)
+            symbols.update(self._heat_quote_symbols)
+        symbols.update({
+            str(symbol).strip().upper()
+            for symbol in additional_symbols or set()
+            if str(symbol).strip()
+        })
+        setter(_ACCOUNT_ID, symbols)
 
     def _enrich_concepts(self, rows: list[dict[str, Any]]) -> None:
         enrich = getattr(self.quote_service, "enrich_external_alerts", None)
@@ -2767,7 +2808,7 @@ class LimitBoardService:
                         if isinstance(sector_strength, dict)
                         else self._last_scan_at
                     ),
-                    "interval_seconds": int(_SCORE_REFRESH_SECONDS),
+                    "interval_seconds": int(self._refresh_interval_seconds()),
                 },
                 "first_board_enabled": first_board_enabled,
             },

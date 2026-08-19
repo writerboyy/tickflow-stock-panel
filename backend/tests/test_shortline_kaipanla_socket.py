@@ -88,7 +88,7 @@ async def test_shortline_bootstrap_refreshes_close_snapshot_after_close(
     assert collector.sector_strength_snapshot()["refreshed_at"] == "2026-08-18T15:00:00+08:00"
 
 
-def test_shortline_service_uses_socket_quotes_without_tickflow(tmp_path, monkeypatch):
+def test_shortline_service_uses_tickflow_quotes_for_heat_snapshot(tmp_path, monkeypatch):
     today = date(2026, 8, 18)
     quotes = FakeQuotes()
     service = LimitBoardService(
@@ -113,16 +113,22 @@ def test_shortline_service_uses_socket_quotes_without_tickflow(tmp_path, monkeyp
         sector_strength_snapshot=lambda: strength,
         shortline_constituents_snapshot=lambda: constituent,
     )
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH", "name": "浦发银行", "last_price": 10.3,
+        "prev_close": 10.0, "change_pct": 0.03,
+        "timestamp": "2026-08-18T10:00:02+08:00",
+    }]
     monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
 
     assert service._refresh_sector_candidate_universe(today) == {"600000.SH"}
     snapshot = service.quote_snapshot(["600000.SH"])
     assert snapshot["state"] == "live"
-    assert snapshot["quotes"]["600000.SH"]["source"] == "kaipanla_socket"
-    assert quotes.consumers == {}
+    assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.3
+    assert snapshot["quotes"]["600000.SH"]["source"] == "tickflow"
+    assert quotes.consumers["limit_board"] == {"600000.SH"}
 
 
-def test_shortline_heat_quotes_fill_socket_gaps_from_shared_realtime(
+def test_shortline_heat_quotes_use_tickflow_for_socket_gaps(
     tmp_path, monkeypatch,
 ):
     today = date(2026, 8, 18)
@@ -164,11 +170,37 @@ def test_shortline_heat_quotes_fill_socket_gaps_from_shared_realtime(
 
     assert snapshot["state"] == "live"
     assert snapshot["missing_symbols"] == []
-    assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.2
-    assert snapshot["quotes"]["600000.SH"]["source"] == "kaipanla_socket"
+    assert snapshot["quotes"]["600000.SH"]["last_price"] == 10.3
+    assert snapshot["quotes"]["600000.SH"]["source"] == "tickflow"
     assert snapshot["quotes"]["600001.SH"]["last_price"] == 11.2
-    assert snapshot["quotes"]["600001.SH"]["source"] == "shared_realtime"
+    assert snapshot["quotes"]["600001.SH"]["source"] == "tickflow"
     assert snapshot["quotes"]["600001.SH"]["limit_up"] == 11.55
+
+
+def test_shortline_heat_quotes_fail_closed_for_non_tickflow_provider(
+    tmp_path, monkeypatch,
+):
+    today = date(2026, 8, 18)
+    quotes = FakeQuotes()
+    quotes.realtime_provider = lambda: "kaipanla"
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH", "name": "浦发银行", "last_price": 10.3,
+        "change_pct": 0.03, "timestamp": "2026-08-18T10:00:02+08:00",
+    }]
+    service = LimitBoardService(
+        Path(tmp_path), FakeRepo(), quotes,
+        SimpleNamespace(paper_supervisor=None, qmt_trading_service=None),
+    )
+    monkeypatch.setattr(
+        service, "_refresh_sector_candidate_universe", lambda _day: set(),
+    )
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+
+    snapshot = service.quote_snapshot(["600000.SH"])
+
+    assert snapshot["state"] == "unavailable"
+    assert snapshot["quotes"] == {}
+    assert snapshot["missing_symbols"] == ["600000.SH"]
 
 
 def test_shortline_scope_keeps_top_ten_target_when_upstream_returns_nine(

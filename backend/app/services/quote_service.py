@@ -1219,6 +1219,12 @@ class QuoteService:
             return "watchlist"
         return "full_market"
 
+    @staticmethod
+    def realtime_provider() -> str:
+        """返回共享实时行情当前选择的 provider。"""
+        from app.services import preferences
+        return preferences.get_realtime_data_provider()
+
     @classmethod
     def is_realtime_allowed(cls) -> bool:
         """当前档位是否允许使用实时行情。"""
