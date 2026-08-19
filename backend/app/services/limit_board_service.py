@@ -42,6 +42,7 @@ _PREMIUM_FILTER_COLUMNS = {
     "first_board_broken_rate",
 }
 _SCORE_REFRESH_SECONDS = 5.0
+_SCORE_DISPLAY_CACHE_SECONDS = 60.0
 _SECTOR_CANDIDATE_LIMIT = 10
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_CANDIDATE_LIMIT = 30
@@ -2146,6 +2147,18 @@ class LimitBoardService:
                 self.quote_service.push_alerts([event])
 
     def _persist_runtime(self, runtime: dict[str, Any]) -> None:
+        stored = self.store.load_runtime()
+        if stored.get("trading_date") == runtime.get("trading_date"):
+            snapshots = dict(stored.get("candidate_score_snapshots") or {})
+            for symbol, snapshot in (runtime.get("candidate_score_snapshots") or {}).items():
+                previous = snapshots.get(symbol) or {}
+                previous_at = _quote_time(previous.get("candidate_score_as_of"))
+                snapshot_at = _quote_time(snapshot.get("candidate_score_as_of"))
+                if previous_at is None or (
+                    snapshot_at is not None and snapshot_at >= previous_at
+                ):
+                    snapshots[symbol] = snapshot
+            runtime["candidate_score_snapshots"] = snapshots
         self.store.save_runtime(runtime)
 
     def _notify_updated(self) -> None:
@@ -2326,18 +2339,20 @@ class LimitBoardService:
             automatic_rows,
             runtime.get("candidate_scores") or {},
         )
-        scored_order = [
+        live_order = [
             str(row["symbol"]).strip().upper()
             for row in ranked
-            if row.get("candidate_score") is not None
+            if (
+                row.get("candidate_score") is not None
+                and row.get("candidate_score_state") == "live"
+            )
         ][:_AUTOMATIC_CANDIDATE_LIMIT]
-        retained_order = [*scored_order]
+        retained_order = [*live_order]
         if len(retained_order) < _AUTOMATIC_CANDIDATE_LIMIT:
             retained_order.extend(
                 str(row["symbol"]).strip().upper()
                 for row in ranked
-                if row.get("candidate_score") is None
-                and str(row["symbol"]).strip().upper() not in retained_order
+                if str(row["symbol"]).strip().upper() not in retained_order
             )
             retained_order = retained_order[:_AUTOMATIC_CANDIDATE_LIMIT]
         retained = set(retained_order)
@@ -2353,6 +2368,11 @@ class LimitBoardService:
         runtime["candidate_scores"] = {
             symbol: value
             for symbol, value in (runtime.get("candidate_scores") or {}).items()
+            if symbol in kept_symbols
+        }
+        runtime["candidate_score_snapshots"] = {
+            symbol: value
+            for symbol, value in (runtime.get("candidate_score_snapshots") or {}).items()
             if symbol in kept_symbols
         }
         return retained
@@ -2643,6 +2663,18 @@ class LimitBoardService:
             } if sector_service is not None else {}
             realtime_sectors = self._sector_strength_snapshot(now.date())
 
+            valid_snapshots = dict(runtime.get("candidate_score_snapshots") or {})
+            for symbol, value in previous_cache.items():
+                if (
+                    symbol not in valid_snapshots
+                    and value.get("candidate_score") is not None
+                    and _quote_time(value.get("candidate_score_as_of")) is not None
+                ):
+                    valid_snapshots[symbol] = dict(value)
+            non_trading_cache = (
+                not _is_trading_time(now)
+                and now.timetz().replace(tzinfo=None) >= clock_time(11, 30)
+            )
             refreshed: dict[str, dict[str, Any]] = {}
             for candidate in candidates:
                 symbol = str(candidate.get("symbol") or "").strip().upper()
@@ -2750,8 +2782,12 @@ class LimitBoardService:
                     if complete else None
                 )
                 score = round(base_score, 1) if base_score is not None else None
-                state = "cached" if complete and cached_component else "live" if complete else "unavailable"
-                refreshed[symbol] = {
+                state = (
+                    "cached"
+                    if complete and (cached_component or non_trading_cache)
+                    else "live" if complete else "unavailable"
+                )
+                current = {
                     "change_pct": change_pct,
                     "candidate_score": score,
                     "candidate_rank": None,
@@ -2760,8 +2796,35 @@ class LimitBoardService:
                     "candidate_score_detail": detail,
                     "candidate_reasons": self._score_reasons(candidate, detail),
                 }
+                if complete:
+                    valid_snapshots[symbol] = dict(current)
+                    refreshed[symbol] = current
+                    continue
+
+                snapshot = valid_snapshots.get(symbol) or {}
+                captured_at = _quote_time(snapshot.get("candidate_score_as_of"))
+                cache_age = (
+                    (now - captured_at).total_seconds()
+                    if captured_at is not None and captured_at.date() == now.date()
+                    else None
+                )
+                if (
+                    snapshot.get("candidate_score") is not None
+                    and cache_age is not None
+                    and cache_age >= 0
+                    and (non_trading_cache or cache_age <= _SCORE_DISPLAY_CACHE_SECONDS)
+                ):
+                    refreshed[symbol] = {
+                        **snapshot,
+                        "change_pct": change_pct,
+                        "candidate_rank": None,
+                        "candidate_score_state": "cached",
+                    }
+                else:
+                    refreshed[symbol] = current
             changed = refreshed != previous_cache
             runtime["candidate_scores"] = refreshed
+            runtime["candidate_score_snapshots"] = valid_snapshots
             self._score_refresh_at = now_mono
             return changed
         finally:

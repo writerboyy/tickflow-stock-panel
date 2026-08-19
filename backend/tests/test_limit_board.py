@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import polars as pl
@@ -1062,6 +1062,14 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert view["board_pool"] == []
     assert qmt.orders == []
 
+    service._score_refresh_at = 0.0
+    service._refresh_candidate_scores(
+        runtime,
+        [row],
+        now.replace(hour=15, minute=30),
+    )
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score_state"] == "cached"
+
 
 def test_candidate_score_refresh_uses_five_second_window_and_bypasses_for_new_symbol(
     tmp_path, monkeypatch,
@@ -1117,7 +1125,7 @@ def test_candidate_intraday_features_allow_same_day_final_bars_after_close(tmp_p
     assert captured["freshness_seconds"] == 24 * 60 * 60
 
 
-def test_candidate_score_refresh_requires_current_day_capital_when_source_is_missing(
+def test_candidate_score_refresh_uses_recent_valid_score_when_capital_is_temporarily_missing(
     tmp_path, monkeypatch,
 ):
     service, _quotes, _config = make_service(tmp_path)
@@ -1155,12 +1163,123 @@ def test_candidate_score_refresh_requires_current_day_capital_when_source_is_mis
 
     cached = runtime["candidate_scores"]["600000.SH"]
     assert changed is True
-    assert cached["candidate_score"] is None
-    assert cached["candidate_score_state"] == "unavailable"
-    assert "intraday_flow" not in cached["candidate_score_detail"]
-    assert cached["candidate_score_detail"]["sector"] == previous_detail["sector"]
-    assert cached["candidate_score_detail"]["premium_gene"] == previous_detail["premium_gene"]
-    assert cached["candidate_score_detail"]["technical"] == previous_detail["technical"]
+    assert cached["candidate_score"] == 70.0
+    assert cached["candidate_score_state"] == "cached"
+    assert cached["candidate_score_as_of"] == now.isoformat()
+    assert cached["candidate_score_detail"] == previous_detail
+    assert runtime["candidate_score_snapshots"]["600000.SH"]["candidate_score"] == 70.0
+
+
+def test_candidate_score_refresh_expires_display_cache_during_trading(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    now = captured_at + timedelta(seconds=61)
+    monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
+    runtime = {
+        "candidate_scores": {
+            "600000.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": captured_at.isoformat(),
+                "candidate_score_detail": {},
+                "candidate_reasons": [],
+            },
+        },
+    }
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        now,
+    )
+
+    current = runtime["candidate_scores"]["600000.SH"]
+    assert current["candidate_score"] is None
+    assert current["candidate_score_state"] == "unavailable"
+    assert runtime["candidate_score_snapshots"]["600000.SH"]["candidate_score"] == 70.0
+
+
+def test_persist_runtime_keeps_newer_candidate_score_snapshots(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    captured_at = datetime(2026, 8, 19, 10, 0, tzinfo=CN_TZ)
+    runtime["candidate_score_snapshots"] = {
+        "600000.SH": {
+            "candidate_score": 70.0,
+            "candidate_score_as_of": captured_at.isoformat(),
+        },
+    }
+    service.store.save_runtime(runtime)
+
+    stale_runtime = {
+        **runtime,
+        "candidate_scores": {"600000.SH": {"candidate_score": None}},
+        "candidate_score_snapshots": {},
+    }
+    service._persist_runtime(stale_runtime)
+
+    persisted = service.store.load_runtime()
+    assert persisted["candidate_score_snapshots"]["600000.SH"]["candidate_score"] == 70.0
+
+
+def test_candidate_score_refresh_restores_persisted_snapshot_after_restart(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = datetime(2026, 8, 19, 10, 0, tzinfo=CN_TZ)
+    runtime = service._runtime_for_today()
+    runtime["candidate_score_snapshots"] = {
+        "600000.SH": {
+            "candidate_score": 70.0,
+            "candidate_score_state": "live",
+            "candidate_score_as_of": captured_at.isoformat(),
+            "candidate_score_detail": {},
+            "candidate_reasons": [],
+        },
+    }
+    service.store.save_runtime(runtime)
+    restored = service._runtime_for_today()
+    monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
+
+    service._refresh_candidate_scores(
+        restored,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        captured_at + timedelta(seconds=30),
+    )
+
+    current = restored["candidate_scores"]["600000.SH"]
+    assert current["candidate_score"] == 70.0
+    assert current["candidate_score_state"] == "cached"
+
+
+@pytest.mark.parametrize("hour,minute", [(11, 45), (15, 30)])
+def test_candidate_score_refresh_keeps_final_valid_score_outside_trading_hours(
+    tmp_path, monkeypatch, hour, minute,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    now = captured_at.replace(hour=hour, minute=minute)
+    monkeypatch.setattr("app.services.limit_board_service.time.monotonic", lambda: 100.0)
+    runtime = {
+        "candidate_scores": {
+            "600000.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": captured_at.isoformat(),
+                "candidate_score_detail": {},
+                "candidate_reasons": [],
+            },
+        },
+    }
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        now,
+    )
+
+    current = runtime["candidate_scores"]["600000.SH"]
+    assert current["candidate_score"] == 70.0
+    assert current["candidate_score_state"] == "cached"
+    assert current["candidate_score_as_of"] == captured_at.isoformat()
 
 
 def test_candidate_score_refresh_drops_legacy_local_sector_cache(tmp_path, monkeypatch):
