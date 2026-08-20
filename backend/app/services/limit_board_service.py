@@ -45,7 +45,12 @@ _SCORE_REFRESH_SECONDS = 5.0
 _SCORE_DISPLAY_CACHE_SECONDS = 60.0
 _SECTOR_CANDIDATE_LIMIT = 10
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
+_AUTOMATIC_NEAR_LIMIT_PER_SECTOR = 5
 _AUTOMATIC_CANDIDATE_LIMIT = 30
+_ENTRY_MIN_LIMIT_GAP_PCT = 0.005
+_ENTRY_MAX_LIMIT_GAP_PCT = 0.03
+_ENTRY_QUOTE_FRESH_SECONDS = 10.0
+_ENTRY_SCORE_RISING_DELTA = 0.05
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
@@ -176,6 +181,7 @@ class LimitBoardService:
         self._ws_registered = False
         self._ws_symbols: set[str] = set()
         self._quotes: dict[str, dict[str, Any]] = {}
+        self._preselection_quotes: dict[str, dict[str, Any]] = {}
         self._sector_quote_symbols: set[str] = set()
         self._heat_quote_symbols: set[str] = set()
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=10))
@@ -1322,6 +1328,7 @@ class LimitBoardService:
             }
             self.store.save_runtime(runtime)
             self._depth.clear()
+            self._preselection_quotes.clear()
         return runtime
 
     def _refresh_history(self, config: dict[str, Any]) -> None:
@@ -1456,6 +1463,7 @@ class LimitBoardService:
     @staticmethod
     def _preselect_automatic_updates(
         updates: dict[str, dict[str, Any]],
+        previous_quotes: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         retained = {
             symbol
@@ -1486,9 +1494,40 @@ class LimitBoardService:
             )
 
         for quotes in by_sector.values():
+            ranked = sorted(quotes, key=rank_key)
             retained.update(
                 str(quote["symbol"])
-                for quote in sorted(quotes, key=rank_key)[:_AUTOMATIC_CANDIDATES_PER_SECTOR]
+                for quote in ranked[:_AUTOMATIC_CANDIDATES_PER_SECTOR]
+            )
+            near_limit = sorted(
+                quotes,
+                key=lambda quote: (
+                    _finite(quote.get("limit_gap_pct"))
+                    if _finite(quote.get("limit_gap_pct")) is not None
+                    else float("inf"),
+                    -( _finite(quote.get("amount")) or 0.0),
+                    str(quote.get("symbol") or ""),
+                ),
+            )
+            retained.update(
+                str(quote["symbol"])
+                for quote in near_limit[:_AUTOMATIC_NEAR_LIMIT_PER_SECTOR]
+            )
+            previous_quotes = previous_quotes or {}
+            momentum = []
+            for quote in quotes:
+                symbol = str(quote.get("symbol") or "").strip().upper()
+                current_change = _finite(quote.get("change_pct"))
+                previous_change = _finite((previous_quotes.get(symbol) or {}).get("change_pct"))
+                if current_change is None or previous_change is None:
+                    continue
+                momentum.append((current_change - previous_change, quote))
+            retained.update(
+                str(quote["symbol"])
+                for _delta, quote in sorted(
+                    momentum,
+                    key=lambda item: (-item[0], str(item[1].get("symbol") or "")),
+                )[:_AUTOMATIC_NEAR_LIMIT_PER_SECTOR]
             )
         return {symbol: quote for symbol, quote in updates.items() if symbol in retained}
 
@@ -1577,7 +1616,13 @@ class LimitBoardService:
                 ],
             }
             updates[symbol] = quote
-        updates = self._preselect_automatic_updates(updates)
+        all_updates = updates
+        updates = self._preselect_automatic_updates(updates, self._preselection_quotes)
+        self._preselection_quotes = {
+            symbol: dict(quote)
+            for symbol, quote in all_updates.items()
+            if {"first_board", "rebound_board"} & set(quote.get("source_modes") or [])
+        }
         with self._lock:
             self._quotes.update(updates)
         self._evaluate_quotes(updates, runtime, config)
@@ -2630,6 +2675,146 @@ class LimitBoardService:
             reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/5")
         return reasons
 
+    @staticmethod
+    def _entry_metrics(
+        candidate: dict[str, Any],
+        score: float | None,
+        previous: dict[str, Any],
+        detail: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Build a buyability snapshot separately from the strength score."""
+        now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
+        current_score = _finite(score)
+        previous_score = _finite(previous.get("candidate_score"))
+        velocity = (
+            current_score - previous_score
+            if current_score is not None and previous_score is not None
+            else None
+        )
+        previous_rounds = int(_finite(previous.get("candidate_score_rising_rounds")) or 0)
+        rising_rounds = (
+            min(3, previous_rounds + 1)
+            if velocity is not None and velocity > _ENTRY_SCORE_RISING_DELTA
+            else 0
+        )
+        gap = _finite(candidate.get("limit_gap_pct"))
+        status = str(candidate.get("status") or "watching")
+        quote_at = _quote_time(candidate.get("last_quote_at") or candidate.get("timestamp"))
+        quote_age = (
+            max(0.0, (now_aware - quote_at).total_seconds())
+            if quote_at is not None and quote_at.date() == now_aware.date()
+            else None
+        )
+        flow = detail.get("intraday_flow") or {}
+        flow_score = _finite(flow.get("score")) or 0.0
+        gap_score = (
+            max(0.0, min(1.0, 1.0 - abs(gap - 0.015) / 0.015))
+            if gap is not None else 0.0
+        )
+        velocity_score = (
+            max(0.0, min(1.0, velocity / 3.0))
+            if velocity is not None else 0.0
+        )
+        entry_score = (
+            round(
+                (current_score or 0.0) * 0.50
+                + velocity_score * 20.0
+                + max(0.0, min(1.0, flow_score / 15.0)) * 15.0
+                + gap_score * 15.0,
+                1,
+            )
+            if current_score is not None and gap is not None else None
+        )
+
+        market_time = now_aware.timetz().replace(tzinfo=None)
+        if status in {"touched", "sealed", "broken", "resealed"} or (
+            gap is not None and gap <= 0.0001
+        ):
+            state, reason = "limit_reached", "已触及涨停或出现封板状态"
+        elif not _is_trading_time(now_aware):
+            state, reason = "closed", "当前不在连续竞价时段"
+        elif market_time < clock_time(9, 35):
+            state, reason = "warming", "等待 09:35 后确认开盘强度"
+        elif gap is None:
+            state, reason = "unavailable", "涨停价或距涨停数据不可用"
+        elif current_score is None:
+            state, reason = "unavailable", "强势确认分尚未计算"
+        elif quote_age is None or quote_age > _ENTRY_QUOTE_FRESH_SECONDS:
+            state, reason = "stale", f"行情超过 {_ENTRY_QUOTE_FRESH_SECONDS:.0f} 秒未更新"
+        elif gap < _ENTRY_MIN_LIMIT_GAP_PCT:
+            state, reason = "too_close", "距涨停过近，成交空间不足"
+        elif gap > _ENTRY_MAX_LIMIT_GAP_PCT:
+            state, reason = "too_far", "尚未进入可交易的强势区间"
+        elif velocity is None or rising_rounds < 2:
+            state, reason = "warming", "等待强势分连续两轮上升"
+        elif velocity <= _ENTRY_SCORE_RISING_DELTA:
+            state, reason = "weakening", "强势分上升动能不足"
+        else:
+            state, reason = "tradable", "强势分上升且仍有成交空间"
+
+        return {
+            "entry_score": entry_score,
+            "entry_rank": None,
+            "candidate_score_velocity": round(velocity, 2) if velocity is not None else None,
+            "candidate_score_rising_rounds": rising_rounds,
+            "tradability_state": state,
+            "tradability_reason": reason,
+            "entry_score_detail": {
+                "strength": round((current_score or 0.0) * 0.50, 2),
+                "velocity": round(velocity_score * 20.0, 2),
+                "intraday_flow": round(max(0.0, min(1.0, flow_score / 15.0)) * 15.0, 2),
+                "limit_gap": round(gap_score * 15.0, 2),
+                "quote_age_seconds": round(quote_age, 1) if quote_age is not None else None,
+            },
+            "entry_reasons": [reason],
+        }
+
+    @staticmethod
+    def _rank_opportunities(
+        candidates: list[dict[str, Any]],
+        score_cache: dict[str, dict[str, Any]],
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
+        result = []
+        for candidate in candidates:
+            symbol = str(candidate.get("symbol") or "").strip().upper()
+            score = score_cache.get(symbol) or {}
+            row = {**candidate, **score}
+            state = str(row.get("tradability_state") or "unavailable")
+            gap = _finite(row.get("limit_gap_pct"))
+            status = str(row.get("status") or "watching")
+            quote_at = _quote_time(row.get("last_quote_at") or row.get("timestamp"))
+            quote_age = (
+                (now_aware - quote_at).total_seconds()
+                if quote_at is not None and quote_at.date() == now_aware.date()
+                else None
+            )
+            if status in {"touched", "sealed", "broken", "resealed"} or (
+                gap is not None and gap <= 0.0001
+            ):
+                continue
+            if gap is None or gap < _ENTRY_MIN_LIMIT_GAP_PCT or gap > _ENTRY_MAX_LIMIT_GAP_PCT:
+                continue
+            if not _is_trading_time(now_aware) or now_aware.timetz().replace(tzinfo=None) < clock_time(9, 35):
+                continue
+            if quote_age is None or quote_age > _ENTRY_QUOTE_FRESH_SECONDS:
+                continue
+            if row.get("candidate_score_state") != "live" or state != "tradable":
+                continue
+            result.append(row)
+        result.sort(key=lambda row: (
+            -float(_finite(row.get("entry_score")) or 0.0),
+            -float(_finite(row.get("candidate_score_velocity")) or 0.0),
+            -float(_finite(row.get("candidate_score")) or 0.0),
+            float(_finite(row.get("limit_gap_pct")) or float("inf")),
+            str(row.get("symbol") or ""),
+        ))
+        for rank, row in enumerate(result, start=1):
+            row["entry_rank"] = rank
+        return result
+
     def _refresh_candidate_scores(
         self,
         runtime: dict[str, Any],
@@ -2810,6 +2995,13 @@ class LimitBoardService:
                     if complete and (cached_component or non_trading_cache)
                     else "live" if complete else "unavailable"
                 )
+                entry = self._entry_metrics(
+                    {**candidate, **candidate_quotes.get(symbol, {})},
+                    score,
+                    previous,
+                    detail,
+                    now,
+                )
                 current = {
                     "change_pct": change_pct,
                     "candidate_score": score,
@@ -2818,6 +3010,7 @@ class LimitBoardService:
                     "candidate_score_as_of": now.isoformat(),
                     "candidate_score_detail": detail,
                     "candidate_reasons": self._score_reasons(candidate, detail),
+                    **entry,
                 }
                 if complete:
                     valid_snapshots[symbol] = dict(current)
@@ -2837,11 +3030,19 @@ class LimitBoardService:
                     and cache_age >= 0
                     and (non_trading_cache or cache_age <= _SCORE_DISPLAY_CACHE_SECONDS)
                 ):
+                    snapshot_entry = self._entry_metrics(
+                        {**candidate, **candidate_quotes.get(symbol, {})},
+                        _finite(snapshot.get("candidate_score")),
+                        previous,
+                        snapshot.get("candidate_score_detail") or {},
+                        now,
+                    )
                     refreshed[symbol] = {
                         **snapshot,
                         "change_pct": change_pct,
                         "candidate_rank": None,
                         "candidate_score_state": "cached",
+                        **snapshot_entry,
                     }
                 else:
                     refreshed[symbol] = current
@@ -2881,6 +3082,11 @@ class LimitBoardService:
         rebound_board = self._rank_candidates(
             [item for item in self._strong_rows(rows) if "rebound_board" in item.get("source_modes", [])],
             score_cache,
+        )
+        opportunity_pool = self._rank_opportunities(
+            self._strong_rows(rows),
+            score_cache,
+            cn_now(),
         )
         qmt = self._qmt()
         stored_events = self.store.events(runtime["trading_date"])
@@ -2929,7 +3135,7 @@ class LimitBoardService:
             events.append(event)
         self._enrich_concepts([
             *rows, *selected, *board_pool, *candidate_pool,
-            *first_board, *rebound_board, *events,
+            *opportunity_pool, *first_board, *rebound_board, *events,
         ])
         hub = self._hub()
         capacity = hub.websocket_capacity() if hub is not None else 0
@@ -2963,6 +3169,7 @@ class LimitBoardService:
             "rebound_board": rebound_board,
             "selected": selected,
             "candidate_pool": candidate_pool,
+            "opportunity_pool": opportunity_pool,
             "board_pool": board_pool,
             "blacklist": [
                 symbol for symbol in runtime.get("blacklist", [])

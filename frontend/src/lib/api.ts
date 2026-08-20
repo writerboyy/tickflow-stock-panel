@@ -1179,6 +1179,20 @@ export interface LimitBoardRow {
   auto_order_amount?: number | null
   candidate_score?: number | null
   candidate_rank?: number | null
+  entry_score?: number | null
+  entry_rank?: number | null
+  candidate_score_velocity?: number | null
+  candidate_score_rising_rounds?: number
+  tradability_state?: 'tradable' | 'warming' | 'weakening' | 'too_close' | 'too_far' | 'stale' | 'closed' | 'limit_reached' | 'unavailable'
+  tradability_reason?: string
+  entry_reasons?: string[]
+  entry_score_detail?: {
+    strength?: number
+    velocity?: number
+    intraday_flow?: number
+    limit_gap?: number
+    quote_age_seconds?: number | null
+  }
   candidate_score_state?: 'live' | 'cached' | 'unavailable'
   candidate_score_as_of?: string | null
   candidate_score_detail?: {
@@ -1455,6 +1469,7 @@ export interface LimitBoardView {
   rebound_board: LimitBoardRow[]
   selected: LimitBoardRow[]
   candidate_pool: LimitBoardRow[]
+  opportunity_pool: LimitBoardRow[]
   board_pool: LimitBoardRow[]
   blacklist: string[]
   market_sentiment: {

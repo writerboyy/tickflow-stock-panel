@@ -22,6 +22,7 @@ import {
   WalletCards,
   Wifi,
   X,
+  Zap,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
@@ -42,7 +43,7 @@ import { QK } from '@/lib/queryKeys'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'candidate' | 'pool' | 'events'
+type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'events'
 type TableMode = 'candidate' | 'pool'
 type NotificationSettings = LimitBoardView['settings']['notifications']
 type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
@@ -210,7 +211,8 @@ function Row({
       {mode === 'candidate' ? <>
         <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
           {row.candidate_score == null ? <div className={intradayFlow?.capital_available === false ? 'text-warning' : 'text-muted'}>{intradayFlow?.capital_available === false ? '实时资金待补' : '待补数据'}</div> : <>
-            <div className="font-mono text-sm font-semibold tabular-nums text-accent">#{row.candidate_rank} · {row.candidate_score.toFixed(1)}</div>
+            <div className="font-mono text-sm font-semibold tabular-nums text-accent">强 {row.candidate_score.toFixed(1)}</div>
+            <div className="mt-0.5 font-mono text-[9px] text-bull">机会 {row.entry_rank != null ? `#${row.entry_rank} ` : ''}{row.entry_score == null ? '--' : row.entry_score.toFixed(1)}{row.candidate_score_velocity != null ? ` · ${row.candidate_score_velocity >= 0 ? '+' : ''}${row.candidate_score_velocity.toFixed(1)}` : ''}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)}</div>
             <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">分{intradayFlow?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
           </>}
@@ -219,6 +221,7 @@ function Row({
         <td className="w-[118px] min-w-[118px] px-2" title={`涨幅 ${change}；距涨停 ${gap}；${status.label}`}>
           <div className="font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'} <span className="text-secondary">{change}</span></div>
           <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="font-mono text-muted">距涨停 {gap}</span><span className={status.tone}>{status.label}</span></div>
+          <div className="mt-0.5 truncate text-[9px] text-secondary">{row.tradability_state === 'tradable' ? '可交易机会' : row.tradability_reason || '待观察'}</div>
         </td>
         <td className="w-[292px] min-w-[292px] px-2" title={(row.candidate_reasons || []).join('；')}>
           <div className="truncate text-[10px] text-secondary">板 {sector?.name || '--'} · {leadership} · {sector?.score.toFixed(1) ?? '--'}/50</div>
@@ -922,7 +925,7 @@ function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
             ['3', '保留 Top 30', '首板、反包合并打分后只保留自动排名前 30。'],
           ].map(([step, title, detail]) => <li key={step} className="flex gap-2 border-t border-border pt-2"><span className="font-mono text-accent">{step}</span><span><strong className="font-medium text-foreground">{title}</strong><span className="mt-0.5 block text-[11px] leading-5 text-muted">{detail}</span></span></li>)}
         </ol>
-        <p className="mt-2 text-[11px] leading-5 text-muted">首板资格为回看窗口内无涨停记录；反包资格为窗口内曾涨停、随后炸板或断板，且最近一个完整交易日未涨停。两类只有当日真实触及涨停时才显示对应标签，未触及时显示“观察”。“仅沪深主板”只限制自动候选，手工加入不受影响；距涨停不参与入选和打分。</p>
+        <p className="mt-2 text-[11px] leading-5 text-muted">首板资格为回看窗口内无涨停记录；反包资格为窗口内曾涨停、随后炸板或断板，且最近一个完整交易日未涨停。两类只有当日真实触及涨停时才显示对应标签，未触及时显示“观察”。“仅沪深主板”只限制自动候选，手工加入不受影响；强势确认分不使用距涨停，但可交易机会榜会使用成交空间和行情新鲜度。</p>
       </section>
 
       <section className="mt-4 border-t border-border pt-4">
@@ -971,6 +974,11 @@ function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
           <p><strong className="font-medium text-foreground">排序顺序：</strong>可计算状态 → 实时板块可用 → 板块实时排名 → 板块强度 → 板块分 → 龙头地位与成分排名 → 总分 → 基因 → 分时资金 → 技术面 → 股票代码。</p>
           <p className="sm:col-span-2"><strong className="font-medium text-foreground">缓存：</strong>5 秒一轮批量更新。同一交易日某项短暂缺数时可沿用最后有效值并标记“缓存”；跨交易日清空。实时板块或当日实时成分缺失时，自动候选严格停止，不使用本地聚合降级。</p>
         </div>
+      </section>
+
+      <section className="mt-4 border-t border-border pt-4">
+        <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">可交易机会分</h3><span className="font-mono text-bull">100 分</span></div>
+        <p className="mt-2 text-[11px] leading-5">强势确认分 50%、评分上升速度 20%、日内分时 15%、距涨停成交空间 15%。机会榜只保留行情 10 秒内、距涨停 0.5%–3%、未触板且强势分连续两轮上升的标的；涨停、封板、炸板和缓存评分只留在强势确认榜。</p>
       </section>
     </div>
     <div className="flex justify-end border-t border-border px-4 py-3"><button type="button" onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated hover:text-foreground">关闭</button></div>
@@ -1203,18 +1211,21 @@ export function LimitBoard() {
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
   const candidateSymbols = useMemo(() => new Set([
     ...(view.data?.candidate_pool ?? []).map(row => row.symbol),
+    ...(view.data?.opportunity_pool ?? []).map(row => row.symbol),
     ...(view.data?.board_pool ?? []).map(row => row.symbol),
-  ]), [view.data?.candidate_pool, view.data?.board_pool])
+  ]), [view.data?.candidate_pool, view.data?.opportunity_pool, view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
   const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateNotifications.isPending || updateAdvanced.isPending
   if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const data = view.data
   const runtime = data.runtime
-  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'pool' ? data.board_pool : []
+  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'pool' ? data.board_pool : []
   const tableMode: TableMode = tab === 'pool' ? 'pool' : 'candidate'
-  const tableTitle = tab === 'candidate' ? '备选池' : '实盘打板池'
+  const tableTitle = tab === 'candidate' ? '备选池' : tab === 'opportunity' ? '可交易机会' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
+    : tab === 'opportunity'
+      ? '独立机会分排序：强势确认、评分上升速度、日内分时和成交空间；只显示仍有成交空间的实时标的'
     : `前 10 板块强势股统一打分，自动候选只取 Top 30${data.settings.main_board_only ? ' · 仅沪深主板' : ''}；手工标的不受限制`
   const sentimentPanel = <section className="border-b border-border px-4 py-3 sm:px-5">
     <div className="grid min-w-[720px] grid-cols-5 divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
@@ -1253,6 +1264,7 @@ export function LimitBoard() {
           ['ladder', '连板天梯', null, Flame],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
+          ['opportunity', '机会榜', data.opportunity_pool.length, Zap],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
@@ -1268,7 +1280,7 @@ export function LimitBoard() {
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
               <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
-                {tab === 'candidate' ? <button type="button" onClick={() => setCandidateAlgorithmOpen(true)} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-secondary hover:bg-elevated hover:text-foreground"><CircleHelp className="h-3.5 w-3.5" />排序算法</button> : null}
+                {tab === 'candidate' || tab === 'opportunity' ? <button type="button" onClick={() => setCandidateAlgorithmOpen(true)} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-secondary hover:bg-elevated hover:text-foreground"><CircleHelp className="h-3.5 w-3.5" />排序算法</button> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
               </div>
             </div>

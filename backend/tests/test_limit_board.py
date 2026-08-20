@@ -1441,6 +1441,78 @@ def test_candidate_ranking_prioritizes_live_sector_before_total_score():
     assert [row["symbol"] for row in ranked] == ["600000.SH", "600001.SH"]
 
 
+def test_entry_metrics_requires_open_space_fresh_quote_and_rising_score(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 20, 10, 0, tzinfo=CN_TZ)
+    candidate = {
+        "symbol": "600000.SH",
+        "status": "near_limit",
+        "limit_gap_pct": 0.015,
+        "last_quote_at": now.isoformat(),
+    }
+    detail = {"intraday_flow": {"score": 12.0}}
+
+    first = service._entry_metrics(candidate, 80.0, {}, detail, now)
+    assert first["tradability_state"] == "warming"
+    assert first["entry_score"] is not None
+
+    second = service._entry_metrics(
+        candidate,
+        81.0,
+        {"candidate_score": 80.0, "candidate_score_rising_rounds": 1},
+        detail,
+        now,
+    )
+    assert second["tradability_state"] == "tradable"
+    assert second["candidate_score_velocity"] == pytest.approx(1.0)
+    assert second["candidate_score_rising_rounds"] == 2
+
+    sealed = service._entry_metrics(
+        {**candidate, "status": "sealed"},
+        90.0,
+        {"candidate_score": 80.0, "candidate_score_rising_rounds": 1},
+        detail,
+        now,
+    )
+    assert sealed["tradability_state"] == "limit_reached"
+
+
+def test_opportunity_ranking_excludes_untradable_rows_and_assigns_entry_rank(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 20, 10, 0, tzinfo=CN_TZ)
+    candidates = [
+        {"symbol": "600000.SH", "status": "near_limit", "limit_gap_pct": 0.015, "last_quote_at": now.isoformat()},
+        {"symbol": "600001.SH", "status": "touched", "limit_gap_pct": 0.0, "last_quote_at": now.isoformat()},
+        {"symbol": "600002.SH", "status": "near_limit", "limit_gap_pct": 0.04, "last_quote_at": now.isoformat()},
+    ]
+    scores = {
+        "600000.SH": {
+            "candidate_score": 80.0,
+            "candidate_score_state": "live",
+            "entry_score": 75.0,
+            "candidate_score_velocity": 1.0,
+            "tradability_state": "tradable",
+        },
+        "600001.SH": {
+            "candidate_score": 99.0,
+            "entry_score": 99.0,
+            "candidate_score_velocity": 5.0,
+            "tradability_state": "limit_reached",
+        },
+        "600002.SH": {
+            "candidate_score": 95.0,
+            "entry_score": 95.0,
+            "candidate_score_velocity": 5.0,
+            "tradability_state": "too_far",
+        },
+    }
+
+    ranked = service._rank_opportunities(candidates, scores, now)
+
+    assert [row["symbol"] for row in ranked] == ["600000.SH"]
+    assert ranked[0]["entry_rank"] == 1
+
+
 def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_industry(
     tmp_path, monkeypatch,
 ):
@@ -2832,6 +2904,7 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
     view = client.get("/api/limit-board")
     assert view.status_code == 200
     assert view.json()["revision"] == 0
+    assert "opportunity_pool" in view.json()
 
     added = client.post(
         "/api/limit-board/candidate",
