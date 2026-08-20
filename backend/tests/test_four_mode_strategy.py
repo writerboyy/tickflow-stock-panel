@@ -60,3 +60,72 @@ def test_snapshot_day_normalization_handles_datetime_index():
     cache.end = date(2026, 8, 20)
     cache.requirement = {"index_symbol": "000852.SH"}
     assert cache._trading_days() == [date(2026, 8, 20)]
+
+
+def test_snapshot_build_filters_stock_symbols_without_polars_list_cast_error():
+    import polars as pl
+
+    class Store:
+        data_dir = "/tmp/four-mode-test"
+
+    class Repo:
+        store = Store()
+
+        def get_instruments_asset(self, asset_type):
+            assert asset_type == "stock"
+            return pl.DataFrame({"symbol": ["000001.SZ", "600000.SH", "430001.BJ"]})
+
+        def get_daily_asset_batch(self, *_args, **_kwargs):
+            return pl.DataFrame()
+
+        def get_daily_asset(self, *_args, **_kwargs):
+            return pl.DataFrame({"date": [date(2026, 8, 20)]})
+
+    cache = snapshot.FourModeSnapshotCache(
+        Repo(), date(2026, 8, 20), date(2026, 8, 20), {"index_symbol": "000852.SH"}
+    )
+    assert cache.all_symbols == ["000001.SZ", "600000.SH"]
+
+
+def test_valid_empty_auction_manifest_is_not_a_storage_gap():
+    manifest = {
+        "status": "complete",
+        "expected_components": ["0915", "0920", "0925", "bid_detail"],
+        "components": {
+            name: {"status": "valid_empty", "rows": 0}
+            for name in ("0915", "0920", "0925")
+        } | {"bid_detail": {"status": "not_applicable", "rows": 0}},
+    }
+    assert snapshot._auction_manifest_is_valid_empty(manifest)
+
+
+def test_valid_empty_auction_does_not_reuse_stale_partition(tmp_path):
+    import json
+    import polars as pl
+
+    day = date(2026, 8, 20)
+    manifest_dir = tmp_path / "ext_data" / "_ingestion" / "kaipanla" / "auction_completion"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / f"{day.isoformat()}.json").write_text(
+        json.dumps({
+            "status": "complete",
+            "expected_components": ["0925"],
+            "components": {"0925": {"status": "valid_empty", "rows": 0}},
+        }),
+        encoding="utf-8",
+    )
+    partition = tmp_path / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["000001.SZ"], "auction_change_pct_0925": [5.0]}).write_parquet(partition / "part.parquet")
+
+    class Store:
+        data_dir = tmp_path
+
+    class Repo:
+        store = Store()
+
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.repo = Repo()
+    rows, gaps, _manifest = cache._auction(day)
+    assert rows == {}
+    assert gaps == []

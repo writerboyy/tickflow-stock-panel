@@ -86,6 +86,31 @@ def _auction_change_fraction(row: dict[str, Any]) -> float | None:
     return value / 100.0 if value is not None else None
 
 
+def _auction_manifest_is_valid_empty(manifest: dict[str, Any]) -> bool:
+    """A complete all-empty auction snapshot is a valid provider response.
+
+    The collector intentionally does not publish a zero-row parquet partition
+    for ``valid_empty`` responses.  Treating that absence as a storage gap
+    would incorrectly block modes whose static rules do not need today's
+    auction data.
+    """
+    if manifest.get("status") != "complete":
+        return False
+    components = manifest.get("components")
+    expected = manifest.get("expected_components")
+    if not isinstance(components, dict):
+        return False
+    names = expected if isinstance(expected, list) and expected else list(components)
+    if not names or any(name not in components for name in names):
+        return False
+    return all(
+        isinstance(components[name], dict)
+        and components[name].get("status") in {"valid_empty", "not_applicable"}
+        and int(components[name].get("rows") or 0) == 0
+        for name in names
+    )
+
+
 def yje_static_score(rows: list[dict[str, Any]], *, minute_rows: list[dict[str, Any]] | None = None) -> tuple[float, dict[str, Any], str | None]:
     """Reproduce the archived 100-point first-to-second-board score."""
     if len(rows) < 21:
@@ -496,6 +521,11 @@ class FourModeSnapshotCache:
         manifest = load_ingestion_manifest(self.repo.store.data_dir, "kaipanla", "auction_completion", day.isoformat())
         if manifest.get("status") != "complete":
             return {}, ["竞价 completion manifest 未完成"], manifest
+        # A valid-empty publication must win over any stale partition left by
+        # an earlier non-empty run; never replay old auction rows as today's
+        # final snapshot.
+        if _auction_manifest_is_valid_empty(manifest):
+            return {}, [], manifest
         root = Path(self.repo.store.data_dir) / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
         files = list(root.glob("*.parquet"))
         if not files:
@@ -552,7 +582,17 @@ class FourModeSnapshotCache:
         instruments = self.repo.get_instruments_asset("stock")
         if instruments.is_empty() or "symbol" not in instruments.columns:
             raise ValueError("四合一缺少股票标的目录")
-        symbols = [str(item) for item in instruments.filter(pl.col("symbol").str.ends_with((".SH", ".SZ")))["symbol"].to_list()]
+        # Polars' ``ends_with`` accepts one suffix per expression; passing a
+        # tuple produces a list-typed literal and fails at runtime on current
+        # Polars versions.  Keep the stock universe limited to Shanghai and
+        # Shenzhen symbols while expressing the predicate explicitly.
+        symbols = [
+            str(item)
+            for item in instruments.filter(
+                pl.col("symbol").str.ends_with(".SH")
+                | pl.col("symbol").str.ends_with(".SZ")
+            )["symbol"].to_list()
+        ]
         self._all_symbols.update(symbols)
         load_start = self.start - timedelta(days=max(180, int(self.requirement.get("lookback_days", 80)) * 3))
         columns = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "raw_open", "raw_high", "raw_low", "raw_close"]
@@ -657,7 +697,15 @@ class FourModeSnapshotCache:
                 "state": snapshot_state,
                 "static_state": "ready" if not member_gap else "waiting_data",
                 "data_gaps": [*mode_gaps, *([member_gap] if member_gap else [])],
-                "auction": {"state": "ready" if not auction_gaps else "waiting_data", "rows": auction_rows, "manifest": manifest},
+                "auction": {
+                    "state": (
+                        "valid_empty"
+                        if not auction_gaps and not auction_rows and _auction_manifest_is_valid_empty(manifest)
+                        else "ready" if not auction_gaps else "waiting_data"
+                    ),
+                    "rows": auction_rows,
+                    "manifest": manifest,
+                },
                 "modes": modes,
                 "static_modes": static_modes,
                 "static_candidates": static_candidates,
