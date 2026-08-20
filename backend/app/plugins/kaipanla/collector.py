@@ -126,6 +126,8 @@ class KaipanlaCollector:
             self._realtime_interval_seconds = 5.0
         self._last_sector_strength_refresh_mono = 0.0
         self._bootstrap_task: asyncio.Task | None = None
+        self._four_mode_target_task: asyncio.Task | None = None
+        self._four_mode_targets: dict[date, list[str] | None] = {}
         self._sentiment_task: asyncio.Task | None = None
         self._sector_strength_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
@@ -164,6 +166,19 @@ class KaipanlaCollector:
                     misfire_grace_time=20,
                     replace_existing=True,
                 )
+            scheduler.add_job(
+                self._scheduled_four_mode_targets,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour=9,
+                    minute=5,
+                    second=5,
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_four_mode_targets",
+                misfire_grace_time=600,
+                replace_existing=True,
+            )
             scheduler.add_job(
                 self._scheduled_limitup,
                 trigger=CronTrigger(
@@ -301,6 +316,15 @@ class KaipanlaCollector:
             self._run_safely("auction_catch_up", self.catch_up_auction),
             name="kaipanla-auction-catch-up",
         )
+        if self._four_mode_target_task is None or self._four_mode_target_task.done():
+            self._four_mode_target_task = asyncio.create_task(
+                self._run_safely(
+                    "four_mode_targets",
+                    self._prepare_four_mode_targets,
+                    cn_today(),
+                ),
+                name="kaipanla-four-mode-targets",
+            )
         if self._sentiment_task is None or self._sentiment_task.done():
             self._sentiment_task = asyncio.create_task(
                 self._run_safely(
@@ -319,11 +343,14 @@ class KaipanlaCollector:
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
             self._bootstrap_task.cancel()
+        if self._four_mode_target_task and not self._four_mode_target_task.done():
+            self._four_mode_target_task.cancel()
         if self._sentiment_task and not self._sentiment_task.done():
             self._sentiment_task.cancel()
         if self._sector_strength_task and not self._sector_strength_task.done():
             self._sector_strength_task.cancel()
         self._bootstrap_task = None
+        self._four_mode_target_task = None
         self._sentiment_task = None
         self._sector_strength_task = None
 
@@ -344,13 +371,51 @@ class KaipanlaCollector:
                 return 0
 
     async def _scheduled_auction(self, checkpoint: str) -> int:
-        return await self._run_safely(
+        count = await self._run_safely(
             f"auction_{checkpoint}",
             self.collect_auction,
             checkpoint,
             cn_today(),
             False,
         )
+        if checkpoint == "0925":
+            trade_date = cn_today()
+            symbols = self._four_mode_targets.pop(trade_date, None)
+            await self._run_safely(
+                "four_mode_bid_detail",
+                self.collect_four_mode_bid_details,
+                trade_date,
+                symbols,
+            )
+        return count
+
+    async def _scheduled_four_mode_targets(self) -> int:
+        return await self._run_safely(
+            "four_mode_targets",
+            self._prepare_four_mode_targets,
+            cn_today(),
+        )
+
+    async def _prepare_four_mode_targets(self, trade_date: date) -> int:
+        try:
+            symbols = await asyncio.to_thread(self._four_mode_bid_symbols, trade_date)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("四合一 /31 目标股票准备失败 (%s)", type(exc).__name__)
+            symbols = None
+        self._four_mode_targets[trade_date] = symbols
+        return len(symbols or [])
+
+    def _four_mode_bid_symbols(self, trade_date: date) -> list[str] | None:
+        """Build the small native four-mode target set without using auction data."""
+        try:
+            from app.free_strategy.four_mode_snapshot import four_mode_bid_symbols
+            from app.tickflow.repository import DataStore, KlineRepository
+
+            repo = KlineRepository(DataStore(self.data_dir))
+            return four_mode_bid_symbols(repo, trade_date)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("四合一 /31 目标股票准备失败 (%s)", type(exc).__name__)
+            return None
 
     async def _scheduled_limitup(self) -> int:
         return await self._run_safely("limitup", self.collect_limitup, cn_today())
@@ -2038,6 +2103,142 @@ class KaipanlaCollector:
             trade_date.isoformat(),
             status="incomplete" if failed_codes else "complete",
             expected_batches=unique_codes,
+            failed_batches=sorted(failed_codes),
+            published_rows=count,
+        )
+        return count
+
+    def _update_four_mode_bid_component(
+        self,
+        trade_date: date,
+        *,
+        status: str,
+        expected_batches: list[str],
+        failed_batches: list[str] | None = None,
+        published_rows: int = 0,
+        error_code: str | None = None,
+    ) -> None:
+        existing = load_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            "auction_completion",
+            trade_date.isoformat(),
+        )
+        components = dict(existing.get("components") or {})
+        components["four_mode_bid_detail"] = {
+            "status": status,
+            "endpoint": "/31",
+            "rows": int(published_rows),
+            "expected_batches": list(expected_batches),
+            "failed_batches": list(failed_batches or []),
+        }
+        required = set(existing.get("expected_components") or ())
+        if not required:
+            required = {"0915", "0920", "0925", "bid_detail"}
+        required.add("four_mode_bid_detail")
+        terminal = {"published", "valid_empty", "complete", "not_applicable"}
+        completion_status = (
+            "complete"
+            if required <= set(components)
+            and all(components[name].get("status") in terminal for name in required)
+            else "incomplete"
+        )
+        update_ingestion_manifest(
+            self.data_dir,
+            "kaipanla",
+            "auction_completion",
+            trade_date.isoformat(),
+            status=completion_status,
+            parser_version="kaipanla_v1",
+            schema_version=1,
+            expected_components=sorted(required),
+            components=components,
+            error_code=error_code,
+        )
+
+    async def collect_four_mode_bid_details(
+        self,
+        trade_date: date,
+        symbols: list[str] | None,
+    ) -> int:
+        """Fetch /31 only for four-mode weak-reversal/trend candidates."""
+        if symbols is None:
+            self._update_four_mode_bid_component(
+                trade_date,
+                status="source_error",
+                expected_batches=[],
+                error_code="target_symbols_unavailable",
+            )
+            return 0
+        codes = sorted({str(symbol).split(".", 1)[0] for symbol in symbols if str(symbol).strip()})
+        if not codes:
+            self._update_four_mode_bid_component(
+                trade_date,
+                status="valid_empty",
+                expected_batches=[],
+            )
+            return 0
+        semaphore = asyncio.Semaphore(4)
+        failed_codes: set[str] = set()
+        collected_at = cn_now().isoformat()
+
+        async def collect_one(code: str) -> dict | None:
+            async with semaphore:
+                try:
+                    payload = await client.request(31, {"StockID": code})
+                    archive_raw(self.data_dir, 31, trade_date, payload, f"four-mode-{code}")
+                    parsed = parse_bid_detail(payload)
+                    change = parsed.get("auction_change_pct")
+                    if change is None:
+                        raise ValueError("/31 缺少竞价末价或昨收价")
+                    row = {
+                        **parsed,
+                        "source_0925": "/31",
+                        "collected_at_0925": collected_at,
+                        "bid_collected_at": collected_at,
+                        "auction_change_pct_0925": change,
+                    }
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "four_mode_bid_detail",
+                        trade_date.isoformat(),
+                        code,
+                        status="completed",
+                        row_count=1,
+                        content_hash=stable_content_hash(row),
+                        source_content_hash=stable_content_hash(payload),
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        expected_batches=codes,
+                    )
+                    return row
+                except Exception as exc:  # noqa: BLE001
+                    failed_codes.add(code)
+                    record_ingestion_batch(
+                        self.data_dir,
+                        "kaipanla",
+                        "four_mode_bid_detail",
+                        trade_date.isoformat(),
+                        code,
+                        status="source_error",
+                        error_code=type(exc).__name__,
+                        parser_version="kaipanla_v1",
+                        schema_version=1,
+                        expected_batches=codes,
+                    )
+                    logger.warning("开盘啦 /31 四合一个股 %s 采集失败 (%s)", code, type(exc).__name__)
+                    return None
+
+        async with self._client_factory() as client:
+            details = [
+                row for row in await asyncio.gather(*(collect_one(code) for code in codes)) if row
+            ]
+        count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details) if not failed_codes else 0
+        self._update_four_mode_bid_component(
+            trade_date,
+            status="incomplete" if failed_codes else "complete",
+            expected_batches=codes,
             failed_batches=sorted(failed_codes),
             published_rows=count,
         )

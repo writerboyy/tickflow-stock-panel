@@ -99,6 +99,28 @@ def test_valid_empty_auction_manifest_is_not_a_storage_gap():
     assert snapshot._auction_manifest_is_valid_empty(manifest)
 
 
+def test_four_mode_bid_symbols_only_include_weak_reversal_and_trend(monkeypatch):
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def snapshot(self, _day):
+            return {
+                "static_modes": {
+                    "yje": {"candidates": [{"symbol": "000001.SZ"}]},
+                    "rzq": {"candidates": [{"symbol": "000002.SZ"}]},
+                    "qs": {"candidates": [{"symbol": "600000.SH"}]},
+                    "sb": {"candidates": [{"symbol": "000003.SZ"}]},
+                }
+            }
+
+    monkeypatch.setattr(snapshot, "FourModeSnapshotCache", FakeCache)
+    assert snapshot.four_mode_bid_symbols(object(), date(2026, 8, 20)) == [
+        "000002.SZ",
+        "600000.SH",
+    ]
+
+
 def test_valid_empty_auction_does_not_reuse_stale_partition(tmp_path):
     import json
     import polars as pl

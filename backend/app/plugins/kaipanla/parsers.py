@@ -590,6 +590,13 @@ def parse_bid_detail(payload: dict) -> dict:
         )
     first = points[0] if points else {}
     last = points[-1] if points else {}
+    last_price = _float(last.get("price"), "bid_last_price")
+    preclose_price = _float(payload.get("preclose_px"), "preclose_px")
+    auction_change_pct = (
+        (last_price / preclose_price - 1.0) * 100.0
+        if last_price is not None and preclose_price not in (None, 0)
+        else None
+    )
     return {
         "symbol": code,
         "code": code,
@@ -597,9 +604,10 @@ def parse_bid_detail(payload: dict) -> dict:
         "bid_points": len(points),
         "bid_first_time": first.get("time"),
         "bid_last_time": last.get("time"),
-        "bid_last_price": last.get("price"),
+        "bid_last_price": last_price,
         "bid_last_volume": last.get("volume"),
-        "bid_preclose_price": _float(payload.get("preclose_px"), "preclose_px"),
+        "bid_preclose_price": preclose_price,
+        "auction_change_pct": auction_change_pct,
         "bid_high_price": _float(payload.get("hprice"), "hprice"),
         "bid_low_price": _float(payload.get("lprice"), "lprice"),
         "bid_open_price": _float(payload.get("openpx"), "openpx"),

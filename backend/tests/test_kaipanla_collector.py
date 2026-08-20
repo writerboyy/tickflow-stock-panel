@@ -102,6 +102,103 @@ async def test_0925_collection_automatically_fans_out_bid_details(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_four_mode_bid_details_use_31_and_publish_auction_change(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                31: {
+                    "code": "000785",
+                    "bid": [["09:15", 2.19, 1, 10], ["09:25", 2.235, 0, 20]],
+                    "preclose_px": 2.19,
+                    "hprice": 2.235,
+                    "lprice": 2.19,
+                    "openpx": 2.235,
+                },
+            },
+            calls,
+        ),
+    )
+
+    assert await collector.collect_four_mode_bid_details(
+        date(2026, 5, 15), ["000785.SZ"]
+    ) == 1
+    assert calls == [(31, {"StockID": "000785"})]
+    path = tmp_path / "ext_data" / AUCTION_TABLE / "timeseries" / "date=2026-05-15" / "part.parquet"
+    stored = pl.read_parquet(path).to_dicts()[0]
+    assert stored["source_0925"] == "/31"
+    assert stored["auction_change_pct_0925"] == pytest.approx(2.0548, rel=1e-4)
+    manifest = json.loads(
+        (
+            tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+            / "auction_completion" / "2026-05-15.json"
+        ).read_text()
+    )
+    assert manifest["components"]["four_mode_bid_detail"]["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_four_mode_bid_details_fail_closed_when_31_has_no_prices(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                31: {
+                    "code": "000785",
+                    "bid": [["09:15", 2.19, 1, 10]],
+                    "preclose_px": None,
+                },
+            },
+            [],
+        ),
+    )
+
+    assert await collector.collect_four_mode_bid_details(
+        date(2026, 5, 15), ["000785.SZ"]
+    ) == 0
+    assert not (
+        tmp_path / "ext_data" / AUCTION_TABLE
+        / "timeseries" / "date=2026-05-15" / "part.parquet"
+    ).exists()
+    manifest = json.loads(
+        (
+            tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+            / "auction_completion" / "2026-05-15.json"
+        ).read_text()
+    )
+    assert manifest["status"] == "incomplete"
+    assert manifest["components"]["four_mode_bid_detail"]["status"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_0925_consumes_prepared_four_mode_targets(tmp_path, monkeypatch):
+    _configured(monkeypatch)
+    trade_date = date(2026, 5, 15)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: trade_date)
+    collector = KaipanlaCollector(tmp_path)
+    collector._four_mode_targets[trade_date] = ["000785.SZ"]
+    calls = []
+
+    async def collect_auction(*_args):
+        calls.append("auction")
+        return 1
+
+    async def collect_four_mode_bid_details(*args):
+        calls.append(args)
+        return 1
+
+    monkeypatch.setattr(collector, "collect_auction", collect_auction)
+    monkeypatch.setattr(collector, "collect_four_mode_bid_details", collect_four_mode_bid_details)
+
+    assert await collector._scheduled_auction("0925") == 1
+    assert calls == ["auction", (trade_date, ["000785.SZ"])]
+    assert trade_date not in collector._four_mode_targets
+
+
+@pytest.mark.asyncio
 async def test_market_sentiment_snapshot_uses_live_expression_and_matching_ladder(
     tmp_path, monkeypatch,
 ):
@@ -1068,7 +1165,8 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 14
+    assert len(scheduler.jobs) == 15
+    assert "kaipanla_four_mode_targets" in scheduler.jobs
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
     assert "second='*/5'" in str(scheduler.triggers["kaipanla_sector_strength"])
@@ -1142,5 +1240,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 14
+    assert len(scheduler.jobs) == 15
     assert collector._bootstrap_task is None

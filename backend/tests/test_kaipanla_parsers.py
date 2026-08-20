@@ -176,6 +176,7 @@ def test_bid_parser_omits_unknown_direction_position_from_standard_json():
         {"time": "09:25", "price": 3.06, "volume": 1281.0},
     ]
     assert row["bid_last_price"] == 3.06
+    assert row["auction_change_pct"] == pytest.approx(0.0)
 
 
 def test_limitup_parser_flattens_nested_plates_to_one_row_per_stock():

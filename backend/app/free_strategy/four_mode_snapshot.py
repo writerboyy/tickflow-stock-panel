@@ -912,6 +912,35 @@ class FourModeSnapshotCache:
             for mode, payload in modes.items():
                 if payload["state"] == "ready":
                     candidates.extend(payload["candidates"])
+            # When the live collector declares a four-mode /31 component, it
+            # is an explicit readiness contract for the static weak-reversal
+            # and trend candidates.  Do not silently fall back to an older
+            # /115 row or a missing value for those modes.
+            four_mode_bid_component = (manifest.get("components") or {}).get(
+                "four_mode_bid_detail"
+            )
+            if isinstance(four_mode_bid_component, dict):
+                target_symbols = {
+                    str(row.get("symbol") or "").strip().upper()
+                    for mode in ("rzq", "qs")
+                    for row in static_modes[mode]["candidates"]
+                    if row.get("symbol")
+                }
+                missing_direct = sorted(
+                    symbol
+                    for symbol in target_symbols
+                    if (
+                        not auction_rows.get(symbol)
+                        or auction_rows[symbol].get("source_0925") != "/31"
+                        or _finite(auction_rows[symbol].get("auction_change_pct_0925")) is None
+                    )
+                )
+                component_status = four_mode_bid_component.get("status")
+                if target_symbols and (component_status != "complete" or missing_direct):
+                    count = len(missing_direct) or len(
+                        four_mode_bid_component.get("failed_batches") or []
+                    )
+                    mode_gaps.append(f"缺少四合一 /31 竞价明细（{count}只）")
             snapshot_state = "waiting_data" if mode_gaps or member_gap else "ready"
             # Static candidates are intentionally retained separately.  The
             # strategy only publishes the auction-confirmed list at 09:25:45.
@@ -952,6 +981,34 @@ class FourModeSnapshotCache:
         if frame.is_empty() or "date" not in frame.columns:
             return []
         return sorted({day for value in frame["date"].to_list() if (day := _as_day(value)) is not None})
+
+
+def four_mode_bid_symbols(
+    repo: Any,
+    trade_date: date,
+    requirement: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return only the static weak-reversal/trend symbols needing /31 data."""
+    cache = FourModeSnapshotCache(
+        repo,
+        trade_date,
+        trade_date,
+        requirement
+        or {
+            "lookback_days": 80,
+            "trend_history_days": 65,
+            "index_symbol": "000852.SH",
+            "require_auction": True,
+        },
+    )
+    snapshot = cache.snapshot(trade_date)
+    symbols = {
+        str(row.get("symbol") or "").strip().upper()
+        for mode in ("rzq", "qs")
+        for row in (snapshot.get("static_modes", {}).get(mode, {}).get("candidates") or [])
+        if row.get("symbol")
+    }
+    return sorted(symbols)
 
 
 def configure_four_mode_snapshot(engine: Any, repo: Any, start: date, end: date) -> FourModeSnapshotCache | None:
