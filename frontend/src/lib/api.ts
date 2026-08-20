@@ -1447,6 +1447,38 @@ export interface LimitBoardEvent {
   order_timeline?: LimitBoardOrderTimeline
 }
 
+export interface FourModeStrategyView {
+  state: 'available' | 'unavailable'
+  reason: string
+  source: {
+    path: string
+    sha256?: string
+    title?: string
+    source_url?: string
+    parsed_at?: string
+  }
+  modes: Array<{
+    id: string
+    name: string
+    summary: string
+    runtime: string
+    functions: Array<{ name: string; line?: number }>
+    config: Array<{ key: string; value: unknown }>
+    state_fields: string[]
+  }>
+  schedule: Array<{ time: string; function: string; description: string }>
+  dependencies: Array<{
+    name: string
+    kind: string
+    available: boolean
+    referenced: boolean
+    note: string
+  }>
+  state_fields: string[]
+  live_trading_enabled?: boolean
+  execution_state?: 'read_only' | string
+}
+
 export interface LimitBoardView {
   revision: number
   settings: {
@@ -1485,6 +1517,7 @@ export interface LimitBoardView {
     max_consecutive?: number | null
   } | null
   sector_strength: LimitBoardSectorStrengthSnapshot | null
+  four_mode: FourModeStrategyView
   events: LimitBoardEvent[]
   runtime: {
     trading_date: string
@@ -2748,6 +2781,7 @@ export const api = {
   qmtCancelOrder: (order_sys_id: string) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
   limitBoard: () => request<LimitBoardView>('/api/limit-board'),
+  limitBoardFourMode: () => request<FourModeStrategyView>('/api/limit-board/four-mode'),
   limitBoardSectorStrength: (capturedAt: string) =>
     request<LimitBoardSectorStrengthSnapshot>(
       `/api/limit-board/sector-strength?captured_at=${encodeURIComponent(capturedAt)}`,

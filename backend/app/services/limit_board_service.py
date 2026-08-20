@@ -22,6 +22,7 @@ from app.services.limit_board_scoring import (
     sector_detail,
     technical_detail,
 )
+from app.services.four_mode_parser import parse_four_mode_strategy
 from app.services.limit_board_store import LimitBoardStore
 
 
@@ -218,6 +219,8 @@ class LimitBoardService:
         self._history_reason = "正在读取涨停历史与溢价基因数据"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
+        self._four_mode_report: dict[str, Any] | None = None
+        self._four_mode_signature: tuple[int, int] | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -314,6 +317,19 @@ class LimitBoardService:
             "sector_links": sector_links,
             "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
         }
+
+    def four_mode_view(self) -> dict[str, Any]:
+        """Return the cached, execution-free report for the archived strategy."""
+        source_path = Path(__file__).resolve().parents[3] / "docs" / "聚宽策略" / "四合一打板.py"
+        try:
+            stat = source_path.stat()
+            signature = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            signature = None
+        if self._four_mode_report is None or signature != self._four_mode_signature:
+            self._four_mode_report = parse_four_mode_strategy(source_path)
+            self._four_mode_signature = signature
+        return self._four_mode_report
 
     def _fresh_tickflow_quotes(self, symbols: set[str]) -> dict[str, Any]:
         provider_getter = getattr(self.quote_service, "realtime_provider", None)
@@ -3177,6 +3193,7 @@ class LimitBoardService:
             ],
             "market_sentiment": self._market_sentiment_snapshot(),
             "sector_strength": sector_strength,
+            "four_mode": self.four_mode_view(),
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],

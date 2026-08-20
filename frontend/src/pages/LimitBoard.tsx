@@ -3,11 +3,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Ban,
   Bell,
+  BookOpen,
   Check,
   CircleHelp,
   CircleDot,
   Crosshair,
+  Database,
   Flame,
+  GitBranch,
+  Clock3,
   Layers3,
   ListFilter,
   PanelRightClose,
@@ -38,12 +42,13 @@ import {
   type LimitBoardSectorStrengthRow,
   type LimitBoardView,
   type MarketHeatItem,
+  type FourModeStrategyView,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'events'
+type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'four_mode' | 'events'
 type TableMode = 'candidate' | 'pool'
 type NotificationSettings = LimitBoardView['settings']['notifications']
 type AdvancedSettings = Omit<LimitBoardView['settings'], 'notifications'>
@@ -1121,6 +1126,62 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
   }
 }
 
+function fourModeConfigValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2)
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  try { return JSON.stringify(value) } catch { return '--' }
+}
+
+function FourModePanel({ report }: { report: FourModeStrategyView }) {
+  if (report.state !== 'available') {
+    return <EmptyState icon={BookOpen} title="四合一规则解析不可用" hint={report.reason} />
+  }
+  const unavailable = report.dependencies.filter(item => !item.available)
+  return <div className="space-y-3">
+    <section className="rounded-btn border border-border bg-surface px-3 py-3 sm:px-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold"><BookOpen className="h-4 w-4 text-accent" />{report.source.title || '四合一策略'}</div>
+          <div className="mt-1 text-[10px] text-muted">{report.reason}</div>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-muted">
+            <span>源码 {report.source.path}</span>
+            {report.source.sha256 ? <span>SHA256 {report.source.sha256.slice(0, 12)}…</span> : null}
+            {report.source.parsed_at ? <span>解析 {scoreTime(report.source.parsed_at)}</span> : null}
+          </div>
+        </div>
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[10px] text-warning"><GitBranch className="h-3 w-3" />只读规则解析 · 不生成委托</span>
+      </div>
+    </section>
+
+    <section className="grid gap-3 xl:grid-cols-2">
+      {report.modes.map(mode => <article key={mode.id} className="rounded-btn border border-border bg-surface p-3">
+        <div className="flex items-start justify-between gap-2">
+          <div><div className="text-sm font-semibold">{mode.name}</div><div className="mt-1 text-[11px] leading-5 text-secondary">{mode.summary}</div></div>
+          <span className="rounded-md bg-elevated px-2 py-1 font-mono text-[10px] text-accent">{mode.id}</span>
+        </div>
+        <div className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2">
+          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">运行阶段</div><div className="mt-1 text-secondary">{mode.runtime}</div></div>
+          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">状态字段</div><div className="mt-1 truncate font-mono text-secondary" title={mode.state_fields.join('、')}>{mode.state_fields.length ? mode.state_fields.join('、') : '--'}</div></div>
+        </div>
+        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">关键函数</div><div className="mt-1 flex flex-wrap gap-1.5">{mode.functions.map(fn => <span key={fn.name} className="rounded-md border border-border px-1.5 py-1 font-mono text-[9px] text-secondary">{fn.name}{fn.line ? `:${fn.line}` : ''}</span>)}</div></div>
+        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">源码参数</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{mode.config.map(item => <span key={item.key} className="font-mono text-[10px] text-secondary">{item.key}={fourModeConfigValue(item.value)}</span>)}</div></div>
+      </article>)}
+    </section>
+
+    <section className="overflow-hidden rounded-btn border border-border bg-surface">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-medium"><Clock3 className="h-3.5 w-3.5 text-accent" />日内调度</div>
+      <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-[10px]"><thead className="bg-elevated/60 text-muted"><tr><th className="px-3 py-2 font-medium">时间</th><th className="px-3 py-2 font-medium">函数</th><th className="px-3 py-2 font-medium">用途</th></tr></thead><tbody>{report.schedule.map(item => <tr key={`${item.time}-${item.function}`} className="border-t border-border"><td className="px-3 py-2 font-mono text-accent">{item.time}</td><td className="px-3 py-2 font-mono text-secondary">{item.function}</td><td className="px-3 py-2 text-secondary">{item.description}</td></tr>)}</tbody></table></div>
+    </section>
+
+    <section className="overflow-hidden rounded-btn border border-border bg-surface">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-medium"><Database className="h-3.5 w-3.5 text-accent" />依赖与接入状态</div>
+      <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-[10px]"><thead className="bg-elevated/60 text-muted"><tr><th className="px-3 py-2 font-medium">依赖</th><th className="px-3 py-2 font-medium">用途</th><th className="px-3 py-2 font-medium">当前状态</th><th className="px-3 py-2 font-medium">说明</th></tr></thead><tbody>{report.dependencies.map(item => <tr key={item.name} className="border-t border-border"><td className="px-3 py-2 font-mono text-secondary">{item.name}</td><td className="px-3 py-2 text-secondary">{item.kind}</td><td className={`px-3 py-2 font-medium ${item.available ? 'text-bear' : 'text-warning'}`}>{item.available ? '库可见' : '未接入'}{item.referenced ? '' : ' · 源码未直接导入'}</td><td className="px-3 py-2 text-muted">{item.note}</td></tr>)}</tbody></table></div>
+      <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2.5 text-[10px] text-warning"><ShieldAlert className="h-3.5 w-3.5" />{unavailable.length} 项依赖尚未形成可验证的系统数据契约；当前仅供查看策略结构。</div>
+    </section>
+  </div>
+}
+
 export function LimitBoard() {
   const queryClient = useQueryClient()
   const [tab, setTab] = useState<Tab>('sector')
@@ -1266,6 +1327,7 @@ export function LimitBoard() {
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['opportunity', '机会榜', data.opportunity_pool.length, Zap],
           ['pool', '打板池', data.board_pool.length, Crosshair],
+          ['four_mode', '四合一', data.four_mode.modes.length, BookOpen],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
           <button key={id} type="button" onClick={() => setTab(id)} className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium ${tab === id ? 'border-accent text-foreground' : 'border-transparent text-muted'}`}>
@@ -1275,7 +1337,7 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab === 'four_mode' ? <FourModePanel report={data.four_mode} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
