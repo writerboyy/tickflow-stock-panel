@@ -33,6 +33,7 @@ from .first_board_snapshot import configure_first_board_snapshot
 from .industry import load_industry_history
 from .mainline_snapshot import configure_mainline_snapshot
 from .strong_momentum_snapshot import configure_strong_momentum_snapshot
+from .four_mode_snapshot import configure_four_mode_snapshot
 from .readiness import (
     ReadinessUnavailable,
     build_readiness_manifest,
@@ -1350,12 +1351,15 @@ def _prepare_dynamic_market_data(
             else "pit_first_board_snapshot"
             if engine.limit_board_snapshot_requirement is not None
             else "pit_strong_momentum_snapshot"
+            if engine.strong_momentum_snapshot_requirement is not None
+            else "four_mode_pit_static_and_auction"
         ),
         "requested_bars": int(
             (
                 engine.mainline_snapshot_requirement
                 or engine.limit_board_snapshot_requirement
                 or engine.strong_momentum_snapshot_requirement
+                or engine.four_mode_snapshot_requirement
                 or {}
             ).get("lookback_days", 60)
         ),
@@ -2186,10 +2190,17 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             start,
             end,
         )
-        mainline_cache = configure_mainline_snapshot(engine, repo, start, end)
-        first_board_cache = configure_first_board_snapshot(engine, repo, start, end)
-        strong_momentum_cache = configure_strong_momentum_snapshot(engine, repo, start, end)
-        dynamic_cache = mainline_cache or first_board_cache or strong_momentum_cache
+        snapshot_caches = [
+            configure_mainline_snapshot(engine, repo, start, end),
+            configure_first_board_snapshot(engine, repo, start, end),
+            configure_strong_momentum_snapshot(engine, repo, start, end),
+            configure_four_mode_snapshot(engine, repo, start, end),
+        ]
+        active_snapshot_caches = [cache for cache in snapshot_caches if cache is not None]
+        if len(active_snapshot_caches) > 1:
+            raise ValueError("同一策略不能同时启用多个动态候选快照")
+        mainline_cache, first_board_cache, strong_momentum_cache, four_mode_cache = snapshot_caches
+        dynamic_cache = active_snapshot_caches[0] if active_snapshot_caches else None
         fund_nav_data: dict[str, Any] = {}
         if "unit_net_value" in engine.extra_history_requirements:
             from .fund_nav import prepare_fund_nav_data
@@ -2551,6 +2562,15 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     "mode": "pit_daily_dynamic_universe",
                 }
                 if mainline_cache is not None else {"enabled": False}
+            ),
+            "four_mode_snapshot": (
+                {
+                    "enabled": True,
+                    "candidate_symbols": len(four_mode_cache.all_symbols),
+                    "mode": "four_mode_pit_static_and_auction",
+                    "modes": ["yje", "rzq", "qs", "sb"],
+                }
+                if four_mode_cache is not None else {"enabled": False}
             ),
             "first_board_snapshot": (
                 {

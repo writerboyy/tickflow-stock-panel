@@ -1205,6 +1205,7 @@ def _engine_from_state(
         _preload_tradable_dates,
         _read_rows,
     )
+    from app.free_strategy.four_mode_snapshot import configure_four_mode_snapshot
     from app.tickflow.repository import DataStore, KlineRepository
 
     raw = dict(state.get("config", {}))
@@ -1263,6 +1264,11 @@ def _engine_from_state(
         strategy_start,
         cn_today(),
     )
+    # Four-mode paper accounts use the same PIT/static-plus-auction snapshot
+    # contract as backtests; it is deliberately mutually exclusive with the
+    # other dynamic candidate loaders.
+    if engine.four_mode_snapshot_requirement is not None:
+        configure_four_mode_snapshot(engine, repo, strategy_start, cn_today())
     if config.allow_stale_fills:
         _preload_tradable_dates(
             engine,

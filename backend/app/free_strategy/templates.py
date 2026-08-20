@@ -61,6 +61,7 @@ PERFORMANCE_SMALL_CAP_SOURCE = Path(__file__).with_name("performance_small_cap.p
 MAINLINE_MOMENTUM_SOURCE = Path(__file__).with_name("mainline_momentum.py").read_text(encoding="utf-8")
 LARGE_AMOUNT_FIRST_BOARD_SOURCE = Path(__file__).with_name("large_amount_first_board.py").read_text(encoding="utf-8")
 STRONG_MOMENTUM_SOURCE = Path(__file__).with_name("strong_momentum.py").read_text(encoding="utf-8")
+FOUR_MODE_SOURCE = Path(__file__).with_name("four_mode.py").read_text(encoding="utf-8")
 
 
 def _mainline_momentum_template(model: str, name: str) -> dict:
@@ -173,6 +174,28 @@ def on_bar(context, bars):
             "fill_policy": "close",
         },
         "source": STRONG_MOMENTUM_SOURCE,
+    },
+    "four_mode": {
+        "name": "四合一打板·原生模拟",
+        "config": {
+            "timeframe": "1m",
+            "asset_type": "stock",
+            "initial_capital": 100_000,
+            "fees_pct": 0.0003,
+            "commission_pct": 0.0003,
+            "sell_commission_pct": 0.0003,
+            "min_commission": 5,
+            "stamp_tax_pct": 0.001,
+            "transfer_fee_pct": 0.00001,
+            "slippage_bps": 0,
+            "price_tick": 0.01,
+            "lot_size": 100,
+            "max_exposure_pct": 1.0,
+            "benchmark_symbol": "000001.SH",
+            "settlement": "t1",
+            "fill_policy": "close",
+        },
+        "source": FOUR_MODE_SOURCE,
     },
     "large_amount_first_board": {
         "name": "大成交首板·上午打板",
