@@ -2290,7 +2290,15 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         first_bar: datetime | None = None
         last_bar: datetime | None = None
         symbols_seen: set[str] = set()
-        requested_symbols = list(symbols)
+        # Dynamic PIT pools bootstrap the engine with static candidates so the
+        # first session can resolve instruments.  Those symbols are not actual
+        # replay requirements when the current-day auction gate is waiting for
+        # data; only the benchmark and candidates observed during replay are.
+        requested_symbols = (
+            [config.benchmark_symbol]
+            if dynamic_cache is not None and config.benchmark_symbol
+            else list(symbols)
+        )
         trading_days = 0
         if engine.execution_mode == "scheduled":
             output.put({
