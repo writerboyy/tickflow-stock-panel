@@ -99,6 +99,54 @@ def test_valid_empty_auction_manifest_is_not_a_storage_gap():
     assert snapshot._auction_manifest_is_valid_empty(manifest)
 
 
+def test_four_mode_auction_ignores_unrelated_strong_momentum_failure(tmp_path):
+    import json
+    import polars as pl
+
+    day = date(2026, 8, 20)
+    manifest_dir = tmp_path / "ext_data" / "_ingestion" / "kaipanla" / "auction_completion"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / f"{day.isoformat()}.json").write_text(
+        json.dumps({
+            "status": "incomplete",
+            "expected_components": [
+                "0915",
+                "0920",
+                "0925",
+                "bid_detail",
+                "four_mode_bid_detail",
+                "strong_momentum_bid_detail",
+            ],
+            "components": {
+                "0915": {"status": "valid_empty", "rows": 0},
+                "0920": {"status": "valid_empty", "rows": 0},
+                "0925": {"status": "published", "rows": 1},
+                "bid_detail": {"status": "not_applicable", "rows": 0},
+                "four_mode_bid_detail": {"status": "complete", "rows": 1},
+                "strong_momentum_bid_detail": {"status": "source_error", "rows": 0},
+            },
+        }),
+        encoding="utf-8",
+    )
+    partition = tmp_path / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame({"symbol": ["000001.SZ"], "source_0925": ["/31"]}).write_parquet(
+        partition / "part.parquet"
+    )
+
+    class Store:
+        data_dir = tmp_path
+
+    class Repo:
+        store = Store()
+
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.repo = Repo()
+    rows, gaps, _manifest = cache._auction(day)
+    assert gaps == []
+    assert rows["000001.SZ"]["source_0925"] == "/31"
+
+
 def test_four_mode_bid_symbols_only_include_weak_reversal_and_trend(monkeypatch):
     class FakeCache:
         def __init__(self, *_args, **_kwargs):

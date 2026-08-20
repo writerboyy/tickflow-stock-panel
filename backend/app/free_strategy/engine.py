@@ -315,12 +315,18 @@ class Context:
             if self._limit_board_snapshot_requirement is not None else None
         )
 
-    def require_strong_momentum_snapshot(self, *, lookback_days: int = 30) -> None:
+    def require_strong_momentum_snapshot(
+        self,
+        *,
+        lookback_days: int = 30,
+        require_auction: bool = False,
+    ) -> None:
         """声明“强者恒强”盘前 PIT 候选快照需求。"""
         if isinstance(lookback_days, bool) or lookback_days < 20:
             raise ValueError("强者恒强快照至少需要 20 个交易日")
         self._strong_momentum_snapshot_requirement = {
             "lookback_days": int(lookback_days),
+            "require_auction": bool(require_auction),
         }
 
     @property

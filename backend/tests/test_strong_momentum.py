@@ -6,6 +6,7 @@ import polars as pl
 
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+from app.free_strategy.strong_momentum import _passes_intraday_gate
 from app.free_strategy.strong_momentum_snapshot import _with_candidate_features
 from app.free_strategy.templates import TEMPLATES
 
@@ -185,6 +186,121 @@ def test_auction_gate_rejects_open_above_eight_percent():
 
     assert result["fills"] == []
     assert result["strategy_signals"] == []
+
+
+def test_strong_momentum_requires_direct_bid_detail_when_enabled():
+    state = {"session_open": {SYMBOL: 10.2}}
+    meta = {
+        "previous_raw_close": 10.0,
+        "auction_required": True,
+        "auction_change_pct_0925": 8.1,
+    }
+    bar = _bar(date(2026, 1, 5), 9, 31, open_price=10.2, close=10.3)
+    assert _passes_intraday_gate(state, SYMBOL, meta, bar) is None
+
+    meta["auction_change_pct_0925"] = 5.0
+    assert _passes_intraday_gate(state, SYMBOL, meta, bar) is not None
+
+
+def test_strong_momentum_bid_symbols_uses_static_candidates_before_auction(
+    monkeypatch,
+):
+    import app.free_strategy.strong_momentum_snapshot as snapshot
+
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def snapshot(self, _day):
+            return {
+                "static_candidates": [
+                    {"symbol": "600001.SH"},
+                    {"symbol": "000001.SZ"},
+                ],
+                "candidates": [],
+            }
+
+    monkeypatch.setattr(snapshot, "StrongMomentumSnapshotCache", FakeCache)
+    assert snapshot.strong_momentum_bid_symbols(object(), date(2026, 8, 20)) == [
+        "000001.SZ",
+        "600001.SH",
+    ]
+
+
+def test_strong_momentum_auction_rows_ignore_unrelated_component_failure(
+    tmp_path, monkeypatch
+):
+    import json
+    import app.free_strategy.strong_momentum_snapshot as snapshot
+
+    day = date(2026, 8, 20)
+    manifest_dir = tmp_path / "ext_data" / "_ingestion" / "kaipanla" / "auction_completion"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / f"{day.isoformat()}.json").write_text(
+        json.dumps({
+            "status": "incomplete",
+            "expected_components": ["four_mode_bid_detail", "strong_momentum_bid_detail"],
+            "components": {
+                "four_mode_bid_detail": {"status": "source_error", "rows": 0},
+                "strong_momentum_bid_detail": {"status": "complete", "rows": 1},
+            },
+        }),
+        encoding="utf-8",
+    )
+    partition = tmp_path / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+    partition.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "source_0925": ["/31"],
+        "auction_change_pct_0925": [5.0],
+    }).write_parquet(partition / "part.parquet")
+
+    class Store:
+        data_dir = tmp_path
+
+    class Repo:
+        store = Store()
+
+    monkeypatch.setattr(snapshot, "cn_today", lambda: day)
+    cache = object.__new__(snapshot.StrongMomentumSnapshotCache)
+    cache.repo = Repo()
+    cache.requirement = {"require_auction": True}
+    rows, gaps = cache._auction_rows(day)
+    assert gaps == []
+    assert rows["600001.SH"]["auction_change_pct_0925"] == 5.0
+
+
+def test_strong_momentum_snapshot_refreshes_after_auction_manifest_changes(
+    monkeypatch,
+):
+    import app.free_strategy.strong_momentum_snapshot as snapshot
+
+    day = date(2026, 8, 20)
+    cache = object.__new__(snapshot.StrongMomentumSnapshotCache)
+    cache.requirement = {"require_auction": True}
+    cache._snapshots = {day: {"state": "waiting_data", "candidates": []}}
+    cache._auction_signatures = {day: ("before",)}
+    monkeypatch.setattr(cache, "_auction_signature", lambda _day: ("after",))
+
+    def rebuild():
+        cache._snapshots[day] = {"state": "ready", "candidates": []}
+        cache._auction_signatures[day] = ("after",)
+
+    monkeypatch.setattr(cache, "_build", rebuild)
+    assert cache.snapshot(day)["state"] == "ready"
+
+
+def test_strong_momentum_bootstrap_uses_static_candidates_while_waiting():
+    from app.free_strategy.strong_momentum_snapshot import StrongMomentumSnapshotCache
+
+    cache = object.__new__(StrongMomentumSnapshotCache)
+    cache._snapshots = {
+        date(2026, 8, 20): {
+            "static_candidates": [{"symbol": "600001.SH"}],
+            "candidates": [],
+        }
+    }
+    assert cache.bootstrap_symbols == ["600001.SH"]
 
 
 def test_t1_blocks_same_day_stop_and_allows_next_day_exit():

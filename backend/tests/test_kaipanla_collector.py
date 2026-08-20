@@ -174,6 +174,98 @@ async def test_four_mode_bid_details_fail_closed_when_31_has_no_prices(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_strong_momentum_bid_details_publish_separate_manifest_component(
+    tmp_path, monkeypatch
+):
+    _configured(monkeypatch)
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                31: {
+                    "code": "600001",
+                    "bid": [["09:15", 10.0, 1, 10], ["09:25", 10.5, 0, 20]],
+                    "preclose_px": 10.0,
+                    "hprice": 10.5,
+                    "lprice": 10.0,
+                    "openpx": 10.5,
+                },
+            },
+            calls,
+        ),
+    )
+
+    assert await collector.collect_strong_momentum_bid_details(
+        date(2026, 5, 15), ["600001.SH"]
+    ) == 1
+    assert calls == [(31, {"StockID": "600001"})]
+    manifest = json.loads(
+        (
+            tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+            / "auction_completion" / "2026-05-15.json"
+        ).read_text()
+    )
+    assert manifest["components"]["strong_momentum_bid_detail"]["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_strategy_bid_components_extend_shared_manifest_without_losing_completion(
+    tmp_path, monkeypatch
+):
+    _configured(monkeypatch)
+    trade_date = date(2026, 5, 15)
+    base_components = {
+        name: {"status": "valid_empty", "rows": 0}
+        for name in ("0915", "0920", "0925", "bid_detail")
+    }
+    update_ingestion_manifest(
+        tmp_path,
+        "kaipanla",
+        "auction_completion",
+        trade_date.isoformat(),
+        status="complete",
+        expected_components=sorted(base_components),
+        components=base_components,
+    )
+    collector = KaipanlaCollector(
+        tmp_path,
+        lambda: FakeClient(
+            {
+                31: {
+                    "code": "600001",
+                    "bid": [["09:15", 10.0, 1, 10], ["09:25", 10.5, 0, 20]],
+                    "preclose_px": 10.0,
+                    "hprice": 10.5,
+                    "lprice": 10.0,
+                    "openpx": 10.5,
+                },
+            },
+            [],
+        ),
+    )
+
+    assert await collector.collect_four_mode_bid_details(trade_date, ["600001.SH"]) == 1
+    assert await collector.collect_strong_momentum_bid_details(trade_date, ["600001.SH"]) == 1
+
+    manifest = json.loads(
+        (
+            tmp_path / "ext_data" / "_ingestion" / "kaipanla"
+            / "auction_completion" / "2026-05-15.json"
+        ).read_text()
+    )
+    assert manifest["status"] == "complete"
+    assert set(manifest["expected_components"]) == {
+        "0915",
+        "0920",
+        "0925",
+        "bid_detail",
+        "four_mode_bid_detail",
+        "strong_momentum_bid_detail",
+    }
+
+
+@pytest.mark.asyncio
 async def test_scheduled_0925_consumes_prepared_four_mode_targets(tmp_path, monkeypatch):
     _configured(monkeypatch)
     trade_date = date(2026, 5, 15)

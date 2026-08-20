@@ -717,7 +717,25 @@ class FourModeSnapshotCache:
 
     def _auction(self, day: date) -> tuple[dict[str, dict[str, Any]], list[str], dict[str, Any]]:
         manifest = load_ingestion_manifest(self.repo.store.data_dir, "kaipanla", "auction_completion", day.isoformat())
-        if manifest.get("status") != "complete":
+        components = manifest.get("components") or {}
+        four_mode_component = components.get("four_mode_bid_detail")
+        if isinstance(four_mode_component, dict):
+            base_components = ("0915", "0920", "0925", "bid_detail")
+            terminal = {"published", "valid_empty", "complete", "not_applicable"}
+            required = (*base_components, "four_mode_bid_detail")
+            if any(
+                not isinstance(components.get(name), dict)
+                or components[name].get("status") not in terminal
+                for name in required
+            ):
+                return {}, ["竞价 completion manifest 未完成"], manifest
+            if all(
+                components[name].get("status") in {"valid_empty", "not_applicable"}
+                and int(components[name].get("rows") or 0) == 0
+                for name in required
+            ):
+                return {}, [], manifest
+        elif manifest.get("status") != "complete":
             return {}, ["竞价 completion manifest 未完成"], manifest
         # A valid-empty publication must win over any stale partition left by
         # an earlier non-empty run; never replay old auction rows as today's

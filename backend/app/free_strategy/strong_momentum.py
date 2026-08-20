@@ -44,7 +44,7 @@ def initialize(context):
     if not instruments:
         raise ValueError("强者恒强策略没有可用的股票分钟标的")
     context.set_universe([str(instruments[0]["symbol"])])
-    context.require_strong_momentum_snapshot(lookback_days=30)
+    context.require_strong_momentum_snapshot(lookback_days=30, require_auction=True)
     _state(context)
 
 
@@ -198,6 +198,14 @@ def _exit_positions(context, state, bars):
 
 
 def _passes_intraday_gate(state, symbol, meta, bar):
+    if bool(meta.get("auction_required")):
+        auction_change = meta.get("auction_change_pct_0925")
+        try:
+            auction_change = float(auction_change)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= auction_change <= 8:
+            return None
     previous = float(meta.get("previous_raw_close") or 0)
     open_price = float(state["session_open"].get(symbol) or _raw(bar, "open"))
     current = _raw(bar, "close")

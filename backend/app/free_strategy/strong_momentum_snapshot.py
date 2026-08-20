@@ -14,6 +14,8 @@ from app.price_limits import (
     polars_limit_price,
     polars_price_limit_pct,
 )
+from app.market_time import cn_today
+from app.services.ingestion_manifest import load_ingestion_manifest
 
 from .mainline_snapshot import _name_events
 
@@ -97,6 +99,7 @@ class StrongMomentumSnapshotCache:
         self.requirement = dict(requirement)
         self._snapshots: dict[date, dict[str, Any]] = {}
         self._all_symbols: set[str] = set()
+        self._auction_signatures: dict[date, tuple[Any, ...]] = {}
         self._build()
 
     @property
@@ -106,12 +109,18 @@ class StrongMomentumSnapshotCache:
     @property
     def bootstrap_symbols(self) -> list[str]:
         for day in sorted(self._snapshots):
-            symbols = [str(row["symbol"]) for row in self._snapshots[day]["candidates"]]
+            payload = self._snapshots[day]
+            rows = payload.get("static_candidates") or payload.get("candidates") or []
+            symbols = [str(row["symbol"]) for row in rows]
             if symbols:
                 return symbols
         return []
 
     def snapshot(self, trading_day: date) -> dict[str, Any]:
+        if trading_day in self._snapshots and self.requirement.get("require_auction"):
+            signature = self._auction_signature(trading_day)
+            if signature != self._auction_signatures.get(trading_day):
+                self._build()
         value = self._snapshots.get(trading_day)
         return copy.deepcopy(value) if value is not None else {
             "date": trading_day.isoformat(),
@@ -119,6 +128,54 @@ class StrongMomentumSnapshotCache:
             "selection_mode": "strict",
             "candidates": [],
         }
+
+    def _auction_signature(self, day: date) -> tuple[Any, ...]:
+        data_dir = Path(self.repo.store.data_dir)
+        manifest_path = (
+            data_dir / "ext_data" / "_ingestion" / "kaipanla"
+            / "auction_completion" / f"{day.isoformat()}.json"
+        )
+        try:
+            stat = manifest_path.stat()
+            manifest = (True, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            manifest = (False,)
+        partition = data_dir / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+        files = []
+        for path in sorted(partition.glob("*.parquet")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            files.append((path.name, stat.st_mtime_ns, stat.st_size))
+        return (*manifest, tuple(files))
+
+    def _auction_rows(self, day: date) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        data_dir = Path(self.repo.store.data_dir)
+        manifest = load_ingestion_manifest(data_dir, "kaipanla", "auction_completion", day.isoformat())
+        component = (manifest.get("components") or {}).get("strong_momentum_bid_detail")
+        if day == cn_today() and self.requirement.get("require_auction"):
+            if not isinstance(component, dict):
+                return {}, ["缺少强者恒强 /31 竞价明细"]
+            if component.get("status") == "valid_empty":
+                return {}, []
+            if component.get("status") != "complete":
+                return {}, ["缺少强者恒强 /31 竞价明细"]
+        root = data_dir / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+        files = sorted(root.glob("*.parquet"))
+        if not files:
+            return {}, []
+        try:
+            frame = pl.concat([pl.read_parquet(path) for path in files], how="diagonal_relaxed")
+        except Exception:
+            return {}, ["竞价 parquet 无法读取"]
+        if frame.is_empty() or "symbol" not in frame.columns:
+            return {}, []
+        return {
+            str(row.get("symbol") or "").strip().upper(): row
+            for row in frame.to_dicts()
+            if row.get("symbol")
+        }, []
 
     def _minute_available_symbols(self, trading_day: date) -> set[str] | None:
         path = (
@@ -274,13 +331,50 @@ class StrongMomentumSnapshotCache:
                     "tail_gain_d1": tail_gain,
                 })
             candidates.sort(key=lambda item: (item["previous_change"], item["symbol"]), reverse=True)
+            static_candidates = copy.deepcopy(candidates)
+            snapshot_state = "ready"
+            data_gaps: list[str] = []
+            if day == cn_today() and self.requirement.get("require_auction"):
+                auction_rows, data_gaps = self._auction_rows(day)
+                if data_gaps:
+                    candidates = []
+                    snapshot_state = "waiting_data"
+                else:
+                    confirmed = []
+                    missing = 0
+                    for candidate in candidates:
+                        auction = auction_rows.get(candidate["symbol"], {})
+                        value = auction.get("auction_change_pct_0925")
+                        try:
+                            value = float(value)
+                        except (TypeError, ValueError):
+                            value = None
+                        if value is None or auction.get("source_0925") != "/31":
+                            missing += 1
+                            continue
+                        confirmed.append({
+                            **candidate,
+                            "auction_change_pct_0925": value,
+                            "auction_source": "/31",
+                            "auction_required": True,
+                        })
+                    if missing:
+                        data_gaps = [f"缺少强者恒强 /31 竞价明细（{missing}只）"]
+                        candidates = []
+                        snapshot_state = "waiting_data"
+                    else:
+                        candidates = confirmed
             self._all_symbols.update(row["symbol"] for row in candidates)
             self._snapshots[day] = {
                 "date": day.isoformat(),
                 "as_of": as_of.isoformat() if as_of is not None else None,
                 "selection_mode": selection_mode,
                 "candidates": candidates,
+                "static_candidates": static_candidates,
+                "state": snapshot_state,
+                "data_gaps": data_gaps,
             }
+            self._auction_signatures[day] = self._auction_signature(day)
 
 
 def configure_strong_momentum_snapshot(
@@ -301,3 +395,23 @@ def configure_strong_momentum_snapshot(
         raise ValueError("强者恒强快照在回测区间内没有可用候选股")
     engine.context.set_universe(bootstrap)
     return cache
+
+
+def strong_momentum_bid_symbols(
+    repo: Any,
+    trade_date: date,
+    requirement: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return static strong-momentum candidates for targeted /31 collection."""
+    cache = StrongMomentumSnapshotCache(
+        repo,
+        trade_date,
+        trade_date,
+        requirement or {"lookback_days": 30, "require_auction": True},
+    )
+    snapshot = cache.snapshot(trade_date)
+    return sorted({
+        str(row.get("symbol") or "").strip().upper()
+        for row in (snapshot.get("static_candidates") or snapshot.get("candidates") or [])
+        if row.get("symbol")
+    })

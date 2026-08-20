@@ -128,6 +128,7 @@ class KaipanlaCollector:
         self._bootstrap_task: asyncio.Task | None = None
         self._four_mode_target_task: asyncio.Task | None = None
         self._four_mode_targets: dict[date, list[str] | None] = {}
+        self._strong_momentum_targets: dict[date, list[str] | None] = {}
         self._sentiment_task: asyncio.Task | None = None
         self._sector_strength_task: asyncio.Task | None = None
         self._locks: dict[str, asyncio.Lock] = {}
@@ -380,12 +381,19 @@ class KaipanlaCollector:
         )
         if checkpoint == "0925":
             trade_date = cn_today()
-            symbols = self._four_mode_targets.pop(trade_date, None)
+            four_mode_symbols = self._four_mode_targets.pop(trade_date, None)
             await self._run_safely(
                 "four_mode_bid_detail",
                 self.collect_four_mode_bid_details,
                 trade_date,
-                symbols,
+                four_mode_symbols,
+            )
+            strong_momentum_symbols = self._strong_momentum_targets.pop(trade_date, None)
+            await self._run_safely(
+                "strong_momentum_bid_detail",
+                self.collect_strong_momentum_bid_details,
+                trade_date,
+                strong_momentum_symbols,
             )
         return count
 
@@ -398,12 +406,20 @@ class KaipanlaCollector:
 
     async def _prepare_four_mode_targets(self, trade_date: date) -> int:
         try:
-            symbols = await asyncio.to_thread(self._four_mode_bid_symbols, trade_date)
+            four_mode_symbols = await asyncio.to_thread(self._four_mode_bid_symbols, trade_date)
         except Exception as exc:  # noqa: BLE001
             logger.warning("四合一 /31 目标股票准备失败 (%s)", type(exc).__name__)
-            symbols = None
-        self._four_mode_targets[trade_date] = symbols
-        return len(symbols or [])
+            four_mode_symbols = None
+        try:
+            strong_momentum_symbols = await asyncio.to_thread(
+                self._strong_momentum_bid_symbols, trade_date
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("强者恒强 /31 目标股票准备失败 (%s)", type(exc).__name__)
+            strong_momentum_symbols = None
+        self._four_mode_targets[trade_date] = four_mode_symbols
+        self._strong_momentum_targets[trade_date] = strong_momentum_symbols
+        return len(four_mode_symbols or []) + len(strong_momentum_symbols or [])
 
     def _four_mode_bid_symbols(self, trade_date: date) -> list[str] | None:
         """Build the small native four-mode target set without using auction data."""
@@ -415,6 +431,18 @@ class KaipanlaCollector:
             return four_mode_bid_symbols(repo, trade_date)
         except Exception as exc:  # noqa: BLE001
             logger.warning("四合一 /31 目标股票准备失败 (%s)", type(exc).__name__)
+            return None
+
+    def _strong_momentum_bid_symbols(self, trade_date: date) -> list[str] | None:
+        """Build the static strong-momentum target set without auction data."""
+        try:
+            from app.free_strategy.strong_momentum_snapshot import strong_momentum_bid_symbols
+            from app.tickflow.repository import DataStore, KlineRepository
+
+            repo = KlineRepository(DataStore(self.data_dir))
+            return strong_momentum_bid_symbols(repo, trade_date)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("强者恒强 /31 目标股票准备失败 (%s)", type(exc).__name__)
             return None
 
     async def _scheduled_limitup(self) -> int:
@@ -2108,10 +2136,11 @@ class KaipanlaCollector:
         )
         return count
 
-    def _update_four_mode_bid_component(
+    def _update_strategy_bid_component(
         self,
         trade_date: date,
         *,
+        component: str,
         status: str,
         expected_batches: list[str],
         failed_batches: list[str] | None = None,
@@ -2125,7 +2154,7 @@ class KaipanlaCollector:
             trade_date.isoformat(),
         )
         components = dict(existing.get("components") or {})
-        components["four_mode_bid_detail"] = {
+        components[component] = {
             "status": status,
             "endpoint": "/31",
             "rows": int(published_rows),
@@ -2135,7 +2164,7 @@ class KaipanlaCollector:
         required = set(existing.get("expected_components") or ())
         if not required:
             required = {"0915", "0920", "0925", "bid_detail"}
-        required.add("four_mode_bid_detail")
+        required.add(component)
         terminal = {"published", "valid_empty", "complete", "not_applicable"}
         completion_status = (
             "complete"
@@ -2156,15 +2185,19 @@ class KaipanlaCollector:
             error_code=error_code,
         )
 
-    async def collect_four_mode_bid_details(
+    async def _collect_strategy_bid_details(
         self,
         trade_date: date,
         symbols: list[str] | None,
+        *,
+        component: str,
+        label: str,
     ) -> int:
-        """Fetch /31 only for four-mode weak-reversal/trend candidates."""
+        """Fetch /31 only for a strategy's static candidate set."""
         if symbols is None:
-            self._update_four_mode_bid_component(
+            self._update_strategy_bid_component(
                 trade_date,
+                component=component,
                 status="source_error",
                 expected_batches=[],
                 error_code="target_symbols_unavailable",
@@ -2172,8 +2205,9 @@ class KaipanlaCollector:
             return 0
         codes = sorted({str(symbol).split(".", 1)[0] for symbol in symbols if str(symbol).strip()})
         if not codes:
-            self._update_four_mode_bid_component(
+            self._update_strategy_bid_component(
                 trade_date,
+                component=component,
                 status="valid_empty",
                 expected_batches=[],
             )
@@ -2186,7 +2220,8 @@ class KaipanlaCollector:
             async with semaphore:
                 try:
                     payload = await client.request(31, {"StockID": code})
-                    archive_raw(self.data_dir, 31, trade_date, payload, f"four-mode-{code}")
+                    archive_context = f"four-mode-{code}" if component == "four_mode_bid_detail" else f"{label}-{code}"
+                    archive_raw(self.data_dir, 31, trade_date, payload, archive_context)
                     parsed = parse_bid_detail(payload)
                     change = parsed.get("auction_change_pct")
                     if change is None:
@@ -2201,7 +2236,7 @@ class KaipanlaCollector:
                     record_ingestion_batch(
                         self.data_dir,
                         "kaipanla",
-                        "four_mode_bid_detail",
+                        component,
                         trade_date.isoformat(),
                         code,
                         status="completed",
@@ -2218,7 +2253,7 @@ class KaipanlaCollector:
                     record_ingestion_batch(
                         self.data_dir,
                         "kaipanla",
-                        "four_mode_bid_detail",
+                        component,
                         trade_date.isoformat(),
                         code,
                         status="source_error",
@@ -2227,7 +2262,10 @@ class KaipanlaCollector:
                         schema_version=1,
                         expected_batches=codes,
                     )
-                    logger.warning("开盘啦 /31 四合一个股 %s 采集失败 (%s)", code, type(exc).__name__)
+                    if component == "four_mode_bid_detail":
+                        logger.warning("开盘啦 /31 四合一个股 %s 采集失败 (%s)", code, type(exc).__name__)
+                    else:
+                        logger.warning("开盘啦 /31 %s 个股 %s 采集失败 (%s)", label, code, type(exc).__name__)
                     return None
 
         async with self._client_factory() as client:
@@ -2235,14 +2273,41 @@ class KaipanlaCollector:
                 row for row in await asyncio.gather(*(collect_one(code) for code in codes)) if row
             ]
         count = atomic_upsert(self.data_dir, AUCTION_TABLE, trade_date, details) if not failed_codes else 0
-        self._update_four_mode_bid_component(
+        self._update_strategy_bid_component(
             trade_date,
+            component=component,
             status="incomplete" if failed_codes else "complete",
             expected_batches=codes,
             failed_batches=sorted(failed_codes),
             published_rows=count,
         )
         return count
+
+    async def collect_four_mode_bid_details(
+        self,
+        trade_date: date,
+        symbols: list[str] | None,
+    ) -> int:
+        """Fetch /31 only for four-mode weak-reversal/trend candidates."""
+        return await self._collect_strategy_bid_details(
+            trade_date,
+            symbols,
+            component="four_mode_bid_detail",
+            label="四合一",
+        )
+
+    async def collect_strong_momentum_bid_details(
+        self,
+        trade_date: date,
+        symbols: list[str] | None,
+    ) -> int:
+        """Fetch /31 only for strong-momentum candidates."""
+        return await self._collect_strategy_bid_details(
+            trade_date,
+            symbols,
+            component="strong_momentum_bid_detail",
+            label="强者恒强",
+        )
 
     async def collect_limitup(self, trade_date: date) -> int:
         async with self._client_factory() as client:
