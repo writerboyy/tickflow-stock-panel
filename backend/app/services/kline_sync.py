@@ -1162,6 +1162,8 @@ def sync_and_persist_minute(
     should_cancel: Callable[[], bool] | None = None,
     latest_year: bool = False,
     asset_type: AssetType = "stock",
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> int:
     """同步分钟 K 并存到 Parquet(前复权价格, SDK 端 adjust=qfq)。返回写入行数。
 
@@ -1193,7 +1195,14 @@ def sync_and_persist_minute(
 
     now = datetime.now()
 
-    if latest_year:
+    if (window_start is None) != (window_end is None):
+        raise ValueError("window_start 和 window_end 必须同时提供")
+
+    if window_start is not None and window_end is not None:
+        if window_end <= window_start:
+            return 0
+        start_time, end_time = window_start, window_end
+    elif latest_year:
         # TickFlow 分钟线文档限制为最近一年。以最新本地交易日为终点,
         # 强制覆盖整个窗口,不受已有分钟数据的最早/最新日期影响。
         latest_trade_date = repo.latest_daily_date() or now.date()

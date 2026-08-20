@@ -635,6 +635,38 @@ def run_now(
         else:
             logger.info("sync_etf_minute skipped: user disabled")
 
+    # 四合一的一进二封板质量只需要昨日涨停池的分钟 K。
+    # 全市场分钟同步仍由 minute_sync_enabled 控制；关闭时仅做这一个小范围补齐，
+    # 让次日 09:05 预选不因默认关闭全市场分钟 K 而失去一进二评分。
+    four_mode_minute_rows = 0
+    four_mode_minute_attempted = 0
+    four_mode_minute_unresolved: dict[str, list[str]] = {}
+    if not minute_on:
+        try:
+            from app.free_strategy.four_mode_snapshot import (
+                ensure_four_mode_minute_data,
+                four_mode_limit_up_symbols,
+            )
+
+            target_symbols = four_mode_limit_up_symbols(repo, today)
+            four_mode_minute_result = ensure_four_mode_minute_data(
+                repo,
+                capset,
+                {today: target_symbols},
+            )
+            four_mode_minute_rows = int(four_mode_minute_result.get("written_rows") or 0)
+            four_mode_minute_attempted = int(four_mode_minute_result.get("attempted_symbols") or 0)
+            four_mode_minute_unresolved = dict(four_mode_minute_result.get("unresolved") or {})
+            if four_mode_minute_attempted:
+                logger.info(
+                    "four_mode_minute: attempted=%d written=%d unresolved=%d",
+                    four_mode_minute_attempted,
+                    four_mode_minute_rows,
+                    sum(len(values) for values in four_mode_minute_unresolved.values()),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("four_mode minute preparation failed: %s", type(exc).__name__)
+
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
     # 默认关闭: regime 是本地聚合计算(非拉取), 首次/regime 表为空时需全量回填
@@ -698,6 +730,9 @@ def run_now(
         "pit_reference_instrument_appended_symbols": pit_reference_instrument_appended_symbols,
         "minute_rows": written_minute,
         "etf_minute_rows": written_etf_minute,
+        "four_mode_minute_rows": four_mode_minute_rows,
+        "four_mode_minute_attempted": four_mode_minute_attempted,
+        "four_mode_minute_unresolved": four_mode_minute_unresolved,
         "regime_days": regime_days,
         "premium_gene_rows": premium_gene_rows,
         "lagging_symbols": len(lagging_symbols),

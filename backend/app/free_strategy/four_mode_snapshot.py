@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,9 @@ import polars as pl
 
 from app.price_limits import limit_price, price_limit_pct
 from app.services.ingestion_manifest import load_ingestion_manifest
+
+
+logger = logging.getLogger(__name__)
 
 
 MODE_NAMES = {"yje": "一进二", "rzq": "弱转强", "qs": "趋势股", "sb": "首板"}
@@ -109,6 +113,155 @@ def _auction_manifest_is_valid_empty(manifest: dict[str, Any]) -> bool:
         and int(components[name].get("rows") or 0) == 0
         for name in names
     )
+
+
+def _stock_symbols(repo: Any) -> list[str]:
+    """Return the native A-share universe used by the four-mode snapshot."""
+    instruments = repo.get_instruments_asset("stock")
+    if instruments is None or instruments.is_empty() or "symbol" not in instruments.columns:
+        return []
+    return sorted({
+        str(symbol).strip().upper()
+        for symbol in instruments["symbol"].to_list()
+        if str(symbol).strip().upper().endswith((".SH", ".SZ"))
+    })
+
+
+def four_mode_limit_up_symbols(repo: Any, trade_date: date) -> list[str]:
+    """Find the symbols whose *completed* daily bar hit the native limit.
+
+    This is intentionally a small preparation universe for the archived
+    first-to-second-board score.  It never uses auction or substitute prices.
+    """
+    symbols = _stock_symbols(repo)
+    if not symbols:
+        return []
+    daily = repo.get_daily_asset_batch(
+        "stock",
+        symbols,
+        trade_date - timedelta(days=35),
+        trade_date,
+        ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "raw_open", "raw_high", "raw_low", "raw_close"],
+    )
+    if daily is None or daily.is_empty() or "symbol" not in daily.columns:
+        return []
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in daily.sort(["symbol", "date"]).to_dicts():
+        day = _as_day(row.get("date"))
+        if day is not None:
+            row["date"] = day
+            grouped.setdefault(str(row.get("symbol") or "").strip().upper(), []).append(row)
+    result: list[str] = []
+    for symbol, rows in grouped.items():
+        visible = [row for row in rows if row["date"] <= trade_date]
+        if visible and visible[-1]["date"] == trade_date and len(visible) >= 2 and _is_limit(visible[-1], visible[-2]):
+            result.append(symbol)
+    return sorted(set(result))
+
+
+def four_mode_minute_requirements(
+    repo: Any,
+    start: date,
+    end: date,
+    requirement: dict[str, Any],
+    *,
+    max_target_days: int = 5,
+) -> dict[date, list[str]]:
+    """Return ``{completed_daily_date: symbols}`` needing first-to-second data.
+
+    A paper account can start on a morning before its first callback.  The
+    extra lookback before ``start`` lets that account prepare the previous
+    completed trading day without opening a full-market minute sync.
+    """
+    if end < start:
+        return {}
+    symbols = _stock_symbols(repo)
+    if not symbols:
+        return {}
+    index_symbol = str(requirement.get("index_symbol") or "000852.SH")
+    index = repo.get_daily_asset("index", index_symbol, start - timedelta(days=35), end, ["date"])
+    if index is None or index.is_empty() or "date" not in index.columns:
+        return {}
+    trading_days = sorted({
+        day for value in index["date"].to_list() if (day := _as_day(value)) is not None
+    })
+    if not trading_days:
+        return {}
+    daily = repo.get_daily_asset_batch(
+        "stock",
+        symbols,
+        start - timedelta(days=max(180, int(requirement.get("lookback_days", 80)) * 3)),
+        end,
+        ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "raw_open", "raw_high", "raw_low", "raw_close"],
+    )
+    if daily is None or daily.is_empty() or "symbol" not in daily.columns:
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in daily.sort(["symbol", "date"]).to_dicts():
+        day = _as_day(row.get("date"))
+        if day is not None:
+            row["date"] = day
+            grouped.setdefault(str(row.get("symbol") or "").strip().upper(), []).append(row)
+    requirements: dict[date, set[str]] = {}
+    for trading_day in trading_days:
+        for symbol, rows in grouped.items():
+            visible = [row for row in rows if row["date"] < trading_day]
+            if len(visible) >= 2 and _is_limit(visible[-1], visible[-2]):
+                requirements.setdefault(visible[-1]["date"], set()).add(symbol)
+    selected_days = sorted(requirements)[-max(1, int(max_target_days)):]
+    return {day: sorted(requirements[day]) for day in selected_days}
+
+
+def ensure_four_mode_minute_data(
+    repo: Any,
+    capset: Any,
+    requirements: dict[date, list[str]],
+) -> dict[str, Any]:
+    """Fill only missing four-mode minute partitions and report unresolved rows."""
+    from app.services import kline_sync
+
+    attempted = 0
+    written = 0
+    unresolved: dict[str, list[str]] = {}
+    for trade_date, requested in sorted(requirements.items()):
+        symbols = sorted(set(str(symbol).strip().upper() for symbol in requested if str(symbol).strip()))
+        if not symbols:
+            continue
+        try:
+            existing = repo.get_minute_range(symbols, trade_date, trade_date, "stock")
+        except Exception:  # noqa: BLE001
+            existing = pl.DataFrame()
+        covered = set(existing["symbol"].cast(pl.String).to_list()) if existing is not None and not existing.is_empty() and "symbol" in existing.columns else set()
+        missing = [symbol for symbol in symbols if symbol not in covered]
+        if not missing:
+            continue
+        attempted += len(missing)
+        try:
+            written += int(kline_sync.sync_and_persist_minute(
+                missing,
+                repo,
+                capset,
+                days=1,
+                window_start=datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=25),
+                window_end=datetime.combine(trade_date, datetime.min.time()).replace(hour=15, minute=5),
+                asset_type="stock",
+            ) or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("四合一分钟K准备失败 (%s, %d只): %s", trade_date, len(missing), type(exc).__name__)
+        try:
+            refreshed = repo.get_minute_range(missing, trade_date, trade_date, "stock")
+        except Exception:  # noqa: BLE001
+            refreshed = pl.DataFrame()
+        covered_after = set(refreshed["symbol"].cast(pl.String).to_list()) if refreshed is not None and not refreshed.is_empty() and "symbol" in refreshed.columns else set()
+        remaining = [symbol for symbol in missing if symbol not in covered_after]
+        if remaining:
+            unresolved[trade_date.isoformat()] = remaining
+    return {
+        "attempted_symbols": attempted,
+        "written_rows": written,
+        "unresolved": unresolved,
+        "status": "waiting_data" if unresolved else "ready",
+    }
 
 
 def yje_static_score(rows: list[dict[str, Any]], *, minute_rows: list[dict[str, Any]] | None = None) -> tuple[float, dict[str, Any], str | None]:
@@ -483,6 +636,7 @@ class FourModeSnapshotCache:
     def __init__(self, repo: Any, start: date, end: date, requirement: dict[str, Any]) -> None:
         self.repo, self.start, self.end, self.requirement = repo, start, end, dict(requirement)
         self._snapshots: dict[date, dict[str, Any]] = {}
+        self._auction_signatures: dict[date, tuple[Any, ...]] = {}
         self._all_symbols: set[str] = set()
         self._build()
 
@@ -495,7 +649,51 @@ class FourModeSnapshotCache:
         return self.all_symbols
 
     def snapshot(self, trading_day: date) -> dict[str, Any]:
+        # A paper account may be started before 09:25.  Rebuild once the
+        # collector publishes the final auction manifest/partition so the
+        # scheduled confirmation does not remain stuck on the startup view.
+        if trading_day > self.end:
+            self.end = trading_day
+            self._build()
+        elif trading_day in self._snapshots:
+            signature = self._auction_signature(trading_day)
+            if signature != self._auction_signatures.get(trading_day):
+                self._build()
         return copy.deepcopy(self._snapshots.get(trading_day, {"date": trading_day.isoformat(), "state": "waiting_data", "data_gaps": ["没有构建该交易日快照"], "modes": {}, "candidates": []}))
+
+    def _auction_signature(self, day: date) -> tuple[Any, ...]:
+        data_dir = Path(self.repo.store.data_dir)
+        manifest_path = (
+            data_dir
+            / "ext_data"
+            / "_ingestion"
+            / "kaipanla"
+            / "auction_completion"
+            / f"{day.isoformat()}.json"
+        )
+        try:
+            manifest_stat = manifest_path.stat()
+            manifest_signature: tuple[Any, ...] = (
+                True,
+                manifest_stat.st_mtime_ns,
+                manifest_stat.st_size,
+            )
+        except OSError:
+            manifest_signature = (False,)
+        partition = data_dir / "ext_data" / "ext_kpl_auction" / "timeseries" / f"date={day.isoformat()}"
+        files: list[tuple[str, int, int]] = []
+        for path in sorted(partition.glob("*.parquet")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            files.append((path.name, stat.st_mtime_ns, stat.st_size))
+        return (*manifest_signature, tuple(files))
+
+    def _remember_auction_signatures(self) -> None:
+        self._auction_signatures = {
+            day: self._auction_signature(day) for day in self._trading_days()
+        }
 
     def _members(self, day: date) -> tuple[set[str], str | None]:
         path = Path(self.repo.store.data_dir) / "pit_reference" / "history" / "index_membership_history" / "part.parquet"
@@ -600,6 +798,7 @@ class FourModeSnapshotCache:
         if daily.is_empty():
             for day in self._trading_days():
                 self._snapshots[day] = {"date": day.isoformat(), "state": "waiting_data", "data_gaps": ["缺少股票日线"], "modes": {}, "candidates": []}
+            self._remember_auction_signatures()
             return
         grouped: dict[str, list[dict[str, Any]]] = {}
         for row in daily.sort(["symbol", "date"]).to_dicts():
@@ -627,10 +826,15 @@ class FourModeSnapshotCache:
                 for history in grouped.values()
             )
             minute_rows_by_key: dict[tuple[str, date], list[dict[str, Any]]] = {}
+            minute_missing_symbols_by_day: dict[date, list[str]] = {}
             for minute_day, minute_symbols in yje_symbols_by_day.items():
+                loaded = self._minute_rows(minute_day, minute_symbols)
                 minute_rows_by_key.update(
-                    {(symbol, minute_day): rows for symbol, rows in self._minute_rows(minute_day, minute_symbols).items()}
+                    {(symbol, minute_day): rows for symbol, rows in loaded.items()}
                 )
+                missing_symbols = sorted(set(minute_symbols) - set(loaded))
+                if missing_symbols:
+                    minute_missing_symbols_by_day[minute_day] = missing_symbols
             for symbol, history in grouped.items():
                 visible = [row for row in history if row.get("date") and row["date"] < day]
                 if not visible:
@@ -655,23 +859,47 @@ class FourModeSnapshotCache:
                     if trend:
                         trend.update({"symbol": symbol, "mode": "qs"})
                         static_modes["qs"]["candidates"].append(trend)
+            # Only the immediately preceding completed board feeds this
+            # snapshot's yje score.  Older historical gaps matter during a
+            # deliberate multi-day catch-up, but must not block today's live
+            # selection when yesterday is fully covered.
+            relevant_minute_days = [
+                minute_day for minute_day in yje_symbols_by_day
+                if minute_day < day
+            ]
+            latest_minute_day = max(relevant_minute_days, default=None)
+            missing_count = len(
+                minute_missing_symbols_by_day.get(latest_minute_day, [])
+                if latest_minute_day is not None else []
+            )
+            if missing_count:
+                static_modes["yje"]["state"] = "waiting_data"
+                static_modes["yje"]["data_gaps"] = [
+                    f"缺少昨日分钟K（{missing_count}只）"
+                ]
             for mode, payload in static_modes.items():
                 payload["candidates"].sort(key=lambda row: (-float(row.get("score", 0)), str(row.get("symbol"))))
-                modes[mode] = {"state": "ready", "candidates": [], "data_gaps": []}
+                modes[mode] = {
+                    "state": payload.get("state", "ready"),
+                    "candidates": [],
+                    "data_gaps": list(payload.get("data_gaps") or []),
+                }
                 if self.requirement.get("require_auction") and auction_gaps:
                     modes[mode]["state"] = "waiting_data"
                     modes[mode]["data_gaps"] = list(auction_gaps)
             if not auction_gaps:
                 # Apply only the rules that require today's 09:25:00 auction.
-                modes["yje"]["candidates"] = copy.deepcopy(static_modes["yje"]["candidates"])
-                modes["sb"]["candidates"] = copy.deepcopy(static_modes["sb"]["candidates"])
-                for row in static_modes["rzq"]["candidates"]:
+                if modes["yje"]["state"] == "ready":
+                    modes["yje"]["candidates"] = copy.deepcopy(static_modes["yje"]["candidates"])
+                if modes["sb"]["state"] == "ready":
+                    modes["sb"]["candidates"] = copy.deepcopy(static_modes["sb"]["candidates"])
+                for row in (static_modes["rzq"]["candidates"] if modes["rzq"]["state"] == "ready" else []):
                     change = _auction_change_fraction(auction_rows.get(str(row.get("symbol")), {}))
                     if change is not None and 0 < change <= .06:
                         confirmed = copy.deepcopy(row)
                         confirmed.update({"score": change * 100, "open_chg": change * 100})
                         modes["rzq"]["candidates"].append(confirmed)
-                for row in static_modes["qs"]["candidates"]:
+                for row in (static_modes["qs"]["candidates"] if modes["qs"]["state"] == "ready" else []):
                     change = _auction_change_fraction(auction_rows.get(str(row.get("symbol")), {}))
                     confirmed = confirm_trend_candidate(row, change * 100 if change is not None else None)
                     if confirmed:
@@ -697,6 +925,11 @@ class FourModeSnapshotCache:
                 "state": snapshot_state,
                 "static_state": "ready" if not member_gap else "waiting_data",
                 "data_gaps": [*mode_gaps, *([member_gap] if member_gap else [])],
+                "mode_data_gaps": {
+                    mode: list(payload.get("data_gaps") or [])
+                    for mode, payload in modes.items()
+                    if payload.get("data_gaps")
+                },
                 "auction": {
                     "state": (
                         "valid_empty"
@@ -712,6 +945,7 @@ class FourModeSnapshotCache:
                 "candidates": candidates,
                 "limit_up_count": limit_up_count,
             }
+        self._remember_auction_signatures()
 
     def _trading_days(self) -> list[date]:
         frame = self.repo.get_daily_asset("index", self.requirement.get("index_symbol", "000852.SH"), self.start, self.end, ["date"])

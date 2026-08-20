@@ -1205,7 +1205,11 @@ def _engine_from_state(
         _preload_tradable_dates,
         _read_rows,
     )
-    from app.free_strategy.four_mode_snapshot import configure_four_mode_snapshot
+    from app.free_strategy.four_mode_snapshot import (
+        configure_four_mode_snapshot,
+        ensure_four_mode_minute_data,
+        four_mode_minute_requirements,
+    )
     from app.tickflow.repository import DataStore, KlineRepository
 
     raw = dict(state.get("config", {}))
@@ -1268,6 +1272,21 @@ def _engine_from_state(
     # contract as backtests; it is deliberately mutually exclusive with the
     # other dynamic candidate loaders.
     if engine.four_mode_snapshot_requirement is not None:
+        # Prepare only the small first-to-second-board universe before the
+        # first scheduled callback.  The global minute-sync preference remains
+        # independent; missing capability is reported by the snapshot.
+        try:
+            from app.tickflow.policy import detect_capabilities
+
+            minute_requirements = four_mode_minute_requirements(
+                repo,
+                strategy_start,
+                cn_today(),
+                engine.four_mode_snapshot_requirement,
+            )
+            ensure_four_mode_minute_data(repo, detect_capabilities(), minute_requirements)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("四合一启动前分钟K准备失败: %s", type(exc).__name__)
         configure_four_mode_snapshot(engine, repo, strategy_start, cn_today())
     if config.allow_stale_fills:
         _preload_tradable_dates(

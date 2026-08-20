@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from app.free_strategy import four_mode_snapshot as snapshot
 from app.free_strategy.engine import FreeStrategyEngine
 from app.free_strategy.templates import TEMPLATES
@@ -129,3 +129,106 @@ def test_valid_empty_auction_does_not_reuse_stale_partition(tmp_path):
     rows, gaps, _manifest = cache._auction(day)
     assert rows == {}
     assert gaps == []
+
+
+def test_snapshot_refreshes_when_auction_input_changes(monkeypatch):
+    day = date(2026, 8, 20)
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.end = day
+    cache._snapshots = {day: {"state": "waiting_data"}}
+    cache._auction_signatures = {day: ("before",)}
+    calls = []
+
+    monkeypatch.setattr(cache, "_auction_signature", lambda _day: ("after",))
+
+    def rebuild():
+        calls.append(True)
+        cache._snapshots[day] = {"state": "ready"}
+        cache._auction_signatures[day] = ("after",)
+
+    monkeypatch.setattr(cache, "_build", rebuild)
+    assert cache.snapshot(day)["state"] == "ready"
+    assert calls == [True]
+
+
+def test_snapshot_extends_cache_for_a_new_trading_day(monkeypatch):
+    first = date(2026, 8, 20)
+    second = date(2026, 8, 21)
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.start = first
+    cache.end = first
+    cache._snapshots = {first: {"state": "ready"}}
+    cache._auction_signatures = {first: ("same",)}
+    calls = []
+
+    def rebuild():
+        calls.append(cache.end)
+        cache._snapshots[second] = {"state": "ready"}
+        cache._auction_signatures[second] = ("same",)
+
+    monkeypatch.setattr(cache, "_build", rebuild)
+    assert cache.snapshot(second)["state"] == "ready"
+    assert cache.end == second
+    assert calls == [second]
+
+
+def test_four_mode_minute_preparation_targets_only_limit_up_symbols():
+    import polars as pl
+
+    target = date(2026, 8, 20)
+
+    class Repo:
+        def get_instruments_asset(self, asset_type):
+            assert asset_type == "stock"
+            return pl.DataFrame({"symbol": ["000001.SZ", "600000.SH"]})
+
+        def get_daily_asset_batch(self, asset_type, symbols, start, end, columns):
+            assert asset_type == "stock"
+            assert set(symbols) == {"000001.SZ", "600000.SH"}
+            return pl.DataFrame({
+                "symbol": ["000001.SZ", "000001.SZ", "600000.SH", "600000.SH"],
+                "date": [date(2026, 8, 19), target, date(2026, 8, 19), target],
+                "raw_close": [10.0, 11.0, 20.0, 20.5],
+                "raw_open": [10.0, 10.5, 20.0, 20.1],
+                "raw_high": [10.0, 11.0, 20.0, 20.5],
+                "raw_low": [10.0, 10.0, 20.0, 20.0],
+                "close": [10.0, 11.0, 20.0, 20.5],
+                "open": [10.0, 10.5, 20.0, 20.1],
+                "high": [10.0, 11.0, 20.0, 20.5],
+                "low": [10.0, 10.0, 20.0, 20.0],
+                "volume": [100.0, 120.0, 100.0, 110.0],
+                "amount": [1000.0, 1200.0, 2000.0, 2200.0],
+            })
+
+    assert snapshot.four_mode_limit_up_symbols(Repo(), target) == ["000001.SZ"]
+
+
+def test_four_mode_minute_preparation_uses_exact_session_window(monkeypatch):
+    import polars as pl
+
+    target = date(2026, 8, 20)
+    calls = []
+    covered = set()
+
+    class Repo:
+        def get_minute_range(self, symbols, start, end, asset_type):
+            if covered:
+                return pl.DataFrame({"symbol": sorted(covered), "datetime": ["2026-08-20 09:30:00"] * len(covered)})
+            return pl.DataFrame()
+
+    def sync(symbols, repo, capset, **kwargs):
+        calls.append((symbols, kwargs["window_start"], kwargs["window_end"]))
+        covered.update(symbols)
+        return 1
+
+    monkeypatch.setattr("app.services.kline_sync.sync_and_persist_minute", sync)
+    result = snapshot.ensure_four_mode_minute_data(
+        Repo(), object(), {target: ["000001.SZ"]},
+    )
+    assert result["attempted_symbols"] == 1
+    assert result["unresolved"] == {}
+    assert calls == [(
+        ["000001.SZ"],
+        datetime(2026, 8, 20, 9, 25),
+        datetime(2026, 8, 20, 15, 5),
+    )]
