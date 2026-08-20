@@ -1448,35 +1448,61 @@ export interface LimitBoardEvent {
 }
 
 export interface FourModeStrategyView {
-  state: 'available' | 'unavailable'
+  state: 'live' | 'partial' | 'unavailable'
   reason: string
+  logic_version: string
+  execution_state?: 'read_only' | string
   source: {
-    path: string
-    sha256?: string
-    title?: string
-    source_url?: string
-    parsed_at?: string
+    provider: string
+    label: string
+    as_of?: string | null
+    data_paths: string[]
   }
   modes: Array<{
     id: string
     name: string
     summary: string
-    runtime: string
-    functions: Array<{ name: string; line?: number }>
-    config: Array<{ key: string; value: unknown }>
-    state_fields: string[]
+    logic: string
+    source: string
+    filters: string[]
+    score_components: string[]
+    candidate_count: number
+    tradable_count: number
+    candidates: Array<{
+      symbol: string
+      name: string
+      candidate_score?: number | null
+      entry_score?: number | null
+      candidate_score_velocity?: number | null
+      candidate_rank?: number | null
+      entry_rank?: number | null
+      mode_rank?: number | null
+      change_pct?: number | null
+      limit_gap_pct?: number | null
+      tradability_state: string
+      tradability_reason: string
+      source_modes: string[]
+      candidate_reasons: string[]
+      entry_reasons: string[]
+      sector_name?: string | null
+      sector_score?: number | null
+      technical_score?: number | null
+      trend_state?: string
+      flow_score?: number | null
+    }>
   }>
-  schedule: Array<{ time: string; function: string; description: string }>
-  dependencies: Array<{
-    name: string
-    kind: string
-    available: boolean
-    referenced: boolean
-    note: string
-  }>
-  state_fields: string[]
-  live_trading_enabled?: boolean
-  execution_state?: 'read_only' | string
+  runtime: {
+    trading_date?: string
+    history_ready: boolean
+    history_reason?: string
+    candidate_scope?: { state?: string; reason?: string; symbol_count?: number; plate_count?: number }
+    market_sentiment_state: string
+    sector_strength_state: string
+    first_board_rows: number
+    rebound_board_rows: number
+    candidate_rows: number
+    opportunity_rows: number
+  }
 }
 
 export interface LimitBoardView {

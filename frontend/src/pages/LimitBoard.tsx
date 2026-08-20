@@ -8,10 +8,8 @@ import {
   CircleHelp,
   CircleDot,
   Crosshair,
-  Database,
   Flame,
   GitBranch,
-  Clock3,
   Layers3,
   ListFilter,
   PanelRightClose,
@@ -1126,32 +1124,28 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
   }
 }
 
-function fourModeConfigValue(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2)
-  if (typeof value === 'boolean') return value ? '是' : '否'
-  try { return JSON.stringify(value) } catch { return '--' }
-}
-
 function FourModePanel({ report }: { report: FourModeStrategyView }) {
-  if (report.state !== 'available') {
-    return <EmptyState icon={BookOpen} title="四合一规则解析不可用" hint={report.reason} />
+  if (report.state === 'unavailable') {
+    return <EmptyState icon={BookOpen} title="四合一原生模式不可用" hint={report.reason} />
   }
-  const unavailable = report.dependencies.filter(item => !item.available)
+  const stateLabel = report.state === 'live' ? '实时原生逻辑' : '部分可用'
   return <div className="space-y-3">
     <section className="rounded-btn border border-border bg-surface px-3 py-3 sm:px-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold"><BookOpen className="h-4 w-4 text-accent" />{report.source.title || '四合一策略'}</div>
+          <div className="flex items-center gap-2 text-sm font-semibold"><BookOpen className="h-4 w-4 text-accent" />四合一 · 系统原生模式</div>
           <div className="mt-1 text-[10px] text-muted">{report.reason}</div>
           <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-muted">
-            <span>源码 {report.source.path}</span>
-            {report.source.sha256 ? <span>SHA256 {report.source.sha256.slice(0, 12)}…</span> : null}
-            {report.source.parsed_at ? <span>解析 {scoreTime(report.source.parsed_at)}</span> : null}
+            <span>逻辑版本 {report.logic_version}</span>
+            <span>数据 {report.source.provider}</span>
+            {report.source.as_of ? <span>更新 {scoreTime(report.source.as_of)}</span> : null}
+            <span>候选 {report.runtime.candidate_rows} · 机会 {report.runtime.opportunity_rows}</span>
           </div>
         </div>
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[10px] text-warning"><GitBranch className="h-3 w-3" />只读规则解析 · 不生成委托</span>
+        <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-bear/40 bg-bear/10 px-2 py-1 text-[10px] text-bear"><GitBranch className="h-3 w-3" />{stateLabel} · 只读查看</span>
       </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">{report.source.data_paths.map(path => <span key={path} className="rounded-md border border-border px-1.5 py-1 text-[9px] text-secondary">{path}</span>)}</div>
+      {!report.runtime.history_ready ? <div className="mt-3 flex items-center gap-2 rounded-btn border border-warning/40 bg-warning/10 px-3 py-2 text-[10px] text-warning"><ShieldAlert className="h-3.5 w-3.5" />{report.runtime.history_reason || '历史候选数据尚未就绪'}</div> : null}
     </section>
 
     <section className="grid gap-3 xl:grid-cols-2">
@@ -1160,24 +1154,17 @@ function FourModePanel({ report }: { report: FourModeStrategyView }) {
           <div><div className="text-sm font-semibold">{mode.name}</div><div className="mt-1 text-[11px] leading-5 text-secondary">{mode.summary}</div></div>
           <span className="rounded-md bg-elevated px-2 py-1 font-mono text-[10px] text-accent">{mode.id}</span>
         </div>
-        <div className="mt-3 grid gap-2 text-[10px] sm:grid-cols-2">
-          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">运行阶段</div><div className="mt-1 text-secondary">{mode.runtime}</div></div>
-          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">状态字段</div><div className="mt-1 truncate font-mono text-secondary" title={mode.state_fields.join('、')}>{mode.state_fields.length ? mode.state_fields.join('、') : '--'}</div></div>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
+          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">系统候选</div><div className="mt-1 font-mono text-sm text-accent">{mode.candidate_count}</div></div>
+          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">可交易</div><div className="mt-1 font-mono text-sm text-bear">{mode.tradable_count}</div></div>
         </div>
-        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">关键函数</div><div className="mt-1 flex flex-wrap gap-1.5">{mode.functions.map(fn => <span key={fn.name} className="rounded-md border border-border px-1.5 py-1 font-mono text-[9px] text-secondary">{fn.name}{fn.line ? `:${fn.line}` : ''}</span>)}</div></div>
-        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">源码参数</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{mode.config.map(item => <span key={item.key} className="font-mono text-[10px] text-secondary">{item.key}={fourModeConfigValue(item.value)}</span>)}</div></div>
+        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">系统逻辑</div><div className="mt-1 text-[10px] text-secondary">{mode.logic}</div></div>
+        <div className="mt-2 flex flex-wrap gap-1.5">{mode.score_components.map(item => <span key={item} className="rounded-md border border-border px-1.5 py-1 text-[9px] text-secondary">{item}</span>)}</div>
+        <div className="mt-2 flex flex-wrap gap-1.5">{mode.filters.map(item => <span key={item} className="rounded-md bg-elevated px-1.5 py-1 text-[9px] text-muted">{item}</span>)}</div>
+        <div className="mt-3 overflow-x-auto border-t border-border pt-2">
+          {mode.candidates.length ? <table className="w-full min-w-[480px] text-left text-[10px]"><thead className="text-muted"><tr><th className="px-1 py-1 font-medium">标的</th><th className="px-1 py-1 font-medium">强势/机会</th><th className="px-1 py-1 font-medium">距板</th><th className="px-1 py-1 font-medium">状态</th></tr></thead><tbody>{mode.candidates.slice(0, 8).map(row => <tr key={row.symbol} className="border-t border-border/70"><td className="px-1 py-1"><div className="font-medium">{row.name}</div><div className="font-mono text-[9px] text-muted">{row.symbol}</div></td><td className="px-1 py-1 font-mono text-secondary">{row.candidate_score?.toFixed(1) ?? '--'} / {row.entry_score?.toFixed(1) ?? '--'}</td><td className="px-1 py-1 font-mono text-secondary">{row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`}</td><td className={`px-1 py-1 ${row.tradability_state === 'tradable' ? 'text-bear' : row.tradability_state === 'limit_reached' ? 'text-warning' : 'text-muted'}`}>{row.tradability_reason || row.tradability_state}</td></tr>)}</tbody></table> : <div className="py-4 text-center text-[10px] text-muted">当前系统没有符合该模式的候选</div>}
+        </div>
       </article>)}
-    </section>
-
-    <section className="overflow-hidden rounded-btn border border-border bg-surface">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-medium"><Clock3 className="h-3.5 w-3.5 text-accent" />日内调度</div>
-      <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-[10px]"><thead className="bg-elevated/60 text-muted"><tr><th className="px-3 py-2 font-medium">时间</th><th className="px-3 py-2 font-medium">函数</th><th className="px-3 py-2 font-medium">用途</th></tr></thead><tbody>{report.schedule.map(item => <tr key={`${item.time}-${item.function}`} className="border-t border-border"><td className="px-3 py-2 font-mono text-accent">{item.time}</td><td className="px-3 py-2 font-mono text-secondary">{item.function}</td><td className="px-3 py-2 text-secondary">{item.description}</td></tr>)}</tbody></table></div>
-    </section>
-
-    <section className="overflow-hidden rounded-btn border border-border bg-surface">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-xs font-medium"><Database className="h-3.5 w-3.5 text-accent" />依赖与接入状态</div>
-      <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-[10px]"><thead className="bg-elevated/60 text-muted"><tr><th className="px-3 py-2 font-medium">依赖</th><th className="px-3 py-2 font-medium">用途</th><th className="px-3 py-2 font-medium">当前状态</th><th className="px-3 py-2 font-medium">说明</th></tr></thead><tbody>{report.dependencies.map(item => <tr key={item.name} className="border-t border-border"><td className="px-3 py-2 font-mono text-secondary">{item.name}</td><td className="px-3 py-2 text-secondary">{item.kind}</td><td className={`px-3 py-2 font-medium ${item.available ? 'text-bear' : 'text-warning'}`}>{item.available ? '库可见' : '未接入'}{item.referenced ? '' : ' · 源码未直接导入'}</td><td className="px-3 py-2 text-muted">{item.note}</td></tr>)}</tbody></table></div>
-      <div className="flex flex-wrap items-center gap-2 border-t border-border px-3 py-2.5 text-[10px] text-warning"><ShieldAlert className="h-3.5 w-3.5" />{unavailable.length} 项依赖尚未形成可验证的系统数据契约；当前仅供查看策略结构。</div>
     </section>
   </div>
 }

@@ -22,7 +22,7 @@ from app.services.limit_board_scoring import (
     sector_detail,
     technical_detail,
 )
-from app.services.four_mode_parser import parse_four_mode_strategy
+from app.services.native_four_mode import build_native_four_mode_report
 from app.services.limit_board_store import LimitBoardStore
 
 
@@ -219,8 +219,6 @@ class LimitBoardService:
         self._history_reason = "正在读取涨停历史与溢价基因数据"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
-        self._four_mode_report: dict[str, Any] | None = None
-        self._four_mode_signature: tuple[int, int] | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -319,17 +317,8 @@ class LimitBoardService:
         }
 
     def four_mode_view(self) -> dict[str, Any]:
-        """Return the cached, execution-free report for the archived strategy."""
-        source_path = Path(__file__).resolve().parents[3] / "docs" / "聚宽策略" / "四合一打板.py"
-        try:
-            stat = source_path.stat()
-            signature = (int(stat.st_mtime_ns), int(stat.st_size))
-        except OSError:
-            signature = None
-        if self._four_mode_report is None or signature != self._four_mode_signature:
-            self._four_mode_report = parse_four_mode_strategy(source_path)
-            self._four_mode_signature = signature
-        return self._four_mode_report
+        """Return the same native report shown inside the short-line hunter."""
+        return self.view()["four_mode"]
 
     def _fresh_tickflow_quotes(self, symbols: set[str]) -> dict[str, Any]:
         provider_getter = getattr(self.quote_service, "realtime_provider", None)
@@ -3172,6 +3161,22 @@ class LimitBoardService:
         else:
             trading_reason = str(qmt_status.get("reason") or "QMT 交易网关未就绪")
         sector_strength = self.sector_strength_view()
+        market_sentiment = self._market_sentiment_snapshot()
+        four_mode = build_native_four_mode_report(
+            first_board=first_board,
+            rebound_board=rebound_board,
+            candidate_pool=candidate_pool,
+            opportunity_pool=opportunity_pool,
+            runtime={
+                "trading_date": runtime["trading_date"],
+                "history_ready": self._history_ready,
+                "history_reason": self._history_reason,
+                "candidate_scope": dict(self._sector_candidate_scope),
+            },
+            market_sentiment=market_sentiment,
+            sector_strength=sector_strength,
+            as_of=cn_now(),
+        )
         market_mode = self._market_mode()
         first_board_enabled = (
             market_mode == "full_market"
@@ -3191,9 +3196,9 @@ class LimitBoardService:
                 symbol for symbol in runtime.get("blacklist", [])
                 if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
             ],
-            "market_sentiment": self._market_sentiment_snapshot(),
+            "market_sentiment": market_sentiment,
             "sector_strength": sector_strength,
-            "four_mode": self.four_mode_view(),
+            "four_mode": four_mode,
             "events": events,
             "runtime": {
                 "trading_date": runtime["trading_date"],
