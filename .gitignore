@@ -58,6 +58,8 @@ data/**
 .env.local
 .env.*.local
 backend/.env
+/成分股-使用/login.txt
+/成分股-使用/新建文本文档.txt
 
 # ===== User-derived prompts =====
 backend/user_prompts/
