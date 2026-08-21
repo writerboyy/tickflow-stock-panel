@@ -1125,6 +1125,7 @@ def _read_rows(
     market_data: MarketData | None = None,
     after: datetime | None = None,
     until: datetime | None = None,
+    second_precision: bool = False,
 ) -> Iterable[Bar]:
     if timeframe == "1d":
         if market_data is not None:
@@ -1174,21 +1175,32 @@ def _read_rows(
         window["after"] = after
     if until is not None:
         window["until"] = until
-    frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
+    if second_precision:
+        get_second_range = getattr(repo, "get_second_range", None)
+        if not callable(get_second_range):
+            raise ValueError(
+                "回测包含秒级定时点，但当前历史 provider 没有秒级行情能力；"
+                "请接入 kline_second 后再回测"
+            )
+        frame = get_second_range(symbols, start, end, asset_type, **window)
+        interval_label = "秒级"
+    else:
+        frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
+        interval_label = "分钟"
     if not frame.is_empty():
         frame = frame.drop_nulls(["open", "high", "low", "close"])
     if frame.is_empty():
-        if allow_empty:
+        if allow_empty and not second_precision:
             return []
         asset_label = "ETF" if asset_type == "etf" else "股票"
         raise ValueError(
-            f"没有可用的{asset_label}分钟K历史数据。请先同步{asset_label}分钟K，"
+            f"没有可用的{asset_label}{interval_label}K历史数据。请先同步{asset_label}{interval_label}K，"
             "或将周期切换为 1d 后重新运行。"
         )
     found = set(frame["symbol"].unique().to_list())
     missing = [symbol for symbol in symbols if symbol not in found]
     if missing and require_all_symbols:
-        raise ValueError(f"分钟K历史缺少标的: {', '.join(missing[:8])}")
+        raise ValueError(f"{interval_label}K历史缺少标的: {', '.join(missing[:8])}")
     bar_metadata = _minute_metadata(frame, market_data, asset_type) if market_data is not None else {}
 
     def minute_rows() -> Iterable[Bar]:
@@ -1731,6 +1743,7 @@ def _scheduled_snapshot(
     symbols: list[str] | None = None,
     live_bars: Iterable[Bar] | None = None,
     live_only: bool = False,
+    second_precision: bool = False,
 ) -> list[Bar]:
     symbols = _scheduled_symbols(engine, timestamp) if symbols is None else symbols
     _ensure_scheduled_market_data(
@@ -1740,7 +1753,8 @@ def _scheduled_snapshot(
         # Historical rows remain available to history()/indicators, but they can
         # never become today's execution snapshot.
         return _live_scheduled_snapshot(live_bars or (), symbols, timestamp, timeframe)
-    if timestamp.time().second or timestamp.time().microsecond:
+    intraday_second = time(9, 30) <= timestamp.time() < time(15, 0)
+    if (second_precision and intraday_second) or timestamp.time().second or timestamp.time().microsecond:
         # A minute bar cannot prove what was tradable at 09:30:16.  Only a
         # provider-owned second snapshot may satisfy a second-precision task.
         get_second_snapshot = getattr(repo, "get_second_snapshot", None)
@@ -1940,6 +1954,7 @@ def _process_scheduled_fills(
     *,
     live_bars: Iterable[Bar] | None = None,
     live_only: bool = False,
+    second_precision: bool = False,
 ) -> None:
     due_groups: dict[datetime, list[str]] = {}
     for order, due_at in engine.pending_orders:
@@ -1984,10 +1999,19 @@ def _process_scheduled_fills(
                 if bar is not None:
                     candidates.append(replace(bar, timestamp=datetime.combine(days[0], time(9, 30))))
         else:
-            get_next = getattr(repo, "get_minute_next", None)
+            get_next = getattr(
+                repo,
+                "get_second_next" if second_precision else "get_minute_next",
+                None,
+            )
             if not callable(get_next):
                 continue
-            frame = get_next(symbols, _next_period_after(due_at, timeframe), until, asset_type)
+            frame = get_next(
+                symbols,
+                _next_period_after(due_at, timeframe),
+                until,
+                asset_type,
+            )
             candidates = _scheduled_minute_bars(frame, market, asset_type)
         by_time: dict[datetime, list[Bar]] = {}
         for bar in candidates:
@@ -2011,6 +2035,7 @@ def advance_scheduled_session(
     live_only: bool = False,
 ) -> None:
     engine.begin_session(day)
+    second_precision = bool(engine.second_precision_schedules)
     due_times = sorted({
         task.resolved_time
         for task in engine.context._scheduled
@@ -2027,6 +2052,7 @@ def advance_scheduled_session(
         _process_scheduled_fills(
             repo, engine, market, timestamp, asset_type, timeframe,
             live_bars=live_bars, live_only=live_only,
+            second_precision=second_precision,
         )
         symbols = _scheduled_symbols(engine, timestamp)
         required_symbols = _scheduled_required_symbols(engine, timestamp)
@@ -2063,6 +2089,7 @@ def advance_scheduled_session(
             symbols=symbols,
             live_bars=live_bars,
             live_only=live_only,
+            second_precision=second_precision,
         )
         market_time = event_timestamp.time()
         needs_live = live_only and market_time >= time(9, 30)
@@ -2085,6 +2112,7 @@ def advance_scheduled_session(
                     symbols=symbols,
                     live_bars=live_bars,
                     live_only=live_only,
+                    second_precision=second_precision,
                 )
                 retry_missing = _missing_snapshot_symbols(
                     retry_snapshot, required_symbols,
@@ -2125,6 +2153,7 @@ def advance_scheduled_session(
                     asset_type,
                     timeframe,
                     symbols=symbols,
+                    second_precision=second_precision,
                 )
                 if any(bar.tradable and not bar.suspended for bar in opening_snapshot):
                     event_timestamp = first_continuous_minute
@@ -2150,6 +2179,7 @@ def advance_scheduled_session(
                 timeframe,
                 live_bars=live_bars,
                 live_only=live_only,
+                second_precision=second_precision,
             )
         engine.advance_event(
             event_timestamp,
@@ -2159,7 +2189,7 @@ def advance_scheduled_session(
         )
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
-        live_bars=live_bars, live_only=live_only,
+        live_bars=live_bars, live_only=live_only, second_precision=second_precision,
     )
     if finalize:
         closing_time = max(cutoff, datetime.combine(day, time(15, 0)))
@@ -2169,6 +2199,7 @@ def advance_scheduled_session(
             symbols=closing_symbols,
             live_bars=live_bars,
             live_only=live_only,
+            second_precision=second_precision,
         )
         closing_found = {bar.symbol for bar in snapshot}
         required_closing_symbols = closing_symbols if live_only else [
@@ -2468,13 +2499,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 engine.state = engine.context.state.copy()
                 result = engine.result()
         else:
-            if engine.second_precision_schedules:
-                raise ValueError(
-                    "回测包含秒级定时点（"
-                    + ", ".join(engine.second_precision_schedules)
-                    + "），当前历史 provider 只有分钟K；请接入秒级历史行情后再回测"
-                )
-            output.put({"type": "progress", "message": "按交易日读取并回放分钟K", "progress": 0.35})
+            output.put({
+                "type": "progress",
+                "message": (
+                    "按交易日读取并回放秒级行情"
+                    if engine.second_precision_schedules else "按交易日读取并回放分钟K"
+                ),
+                "progress": 0.35,
+            })
             cursor = start
             days_seen = 0
             days_with_bars = 0
@@ -2521,10 +2553,20 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                         for symbol in session_symbols:
                             if symbol != engine.config.benchmark_symbol and symbol not in requested_symbols:
                                 requested_symbols.append(symbol)
+                    second_symbols = (
+                        [
+                            symbol for symbol in session_symbols
+                            if symbol != engine.config.benchmark_symbol
+                        ]
+                        if engine.second_precision_schedules else session_symbols
+                    )
                     bars = _read_rows(
-                        repo, session_symbols, cursor, cursor,
-                        payload["asset_type"], payload["timeframe"], require_all_symbols=False, allow_empty=True,
+                        repo, second_symbols, cursor, cursor,
+                        payload["asset_type"], payload["timeframe"],
+                        require_all_symbols=bool(engine.second_precision_schedules),
+                        allow_empty=not bool(engine.second_precision_schedules),
                         market_data=market_data,
+                        second_precision=bool(engine.second_precision_schedules),
                     )
                     rows = list(bars)
                     benchmark_symbol = engine.config.benchmark_symbol
@@ -2667,7 +2709,9 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),
                 "storage": (
-                    "event_snapshots"
+                    "kline_second"
+                    if engine.second_precision_schedules
+                    else "event_snapshots"
                     if engine.execution_mode == "scheduled"
                     else "kline_daily" if payload["timeframe"] == "1d" else minute_table
                 ),

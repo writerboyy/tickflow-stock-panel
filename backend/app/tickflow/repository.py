@@ -68,6 +68,7 @@ class DataStore:
             "kline_etf_enriched",
             "kline_etf_minute",
             "kline_minute",
+            "kline_second",
             "adj_factor",
             "adj_factor_etf",
             "financials",
@@ -172,6 +173,8 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/kline_etf_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_minute AS
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW kline_second AS
+                SELECT * FROM read_parquet('{d}/kline_second/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor AS
                 SELECT * FROM read_parquet('{d}/adj_factor/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor_etf AS
@@ -352,6 +355,7 @@ class KlineRepository:
         self._etf_enriched_glob = str(store.data_dir / "kline_etf_enriched" / "**" / "*.parquet")
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
         self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
+        self._second_glob = str(store.data_dir / "kline_second" / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
@@ -1560,6 +1564,104 @@ class KlineRepository:
                 parts.append(str(path))
             current += timedelta(days=1)
         return parts
+
+    def _second_parts(self, start: date, end: date) -> list[str]:
+        root = self.store.data_dir / "kline_second"
+        parts: list[str] = []
+        current = start
+        while current <= end:
+            path = root / f"date={current.isoformat()}" / "part.parquet"
+            if path.exists():
+                parts.append(str(path))
+            current += timedelta(days=1)
+        return parts
+
+    def get_second_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        asset_type: str = "stock",
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+    ) -> pl.DataFrame:
+        """读取独立秒级行情；没有该分区时返回空表，不降级到分钟K。"""
+        if asset_type != "stock":
+            return pl.DataFrame()
+        if not symbols:
+            return pl.DataFrame()
+        parts = self._second_parts(start, end)
+        if not parts:
+            return pl.DataFrame()
+        try:
+            frame = scan_parquet_compat(parts)
+            available = set(frame.collect_schema().names())
+            columns = [
+                name for name in
+                ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+                if name in available
+            ]
+            required = {"symbol", "datetime", "open", "high", "low", "close"}
+            if not required.issubset(columns):
+                return pl.DataFrame()
+            predicate = (
+                pl.col("symbol").is_in(symbols)
+                & (pl.col("datetime").dt.date() >= start)
+                & (pl.col("datetime").dt.date() <= end)
+            )
+            if after is not None:
+                predicate &= pl.col("datetime") > after
+            if until is not None:
+                predicate &= pl.col("datetime") <= until
+            return (
+                frame.select(columns)
+                .filter(predicate)
+                .sort(["datetime", "symbol"])
+                .collect(engine="streaming")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("秒级行情查询失败: %s", exc)
+            return pl.DataFrame()
+
+    def get_second_snapshot(
+        self,
+        symbols: list[str],
+        at: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """返回每个标的在指定时点之前最近的真实秒级行情。"""
+        frame = self.get_second_range(symbols, at.date(), at.date(), asset_type, until=at)
+        if frame.is_empty():
+            return frame
+        return (
+            frame.sort(["symbol", "datetime"])
+            .group_by("symbol", maintain_order=True)
+            .tail(1)
+            .sort(["datetime", "symbol"])
+        )
+
+    def get_second_next(
+        self,
+        symbols: list[str],
+        after: datetime,
+        until: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """返回每个标的在区间内第一条真实秒级行情。"""
+        frame = self.get_second_range(
+            symbols, after.date(), until.date(), asset_type, after=after, until=until,
+        )
+        if frame.is_empty():
+            return frame
+        if "volume" in frame.columns:
+            frame = frame.filter(pl.col("volume") > 0)
+        return (
+            frame.sort(["symbol", "datetime"])
+            .group_by("symbol", maintain_order=True)
+            .head(1)
+            .sort(["datetime", "symbol"])
+        )
 
     def get_minute_symbols(
         self,

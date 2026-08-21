@@ -1,9 +1,48 @@
-from datetime import date
+from datetime import date, datetime
 
 import polars as pl
 
 from app.parquet import scan_daily_parquet, scan_enriched_parquet
 from app.tickflow.repository import DataStore, KlineRepository
+
+
+def test_second_queries_preserve_real_second_timestamps_and_never_fallback_to_minute(tmp_path):
+    part = tmp_path / "kline_second" / "date=2026-08-20" / "part.parquet"
+    part.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600127.SH", "600127.SH", "600610.SH"],
+        "datetime": [
+            datetime(2026, 8, 20, 9, 30, 16),
+            datetime(2026, 8, 20, 9, 30, 18),
+            datetime(2026, 8, 20, 9, 31),
+        ],
+        "open": [8.14, 8.20, 7.81],
+        "high": [8.30, 8.60, 8.00],
+        "low": [8.14, 8.20, 7.81],
+        "close": [8.30, 8.60, 7.94],
+        "volume": [100.0, 200.0, 300.0],
+        "amount": [830.0, 1720.0, 2382.0],
+    }).write_parquet(part)
+
+    repo = KlineRepository(DataStore(tmp_path))
+    rows = repo.get_second_range(
+        ["600127.SH", "600610.SH"], date(2026, 8, 20), date(2026, 8, 20),
+    )
+    assert rows["datetime"].to_list() == [
+        datetime(2026, 8, 20, 9, 30, 16),
+        datetime(2026, 8, 20, 9, 30, 18),
+        datetime(2026, 8, 20, 9, 31),
+    ]
+
+    snapshot = repo.get_second_snapshot(
+        ["600127.SH", "600610.SH"], datetime(2026, 8, 20, 9, 30, 17),
+    )
+    assert snapshot.select("symbol", "datetime").rows() == [
+        ("600127.SH", datetime(2026, 8, 20, 9, 30, 16)),
+    ]
+    assert repo.get_second_range(
+        ["600127.SH"], date(2026, 8, 19), date(2026, 8, 19),
+    ).is_empty()
 
 
 def test_partitioned_daily_scan_tolerates_added_quote_ts(tmp_path):

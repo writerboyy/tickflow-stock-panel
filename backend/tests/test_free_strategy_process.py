@@ -616,6 +616,167 @@ def test_minute_rows_derive_raw_prices_split_and_limits_from_daily_data():
     assert (bars[0].limit_up, bars[0].limit_down) == (11, 9)
 
 
+def test_second_rows_are_used_for_second_precision_callbacks_without_minute_fallback():
+    class FakeRepository:
+        def get_second_range(self, _symbols, _start, _end, _asset_type):
+            return pl.DataFrame({
+                "symbol": ["X", "X"],
+                "datetime": [datetime(2024, 1, 2, 9, 30, 16), datetime(2024, 1, 2, 9, 31)],
+                "open": [10.0, 10.2], "high": [10.1, 10.3], "low": [10.0, 10.2],
+                "close": [10.1, 10.3], "volume": [100.0, 100.0], "amount": [1010.0, 1030.0],
+            })
+
+    bars = list(_read_rows(
+        FakeRepository(), ["X"], datetime(2024, 1, 2).date(), datetime(2024, 1, 2).date(),
+        "stock", "1m", second_precision=True,
+    ))
+
+    assert [bar.timestamp for bar in bars] == [
+        datetime(2024, 1, 2, 9, 30, 16), datetime(2024, 1, 2, 9, 31),
+    ]
+
+
+def test_second_precision_callbacks_run_at_093016_and_093100_from_provider_rows():
+    class FakeRepository:
+        def get_second_range(self, _symbols, _start, _end, _asset_type):
+            return pl.DataFrame({
+                "symbol": ["X", "X"],
+                "datetime": [datetime(2024, 1, 2, 9, 30, 16), datetime(2024, 1, 2, 9, 31)],
+                "open": [10.0, 10.2], "high": [10.1, 10.3], "low": [10.0, 10.2],
+                "close": [10.1, 10.3], "volume": [100.0, 100.0], "amount": [1010.0, 1030.0],
+            })
+
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(mark, '09:30:16', symbols=['X'])
+    context.schedule(mark, '09:31:00', symbols=['X'])
+
+def mark(context):
+    context.state.setdefault('times', []).append(context.now.isoformat())
+    if context.now.time().second == 16:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+            benchmark_symbol="X",
+        ),
+    )
+    bars = list(_read_rows(
+        FakeRepository(), ["X"], date(2024, 1, 2), date(2024, 1, 2),
+        "stock", "1m", second_precision=True,
+    ))
+
+    result = engine.run(bars)
+
+    assert result["state"]["times"] == [
+        "2024-01-02T09:30:16", "2024-01-02T09:31:00",
+    ]
+    assert [
+        (fill["timestamp"], fill["symbol"], fill["quantity"])
+        for fill in result["fills"]
+    ] == [("2024-01-02T09:30:16", "X", 100)]
+
+
+def test_second_precision_history_missing_fails_closed_instead_of_using_minute_rows():
+    class MinuteOnlyRepository:
+        def get_second_range(self, *_args, **_kwargs):
+            return pl.DataFrame()
+
+    with pytest.raises(ValueError, match="秒级K历史"):
+        list(_read_rows(
+            MinuteOnlyRepository(), ["X"], date(2024, 1, 2), date(2024, 1, 2),
+            "stock", "1m", allow_empty=True, second_precision=True,
+        ))
+
+
+def test_scheduled_backtest_replays_second_snapshots_at_original_callback_times(monkeypatch):
+    day = date(2024, 1, 2)
+
+    class SecondRepository:
+        def get_second_snapshot(self, symbols, at, asset_type="stock"):
+            del asset_type
+            values = {
+                datetime(2024, 1, 2, 9, 30, 16): (10.0, 10.1),
+                datetime(2024, 1, 2, 9, 31): (10.2, 10.3),
+            }
+            rows = [
+                {
+                    "symbol": symbol,
+                    "datetime": timestamp,
+                    "open": prices[0], "high": prices[1],
+                    "low": prices[0], "close": prices[1],
+                    "volume": 100.0, "amount": prices[1] * 100,
+                }
+                for timestamp, prices in values.items()
+                if timestamp <= at
+                for symbol in symbols
+            ]
+            return pl.DataFrame(rows).group_by("symbol", maintain_order=True).tail(1) if rows else pl.DataFrame()
+
+        def get_second_next(self, symbols, after, until, asset_type="stock"):
+            del asset_type
+            values = [
+                (datetime(2024, 1, 2, 9, 30, 16), 10.1),
+                (datetime(2024, 1, 2, 9, 31), 10.3),
+            ]
+            rows = [
+                {
+                    "symbol": symbol, "datetime": timestamp,
+                    "open": price, "high": price, "low": price, "close": price,
+                    "volume": 100.0, "amount": price * 100,
+                }
+                for timestamp, price in values
+                if after < timestamp <= until
+                for symbol in symbols
+            ]
+            return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(mark, '09:30:16', symbols=['X'])
+    context.schedule(mark, '09:31:00', symbols=['X'])
+
+def mark(context):
+    context.state.setdefault('times', []).append(context.now.isoformat())
+    if context.now.time().second == 16:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000, fees_pct=0, slippage_bps=0,
+            fill_policy="close", settlement="t0", benchmark_symbol="X",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process._ensure_scheduled_market_data",
+        lambda *_args, **_kwargs: None,
+    )
+    advance_scheduled_session(
+        SecondRepository(), engine, MarketData(), day,
+        datetime(2024, 1, 2, 9, 31), "stock", "1m",
+        finalize=False,
+    )
+
+    assert engine.context.state["times"] == [
+        "2024-01-02T09:30:16", "2024-01-02T09:31:00",
+    ]
+    assert [
+        (fill["timestamp"], fill["symbol"], fill["quantity"])
+        for fill in engine.result()["fills"]
+    ] == [("2024-01-02T09:30:16", "X", 100)]
+
+
 def test_market_preparation_does_not_inject_undeclared_history():
     start = datetime(2024, 2, 1).date()
     rows = {"X": [daily_row(start - timedelta(days=day), float(day)) for day in range(1, 11)]}
