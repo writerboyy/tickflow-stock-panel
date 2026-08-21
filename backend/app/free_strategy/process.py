@@ -2134,6 +2134,34 @@ def advance_scheduled_session(
 ) -> None:
     engine.begin_session(day)
     second_precision = bool(engine.second_precision_schedules)
+    live_values = tuple(live_bars or ())
+    replayed_live_keys: set[tuple[datetime, str]] = set()
+    last_event_timestamp: datetime | None = None
+
+    def replay_live_quotes_through(target: datetime) -> None:
+        """Replay received quotes once, without crossing a scheduled boundary."""
+        grouped: dict[datetime, dict[str, Bar]] = {}
+        for bar in live_values:
+            if bar.date != day or bar.timestamp > target:
+                continue
+            key = (bar.timestamp, bar.symbol)
+            if key not in replayed_live_keys:
+                grouped.setdefault(bar.timestamp, {})[bar.symbol] = bar
+        for timestamp, by_symbol in sorted(grouped.items()):
+            values = [
+                bar for symbol, bar in sorted(by_symbol.items())
+                if (bar.timestamp, symbol) not in replayed_live_keys
+            ]
+            if not values:
+                continue
+            engine.advance_event(
+                timestamp,
+                event_type="quote",
+                quotes=[_bar_as_quote(bar) for bar in values],
+                run_schedules=False,
+            )
+            replayed_live_keys.update((bar.timestamp, bar.symbol) for bar in values)
+
     due_times = sorted({
         task.resolved_time
         for task in engine.context._scheduled
@@ -2149,7 +2177,7 @@ def advance_scheduled_session(
             continue
         _process_scheduled_fills(
             repo, engine, market, timestamp, asset_type, timeframe,
-            live_bars=live_bars, live_only=live_only,
+            live_bars=live_values, live_only=live_only,
             second_precision=second_precision,
         )
         symbols = _scheduled_symbols(engine, timestamp)
@@ -2160,7 +2188,7 @@ def advance_scheduled_session(
         event_timestamp = timestamp
         if live_only and has_explicit_seconds(at):
             available_by_time: dict[datetime, set[str]] = {}
-            for bar in live_bars or ():
+            for bar in live_values:
                 if (
                     bar.date == day
                     and timestamp <= bar.timestamp <= cutoff
@@ -2185,7 +2213,7 @@ def advance_scheduled_session(
             asset_type,
             timeframe,
             symbols=symbols,
-            live_bars=live_bars,
+            live_bars=live_values,
             live_only=live_only,
             second_precision=second_precision,
         )
@@ -2208,7 +2236,7 @@ def advance_scheduled_session(
                     asset_type,
                     timeframe,
                     symbols=symbols,
-                    live_bars=live_bars,
+                    live_bars=live_values,
                     live_only=live_only,
                     second_precision=second_precision,
                 )
@@ -2275,29 +2303,15 @@ def advance_scheduled_session(
                 event_timestamp,
                 asset_type,
                 timeframe,
-                live_bars=live_bars,
+                live_bars=live_values,
                 live_only=live_only,
                 second_precision=second_precision,
             )
         if live_only and second_precision:
-            previous_timestamp = engine._last_timestamp  # noqa: SLF001
-            before_rows = [
-                bar for bar in sorted(
-                    live_bars or (), key=lambda item: (item.timestamp, item.symbol),
-                )
-                if bar.timestamp <= timestamp
-                and (
-                    previous_timestamp is None
-                    or bar.timestamp > previous_timestamp
-                )
-            ]
-            for bar in before_rows:
-                engine.advance_event(
-                    bar.timestamp,
-                    event_type="quote",
-                    quotes=[_bar_as_quote(bar)],
-                    run_schedules=False,
-                )
+            # Consume only actual quotes at or before this boundary. A future
+            # quote used as a late snapshot is replayed before the next
+            # boundary (or after the final boundary), exactly once.
+            replay_live_quotes_through(timestamp)
             if event_timestamp > timestamp:
                 # A poll can arrive after the source callback boundary.  Keep
                 # the late quote as the snapshot source, but publish its
@@ -2310,28 +2324,12 @@ def advance_scheduled_session(
             event_type="scheduled",
             scheduled_at=at,
         )
-        if live_only and second_precision and event_timestamp > timestamp:
-            previous_timestamp = engine._last_timestamp  # noqa: SLF001
-            after_rows = [
-                bar for bar in sorted(
-                    live_bars or (), key=lambda item: (item.timestamp, item.symbol),
-                )
-                if timestamp < bar.timestamp <= event_timestamp
-                and (
-                    previous_timestamp is None
-                    or bar.timestamp > previous_timestamp
-                )
-            ]
-            for bar in after_rows:
-                engine.advance_event(
-                    bar.timestamp,
-                    event_type="quote",
-                    quotes=[_bar_as_quote(bar)],
-                    run_schedules=False,
-                )
+        last_event_timestamp = max(last_event_timestamp or event_timestamp, event_timestamp)
+    if live_only and second_precision:
+        replay_live_quotes_through(last_event_timestamp or cutoff)
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
-        live_bars=live_bars, live_only=live_only, second_precision=second_precision,
+        live_bars=live_values, live_only=live_only, second_precision=second_precision,
     )
     if finalize:
         closing_time = max(cutoff, datetime.combine(day, time(15, 0)))
@@ -2339,7 +2337,7 @@ def advance_scheduled_session(
         snapshot = _scheduled_snapshot(
             repo, engine, market, closing_time, asset_type, timeframe,
             symbols=closing_symbols,
-            live_bars=live_bars,
+            live_bars=live_values,
             live_only=live_only,
             second_precision=second_precision,
         )

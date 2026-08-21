@@ -1825,6 +1825,46 @@ def run(context):
     }
 
 
+def test_live_late_quote_is_replayed_once_across_adjacent_second_callbacks():
+    source = """
+def initialize(context):
+    context.schedule(run, '09:30:16', symbols=['X'])
+    context.schedule(run, '09:31:00', symbols=['X'])
+
+def on_quote(context, quotes):
+    context.state.setdefault('quote_times', []).append(context.now.isoformat())
+
+def run(context):
+    bar = context.current_bars()['X']
+    context.state.setdefault('scheduled', []).append((context.now.isoformat(), bar.close))
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    advance_scheduled_session(
+        ScheduledRepository([]),
+        engine,
+        scheduled_market("X"),
+        date(2024, 1, 2),
+        datetime(2024, 1, 2, 9, 31, 5),
+        "stock",
+        "1m",
+        live_bars=[Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11)],
+        live_only=True,
+    )
+
+    assert engine.context.state == {
+        "scheduled": [
+            ("2024-01-02T09:30:16", 11.0),
+            ("2024-01-02T09:31:00", 11.0),
+        ],
+        "quote_times": ["2024-01-02T09:31:05"],
+    }
+
+
 def test_live_scheduled_event_does_not_wait_for_optional_symbols():
     source = """
 def initialize(context):
