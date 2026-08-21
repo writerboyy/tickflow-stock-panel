@@ -17,6 +17,7 @@ from app.api.free_strategy import (
     migrate_legacy_five_fortunes_strategies,
     migrate_managed_etf_nav_alignment,
     migrate_managed_large_amount_first_board,
+    provision_managed_template_strategies,
     router,
 )
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
@@ -48,6 +49,24 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
 
 def test_paper_write_uses_longer_callback_timeout_than_backtests():
     assert PaperWrite(strategy_id="paper").callback_timeout_seconds == 120
+
+
+def test_four_mode_template_is_provisioned_once_and_listed_for_paper(tmp_path):
+    assert provision_managed_template_strategies(tmp_path) == ["four_mode"]
+    assert provision_managed_template_strategies(tmp_path) == []
+
+    loaded = FreeStrategyStore(tmp_path).get("four_mode")
+    assert loaded["name"] == TEMPLATES["four_mode"]["name"]
+    assert loaded["source"] == TEMPLATES["four_mode"]["source"]
+    assert loaded["config"] == TEMPLATES["four_mode"]["config"]
+
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+    response = TestClient(app).get("/api/free-strategies")
+
+    assert response.status_code == 200
+    assert any(item["id"] == "four_mode" for item in response.json()["strategies"])
 
 
 def test_paper_logs_only_return_strategy_output(tmp_path):

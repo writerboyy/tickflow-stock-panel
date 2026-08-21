@@ -310,6 +310,26 @@ def cleanup_incomplete_backtests(data_dir: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def provision_managed_template_strategies(data_dir: Path) -> list[str]:
+    """将必须可直接用于模拟盘的内置模板幂等写入策略存储。"""
+    store = FreeStrategyStore(data_dir)
+    existing = {str(item.get("id")) for item in store.list()}
+    provisioned: list[str] = []
+    for template_id in ("four_mode",):
+        if template_id in existing:
+            continue
+        template = TEMPLATES[template_id]
+        store.save(
+            template_id,
+            str(template["name"]),
+            str(template["source"]),
+            dict(template.get("config") or {}),
+            dialect="native",
+        )
+        provisioned.append(template_id)
+    return provisioned
+
+
 _LEGACY_FIVE_FORTUNES_CONFIG = {
     "timeframe": "1m",
     "asset_type": "etf",
