@@ -2346,6 +2346,7 @@ class FreeStrategyEngine:
         quotes: Iterable[Quote] = (),
         scheduled_at: str | None = None,
         run_prior_schedules: bool = True,
+        run_schedules: bool = True,
     ) -> None:
         """Advance one deterministic market event through the shared state machine."""
         if event_type not in {"bar", "quote", "scheduled", "fill", "market"}:
@@ -2438,7 +2439,7 @@ class FreeStrategyEngine:
                 self.callbacks_executed += 1
 
         # 5. Scheduled callbacks keep their registration order.
-        if event_type in {"bar", "quote", "scheduled"}:
+        if run_schedules and event_type in {"bar", "quote", "scheduled"}:
             self._run_scheduled_at(
                 timestamp,
                 actual_bar=event_type == "bar",

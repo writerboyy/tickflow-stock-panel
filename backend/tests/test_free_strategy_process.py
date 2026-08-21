@@ -25,6 +25,7 @@ from app.free_strategy.process import (
     _scheduled_snapshot,
     _set_daily_row,
     advance_scheduled_session,
+    replay_second_precision_session,
     execute_backtest,
     ScheduledOpeningDataPending,
 )
@@ -825,6 +826,64 @@ def mark(context):
         "executed_at": "2024-01-02T09:31:00",
         "price": 10.2,
     }
+
+
+def test_second_precision_quote_strategy_replays_schedule_at_original_time():
+    day = date(2024, 1, 2)
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(mark, '09:31:00', symbols=['X'])
+
+def on_quote(context, quotes):
+    context.state.setdefault('quotes', []).append(context.now.isoformat())
+
+def mark(context):
+    context.state['scheduled_at'] = context.now.isoformat()
+    context.state['scheduled_price'] = context.current_bars()['X'].close
+    context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+            benchmark_symbol="X",
+        ),
+    )
+    rows = [
+        _Bar(
+            "X", datetime(2024, 1, 2, 9, 30, 59),
+            10.0, 10.2, 10.0, 10.2,
+            volume=100, amount=1_020,
+        ),
+        _Bar(
+            "X", datetime(2024, 1, 2, 9, 31, 5),
+            10.3, 10.4, 10.3, 10.4,
+            volume=100, amount=1_040,
+        ),
+    ]
+
+    replay_second_precision_session(
+        engine,
+        day,
+        rows,
+        datetime(2024, 1, 2, 9, 31, 5),
+    )
+
+    assert engine.context.state["quotes"] == [
+        "2024-01-02T09:30:59",
+        "2024-01-02T09:31:05",
+    ]
+    assert engine.context.state["scheduled_at"] == "2024-01-02T09:31:00"
+    assert engine.context.state["scheduled_price"] == 10.2
+    assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
+        ("2024-01-02T09:31:00", 10.2),
+    ]
 
 
 def test_market_preparation_does_not_inject_undeclared_history():

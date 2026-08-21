@@ -1928,25 +1928,61 @@ def _process_scheduled_day(
     live_only: bool = False,
     notify: Any = None,
 ) -> dict[str, Any]:
-    from app.free_strategy.process import advance_scheduled_session
+    from app.free_strategy.process import (
+        advance_scheduled_session,
+        replay_second_precision_session,
+    )
 
     before_orders = len(engine.account.orders)
     before_fills = len(engine.account.fills)
     before_logs = len(engine.logs)
     before_risk = engine.risk_status
-    advance_scheduled_session(
-        repo,
-        engine,
-        market,
-        day,
-        cutoff,
-        asset_type,
-        timeframe,
-        finalize=finalize,
-        allow_opening_data_retry=allow_opening_data_retry,
-        live_bars=live_bars,
-        live_only=live_only,
-    )
+    if not live_only and engine.second_precision_schedules:
+        get_second_range = getattr(repo, "get_second_range", None)
+        if not callable(get_second_range):
+            raise ValueError("模拟盘历史续接包含秒级定时点，但当前 provider 没有秒级行情能力")
+        from app.free_strategy.process import (
+            _ensure_scheduled_market_data,
+            _scheduled_minute_bars,
+            _scheduled_symbols,
+        )
+
+        symbols = _scheduled_symbols(engine, cutoff)
+        benchmark = str(engine.config.benchmark_symbol or "").strip().upper()
+        second_symbols = [symbol for symbol in symbols if symbol != benchmark]
+        _ensure_scheduled_market_data(
+            repo,
+            market,
+            second_symbols,
+            day - timedelta(days=45),
+            day,
+            asset_type,
+        )
+        frame = get_second_range(second_symbols, day, day, asset_type, until=cutoff)
+        bars = _scheduled_minute_bars(frame, market, asset_type)
+        if not bars:
+            raise ValueError(f"{day.isoformat()} 秒级历史行情为空，无法续接模拟盘")
+        replay_second_precision_session(
+            engine,
+            day,
+            bars,
+            cutoff,
+            finalize=finalize,
+        )
+    else:
+        advance_scheduled_session(
+            repo,
+            engine,
+            market,
+            day,
+            cutoff,
+            asset_type,
+            timeframe,
+            finalize=finalize,
+            allow_opening_data_retry=allow_opening_data_retry,
+            live_bars=live_bars,
+            live_only=live_only,
+        )
     timestamp = engine._last_timestamp  # noqa: SLF001
     if timestamp is None:
         return current

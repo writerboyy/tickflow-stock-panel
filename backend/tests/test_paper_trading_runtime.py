@@ -1052,6 +1052,9 @@ def initialize(context):
     context.set_universe(['X'])
     context.schedule(run, '09:30:16', symbols=['X'])
 
+def on_quote(context, quotes):
+    context.state.setdefault('quote_times', []).append(context.now.isoformat())
+
 def run(context):
     context.buy('X', quantity=100)
 """
@@ -1102,6 +1105,7 @@ def run(context):
     assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
         ("2026-08-20T09:30:18", 10),
     ]
+    assert engine.context.state["quote_times"] == ["2026-08-20T09:30:18"]
     assert current["last_bar"] == "2026-08-20T09:30:18"
 
     # The schedule is marked done in the engine session, so a duplicate poll

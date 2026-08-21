@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -27,7 +28,7 @@ from app.services.security_dimensions import (
 
 from .bars import Bar, group_bars
 from .entry_analysis import build_mainline_entry_analysis
-from .engine import FreeStrategyConfig, FreeStrategyEngine
+from .engine import FreeStrategyConfig, FreeStrategyEngine, Quote
 from .financial_pit import load_financial_periods
 from .first_board_snapshot import configure_first_board_snapshot
 from .industry import load_industry_history
@@ -1669,6 +1670,23 @@ def _missing_snapshot_text(symbols: list[str]) -> str:
     return f"{visible}{f' 等 {len(symbols)} 只' if remainder > 0 else ''}"
 
 
+def _bar_as_quote(bar: Bar) -> Quote:
+    return Quote(
+        symbol=bar.symbol,
+        timestamp=bar.timestamp,
+        last_price=bar.execution_price("close"),
+        prev_close=bar.previous_close,
+        open=bar.execution_price("open"),
+        high=bar.execution_price("high"),
+        low=bar.execution_price("low"),
+        volume=float(bar.volume or 0),
+        amount=float(bar.amount or 0),
+        limit_up=bar.limit_up,
+        limit_down=bar.limit_down,
+        suspended=bar.suspended,
+    )
+
+
 def _live_daily_snapshot(rows: list[Bar], timestamp: datetime) -> list[Bar]:
     grouped: dict[str, list[Bar]] = {}
     for bar in rows:
@@ -2020,6 +2038,86 @@ def _process_scheduled_fills(
             engine.advance_event(timestamp, bars, event_type="fill")
 
 
+def replay_second_precision_session(
+    engine: FreeStrategyEngine,
+    day: date,
+    rows: Iterable[Bar],
+    cutoff: datetime,
+    *,
+    finalize: bool = True,
+) -> int:
+    """Replay a second-level session without moving a callback past its target.
+
+    A strategy may combine ``on_quote`` with explicit schedules.  Feeding all
+    rows through ``engine.run`` lets a late row (for example 09:31:05) catch up
+    a 09:31:00 task while exposing that future row to the callback.  The
+    original scheduled API sees the latest trade *at or before* the target, so
+    market callbacks and scheduled callbacks are replayed in two ordered
+    phases here.
+    """
+    grouped = [
+        (timestamp, list(values))
+        for timestamp, values in groupby(
+            sorted(
+                (row for row in rows if row.date == day and row.timestamp <= cutoff),
+                key=lambda row: (row.timestamp, row.symbol),
+            ),
+            key=lambda row: row.timestamp,
+        )
+    ]
+    engine.begin_session(day)
+    latest: dict[str, Bar] = {}
+    offset = 0
+    schedules = [
+        at for at in engine.scheduled_times
+        if at != "every_bar"
+        and datetime.combine(day, time.fromisoformat(at)) <= cutoff
+    ]
+
+    def consume_until(target: datetime) -> None:
+        nonlocal offset
+        while offset < len(grouped) and grouped[offset][0] <= target:
+            timestamp, values = grouped[offset]
+            if engine.execution_mode == "quote":
+                engine.advance_event(
+                    timestamp,
+                    event_type="quote",
+                    quotes=[_bar_as_quote(bar) for bar in values],
+                    run_schedules=False,
+                )
+            else:
+                engine.advance_event(
+                    timestamp,
+                    values,
+                    event_type="bar",
+                    run_schedules=False,
+                )
+            latest.update({bar.symbol: bar for bar in values})
+            offset += 1
+
+    for at in schedules:
+        target = datetime.combine(day, time.fromisoformat(at))
+        consume_until(target)
+        if latest:
+            engine.advance_event(
+                target,
+                sorted(latest.values(), key=lambda bar: bar.symbol),
+                event_type="scheduled",
+                scheduled_at=at,
+            )
+        else:
+            # Do not let finish_session catch up an unavailable callback with
+            # a later row.  Missing target-time data is a no-trade outcome.
+            for task in engine.context._scheduled:
+                if task.resolved_time == at:
+                    task.done = True
+
+    consume_until(cutoff)
+    if finalize:
+        engine.finish_session()
+    return len(grouped)
+
+
 def advance_scheduled_session(
     repo: Any,
     engine: FreeStrategyEngine,
@@ -2181,6 +2279,25 @@ def advance_scheduled_session(
                 live_only=live_only,
                 second_precision=second_precision,
             )
+        if live_only and second_precision:
+            previous_timestamp = engine._last_timestamp  # noqa: SLF001
+            replay_rows = [
+                bar for bar in sorted(
+                    live_bars or (), key=lambda item: (item.timestamp, item.symbol),
+                )
+                if bar.timestamp <= event_timestamp
+                and (
+                    previous_timestamp is None
+                    or bar.timestamp > previous_timestamp
+                )
+            ]
+            for bar in replay_rows:
+                engine.advance_event(
+                    bar.timestamp,
+                    event_type="quote",
+                    quotes=[_bar_as_quote(bar)],
+                    run_schedules=False,
+                )
         engine.advance_event(
             event_timestamp,
             snapshot,
@@ -2586,7 +2703,15 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                             symbols_seen.add(bar.symbol)
                             first_bar = bar.timestamp if first_bar is None else min(first_bar, bar.timestamp)
                             last_bar = bar.timestamp if last_bar is None else max(last_bar, bar.timestamp)
-                        engine.run(rows, return_result=False)
+                        if engine.second_precision_schedules:
+                            replay_second_precision_session(
+                                engine,
+                                cursor,
+                                rows,
+                                datetime.combine(cursor, time(15, 0)),
+                            )
+                        else:
+                            engine.run(rows, return_result=False)
                         days_with_bars += 1
                 days_seen += 1
                 if days_seen % 20 == 0:
