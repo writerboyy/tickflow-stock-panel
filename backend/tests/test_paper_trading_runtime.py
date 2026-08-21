@@ -1103,7 +1103,7 @@ def run(context):
         live_only=True,
     )
     assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
-        ("2026-08-20T09:30:18", 10),
+        ("2026-08-20T09:30:16", 10),
     ]
     assert engine.context.state["quote_times"] == ["2026-08-20T09:30:18"]
     assert current["last_bar"] == "2026-08-20T09:30:18"

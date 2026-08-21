@@ -2267,7 +2267,7 @@ def advance_scheduled_session(
                 raise ValueError(
                     f"{day.isoformat()} 09:30 定时任务缺少可交易分钟K，已停止执行以避免错误调仓"
                 )
-        if event_timestamp > timestamp:
+        if event_timestamp > timestamp and not (live_only and second_precision):
             _process_scheduled_fills(
                 repo,
                 engine,
@@ -2281,29 +2281,54 @@ def advance_scheduled_session(
             )
         if live_only and second_precision:
             previous_timestamp = engine._last_timestamp  # noqa: SLF001
-            replay_rows = [
+            before_rows = [
                 bar for bar in sorted(
                     live_bars or (), key=lambda item: (item.timestamp, item.symbol),
                 )
-                if bar.timestamp <= event_timestamp
+                if bar.timestamp <= timestamp
                 and (
                     previous_timestamp is None
                     or bar.timestamp > previous_timestamp
                 )
             ]
-            for bar in replay_rows:
+            for bar in before_rows:
                 engine.advance_event(
                     bar.timestamp,
                     event_type="quote",
                     quotes=[_bar_as_quote(bar)],
                     run_schedules=False,
                 )
+            if event_timestamp > timestamp:
+                # A poll can arrive after the source callback boundary.  Keep
+                # the late quote as the snapshot source, but publish its
+                # logical bar at the scheduled time so strategy callbacks and
+                # fills retain the original second-level timestamp.
+                snapshot = [replace(bar, timestamp=timestamp) for bar in snapshot]
         engine.advance_event(
-            event_timestamp,
+            timestamp if live_only and second_precision else event_timestamp,
             snapshot,
             event_type="scheduled",
             scheduled_at=at,
         )
+        if live_only and second_precision and event_timestamp > timestamp:
+            previous_timestamp = engine._last_timestamp  # noqa: SLF001
+            after_rows = [
+                bar for bar in sorted(
+                    live_bars or (), key=lambda item: (item.timestamp, item.symbol),
+                )
+                if timestamp < bar.timestamp <= event_timestamp
+                and (
+                    previous_timestamp is None
+                    or bar.timestamp > previous_timestamp
+                )
+            ]
+            for bar in after_rows:
+                engine.advance_event(
+                    bar.timestamp,
+                    event_type="quote",
+                    quotes=[_bar_as_quote(bar)],
+                    run_schedules=False,
+                )
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
         live_bars=live_bars, live_only=live_only, second_precision=second_precision,

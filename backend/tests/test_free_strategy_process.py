@@ -1788,10 +1788,13 @@ def run(context):
     }
 
 
-def test_live_explicit_zero_second_callback_uses_late_quote_timestamp():
+def test_live_explicit_zero_second_callback_preserves_schedule_timestamp_with_late_quote():
     source = """
 def initialize(context):
     context.schedule(run, '09:31:00', symbols=['X'])
+
+def on_quote(context, quotes):
+    context.state.setdefault('quote_times', []).append(context.now.isoformat())
 
 def run(context):
     context.state['executed_at'] = context.now.isoformat()
@@ -1816,8 +1819,9 @@ def run(context):
     )
 
     assert engine.context.state == {
-        "executed_at": "2024-01-02T09:31:05",
+        "executed_at": "2024-01-02T09:31:00",
         "price": 11.0,
+        "quote_times": ["2024-01-02T09:31:05"],
     }
 
 
