@@ -1096,6 +1096,39 @@ def test_second_precision_clock_uses_quote_history_before_boundary():
     ]
 
 
+def test_websocket_scheduled_account_replays_each_second_boundary_from_quotes():
+    target = queue.Queue(maxsize=4)
+    subscription = _Subscription(
+        "paper",
+        "websocket",
+        {"A"},
+        "stock",
+        target,
+        execution_mode="scheduled",
+        scheduled_times=("09:30:16", "09:31:00"),
+    )
+    hub = MarketDataHub(FakeQuoteService(), repo=None)
+    hub._dispatch_quotes("websocket", [  # noqa: SLF001
+        {"symbol": "A", "last_price": 10.0, "timestamp": "2024-01-02T09:30:15"},
+        {"symbol": "A", "last_price": 10.5, "timestamp": "2024-01-02T09:30:59"},
+        {"symbol": "A", "last_price": 11.0, "timestamp": "2024-01-02T09:31:05"},
+    ])
+
+    hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 9, 31, 5))  # noqa: SLF001
+
+    first = target.get_nowait()
+    second = target.get_nowait()
+    assert [first["cutoff"], second["cutoff"]] == [
+        "2024-01-02T09:30:16", "2024-01-02T09:31:00",
+    ]
+    assert [row["timestamp"] for row in first["quotes"]] == [
+        "2024-01-02T09:30:15",
+    ]
+    assert [row["timestamp"] for row in second["quotes"]] == [
+        "2024-01-02T09:30:15", "2024-01-02T09:30:59",
+    ]
+
+
 def test_paper_detects_explicit_zero_second_schedule():
     assert _has_second_precision_schedule(("09:31:00",))
     assert not _has_second_precision_schedule(("09:31",))

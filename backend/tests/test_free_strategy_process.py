@@ -698,6 +698,31 @@ def test_second_precision_history_missing_fails_closed_instead_of_using_minute_r
         ))
 
 
+def test_tick_history_is_used_for_explicit_second_callbacks_without_minute_fallback():
+    class TickRepository:
+        def get_tick_range(self, _symbols, _start, _end, _asset_type):
+            return pl.DataFrame({
+                "symbol": ["X", "X"],
+                "datetime": [
+                    datetime(2024, 1, 2, 9, 30, 16),
+                    datetime(2024, 1, 2, 9, 31, 5),
+                ],
+                "last_price": [10.1, 10.3],
+                "volume": [100.0, 100.0],
+                "amount": [1010.0, 1030.0],
+            })
+
+    bars = list(_read_rows(
+        TickRepository(), ["X"], date(2024, 1, 2), date(2024, 1, 2),
+        "stock", "1m", second_precision=True,
+    ))
+
+    assert [(bar.timestamp, bar.close) for bar in bars] == [
+        (datetime(2024, 1, 2, 9, 30, 16), 10.1),
+        (datetime(2024, 1, 2, 9, 31, 5), 10.3),
+    ]
+
+
 def test_scheduled_backtest_replays_second_snapshots_at_original_callback_times(monkeypatch):
     day = date(2024, 1, 2)
 

@@ -69,6 +69,7 @@ class DataStore:
             "kline_etf_minute",
             "kline_minute",
             "kline_second",
+            "tick",
             "adj_factor",
             "adj_factor_etf",
             "financials",
@@ -175,6 +176,8 @@ class DataStore:
                 SELECT * FROM read_parquet('{d}/kline_minute/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW kline_second AS
                 SELECT * FROM read_parquet('{d}/kline_second/**/*.parquet', union_by_name=true)""",
+            f"""CREATE OR REPLACE VIEW tick AS
+                SELECT * FROM read_parquet('{d}/tick/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor AS
                 SELECT * FROM read_parquet('{d}/adj_factor/**/*.parquet', union_by_name=true)""",
             f"""CREATE OR REPLACE VIEW adj_factor_etf AS
@@ -356,6 +359,7 @@ class KlineRepository:
         self._minute_glob = str(store.data_dir / "kline_minute" / "**" / "*.parquet")
         self._etf_minute_glob = str(store.data_dir / "kline_etf_minute" / "**" / "*.parquet")
         self._second_glob = str(store.data_dir / "kline_second" / "**" / "*.parquet")
+        self._tick_glob = str(store.data_dir / "tick" / "**" / "*.parquet")
         self._inst_glob = str(store.data_dir / "instruments" / "**" / "*.parquet")
         self._index_inst_glob = str(store.data_dir / "instruments_index" / "**" / "*.parquet")
         self._etf_inst_glob = str(store.data_dir / "instruments_etf" / "**" / "*.parquet")
@@ -1576,6 +1580,118 @@ class KlineRepository:
             current += timedelta(days=1)
         return parts
 
+    def _tick_parts(self, start: date, end: date) -> list[str]:
+        root = self.store.data_dir / "tick"
+        parts: list[str] = []
+        current = start
+        while current <= end:
+            path = root / f"date={current.isoformat()}" / "part.parquet"
+            if path.exists():
+                parts.append(str(path))
+            current += timedelta(days=1)
+        return parts
+
+    @staticmethod
+    def _tick_columns(frame: pl.LazyFrame) -> tuple[list[str], bool] | None:
+        available = set(frame.collect_schema().names())
+        if not {"symbol", "datetime"}.issubset(available):
+            return None
+        price_column = "last_price" if "last_price" in available else "close" if "close" in available else None
+        if price_column is None:
+            return None
+        columns = [
+            name for name in (
+                "symbol", "datetime", price_column, "prev_close", "open", "high", "low",
+                "volume", "amount", "limit_up", "limit_down", "suspended",
+            ) if name in available
+        ]
+        return columns, price_column == "last_price"
+
+    def get_tick_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        asset_type: str = "stock",
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+    ) -> pl.DataFrame:
+        """读取原始 tick/逐笔快照，不从分钟K或其他K线降级。"""
+        if asset_type != "stock" or not symbols:
+            return pl.DataFrame()
+        parts = self._tick_parts(start, end)
+        if not parts:
+            return pl.DataFrame()
+        try:
+            frame = scan_parquet_compat(parts)
+            tick_info = self._tick_columns(frame)
+            if tick_info is None:
+                return pl.DataFrame()
+            columns, uses_last_price = tick_info
+            predicate = (
+                pl.col("symbol").is_in(symbols)
+                & (pl.col("datetime").dt.date() >= start)
+                & (pl.col("datetime").dt.date() <= end)
+            )
+            if after is not None:
+                predicate &= pl.col("datetime") > after
+            if until is not None:
+                predicate &= pl.col("datetime") <= until
+            result = frame.select(columns).filter(predicate)
+            if uses_last_price:
+                result = result.with_columns(
+                    pl.col("last_price").alias("close"),
+                )
+            else:
+                result = result.with_columns(
+                    pl.col("close").alias("last_price"),
+                )
+            for field in ("open", "high", "low"):
+                if field not in result.collect_schema().names():
+                    result = result.with_columns(pl.col("last_price").alias(field))
+            return result.sort(["datetime", "symbol"]).collect(engine="streaming")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tick行情查询失败: %s", exc)
+            return pl.DataFrame()
+
+    def get_tick_snapshot(
+        self,
+        symbols: list[str],
+        at: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """返回各标的在回调边界前最后一笔 tick。"""
+        frame = self.get_tick_range(symbols, at.date(), at.date(), asset_type, until=at)
+        if frame.is_empty():
+            return frame
+        return (
+            frame.sort(["symbol", "datetime"])
+            .group_by("symbol", maintain_order=True)
+            .tail(1)
+            .sort(["datetime", "symbol"])
+        )
+
+    def get_tick_next(
+        self,
+        symbols: list[str],
+        after: datetime,
+        until: datetime,
+        asset_type: str = "stock",
+    ) -> pl.DataFrame:
+        """返回待成交区间内各标的第一笔 tick。"""
+        frame = self.get_tick_range(
+            symbols, after.date(), until.date(), asset_type, after=after, until=until,
+        )
+        if frame.is_empty():
+            return frame
+        return (
+            frame.sort(["symbol", "datetime"])
+            .group_by("symbol", maintain_order=True)
+            .head(1)
+            .sort(["datetime", "symbol"])
+        )
+
     def get_second_range(
         self,
         symbols: list[str],
@@ -1586,7 +1702,7 @@ class KlineRepository:
         after: datetime | None = None,
         until: datetime | None = None,
     ) -> pl.DataFrame:
-        """读取独立秒级行情；没有该分区时返回空表，不降级到分钟K。"""
+        """兼容旧调用方；新代码应使用 get_tick_range。"""
         if asset_type != "stock":
             return pl.DataFrame()
         if not symbols:
@@ -1621,7 +1737,7 @@ class KlineRepository:
                 .collect(engine="streaming")
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("秒级行情查询失败: %s", exc)
+            logger.warning("tick行情查询失败: %s", exc)
             return pl.DataFrame()
 
     def get_second_snapshot(
@@ -1630,7 +1746,7 @@ class KlineRepository:
         at: datetime,
         asset_type: str = "stock",
     ) -> pl.DataFrame:
-        """返回每个标的在指定时点之前最近的真实秒级行情。"""
+        """兼容旧调用方；新代码应使用 get_tick_snapshot。"""
         frame = self.get_second_range(symbols, at.date(), at.date(), asset_type, until=at)
         if frame.is_empty():
             return frame
@@ -1648,7 +1764,7 @@ class KlineRepository:
         until: datetime,
         asset_type: str = "stock",
     ) -> pl.DataFrame:
-        """返回每个标的在区间内第一条真实秒级行情。"""
+        """兼容旧调用方；新代码应使用 get_tick_next。"""
         frame = self.get_second_range(
             symbols, after.date(), until.date(), asset_type, after=after, until=until,
         )

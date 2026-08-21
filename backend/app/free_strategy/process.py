@@ -1177,31 +1177,50 @@ def _read_rows(
     if until is not None:
         window["until"] = until
     if second_precision:
-        get_second_range = getattr(repo, "get_second_range", None)
-        if not callable(get_second_range):
+        get_tick_range = getattr(repo, "get_tick_range", None)
+        legacy_second_range = getattr(repo, "get_second_range", None)
+        if not callable(get_tick_range) and not callable(legacy_second_range):
             raise ValueError(
-                "回测包含秒级定时点，但当前历史 provider 没有秒级行情能力；"
-                "请接入 kline_second 后再回测"
+                "回测包含秒级定时点，但当前历史 provider 没有 tick/逐笔行情能力；"
+                "请接入 tick 数据后再回测"
             )
-        frame = get_second_range(symbols, start, end, asset_type, **window)
-        interval_label = "秒级"
+        # Tick is the source of truth for explicit-second callbacks.  The
+        # legacy method is only retained for custom repositories and old test
+        # doubles; it never falls back to minute K.
+        getter = get_tick_range if callable(get_tick_range) else legacy_second_range
+        frame = getter(symbols, start, end, asset_type, **window)
+        interval_label = "tick"
     else:
         frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
         interval_label = "分钟"
+    if second_precision and not frame.is_empty():
+        columns = set(frame.columns)
+        if "close" not in columns and "last_price" in columns:
+            frame = frame.with_columns(pl.col("last_price").alias("close"))
+            columns.add("close")
+        missing_price_fields = [
+            field for field in ("open", "high", "low") if field not in columns
+        ]
+        if missing_price_fields and "close" in columns:
+            frame = frame.with_columns([
+                pl.col("close").alias(field) for field in missing_price_fields
+            ])
     if not frame.is_empty():
         frame = frame.drop_nulls(["open", "high", "low", "close"])
     if frame.is_empty():
         if allow_empty and not second_precision:
             return []
         asset_label = "ETF" if asset_type == "etf" else "股票"
+        source_label = "秒级K历史/tick" if second_precision else f"{interval_label}K"
         raise ValueError(
-            f"没有可用的{asset_label}{interval_label}K历史数据。请先同步{asset_label}{interval_label}K，"
+            f"没有可用的{asset_label}{source_label}历史数据。"
+            f"请先同步{asset_label}{source_label}，"
             "或将周期切换为 1d 后重新运行。"
         )
     found = set(frame["symbol"].unique().to_list())
     missing = [symbol for symbol in symbols if symbol not in found]
     if missing and require_all_symbols:
-        raise ValueError(f"{interval_label}K历史缺少标的: {', '.join(missing[:8])}")
+        raise ValueError(f"{interval_label}历史缺少标的: {', '.join(missing[:8])}")
     bar_metadata = _minute_metadata(frame, market_data, asset_type) if market_data is not None else {}
 
     def minute_rows() -> Iterable[Bar]:
@@ -1787,17 +1806,20 @@ def _scheduled_snapshot(
     intraday_second = time(9, 30) <= timestamp.time() < time(15, 0)
     if (second_precision and intraday_second) or timestamp.time().second or timestamp.time().microsecond:
         # A minute bar cannot prove what was tradable at 09:30:16.  Only a
-        # provider-owned second snapshot may satisfy a second-precision task.
-        get_second_snapshot = getattr(repo, "get_second_snapshot", None)
-        if not callable(get_second_snapshot):
+        # provider-owned tick snapshot may satisfy a second-precision task.
+        get_tick_snapshot = getattr(repo, "get_tick_snapshot", None)
+        legacy_second_snapshot = getattr(repo, "get_second_snapshot", None)
+        if not callable(get_tick_snapshot) and not callable(legacy_second_snapshot):
             get_second_snapshot = getattr(repo, "get_quote_snapshot", None)
+        else:
+            get_second_snapshot = get_tick_snapshot if callable(get_tick_snapshot) else legacy_second_snapshot
         if not callable(get_second_snapshot):
             raise ValueError(
-                f"{timestamp.isoformat()} 定时任务需要秒级历史行情，当前 provider 只有分钟K"
+                f"{timestamp.isoformat()} 定时任务需要 tick/逐笔历史行情，当前 provider 只有分钟K"
             )
         frame = get_second_snapshot(symbols, timestamp, asset_type)
         if frame is None or frame.is_empty():
-            raise ValueError(f"{timestamp.isoformat()} 秒级历史行情为空，无法执行定时任务")
+            raise ValueError(f"{timestamp.isoformat()} tick历史行情为空，无法执行定时任务")
         if not frame.is_empty():
             frame = frame.filter(
                 (pl.col("datetime") <= timestamp)
@@ -2032,9 +2054,11 @@ def _process_scheduled_fills(
         else:
             get_next = getattr(
                 repo,
-                "get_second_next" if second_precision else "get_minute_next",
+                "get_tick_next" if second_precision else "get_minute_next",
                 None,
             )
+            if second_precision and not callable(get_next):
+                get_next = getattr(repo, "get_second_next", None)
             if not callable(get_next):
                 continue
             frame = get_next(
@@ -2630,7 +2654,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             output.put({
                 "type": "progress",
                 "message": (
-                    "按交易日读取并回放秒级行情"
+                    "按交易日读取并回放 tick/逐笔行情"
                     if engine.second_precision_schedules else "按交易日读取并回放分钟K"
                 ),
                 "progress": 0.35,
@@ -2730,7 +2754,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     output.put({"type": "progress", "message": f"已回放 {days_with_bars} 个交易日", "progress": progress})
                 cursor += timedelta(days=1)
             if not days_with_bars:
-                raise ValueError("没有可用的分钟K历史数据，请先同步后重试")
+                raise ValueError("没有可用的 tick/分钟K历史数据，请先同步后重试")
             get_minute_symbols = getattr(repo, "get_minute_symbols", None)
             stored_symbols = (
                 set(dynamic_cache.all_symbols) | symbols_seen
@@ -2845,7 +2869,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 "missing_symbols": missing_symbols,
                 "configured_provider": payload.get("data_provider", "tickflow"),
                 "storage": (
-                    "kline_second"
+                    "tick"
                     if engine.second_precision_schedules
                     else "event_snapshots"
                     if engine.execution_mode == "scheduled"

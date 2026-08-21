@@ -426,7 +426,11 @@ class MarketDataHub:
                     self.quote_service.add_fetch_listener(self._on_quote_fetch)
                     self.quote_service.acquire_temporary_polling(3.0)
                     self._quote_feed_leased = True
-                if mode.startswith("bar_"):
+                if (
+                    mode.startswith("bar_")
+                    or execution_mode == "scheduled"
+                    or _has_second_precision_schedule(scheduled_times)
+                ):
                     self._ensure_bar_thread()
                 if mode == "websocket":
                     self._sync_websocket()
@@ -480,7 +484,16 @@ class MarketDataHub:
                 self._quote_feed_leased = False
             if removed.mode == "websocket":
                 self._sync_websocket()
-            if removed.mode.startswith("bar_") and not any(s.mode.startswith("bar_") for s in self._subscriptions.values()):
+            if (
+                removed.mode.startswith("bar_")
+                or removed.execution_mode == "scheduled"
+                or _has_second_precision_schedule(removed.scheduled_times)
+            ) and not any(
+                s.mode.startswith("bar_")
+                or s.execution_mode == "scheduled"
+                or _has_second_precision_schedule(s.scheduled_times)
+                for s in self._subscriptions.values()
+            ):
                 self._bar_stop.set()
 
     def update_symbols(
@@ -793,7 +806,17 @@ class MarketDataHub:
         self._last_quote_at = max(str(item["timestamp"]) for item in normalized)
         by_symbol = {str(item["symbol"]): item for item in normalized}
         with self._lock:
-            targets = [sub for sub in self._subscriptions.values() if sub.mode == mode]
+            targets = [
+                sub for sub in self._subscriptions.values()
+                if sub.mode == mode
+                and not (
+                    mode == "websocket"
+                    and (
+                        sub.execution_mode == "scheduled"
+                        or _has_second_precision_schedule(sub.scheduled_times)
+                    )
+                )
+            ]
         for sub in targets:
             selected = [by_symbol[symbol] for symbol in sub.symbols if symbol in by_symbol]
             if selected:
@@ -812,9 +835,11 @@ class MarketDataHub:
         while not self._bar_stop.wait(1.0):
             now = cn_naive_now()
             with self._lock:
-                targets = [sub for sub in self._subscriptions.values() if sub.mode.startswith("bar_")]
+                all_subscriptions = list(self._subscriptions.values())
+                targets = [sub for sub in all_subscriptions if sub.mode.startswith("bar_")]
             scheduled = [
-                sub for sub in targets
+                sub for sub in all_subscriptions
+                if sub.mode.startswith("bar_") or sub.mode == "websocket"
                 if sub.execution_mode == "scheduled"
                 or _has_second_precision_schedule(sub.scheduled_times)
             ]
@@ -924,55 +949,56 @@ class MarketDataHub:
             boundaries = [boundary for boundary in boundaries if boundary <= now]
             if now.time() >= clock_time(15, 0):
                 boundaries.append(datetime.combine(now.date(), clock_time(15, 0)))
-            due = max(
-                (
-                    boundary for boundary in boundaries
-                    if last_bar is None or boundary > last_bar
-                ),
+            try:
+                dispatch_watermark = self._quote_datetime(sub.last_dispatch_cutoff)
+            except (TypeError, ValueError):
+                dispatch_watermark = None
+            watermark = max(
+                (value for value in (last_bar, dispatch_watermark) if value is not None),
                 default=None,
             )
-            if due is None:
-                continue
-            with self._lock:
-                history_quotes = [
-                    dict(row)
-                    for symbol in sub.symbols
-                    for row in self._quote_history.get(symbol, ())
-                    if (
-                        (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
-                        and timestamp.date() == due.date()
-                        and timestamp <= due
-                    )
-                ]
-            fresh_quotes = history_quotes or self._fresh_quote_records(
-                sub.symbols,
-                due.date(),
-                cutoff=due,
+            due_boundaries = sorted(
+                boundary for boundary in boundaries
+                if watermark is None or boundary > watermark
             )
-            # The scheduled boundary is the only logical clock.  Quotes after
-            # it are retained in the next poll's history, never backdated.
-            cutoff = due
-            cutoff_value = cutoff.isoformat()
-            monotonic_now = time.monotonic()
-            if (
-                sub.last_dispatch_cutoff == cutoff_value
-                and monotonic_now - sub.last_dispatch_at < 5
-            ):
-                continue
-            payload = {
-                "type": "scheduled_clock",
-                "account_id": sub.account_id,
-                "cutoff": cutoff_value,
-            }
-            payload["quotes"] = [
-                row for row in fresh_quotes
-                if (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
-                and timestamp <= cutoff
-            ]
-            payload["live_bars"] = [bar.as_dict() for bar in self._scheduled_live_bars(sub, cutoff)]
-            if _put_bar_batch(sub.input_queue, payload):
-                sub.last_dispatch_cutoff = cutoff_value
-                sub.last_dispatch_at = monotonic_now
+            for due in due_boundaries:
+                with self._lock:
+                    history_quotes = [
+                        dict(row)
+                        for symbol in sub.symbols
+                        for row in self._quote_history.get(symbol, ())
+                        if (
+                            (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
+                            and timestamp.date() == due.date()
+                            and timestamp <= due
+                        )
+                    ]
+                fresh_quotes = history_quotes or self._fresh_quote_records(
+                    sub.symbols,
+                    due.date(),
+                    cutoff=due,
+                )
+                # The scheduled boundary is the logical clock. Quotes after
+                # it remain in history for the next boundary.
+                cutoff_value = due.isoformat()
+                payload = {
+                    "type": "scheduled_clock",
+                    "account_id": sub.account_id,
+                    "cutoff": cutoff_value,
+                    "quotes": [
+                        row for row in fresh_quotes
+                        if (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
+                        and timestamp <= due
+                    ],
+                    "live_bars": [bar.as_dict() for bar in self._scheduled_live_bars(sub, due)],
+                }
+                if _put_bar_batch(sub.input_queue, payload):
+                    sub.last_dispatch_cutoff = cutoff_value
+                    sub.last_dispatch_at = time.monotonic()
+                else:
+                    # Preserve callback order when the worker queue is full;
+                    # the next clock pass will retry this boundary.
+                    break
 
     def _fresh_quote_records(
         self,
@@ -1960,9 +1986,10 @@ def _process_scheduled_day(
     before_logs = len(engine.logs)
     before_risk = engine.risk_status
     if not live_only and engine.second_precision_schedules:
-        get_second_range = getattr(repo, "get_second_range", None)
-        if not callable(get_second_range):
-            raise ValueError("模拟盘历史续接包含秒级定时点，但当前 provider 没有秒级行情能力")
+        get_tick_range = getattr(repo, "get_tick_range", None)
+        legacy_second_range = getattr(repo, "get_second_range", None)
+        if not callable(get_tick_range) and not callable(legacy_second_range):
+            raise ValueError("模拟盘历史续接包含秒级定时点，但当前 provider 没有 tick/逐笔行情能力")
         from app.free_strategy.process import (
             _ensure_scheduled_market_data,
             _scheduled_minute_bars,
@@ -1980,10 +2007,11 @@ def _process_scheduled_day(
             day,
             asset_type,
         )
-        frame = get_second_range(second_symbols, day, day, asset_type, until=cutoff)
+        getter = get_tick_range if callable(get_tick_range) else legacy_second_range
+        frame = getter(second_symbols, day, day, asset_type, until=cutoff)
         bars = _scheduled_minute_bars(frame, market, asset_type)
         if not bars:
-            raise ValueError(f"{day.isoformat()} 秒级历史行情为空，无法续接模拟盘")
+            raise ValueError(f"{day.isoformat()} tick历史行情为空，无法续接模拟盘")
         replay_second_precision_session(
             engine,
             day,

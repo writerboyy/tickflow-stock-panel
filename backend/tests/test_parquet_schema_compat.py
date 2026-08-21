@@ -45,6 +45,39 @@ def test_second_queries_preserve_real_second_timestamps_and_never_fallback_to_mi
     ).is_empty()
 
 
+def test_tick_queries_preserve_last_price_and_callback_boundary(tmp_path):
+    part = tmp_path / "tick" / "date=2026-08-20" / "part.parquet"
+    part.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600127.SH", "600127.SH", "600127.SH"],
+        "datetime": [
+            datetime(2026, 8, 20, 9, 30, 15),
+            datetime(2026, 8, 20, 9, 30, 16),
+            datetime(2026, 8, 20, 9, 31, 5),
+        ],
+        "last_price": [8.20, 8.30, 8.60],
+        "prev_close": [8.14, 8.14, 8.14],
+        "volume": [100.0, 120.0, 180.0],
+        "amount": [820.0, 996.0, 1548.0],
+    }).write_parquet(part)
+
+    repo = KlineRepository(DataStore(tmp_path))
+    rows = repo.get_tick_range(
+        ["600127.SH"], date(2026, 8, 20), date(2026, 8, 20),
+    )
+    assert rows.select("datetime", "last_price", "close").rows() == [
+        (datetime(2026, 8, 20, 9, 30, 15), 8.20, 8.20),
+        (datetime(2026, 8, 20, 9, 30, 16), 8.30, 8.30),
+        (datetime(2026, 8, 20, 9, 31, 5), 8.60, 8.60),
+    ]
+    snapshot = repo.get_tick_snapshot(
+        ["600127.SH"], datetime(2026, 8, 20, 9, 31),
+    )
+    assert snapshot.select("datetime", "close").rows() == [
+        (datetime(2026, 8, 20, 9, 30, 16), 8.30),
+    ]
+
+
 def test_partitioned_daily_scan_tolerates_added_quote_ts(tmp_path):
     old_part = tmp_path / "kline_daily" / "date=2026-07-08" / "part.parquet"
     new_part = tmp_path / "kline_daily" / "date=2026-07-09" / "part.parquet"
