@@ -21,6 +21,7 @@ from typing import Any, Callable
 from app.free_strategy.bars import Bar, group_bars, rows_to_bars
 from app.free_strategy.continuation import compact_paper_checkpoint
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
+from app.free_strategy.schedule import has_explicit_seconds
 from app.free_strategy.store import PaperAccountStore, now_iso
 from app.market_time import as_cn_naive, cn_naive_from_timestamp, cn_naive_now, cn_today
 
@@ -49,7 +50,7 @@ def state_market_mode(state: dict[str, Any]) -> str:
 
 def _has_second_precision_schedule(values: tuple[str, ...] | list[str] | None) -> bool:
     return any(
-        value != "every_bar" and clock_time.fromisoformat(value).second > 0
+        value != "every_bar" and has_explicit_seconds(value)
         for value in values or ()
     )
 

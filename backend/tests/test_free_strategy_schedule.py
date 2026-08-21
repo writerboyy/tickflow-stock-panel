@@ -4,7 +4,7 @@ import pytest
 
 from app.free_strategy.bars import Bar as _Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
-from app.free_strategy.schedule import ScheduleRule, parse_time_expression
+from app.free_strategy.schedule import ScheduleRule, has_explicit_seconds, parse_time_expression
 
 
 def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
@@ -20,6 +20,20 @@ def test_time_expression_supports_second_precision_and_market_offsets():
     assert parse_time_expression(datetime(2024, 1, 2, 9, 30, 1).time()) == "09:30:01"
     with pytest.raises(ValueError, match="HH:MM"):
         parse_time_expression("open-30s")
+
+
+def test_explicit_zero_seconds_stay_second_precision():
+    assert has_explicit_seconds("09:31:00")
+    assert not has_explicit_seconds("09:31")
+    source = """
+def initialize(context):
+    context.schedule(run, '09:31:00')
+
+def run(context):
+    pass
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    assert engine.second_precision_schedules == ["09:31:00"]
 
 
 def test_weekly_and_monthly_rules_use_actual_trade_day_ordinals():

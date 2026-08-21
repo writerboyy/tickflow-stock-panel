@@ -38,6 +38,18 @@ def parse_time_expression(value: str | time) -> str:
     return resolved.strftime("%H:%M")
 
 
+def has_explicit_seconds(value: str | time) -> bool:
+    """Return whether a schedule expression explicitly includes ``:SS``.
+
+    ``09:31:00`` is different from ``09:31`` for second-precision replay even
+    though both parse to the same wall-clock second.
+    """
+    if isinstance(value, time):
+        return bool(value.second or value.microsecond)
+    expression = str(value).strip().lower()
+    return bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d", expression))
+
+
 @dataclass(frozen=True, slots=True)
 class ScheduleRule:
     cadence: str

@@ -25,6 +25,7 @@ from app.free_strategy.paper import (
     _engine_from_state,
     _equity_snapshot,
     _full_bar_wait_reason,
+    _has_second_precision_schedule,
     _queue_delay_seconds,
     _queued_payload,
     _process_bar_rows,
@@ -1035,6 +1036,11 @@ def test_second_precision_clock_is_emitted_for_quote_execution_on_bar_feed():
     payload = target.get_nowait()
     assert payload["cutoff"] == "2024-01-02T09:30:18"
     assert payload["quotes"][0]["timestamp"] == "2024-01-02T09:30:18"
+
+
+def test_paper_detects_explicit_zero_second_schedule():
+    assert _has_second_precision_schedule(("09:31:00",))
+    assert not _has_second_precision_schedule(("09:31",))
 
 
 def test_scheduled_live_second_callback_uses_first_common_quote_and_is_idempotent(

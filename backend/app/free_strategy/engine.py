@@ -20,7 +20,12 @@ from typing import Any, Callable, Iterable, Literal
 
 from .bars import Bar
 from .readiness import ReadinessRequirement, make_requirement
-from .schedule import RegisteredSchedule, ScheduleRule, parse_time_expression
+from .schedule import (
+    RegisteredSchedule,
+    ScheduleRule,
+    has_explicit_seconds,
+    parse_time_expression,
+)
 from app.market_time import cn_naive_now
 from app.services.data_authority import normalize_reference_asset
 
@@ -1134,7 +1139,7 @@ class FreeStrategyEngine:
     def second_precision_schedules(self) -> list[str]:
         return [
             value for value in self.scheduled_times
-            if value != "every_bar" and self._schedule_time_value(value).second > 0
+            if value != "every_bar" and has_explicit_seconds(value)
         ]
 
     @staticmethod
