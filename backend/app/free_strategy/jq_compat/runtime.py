@@ -21,6 +21,7 @@ from .capabilities import (
     analyze_source,
     ensure_executable,
 )
+from ..schedule import parse_time_expression
 
 
 _INTERNAL_SUFFIXES = {".XSHG": ".SH", ".XSHE": ".SZ", ".XBSE": ".BJ"}
@@ -916,26 +917,13 @@ class JoinQuantRuntime:
 
     def _schedule_time(self, value: Any) -> str:
         if isinstance(value, datetime_time):
-            if value.second or value.microsecond:
-                return self._ceil_second_time(value)
-            return value.strftime("%H:%M")
+            return parse_time_expression(value)
         text = str(value).strip().lower()
         if text in _TIME_ALIASES:
             return _TIME_ALIASES[text]
         if text == "every_bar":
             return text
-        parts = text.split(":")
-        if len(parts) == 3 and all(part.isdigit() for part in parts):
-            parsed = datetime_time(int(parts[0]), int(parts[1]), int(parts[2]))
-            return self._ceil_second_time(parsed)
-        return text
-
-    @staticmethod
-    def _ceil_second_time(value: datetime_time) -> str:
-        current = datetime.combine(date(2000, 1, 1), value)
-        if value.second or value.microsecond:
-            current = current.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        return current.strftime("%H:%M")
+        return parse_time_expression(text)
 
     def _scheduled_wrapper(self, callback: Callable[..., Any]) -> Callable[..., Any]:
         wrapper = self._scheduled_wrappers.get(callback)

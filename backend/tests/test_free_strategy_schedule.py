@@ -13,12 +13,11 @@ def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
     return _Bar(*args, **kwargs)
 
 
-def test_time_expression_supports_market_offsets_and_rejects_false_precision():
+def test_time_expression_supports_second_precision_and_market_offsets():
     assert parse_time_expression("open-30m") == "09:00"
     assert parse_time_expression("close+15m") == "15:15"
     assert parse_time_expression("every_bar") == "every_bar"
-    with pytest.raises(ValueError, match="分钟精度"):
-        parse_time_expression(datetime(2024, 1, 2, 9, 30, 1).time())
+    assert parse_time_expression(datetime(2024, 1, 2, 9, 30, 1).time()) == "09:30:01"
     with pytest.raises(ValueError, match="HH:MM"):
         parse_time_expression("open-30s")
 
@@ -196,3 +195,32 @@ def scheduled(context):
         (fill.symbol, fill.side, fill.quantity, fill.price, fill.value, fill.total_fee)
         for fill in bar_engine.account.fills
     ]
+
+
+def test_second_schedule_uses_first_quote_after_boundary_without_minute_rounding():
+    source = """
+def initialize(context):
+    context.schedule(mark, '09:30:16')
+
+def on_quote(context, quotes):
+    context.state.setdefault('quotes', []).append(context.now.isoformat())
+
+def mark(context):
+    context.state.setdefault('scheduled', []).append(context.now.isoformat())
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+    timestamp = datetime(2024, 1, 2, 9, 30, 18)
+    engine.advance_event(
+        timestamp,
+        event_type="quote",
+        quotes=[Quote("X", timestamp, 10.0)],
+    )
+
+    assert engine.context.state["quotes"] == ["2024-01-02T09:30:18"]
+    assert engine.context.state["scheduled"] == ["2024-01-02T09:30:18"]
+    engine.advance_event(
+        datetime(2024, 1, 2, 9, 30, 30),
+        event_type="quote",
+        quotes=[Quote("X", datetime(2024, 1, 2, 9, 30, 30), 10.1)],
+    )
+    assert engine.context.state["scheduled"] == ["2024-01-02T09:30:18"]

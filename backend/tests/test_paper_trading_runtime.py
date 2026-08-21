@@ -28,6 +28,7 @@ from app.free_strategy.paper import (
     _queue_delay_seconds,
     _queued_payload,
     _process_bar_rows,
+    _process_scheduled_day,
     _quote_to_live_bar,
 )
 from app.free_strategy.process import MarketData
@@ -79,7 +80,7 @@ def test_session_final_quote_is_clamped_to_closed_market_boundary():
     assert _quote_to_live_bar(
         active_quote,
         cutoff=datetime(2026, 8, 7, 10, 5),
-    ).timestamp == datetime(2026, 8, 7, 10, 6)
+    ).timestamp == datetime(2026, 8, 7, 10, 5, 6)
 
 
 def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):
@@ -998,6 +999,123 @@ def test_scheduled_bar_account_receives_clock_without_reading_minute_ranges():
         "live_bars": [],
     }
     assert target.empty()
+
+
+def test_second_precision_clock_is_emitted_for_quote_execution_on_bar_feed():
+    target = queue.Queue(maxsize=2)
+    service = SimpleNamespace(
+        get_fresh_quotes=lambda _symbols: {
+            "date": "2024-01-02",
+            "quotes": {
+                "A": {
+                    "symbol": "A",
+                    "last_price": 10.0,
+                    "prev_close": 9.0,
+                    "timestamp": "2024-01-02T09:30:18",
+                    "volume": 100,
+                },
+            },
+            "missing_symbols": [],
+        },
+    )
+    subscription = _Subscription(
+        "paper",
+        "bar_1m",
+        {"A"},
+        "stock",
+        target,
+        "2024-01-01T15:00:00",
+        execution_mode="quote",
+        scheduled_times=("09:30:16",),
+    )
+    hub = MarketDataHub(service, repo=None)
+
+    hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 9, 30, 20))  # noqa: SLF001
+
+    payload = target.get_nowait()
+    assert payload["cutoff"] == "2024-01-02T09:30:18"
+    assert payload["quotes"][0]["timestamp"] == "2024-01-02T09:30:18"
+
+
+def test_scheduled_live_second_callback_uses_first_common_quote_and_is_idempotent(
+    monkeypatch, tmp_path,
+):
+    day = date(2026, 8, 20)
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '09:30:16', symbols=['X'])
+
+def run(context):
+    context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            lot_size=100,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+            benchmark_symbol="X",
+        ),
+    )
+    live_bars = [
+        Bar("X", datetime(2026, 8, 20, 9, 30, 18), 10, 10, 10, 10, volume=100),
+        Bar("X", datetime(2026, 8, 20, 9, 30, 21), 11, 11, 11, 11, volume=100),
+    ]
+    monkeypatch.setattr(
+        "app.free_strategy.process._ensure_scheduled_market_data",
+        lambda *_args, **_kwargs: None,
+    )
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "strategy_id": "second-test",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+    })
+
+    current = _process_scheduled_day(
+        store,
+        "paper",
+        current,
+        engine,
+        repo=object(),
+        market=MarketData(),
+        day=day,
+        cutoff=datetime(2026, 8, 20, 9, 30, 25),
+        asset_type="stock",
+        timeframe="1m",
+        finalize=False,
+        live_bars=live_bars,
+        live_only=True,
+    )
+    assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
+        ("2026-08-20T09:30:18", 10),
+    ]
+    assert current["last_bar"] == "2026-08-20T09:30:18"
+
+    # The schedule is marked done in the engine session, so a duplicate poll
+    # cannot submit or fill the same callback again.
+    _process_scheduled_day(
+        store,
+        "paper",
+        current,
+        engine,
+        repo=object(),
+        market=MarketData(),
+        day=day,
+        cutoff=datetime(2026, 8, 20, 9, 30, 25),
+        asset_type="stock",
+        timeframe="1m",
+        finalize=False,
+        live_bars=live_bars,
+        live_only=True,
+    )
+    assert len(engine.account.fills) == 1
 
 
 def test_websocket_account_is_rejected_above_deduplicated_limit():

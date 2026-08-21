@@ -60,7 +60,7 @@ def handle_data(context, data):
     assert result["state"]["__joinquant_g__"]["seen"] == [["09:31", 10.0]]
 
 
-def test_joinquant_lifecycle_schedule_degradation_and_checkpoint_state():
+def test_joinquant_lifecycle_preserves_second_precision_schedule_and_checkpoint_state():
     source = """
 from datetime import date
 from jqdata import *
@@ -88,14 +88,14 @@ def after_trading_end(context):
 """
 
     engine = joinquant_engine(source)
-    assert engine.scheduled_times == ["09:31"]
+    assert engine.scheduled_times == ["09:30:16"]
     result = engine.run([
-        Bar("000001.SZ", datetime(2024, 1, 2, 9, 31), 10, 10, 10, 10),
+        Bar("000001.SZ", datetime(2024, 1, 2, 9, 30, 16), 10, 10, 10, 10),
     ])
 
-    assert result["compatibility_report"]["summary_status"] == "degraded"
+    assert result["compatibility_report"]["summary_status"] == "supported"
     assert result["state"]["__joinquant_g__"]["events"] == [
-        "process", "initialize", "before:09:29", "bar:09:31", "scheduled:09:31", "after:09:31",
+        "process", "initialize", "before:09:29", "bar:09:30", "scheduled:09:30", "after:09:30",
     ]
     checkpoint = result["checkpoint"]
     assert checkpoint["state"]["__joinquant_g__"]["anchor"] == {

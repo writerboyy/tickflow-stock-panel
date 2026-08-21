@@ -9,15 +9,15 @@ from typing import Any, Callable, Iterable
 
 _SESSION_OPEN = time(9, 30)
 _SESSION_CLOSE = time(15, 0)
-_EXPLICIT_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+_EXPLICIT_PATTERN = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?")
 _RELATIVE_PATTERN = re.compile(r"(open|close)([+-])(\d+)m")
 
 
 def parse_time_expression(value: str | time) -> str:
     if isinstance(value, time):
-        if value.second or value.microsecond:
-            raise ValueError("定时任务时间必须使用 HH:MM 分钟精度")
-        return value.strftime("%H:%M")
+        if value.microsecond:
+            raise ValueError("定时任务时间不支持微秒精度")
+        return value.strftime("%H:%M:%S" if value.second else "%H:%M")
     expression = str(value).strip().lower()
     if expression == "every_bar":
         return expression
@@ -26,7 +26,7 @@ def parse_time_expression(value: str | time) -> str:
     match = _RELATIVE_PATTERN.fullmatch(expression)
     if match is None:
         raise ValueError(
-            "定时任务时间必须是 HH:MM、every_bar、open±Nm 或 close±Nm"
+            "定时任务时间必须是 HH:MM[:SS]、every_bar、open±Nm 或 close±Nm"
         )
     anchor = _SESSION_OPEN if match.group(1) == "open" else _SESSION_CLOSE
     offset = timedelta(minutes=int(match.group(3)))

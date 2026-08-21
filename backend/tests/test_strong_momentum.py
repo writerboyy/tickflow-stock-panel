@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 import polars as pl
 
 from app.free_strategy.bars import Bar
-from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine
+from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
 from app.free_strategy.strong_momentum import _passes_intraday_gate
 from app.free_strategy.strong_momentum_snapshot import _with_candidate_features
 from app.free_strategy.templates import TEMPLATES
@@ -103,6 +103,7 @@ def test_strong_momentum_template_uses_minute_morning_contract():
     assert template["config"]["benchmark_symbol"] == "000300.SH"
     assert "jqdata" not in template["source"]
     assert "context.require_strong_momentum_snapshot" in template["source"]
+    assert "09:30:16" in template["source"]
 
 
 def test_candidate_features_shift_all_selection_inputs_to_d1():
@@ -172,6 +173,60 @@ def test_entry_ignores_unsupported_minute_and_can_buy_at_0937():
     ])
 
     assert [fill["timestamp"] for fill in result["fills"]] == ["2026-01-05T09:37:00"]
+
+
+def test_second_level_entry_matches_reference_symbols_and_lots():
+    day = date(2026, 8, 20)
+    metas = {
+        symbol: {
+            "symbol": symbol,
+            "name": name,
+            "previous_raw_close": previous,
+            "previous_change": 0.07,
+            "previous_turnover_rate": 5.0,
+            "previous_volume_growth": 1.2,
+            "previous_limit_up": False,
+            "previous_high_volume_limit": False,
+            "auction_required": False,
+        }
+        for symbol, name, previous in (
+            ("600127.SH", "金健米业", 8.14),
+            ("603207.SH", "小方制药", 25.33),
+            ("600610.SH", "中毅达", 7.80),
+        )
+    }
+    snapshot = {
+        "date": day.isoformat(),
+        "as_of": "2026-08-19",
+        "candidates": list(metas.values()),
+    }
+    engine = FreeStrategyEngine(
+        TEMPLATES["strong_momentum"]["source"],
+        timeframe="1m",
+        config=_config(),
+        instruments=[
+            {"symbol": symbol, "name": meta["name"], "asset_type": "stock", "has_minute": True}
+            for symbol, meta in metas.items()
+        ],
+    )
+    engine.set_strong_momentum_snapshot_loader(lambda _day: snapshot)
+    timestamp = datetime(day.year, day.month, day.day, 9, 30, 16)
+    engine.advance_event(
+        timestamp,
+        event_type="quote",
+        quotes=[
+            Quote("600127.SH", timestamp, 8.30, prev_close=8.14, open=8.14, high=8.30, low=8.14, volume=1000, limit_up=8.60),
+            Quote("603207.SH", timestamp, 25.33, prev_close=25.33, open=25.33, high=25.33, low=25.33, volume=1000, limit_up=27.86),
+            Quote("600610.SH", timestamp, 7.95, prev_close=7.80, open=7.80, high=7.95, low=7.80, volume=1000, limit_up=8.58),
+        ],
+    )
+
+    fills = [fill for fill in engine.account.fills if fill.side == "buy"]
+    assert [(fill.timestamp, fill.symbol, fill.quantity) for fill in fills] == [
+        ("2026-08-20T09:30:16", "600127.SH", 4000),
+        ("2026-08-20T09:30:16", "600610.SH", 4200),
+        ("2026-08-20T09:30:16", "603207.SH", 1300),
+    ]
 
 
 def test_auction_gate_rejects_open_above_eight_percent():

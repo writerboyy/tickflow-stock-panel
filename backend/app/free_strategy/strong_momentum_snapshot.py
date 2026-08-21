@@ -288,7 +288,6 @@ class StrongMomentumSnapshotCache:
             & (pl.col("previous_amplitude") < 0.16)
             & (pl.col("previous_turnover_rate") >= 2.0)
             & (pl.col("previous_turnover_rate") < 24.0)
-            & (pl.col("previous_volume_growth") >= 1.0)
             & (pl.col("recent_limit_down_count") == 0)
             & ~pl.col("previous_shrink_rise_3d")
         )

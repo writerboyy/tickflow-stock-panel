@@ -1,7 +1,8 @@
-"""“强者恒强”分钟策略的项目原生适配。
+"""“强者恒强”实时策略的项目原生适配。
 
-候选股只使用 D-1 及以前的日线和历史名称生成；D 日仅在早盘四个
-分钟时点判断买入。成交、T+1、涨跌停、费用和滑点继续由公共引擎处理。
+候选股只使用 D-1 及以前的日线和历史名称生成；D 日在原版的
+09:30:16、09:31、09:32、09:37、10:29 事件点判断买入。Quote 模式
+保留实时行情的真实秒数，成交、T+1、涨跌停、费用和滑点继续由公共引擎处理。
 """
 from __future__ import annotations
 
@@ -9,12 +10,14 @@ from datetime import time
 
 
 STRATEGY_KIND = "strong_momentum"
-ENTRY_TIMES = {time(9, 31), time(9, 32), time(9, 37), time(10, 29)}
+ENTRY_TIMES = {
+    time(9, 30, 16), time(9, 31), time(9, 32), time(9, 37), time(10, 29),
+}
 STOP_LOSS = -0.04
 TAKE_PROFIT = 0.19
 BREAK_LIMIT_DRAWDOWN = 0.015
 MAX_HOLDING_SESSIONS = 3
-MAX_EXPOSURE = 0.90
+MAX_EXPOSURE = 1.0
 
 
 def _state(context):
@@ -44,7 +47,11 @@ def initialize(context):
     if not instruments:
         raise ValueError("强者恒强策略没有可用的股票分钟标的")
     context.set_universe([str(instruments[0]["symbol"])])
-    context.require_strong_momentum_snapshot(lookback_days=30, require_auction=True)
+    # The source strategy uses the auction only to adjust the opening/risk
+    # state; it does not require a separate /31 bid-detail factor to enter.
+    context.require_strong_momentum_snapshot(lookback_days=30, require_auction=False)
+    for at in ("09:30:16", "09:31", "09:32", "09:37", "10:29"):
+        context.schedule(_entry_callback, at, symbols=lambda ctx, _timestamp: ctx.universe)
     _state(context)
 
 
@@ -229,8 +236,8 @@ def _passes_intraday_gate(state, symbol, meta, bar):
     return current / open_price - 1, current, open_gain, current_gain
 
 
-def _entry_candidates(context, state):
-    if context.now.time() not in ENTRY_TIMES:
+def _entry_candidates(context, state, *, force=False):
+    if not force and context.now.time() not in ENTRY_TIMES:
         return
     positions = context.portfolio.positions
     held = {symbol for symbol, quantity in positions.items() if float(quantity) > 0}
@@ -255,9 +262,19 @@ def _entry_candidates(context, state):
             continue
         ranked.append((lift, current_gain, symbol, meta, current, open_gain))
     ranked.sort(reverse=True, key=lambda item: (item[0], item[1], item[2]))
-    target_percent = MAX_EXPOSURE / max_positions
+    # Match the source's cash-splitting order: each remaining slot receives an
+    # equal share of the remaining cash, rounded down to a board lot.  Using a
+    # target percentage here changes the quantities when earlier lots are
+    # rounded, which is observable in the 09:30:16 fills.
+    planned_cash = float(context.portfolio.cash) * MAX_EXPOSURE
+    remaining_slots = slots
     for lift, current_gain, symbol, meta, current, open_gain in ranked[:slots]:
-        context.order_target_percent(symbol, target_percent)
+        quantity = int(planned_cash / remaining_slots / current / 100) * 100
+        if quantity < 100:
+            continue
+        context.buy(symbol, quantity=quantity)
+        planned_cash -= quantity * current
+        remaining_slots -= 1
         state["pending_entries"][symbol] = {
             "timestamp": context.now.isoformat(),
             "meta": meta,
@@ -284,12 +301,26 @@ def _entry_candidates(context, state):
         )
 
 
-def on_bar(context, bars):
+def _entry_callback(context):
+    _on_market(context)
+    _entry_candidates(context, _state(context), force=True)
+
+
+def _on_market(context):
     state = _state(context)
     _sync_positions(context, state)
+    bars = context.current_bars()
     _update_session_prices(state, bars)
     _exit_positions(context, state, bars)
-    _entry_candidates(context, state)
+
+
+def on_quote(context, quotes):
+    _on_market(context)
+
+
+def on_bar(context, bars):
+    # Historical second-level bars use the same state transition as live Quote events.
+    _on_market(context)
 
 
 def after_trading_end(context):

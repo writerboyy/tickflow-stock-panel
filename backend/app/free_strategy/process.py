@@ -1740,6 +1740,30 @@ def _scheduled_snapshot(
         # Historical rows remain available to history()/indicators, but they can
         # never become today's execution snapshot.
         return _live_scheduled_snapshot(live_bars or (), symbols, timestamp, timeframe)
+    if timestamp.time().second or timestamp.time().microsecond:
+        # A minute bar cannot prove what was tradable at 09:30:16.  Only a
+        # provider-owned second snapshot may satisfy a second-precision task.
+        get_second_snapshot = getattr(repo, "get_second_snapshot", None)
+        if not callable(get_second_snapshot):
+            get_second_snapshot = getattr(repo, "get_quote_snapshot", None)
+        if not callable(get_second_snapshot):
+            raise ValueError(
+                f"{timestamp.isoformat()} 定时任务需要秒级历史行情，当前 provider 只有分钟K"
+            )
+        frame = get_second_snapshot(symbols, timestamp, asset_type)
+        if frame is None or frame.is_empty():
+            raise ValueError(f"{timestamp.isoformat()} 秒级历史行情为空，无法执行定时任务")
+        if not frame.is_empty():
+            frame = frame.filter(
+                (pl.col("datetime") <= timestamp)
+                & pl.col("datetime").is_not_null()
+            )
+        bars = _scheduled_minute_bars(frame, market, asset_type)
+        latest: dict[str, Bar] = {}
+        for bar in bars:
+            if bar.symbol in symbols and bar.timestamp <= timestamp:
+                latest[bar.symbol] = bar
+        return sorted(latest.values(), key=lambda bar: (bar.timestamp, bar.symbol))
     if timeframe == "1d" and timestamp.time() >= time(15, 0):
         return [
             bar for symbol in symbols
@@ -2006,19 +2030,41 @@ def advance_scheduled_session(
         )
         symbols = _scheduled_symbols(engine, timestamp)
         required_symbols = _scheduled_required_symbols(engine, timestamp)
+        # A live poll may land a few seconds after the requested boundary.  Use
+        # the first common realtime snapshot at/after that boundary for the
+        # callback, while retaining ``scheduled_at`` as the strategy event ID.
+        event_timestamp = timestamp
+        if live_only and timestamp.time().second:
+            available_by_time: dict[datetime, set[str]] = {}
+            for bar in live_bars or ():
+                if (
+                    bar.date == day
+                    and timestamp <= bar.timestamp <= cutoff
+                    and (not required_symbols or bar.symbol in required_symbols)
+                ):
+                    available_by_time.setdefault(bar.timestamp, set()).add(bar.symbol)
+            required = set(required_symbols)
+            common_times = sorted(
+                value
+                for value, symbols_at_time in available_by_time.items()
+                if not required or required.issubset(symbols_at_time)
+            )
+            if common_times:
+                # A poll can contain several snapshots.  Consume the first
+                # snapshot that covers every required symbol after the target.
+                event_timestamp = common_times[0]
         snapshot = _scheduled_snapshot(
             repo,
             engine,
             market,
-            timestamp,
+            event_timestamp,
             asset_type,
             timeframe,
             symbols=symbols,
             live_bars=live_bars,
             live_only=live_only,
         )
-        event_timestamp = timestamp
-        market_time = timestamp.time()
+        market_time = event_timestamp.time()
         needs_live = live_only and market_time >= time(9, 30)
         missing_required = _missing_snapshot_symbols(snapshot, required_symbols)
         if needs_live and missing_required:
@@ -2422,6 +2468,12 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 engine.state = engine.context.state.copy()
                 result = engine.result()
         else:
+            if engine.second_precision_schedules:
+                raise ValueError(
+                    "回测包含秒级定时点（"
+                    + ", ".join(engine.second_precision_schedules)
+                    + "），当前历史 provider 只有分钟K；请接入秒级历史行情后再回测"
+                )
             output.put({"type": "progress", "message": "按交易日读取并回放分钟K", "progress": 0.35})
             cursor = start
             days_seen = 0

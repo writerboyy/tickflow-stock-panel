@@ -2488,13 +2488,13 @@ def initialize(context):
     context.schedule(lambda ctx: None, '9:30')
 """)
 
-    with pytest.raises(ValueError, match="HH:MM"):
-        FreeStrategyEngine("""
+    second_precision = FreeStrategyEngine("""
 from datetime import time
 
 def initialize(context):
     context.schedule(lambda ctx: None, time(9, 30, 1))
 """)
+    assert second_precision.scheduled_times == ["09:30:01"]
 
     with pytest.raises(ValueError, match="when"):
         FreeStrategyEngine("""

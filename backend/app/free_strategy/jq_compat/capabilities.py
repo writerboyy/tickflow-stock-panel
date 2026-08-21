@@ -181,8 +181,8 @@ def analyze_source(source: str) -> dict[str, Any]:
                 if schedule_time and _has_second_precision(schedule_time):
                     add(
                         "second_precision_schedule",
-                        "degraded",
-                        "秒级调度会向后对齐到下一分钟；不能模拟 Tick 级时间精度",
+                        "supported",
+                        "保留 HH:MM:SS，并由回测与实时 Quote 事件使用实际秒级时间触发",
                     )
                 if _literal_argument(node, "reference_security"):
                     add(

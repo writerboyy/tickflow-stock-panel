@@ -1130,6 +1130,21 @@ class FreeStrategyEngine:
     def scheduled_times(self) -> list[str]:
         return sorted({task.resolved_time for task in self.context._scheduled})
 
+    @property
+    def second_precision_schedules(self) -> list[str]:
+        return [
+            value for value in self.scheduled_times
+            if value != "every_bar" and self._schedule_time_value(value).second > 0
+        ]
+
+    @staticmethod
+    def _schedule_time_value(value: str | datetime_time) -> datetime_time:
+        return datetime_time.fromisoformat(str(value))
+
+    @classmethod
+    def _schedule_matches(cls, value: str, timestamp: datetime) -> bool:
+        return cls._schedule_time_value(value) == timestamp.time().replace(microsecond=0)
+
     def set_trading_calendar(self, values: Iterable[date]) -> None:
         self._trading_dates = tuple(sorted(set(values)))
 
@@ -1145,11 +1160,10 @@ class FreeStrategyEngine:
         *,
         include_optional: bool,
     ) -> list[str] | None:
-        current_time = timestamp.strftime("%H:%M")
         due = [
             task
             for task in self.context._scheduled
-            if task.resolved_time == current_time
+            if self._schedule_matches(task.resolved_time, timestamp)
         ]
         if not due:
             return []
@@ -1205,10 +1219,9 @@ class FreeStrategyEngine:
 
     def prepare_scheduled_event(self, timestamp: datetime) -> bool:
         """跳过当日不生效的定时回调，并在无任务时推进执行游标。"""
-        current_time = timestamp.strftime("%H:%M")
         active = False
         for task in self.context._scheduled:
-            if task.done or task.resolved_time != current_time:
+            if task.done or not self._schedule_matches(task.resolved_time, timestamp):
                 continue
             if self._scheduled_condition_met(task, timestamp):
                 active = True
@@ -2098,13 +2111,13 @@ class FreeStrategyEngine:
         self._run_callback("before_trading_start", bars_now)
 
     def _advance_scheduled_before(self, timestamp: datetime) -> None:
-        current = timestamp.strftime("%H:%M")
+        current = timestamp.time().replace(microsecond=0)
         due_times = sorted({
             task.resolved_time
             for task in self.context._scheduled
             if not task.done
             and task.resolved_time != "every_bar"
-            and task.resolved_time < current
+            and self._schedule_time_value(task.resolved_time) < current
         })
         for at in due_times:
             scheduled_timestamp = datetime.combine(
@@ -2123,8 +2136,9 @@ class FreeStrategyEngine:
         *,
         actual_bar: bool = False,
         scheduled_at: str | None = None,
+        catch_up: bool = False,
     ) -> None:
-        current = scheduled_at or timestamp.strftime("%H:%M")
+        current = scheduled_at
         for task in self.context._scheduled:
             at = task.resolved_time
             if at == "every_bar":
@@ -2132,7 +2146,40 @@ class FreeStrategyEngine:
                     self.context.now = timestamp
                     self._run_scheduled_callback(task.callback, at)
                 continue
-            if task.done or at != current:
+            scheduled_value = None if at == "every_bar" else self._schedule_time_value(at)
+            if task.done or (
+                current is not None
+                and at != current
+            ) or (
+                current is None
+                and not catch_up
+            ) or (
+                current is None
+                and (
+                    scheduled_value is None
+                    or scheduled_value > timestamp.time().replace(microsecond=0)
+                    or (
+                        scheduled_value.second == 0
+                        and scheduled_value != timestamp.time().replace(microsecond=0)
+                    )
+                    or (
+                        scheduled_value.second > 0
+                        and timestamp - datetime.combine(timestamp.date(), scheduled_value)
+                        > timedelta(seconds=5)
+                    )
+                )
+            ):
+                if (
+                    current is None
+                    and scheduled_value is not None
+                    and scheduled_value < timestamp.time().replace(microsecond=0)
+                    and (
+                        scheduled_value.second == 0
+                        or timestamp - datetime.combine(timestamp.date(), scheduled_value)
+                        > timedelta(seconds=5)
+                    )
+                ):
+                    task.done = True
                 continue
             self.context.now = timestamp
             if self._scheduled_condition_met(task, timestamp):
@@ -2315,8 +2362,10 @@ class FreeStrategyEngine:
                 minute=29,
             )
             self._start_session(premarket, BarsView())
-        if run_prior_schedules and event_type in {"bar", "quote"}:
-            self._advance_scheduled_before(timestamp)
+        # Scheduled callbacks are dispatched after the current market snapshot is
+        # published.  This lets a missed second boundary (for example a first
+        # quote arriving at 09:30:17 for a 09:30:16 task) consume that actual
+        # snapshot instead of running against stale bars.
         self.market_rows_consumed += len(values)
         self._next_timestamp = timestamp
         self.context.now = timestamp
@@ -2353,6 +2402,30 @@ class FreeStrategyEngine:
         # 4. Primary market callback.
         if event_type == "bar":
             self._run_callback("on_bar", bars_now)
+            if self._callbacks.get("on_bar") is None:
+                callback = self._callbacks.get("on_quote")
+                if callback is not None:
+                    self._protected_call(
+                        "on_quote 回调", callback, self.context,
+                        QuotesView({
+                            symbol: Quote(
+                                symbol=symbol,
+                                timestamp=bar.timestamp,
+                                last_price=bar.execution_price("close"),
+                                prev_close=bar.previous_close,
+                                open=bar.execution_price("open"),
+                                high=bar.execution_price("high"),
+                                low=bar.execution_price("low"),
+                                volume=bar.volume,
+                                amount=bar.amount,
+                                limit_up=bar.limit_up,
+                                limit_down=bar.limit_down,
+                                suspended=bar.suspended,
+                            )
+                            for symbol, bar in bars_now.items()
+                        }),
+                    )
+                    self.callbacks_executed += 1
         elif event_type == "quote":
             callback = self._callbacks.get("on_quote")
             if callback is not None:
@@ -2365,6 +2438,7 @@ class FreeStrategyEngine:
                 timestamp,
                 actual_bar=event_type == "bar",
                 scheduled_at=scheduled_at,
+                catch_up=event_type in {"bar", "quote", "scheduled"} and scheduled_at is None,
             )
 
         # 6. Current-price orders are matched after every callback at this timestamp.

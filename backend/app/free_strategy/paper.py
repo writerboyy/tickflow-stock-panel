@@ -47,6 +47,13 @@ def state_market_mode(state: dict[str, Any]) -> str:
     return {"1m": "bar_1m", "5m": "bar_5m", "30m": "bar_30m"}.get(timeframe, "bar_1d")
 
 
+def _has_second_precision_schedule(values: tuple[str, ...] | list[str] | None) -> bool:
+    return any(
+        value != "every_bar" and clock_time.fromisoformat(value).second > 0
+        for value in values or ()
+    )
+
+
 def _paper_callback_timeout(state: dict[str, Any]) -> float:
     config = state.get("config") or {}
     value = config.get("callback_timeout_seconds")
@@ -203,9 +210,8 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
 
 def _quote_to_live_bar(quote: Quote, *, cutoff: datetime | None = None) -> Bar:
     """将一个实时快照转换为当前可见价格 Bar，不引入历史 OHLC。"""
-    timestamp = quote.timestamp.replace(second=0, microsecond=0)
-    if quote.timestamp.second:
-        timestamp += timedelta(minutes=1)
+    # 保留报价原始秒数；调度和成交都以该时间戳作为唯一事实。
+    timestamp = quote.timestamp
     if (
         cutoff is not None
         and timestamp > cutoff
@@ -791,9 +797,17 @@ class MarketDataHub:
             now = cn_naive_now()
             with self._lock:
                 targets = [sub for sub in self._subscriptions.values() if sub.mode.startswith("bar_")]
-            scheduled = [sub for sub in targets if sub.execution_mode == "scheduled"]
+            scheduled = [
+                sub for sub in targets
+                if sub.execution_mode == "scheduled"
+                or _has_second_precision_schedule(sub.scheduled_times)
+            ]
             self._dispatch_scheduled_clocks(scheduled, now)
-            targets = [sub for sub in targets if sub.execution_mode != "scheduled"]
+            targets = [
+                sub for sub in targets
+                if sub.execution_mode != "scheduled"
+                and not _has_second_precision_schedule(sub.scheduled_times)
+            ]
             groups: dict[tuple[str, str], list[_Subscription]] = {}
             for sub in targets:
                 groups.setdefault((sub.mode, sub.asset_type), []).append(sub)
@@ -883,22 +897,38 @@ class MarketDataHub:
         now: datetime,
     ) -> None:
         for sub in subscriptions:
-            cutoff = _closed_bar_cutoff(sub.mode, now)
             try:
                 last_bar = datetime.fromisoformat(sub.last_bar) if sub.last_bar else None
             except ValueError:
                 last_bar = None
             boundaries = [
-                datetime.combine(cutoff.date(), clock_time.fromisoformat(value))
+                datetime.combine(now.date(), clock_time.fromisoformat(value))
                 for value in sub.scheduled_times
             ]
-            if cutoff.time() >= clock_time(15, 0):
-                boundaries.append(datetime.combine(cutoff.date(), clock_time(15, 0)))
-            if not any(
-                boundary <= cutoff and (last_bar is None or boundary > last_bar)
-                for boundary in boundaries
-            ):
+            boundaries = [boundary for boundary in boundaries if boundary <= now]
+            if now.time() >= clock_time(15, 0):
+                boundaries.append(datetime.combine(now.date(), clock_time(15, 0)))
+            due = max(
+                (
+                    boundary for boundary in boundaries
+                    if last_bar is None or boundary > last_bar
+                ),
+                default=None,
+            )
+            if due is None:
                 continue
+            fresh_quotes = self._fresh_quote_records(sub.symbols, due.date())
+            quote_times = [
+                self._quote_datetime(row.get("timestamp"))
+                for row in fresh_quotes
+            ]
+            latest_quote = max(
+                (value for value in quote_times if value is not None and value <= now),
+                default=None,
+            )
+            # Keep the scheduled boundary in the strategy metadata, but let
+            # the live snapshot advance to the first quote received after it.
+            cutoff = max(due, latest_quote) if latest_quote is not None else due
             cutoff_value = cutoff.isoformat()
             monotonic_now = time.monotonic()
             if (
@@ -911,13 +941,23 @@ class MarketDataHub:
                 "account_id": sub.account_id,
                 "cutoff": cutoff_value,
             }
-            payload["quotes"] = self._fresh_quote_records(sub.symbols, cutoff.date())
+            payload["quotes"] = [
+                row for row in fresh_quotes
+                if (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
+                and timestamp <= cutoff
+            ]
             payload["live_bars"] = [bar.as_dict() for bar in self._scheduled_live_bars(sub, cutoff)]
             if _put_bar_batch(sub.input_queue, payload):
                 sub.last_dispatch_cutoff = cutoff_value
                 sub.last_dispatch_at = monotonic_now
 
-    def _fresh_quote_records(self, symbols: set[str], expected_date: date) -> list[dict[str, Any]]:
+    def _fresh_quote_records(
+        self,
+        symbols: set[str],
+        expected_date: date,
+        *,
+        cutoff: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         getter = getattr(self.quote_service, "get_fresh_quotes", None)
         if not callable(getter):
             return []
@@ -951,7 +991,11 @@ class MarketDataHub:
             if normalized is None:
                 continue
             timestamp = self._quote_datetime(normalized.get("timestamp"))
-            if timestamp is None or timestamp.date() != expected_date:
+            if (
+                timestamp is None
+                or timestamp.date() != expected_date
+                or (cutoff is not None and timestamp > cutoff)
+            ):
                 continue
             values.append(normalized)
         return values
@@ -1210,6 +1254,7 @@ def _engine_from_state(
         ensure_four_mode_minute_data,
         four_mode_minute_requirements,
     )
+    from app.free_strategy.strong_momentum_snapshot import configure_strong_momentum_snapshot
     from app.tickflow.repository import DataStore, KlineRepository
 
     raw = dict(state.get("config", {}))
@@ -1288,6 +1333,8 @@ def _engine_from_state(
         except Exception as exc:  # noqa: BLE001
             logger.warning("四合一启动前分钟K准备失败: %s", type(exc).__name__)
         configure_four_mode_snapshot(engine, repo, strategy_start, cn_today())
+    if engine.strong_momentum_snapshot_requirement is not None:
+        configure_strong_momentum_snapshot(engine, repo, strategy_start, cn_today())
     if config.allow_stale_fills:
         _preload_tradable_dates(
             engine,
@@ -2079,7 +2126,7 @@ def _catch_up_bars(
     start_day = last_timestamp.date() if last_timestamp else cn_today()
     timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1d")
     asset_type = str(current.get("config", {}).get("asset_type", "stock"))
-    if engine.execution_mode == "scheduled":
+    if engine.execution_mode == "scheduled" or _has_second_precision_schedule(engine.scheduled_times):
         return _catch_up_scheduled(
             store,
             account_id,
@@ -2310,7 +2357,10 @@ def _paper_worker(
             current["sync"] = dict(current.get("sync", {}))
             current["sync"]["queue_delay_seconds"] = round(queue_wait, 3)
             if message.get("type") == "scheduled_clock":
-                if engine.execution_mode != "scheduled":
+                if (
+                    engine.execution_mode != "scheduled"
+                    and not _has_second_precision_schedule(engine.scheduled_times)
+                ):
                     continue
                 cutoff = datetime.fromisoformat(str(message["cutoff"]))
                 asset_type = str(current.get("config", {}).get("asset_type", "stock"))
