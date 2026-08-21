@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import polars as pl
@@ -16,7 +16,7 @@ from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict
-from app.services.qmt_trading import QmtRedisRpcClient, QmtRpcError, QmtTradingService
+from app.services.qmt_trading import QmtRpcError, QmtTradingService, QmtZmqRpcClient
 from app.services.quote_service import QuoteService
 from app.services.watchlist_ocr.provider import OcrProvider
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -441,11 +441,7 @@ def test_position_risk_notifications_default_to_off(tmp_path: Path):
 def _qmt_settings(**overrides):
     values = {
         "qmt_enabled": True,
-        "qmt_redis_host": "127.0.0.1",
-        "qmt_redis_port": 6379,
-        "qmt_redis_db": 5,
-        "qmt_redis_username": "",
-        "qmt_redis_password": "secret",
+        "qmt_zmq_connect_address": "tcp://127.0.0.1:15648",
         "qmt_account_id": "account-1",
         "qmt_rpc_timeout_seconds": 1,
         "qmt_trade_enabled": False,
@@ -458,27 +454,100 @@ def _qmt_settings(**overrides):
     return SimpleNamespace(**values)
 
 
+def _start_fake_qmt_zmq(handler):
+    import zmq
+
+    context = zmq.Context()
+    router = context.socket(zmq.ROUTER)
+    router.bind("tcp://127.0.0.1:*")
+    address = router.getsockopt(zmq.LAST_ENDPOINT).decode("utf-8")
+    stopped = Event()
+
+    def run():
+        poller = zmq.Poller()
+        poller.register(router, zmq.POLLIN)
+        try:
+            while not stopped.is_set():
+                if not dict(poller.poll(50)).get(router):
+                    continue
+                identity, payload = router.recv_multipart()
+                request = _decode_zmq_payload(payload)
+                responses = handler(request)
+                if isinstance(responses, tuple):
+                    responses = list(responses)
+                else:
+                    responses = [responses]
+                for response in responses:
+                    router.send_multipart([identity, _encode_zmq_payload(response)])
+        finally:
+            router.close(linger=0)
+            context.term()
+
+    thread = Thread(target=run, name="fake-qmt-zmq", daemon=True)
+    thread.start()
+    return address, stopped, thread
+
+
+def _encode_zmq_payload(value):
+    from app.services.qmt_trading import _encode_zmq_payload as encode
+
+    return encode(value)
+
+
+def _decode_zmq_payload(value):
+    from app.services.qmt_trading import _decode_zmq_payload as decode
+
+    return decode(value)
+
+
 def test_qmt_client_requires_explicit_enable_and_complete_credentials():
-    disabled = QmtRedisRpcClient(_qmt_settings(qmt_enabled=False))
+    disabled = QmtZmqRpcClient(_qmt_settings(qmt_enabled=False))
     assert disabled.configured is False
     assert "QMT_ENABLED" in disabled.configuration_reason
 
-    incomplete = QmtRedisRpcClient(_qmt_settings(qmt_redis_password=""))
+    incomplete = QmtZmqRpcClient(_qmt_settings(qmt_zmq_connect_address=""))
     assert incomplete.configured is False
-    assert "QMT_REDIS_PASSWORD" in incomplete.configuration_reason
+    assert "QMT_ZMQ_CONNECT_ADDRESS" in incomplete.configuration_reason
 
 
-def test_qmt_client_forces_resp2_for_legacy_cloud_redis(monkeypatch):
-    captured = {}
+def test_qmt_zmq_client_round_trip_uses_server_protocol():
+    seen = []
 
-    class FakeRedis:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    def handler(request):
+        seen.append(request)
+        response = {
+            "schema_version": 1,
+            "request_id": request["request_id"],
+            "account_id": request["account_id"],
+            "ok": True,
+            "data": {"account_id": request["account_id"], "server_time": "now"},
+        }
+        wrong = {**response, "request_id": "wrong-request-id"}
+        return (wrong, response)
 
-    monkeypatch.setattr("app.services.qmt_trading.redis.Redis", FakeRedis)
-    client = QmtRedisRpcClient(_qmt_settings())
-    client._redis()
-    assert captured["protocol"] == 2
+    address, stopped, thread = _start_fake_qmt_zmq(handler)
+    client = QmtZmqRpcClient(_qmt_settings(qmt_zmq_connect_address=address))
+    try:
+        assert client.call("ping") == {"account_id": "account-1", "server_time": "now"}
+    finally:
+        client.close()
+        stopped.set()
+        thread.join(timeout=2)
+    assert seen[0]["schema_version"] == 1
+    assert seen[0]["account_id"] == "account-1"
+    assert seen[0]["method"] == "ping"
+    assert seen[0]["params"] == {}
+
+
+def test_qmt_zmq_client_times_out_without_server():
+    client = QmtZmqRpcClient(
+        _qmt_settings(
+            qmt_zmq_connect_address="tcp://127.0.0.1:1",
+            qmt_rpc_timeout_seconds=0.05,
+        ),
+    )
+    with pytest.raises(QmtRpcError, match="超时"):
+        client.call("ping")
 
 
 def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Path):
@@ -839,7 +908,7 @@ def test_qmt_submit_uses_sell_preflight(tmp_path: Path):
 
 
 def test_qmt_snapshot_rejects_available_above_volume():
-    client = QmtRedisRpcClient(_qmt_settings())
+    client = QmtZmqRpcClient(_qmt_settings())
     responses = iter([
         {"account_id": "account-1"},
         {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},

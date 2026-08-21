@@ -22,19 +22,15 @@
 
 ## QMT 实盘交易挂载
 
-持仓风控可选接入云端大 QMT。浏览器只访问本地后端，QMT Redis RPC 由后端统一调用；QMT 返回的资金、持仓、委托和成交是权威状态。截图导入仍可作为未接入 QMT 时的备用方式。
+持仓风控可选接入云端大 QMT。浏览器只访问本地后端，QMT ZMQ RPC 由后端统一调用；QMT 返回的资金、持仓、委托和成交是权威状态。截图导入仍可作为未接入 QMT 时的备用方式。
 
-公网 Redis 仅作临时模式，必须使用 Redis 密码、云端防火墙白名单和独立账户；不要把密码写入仓库或前端。推荐后续改为 SSH 隧道或私网。应用只在以下条件同时满足时显示可交易：`QMT_ENABLED=true`、Redis 地址/密码/账户 ID 完整、`ping` 账户匹配、同一轮资金和持仓同步成功，并且页面的“允许真实交易”开关已打开。
+ZMQ RPC 通过明确的 TCP 地址连接 QMT 单文件服务端，例如 `tcp://111.228.39.194:15648`；建议只开放该端口给可信来源，并使用云端防火墙白名单。应用只在以下条件同时满足时显示可交易：`QMT_ENABLED=true`、ZMQ 地址/账户 ID 完整、`ping` 账户匹配、同一轮资金和持仓同步成功，并且页面的“允许真实交易”开关已打开。
 
 配置项从本机环境变量读取：
 
 ```text
 QMT_ENABLED=true
-QMT_REDIS_HOST=云端地址
-QMT_REDIS_PORT=6379
-QMT_REDIS_DB=5
-QMT_REDIS_USERNAME=
-QMT_REDIS_PASSWORD=仅存在于环境变量
+QMT_ZMQ_CONNECT_ADDRESS=tcp://111.228.39.194:15648
 QMT_ACCOUNT_ID=资金账号
 QMT_TRADE_ENABLED=false
 QMT_MAX_ORDER_LOTS=1

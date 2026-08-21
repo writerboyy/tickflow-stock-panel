@@ -1,12 +1,12 @@
-"""云端 QMT Redis RPC 交易网关。
+"""云端 QMT ZMQ RPC 交易网关。
 
 浏览器永远只访问本地 API；本模块是主项目与云端 QMT 之间的唯一边界。
-公网 Redis 只是临时接入模式，凭据从环境变量读取，不写入运行日志或用户数据。
+ZMQ 连接地址和账户从环境变量读取，不写入运行日志或用户数据。
 """
 from __future__ import annotations
 
-import json
 import base64
+import json
 import math
 import sqlite3
 import threading
@@ -17,9 +17,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 try:
-    import redis
-except ImportError:  # pragma: no cover - optional until QMT is configured
-    redis = None
+    import zmq
+except ImportError:  # pragma: no cover - dependency is installed with the backend
+    zmq = None
 
 
 class QmtRpcError(RuntimeError):
@@ -27,6 +27,9 @@ class QmtRpcError(RuntimeError):
 
 
 _CN_TZ = ZoneInfo("Asia/Shanghai")
+_SAFE_B64_PREFIX = "b64s:"
+_SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
+_SAFE_B64_DIGIT_DECODE = str.maketrans("!#$%&()*~?", "0123456789")
 _BROKER_ORDER_TIME_FIELDS = (
     "broker_order_at",
     "order_time",
@@ -41,12 +44,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _json(value: Any) -> Any:
-    if isinstance(value, (bytes, bytearray)):
-        value = value.decode("utf-8")
-    if isinstance(value, str):
-        return json.loads(value)
-    return value
+def _encode_zmq_payload(value: dict[str, Any]) -> bytes:
+    raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+    encoded = base64.b64encode(raw).decode("ascii").translate(_SAFE_B64_DIGIT_ENCODE)
+    return (_SAFE_B64_PREFIX + encoded).encode("utf-8")
+
+
+def _decode_zmq_payload(value: bytes | str) -> Any:
+    text = value.decode("utf-8") if isinstance(value, (bytes, bytearray)) else str(value)
+    if text.startswith(_SAFE_B64_PREFIX):
+        encoded = text[len(_SAFE_B64_PREFIX):].translate(_SAFE_B64_DIGIT_DECODE)
+        text = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+    return json.loads(text)
 
 
 def _float(value: Any) -> float | None:
@@ -140,102 +149,118 @@ def _broker_time(order: dict[str, Any], anchor: str | None) -> tuple[str | None,
     return None, None, None
 
 
-class QmtRedisRpcClient:
-    """调用现有 bigqmt_signal_trader 的 queue/list RPC 协议。"""
+class QmtZmqRpcClient:
+    """调用 bigqmt_signal_trader 的 ZMQ ROUTER/DEALER RPC 协议。"""
 
     def __init__(self, settings: Any) -> None:
         self.enabled = bool(getattr(settings, "qmt_enabled", False))
-        self.host = str(getattr(settings, "qmt_redis_host", "") or "").strip()
-        self.port = int(getattr(settings, "qmt_redis_port", 6379))
-        self.db = int(getattr(settings, "qmt_redis_db", 5))
-        self.username = str(getattr(settings, "qmt_redis_username", "") or "") or None
-        self.password = str(getattr(settings, "qmt_redis_password", "") or "") or None
+        self.connect_address = str(
+            getattr(settings, "qmt_zmq_connect_address", "") or "",
+        ).strip()
         self.account_id = str(getattr(settings, "qmt_account_id", "") or "").strip()
         self.timeout = max(1.0, float(getattr(settings, "qmt_rpc_timeout_seconds", 6.0)))
-        self._client = None
+        self._context = None
+        self._dealer = None
         self._lock = threading.Lock()
 
     @property
     def configured(self) -> bool:
-        return bool(self.enabled and self.host and self.password and self.account_id and redis is not None)
+        return bool(self.enabled and self.connect_address and self.account_id and zmq is not None)
 
     @property
     def configuration_reason(self) -> str:
         if not self.enabled:
             return "QMT_ENABLED 未开启"
         missing = []
-        if not self.host:
-            missing.append("QMT_REDIS_HOST")
-        if not self.password:
-            missing.append("QMT_REDIS_PASSWORD")
+        if not self.connect_address:
+            missing.append("QMT_ZMQ_CONNECT_ADDRESS")
         if not self.account_id:
             missing.append("QMT_ACCOUNT_ID")
         if missing:
             return "缺少 " + ", ".join(missing)
-        return "后端未安装 redis 客户端" if redis is None else "已配置"
+        return "后端未安装 pyzmq 客户端" if zmq is None else "已配置"
 
-    def _redis(self):
+    def _ensure_dealer(self):
         if not self.configured:
             raise QmtRpcError(self.configuration_reason)
         with self._lock:
-            if self._client is None:
-                self._client = redis.Redis(
-                    host=self.host,
-                    port=self.port,
-                    db=self.db,
-                    username=self.username,
-                    password=self.password,
-                    socket_connect_timeout=min(5.0, self.timeout),
-                    socket_timeout=self.timeout,
-                    health_check_interval=30,
-                    decode_responses=False,
-                    protocol=2,
-                )
-            return self._client
+            return self._ensure_dealer_locked()
+
+    def _ensure_dealer_locked(self):
+        if self._dealer is not None:
+            return self._dealer
+        if zmq is None:  # pragma: no cover - guarded by configured
+            raise QmtRpcError("后端未安装 pyzmq 客户端")
+        if self._context is None:
+            self._context = zmq.Context.instance()
+        dealer = self._context.socket(zmq.DEALER)
+        dealer.setsockopt(zmq.IDENTITY, uuid.uuid4().hex[:16].encode("ascii"))
+        dealer.setsockopt(zmq.LINGER, 0)
+        dealer.connect(self.connect_address)
+        self._dealer = dealer
+        return dealer
+
+    def _close_dealer_locked(self) -> None:
+        if self._dealer is None:
+            return
+        try:
+            self._dealer.close(linger=0)
+        finally:
+            self._dealer = None
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        client = self._redis()
+        if not self.configured:
+            raise QmtRpcError(self.configuration_reason)
         request_id = uuid.uuid4().hex
-        account_id = self.account_id
-        response_list = f"bigqmt:rpc:respq:{account_id}:{request_id}"
-        response_key = f"bigqmt:rpc:resp:{account_id}:{request_id}"
         request = {
             "schema_version": 1,
             "request_id": request_id,
-            "account_id": account_id,
+            "account_id": self.account_id,
             "method": method,
             "params": params or {},
-            "reply_list": response_list,
-            "reply_key": response_key,
             "ttl_seconds": max(60, int(self.timeout) + 30),
         }
-        raw_payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
-        encoded = base64.b64encode(raw_payload).decode("ascii").translate(str.maketrans("0123456789", "!#$%&()*~?"))
-        payload = "b64s:" + encoded
-        queue_key = f"bigqmt:rpc:queue:{account_id}"
-        try:
-            client.rpush(queue_key, payload)
-            client.expire(queue_key, max(60, int(self.timeout) + 30))
-            item = client.blpop(response_list, timeout=max(1, math.ceil(self.timeout)))
-            raw = item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else item
-            if raw is None:
-                raw = client.get(response_key)
-            if raw is None:
-                raise QmtRpcError(f"QMT RPC 超时: {method}")
-            response = _json(raw)
-        except QmtRpcError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise QmtRpcError(f"QMT Redis RPC 连接失败: {exc.__class__.__name__}") from exc
-        finally:
+        with self._lock:
+            dealer = self._ensure_dealer_locked()
             try:
-                client.delete(response_list, response_key)
-            except Exception:  # noqa: BLE001
-                pass
-        if not isinstance(response, dict) or not response.get("ok"):
-            error = response.get("error") if isinstance(response, dict) else "响应格式无效"
-            raise QmtRpcError(str(error or f"QMT RPC {method} 失败"))
+                dealer.send(_encode_zmq_payload(request))
+                poller = zmq.Poller()
+                poller.register(dealer, zmq.POLLIN)
+                deadline = time.monotonic() + self.timeout
+                response = None
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    events = dict(poller.poll(timeout=max(1, math.ceil(remaining * 1000))))
+                    if dealer not in events:
+                        continue
+                    candidate = _decode_zmq_payload(dealer.recv())
+                    if not isinstance(candidate, dict):
+                        continue
+                    if str(candidate.get("request_id") or "") != request_id:
+                        continue
+                    response = candidate
+                    break
+            except QmtRpcError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._close_dealer_locked()
+                raise QmtRpcError(f"QMT ZMQ RPC 连接失败: {exc.__class__.__name__}") from exc
+            if response is None:
+                self._close_dealer_locked()
+                raise QmtRpcError(f"QMT RPC 超时: {method}")
+        if not response.get("ok"):
+            error = response.get("error") or f"QMT RPC {method} 失败"
+            raise QmtRpcError(str(error))
+        server_error = str(response.get("server_error") or "").strip()
+        if server_error:
+            raise QmtRpcError(f"QMT {method} server_error: {server_error}")
         return response.get("data")
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_dealer_locked()
 
     def probe(self) -> dict[str, Any]:
         data = self.call("ping")
@@ -297,7 +322,7 @@ class QmtTradingService:
     """本地交易控制面；不会把确认风险建议直接变成委托。"""
 
     def __init__(self, data_dir, settings: Any) -> None:
-        self.client = QmtRedisRpcClient(settings)
+        self.client = QmtZmqRpcClient(settings)
         self.max_order_volume = max(100, int(getattr(settings, "qmt_max_order_lots", 1)) * 100)
         self.trade_authorized = bool(getattr(settings, "qmt_trade_enabled", False))
         self.trade_enabled = self.trade_authorized and self.client.configured
@@ -331,6 +356,8 @@ class QmtTradingService:
                 "trade_enabled": self.trade_enabled,
                 "max_order_lots": self.max_order_volume // 100,
                 "account_id": self.client.account_id or None,
+                "rpc_transport": "zmq",
+                "rpc_address": self.client.connect_address or None,
                 "account_type": self.account_type,
                 "auto_sync_enabled": self.auto_sync_enabled,
                 "auto_sync_running": bool(self._auto_thread and self._auto_thread.is_alive()),
@@ -561,6 +588,7 @@ class QmtTradingService:
         with self._lock:
             self._auto_thread = None
             self.trade_enabled = False
+        self.client.close()
 
     def set_trade_enabled(self, enabled: bool) -> dict[str, Any]:
         if enabled:

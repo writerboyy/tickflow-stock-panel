@@ -107,7 +107,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ### QMT 实盘交易（可选）
 
-持仓风控的云端 QMT Redis RPC 只从环境变量读取，默认关闭连接和交易能力：`QMT_ENABLED=false`、`QMT_TRADE_ENABLED=false`、`QMT_MAX_ORDER_LOTS=1`、`QMT_ACCOUNT_TYPE=STOCK`。连接配置完整后，`QMT_AUTO_SYNC=true` 默认每 30 秒同步一次权威账户；`QMT_TRADE_ENABLED=true` 只授权交易能力，运行时开关重启后仍默认关闭。公网 Redis 仅用于临时联调，必须使用认证、防火墙限制和独立账户，不能把密码提交到 Git 或前端。
+持仓风控的云端 QMT ZMQ RPC 只从环境变量读取，默认关闭连接和交易能力：`QMT_ENABLED=false`、`QMT_TRADE_ENABLED=false`、`QMT_MAX_ORDER_LOTS=1`、`QMT_ACCOUNT_TYPE=STOCK`。连接配置完整后，`QMT_AUTO_SYNC=true` 默认每 30 秒同步一次权威账户；`QMT_TRADE_ENABLED=true` 只授权交易能力，运行时开关重启后仍默认关闭。ZMQ 端口应通过防火墙限制来源，账户信息和连接地址不要提交到 Git。
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`
 2. **`.env` 文件**:启动时读取
