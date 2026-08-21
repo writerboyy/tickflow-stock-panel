@@ -105,6 +105,12 @@ def test_strong_momentum_template_uses_minute_morning_contract():
     assert "context.require_strong_momentum_snapshot" in template["source"]
     assert "09:30:16" in template["source"]
 
+    engine = _engine()
+    assert engine.scheduled_times == [
+        "09:30:16", "09:31:00", "09:32:00", "09:37:00", "10:29:00",
+    ]
+    assert engine.second_precision_schedules == engine.scheduled_times
+
 
 def test_candidate_features_shift_all_selection_inputs_to_d1():
     start = date(2025, 12, 1)

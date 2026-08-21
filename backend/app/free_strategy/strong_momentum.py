@@ -1,7 +1,7 @@
 """“强者恒强”实时策略的项目原生适配。
 
 候选股只使用 D-1 及以前的日线和历史名称生成；D 日在原版的
-09:30:16、09:31、09:32、09:37、10:29 事件点判断买入。Quote 模式
+09:30:16、09:31:00、09:32:00、09:37:00、10:29:00 事件点判断买入。Quote 模式
 保留实时行情的真实秒数，成交、T+1、涨跌停、费用和滑点继续由公共引擎处理。
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ def initialize(context):
     # The source strategy uses the auction only to adjust the opening/risk
     # state; it does not require a separate /31 bid-detail factor to enter.
     context.require_strong_momentum_snapshot(lookback_days=30, require_auction=False)
-    for at in ("09:30:16", "09:31", "09:32", "09:37", "10:29"):
+    for at in ("09:30:16", "09:31:00", "09:32:00", "09:37:00", "10:29:00"):
         context.schedule(_entry_callback, at, symbols=lambda ctx, _timestamp: ctx.universe)
     _state(context)
 
