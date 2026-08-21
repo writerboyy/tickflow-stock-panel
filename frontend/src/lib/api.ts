@@ -2165,6 +2165,7 @@ export interface FreeStrategySummary {
   created_at?: string
   updated_at?: string
   source?: string
+  execution_mode_hint?: 'full_bar' | 'scheduled' | 'quote' | null
 }
 
 export interface FreeBacktestConfig {

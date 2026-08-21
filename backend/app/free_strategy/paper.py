@@ -1987,8 +1987,7 @@ def _process_scheduled_day(
     before_risk = engine.risk_status
     if not live_only and engine.second_precision_schedules:
         get_tick_range = getattr(repo, "get_tick_range", None)
-        legacy_second_range = getattr(repo, "get_second_range", None)
-        if not callable(get_tick_range) and not callable(legacy_second_range):
+        if not callable(get_tick_range):
             raise ValueError("模拟盘历史续接包含秒级定时点，但当前 provider 没有 tick/逐笔行情能力")
         from app.free_strategy.process import (
             _ensure_scheduled_market_data,
@@ -2007,8 +2006,7 @@ def _process_scheduled_day(
             day,
             asset_type,
         )
-        getter = get_tick_range if callable(get_tick_range) else legacy_second_range
-        frame = getter(second_symbols, day, day, asset_type, until=cutoff)
+        frame = get_tick_range(second_symbols, day, day, asset_type, until=cutoff)
         bars = _scheduled_minute_bars(frame, market, asset_type)
         if not bars:
             raise ValueError(f"{day.isoformat()} tick历史行情为空，无法续接模拟盘")

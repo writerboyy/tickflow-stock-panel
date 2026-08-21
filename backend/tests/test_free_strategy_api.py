@@ -17,6 +17,7 @@ from app.api.free_strategy import (
     migrate_legacy_five_fortunes_strategies,
     migrate_managed_etf_nav_alignment,
     migrate_managed_large_amount_first_board,
+    migrate_managed_strong_momentum,
     provision_managed_template_strategies,
     router,
 )
@@ -49,6 +50,75 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
 
 def test_paper_write_uses_longer_callback_timeout_than_backtests():
     assert PaperWrite(strategy_id="paper").callback_timeout_seconds == 120
+
+
+def test_strategy_detail_reports_quote_execution_mode_for_paper_default(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "quote-strategy",
+        "实时策略",
+        "def on_quote(context, quotes):\n    pass\n",
+        {"timeframe": "1m"},
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    response = TestClient(app).get(f"/api/free-strategies/{strategy['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["execution_mode_hint"] == "quote"
+
+
+def test_create_paper_account_defaults_quote_strategy_to_websocket(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "quote-strategy",
+        "实时策略",
+        "def on_quote(context, quotes):\n    pass\n",
+        {"timeframe": "1m", "asset_type": "stock"},
+    )
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.state.quote_service = SimpleNamespace(
+        is_realtime_allowed=lambda: True,
+        get_min_interval=lambda: 3.0,
+    )
+    app.include_router(router)
+
+    response = TestClient(app).post(
+        "/api/free-strategies/paper/accounts",
+        json={"strategy_id": strategy["id"], "name": "实时策略模拟"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["market_mode"] == "websocket"
+
+
+def test_managed_strong_momentum_migration_replaces_only_known_old_source(tmp_path, monkeypatch):
+    from hashlib import sha256
+
+    replacement = TEMPLATES["strong_momentum"]["source"]
+    old_source = replacement.replace(
+        "09:30:16、09:31:00、09:32:00、09:37:00、10:29:00",
+        "09:30:16、09:31、09:32、09:37、10:29",
+    ).replace(
+        '("09:30:16", "09:31:00", "09:32:00", "09:37:00", "10:29:00")',
+        '("09:30:16", "09:31", "09:32", "09:37", "10:29")',
+    ).replace(
+        "if bar is None or bar.timestamp > context.now or not bar.tradable",
+        "if bar is None or bar.timestamp != context.now or not bar.tradable",
+    )
+    monkeypatch.setattr(
+        free_strategy,
+        "MANAGED_STRONG_MOMENTUM_SHA256",
+        frozenset({sha256(old_source.encode("utf-8")).hexdigest()}),
+    )
+    store = FreeStrategyStore(tmp_path)
+    store.save("strong", "强者恒强", old_source, {"timeframe": "1m"})
+
+    assert migrate_managed_strong_momentum(tmp_path) == ["strong"]
+    migrated = store.get("strong")
+    assert migrated["source"] == replacement
+    assert migrated["revision"] == 2
 
 
 def test_four_mode_template_is_provisioned_once_and_listed_for_paper(tmp_path):

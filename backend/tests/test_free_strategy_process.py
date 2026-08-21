@@ -617,9 +617,9 @@ def test_minute_rows_derive_raw_prices_split_and_limits_from_daily_data():
     assert (bars[0].limit_up, bars[0].limit_down) == (11, 9)
 
 
-def test_second_rows_are_used_for_second_precision_callbacks_without_minute_fallback():
+def test_tick_rows_are_used_for_second_precision_callbacks_without_minute_fallback():
     class FakeRepository:
-        def get_second_range(self, _symbols, _start, _end, _asset_type):
+        def get_tick_range(self, _symbols, _start, _end, _asset_type):
             return pl.DataFrame({
                 "symbol": ["X", "X"],
                 "datetime": [datetime(2024, 1, 2, 9, 30, 16), datetime(2024, 1, 2, 9, 31)],
@@ -639,7 +639,7 @@ def test_second_rows_are_used_for_second_precision_callbacks_without_minute_fall
 
 def test_second_precision_callbacks_run_at_093016_and_093100_from_provider_rows():
     class FakeRepository:
-        def get_second_range(self, _symbols, _start, _end, _asset_type):
+        def get_tick_range(self, _symbols, _start, _end, _asset_type):
             return pl.DataFrame({
                 "symbol": ["X", "X"],
                 "datetime": [datetime(2024, 1, 2, 9, 30, 16), datetime(2024, 1, 2, 9, 31)],
@@ -686,14 +686,19 @@ def mark(context):
     ] == [("2024-01-02T09:30:16", "X", 100)]
 
 
-def test_second_precision_history_missing_fails_closed_instead_of_using_minute_rows():
-    class MinuteOnlyRepository:
+def test_second_precision_history_rejects_legacy_second_rows():
+    class LegacySecondRepository:
         def get_second_range(self, *_args, **_kwargs):
-            return pl.DataFrame()
+            return pl.DataFrame({
+                "symbol": ["X"],
+                "datetime": [datetime(2024, 1, 2, 9, 30, 16)],
+                "open": [10.0], "high": [10.1], "low": [10.0],
+                "close": [10.1], "volume": [100.0], "amount": [1010.0],
+            })
 
-    with pytest.raises(ValueError, match="秒级K历史"):
+    with pytest.raises(ValueError, match="没有 tick/逐笔行情能力"):
         list(_read_rows(
-            MinuteOnlyRepository(), ["X"], date(2024, 1, 2), date(2024, 1, 2),
+            LegacySecondRepository(), ["X"], date(2024, 1, 2), date(2024, 1, 2),
             "stock", "1m", allow_empty=True, second_precision=True,
         ))
 
@@ -726,8 +731,8 @@ def test_tick_history_is_used_for_explicit_second_callbacks_without_minute_fallb
 def test_scheduled_backtest_replays_second_snapshots_at_original_callback_times(monkeypatch):
     day = date(2024, 1, 2)
 
-    class SecondRepository:
-        def get_second_snapshot(self, symbols, at, asset_type="stock"):
+    class TickRepository:
+        def get_tick_snapshot(self, symbols, at, asset_type="stock"):
             del asset_type
             values = {
                 datetime(2024, 1, 2, 9, 30, 16): (10.0, 10.1),
@@ -747,7 +752,7 @@ def test_scheduled_backtest_replays_second_snapshots_at_original_callback_times(
             ]
             return pl.DataFrame(rows).group_by("symbol", maintain_order=True).tail(1) if rows else pl.DataFrame()
 
-        def get_second_next(self, symbols, after, until, asset_type="stock"):
+        def get_tick_next(self, symbols, after, until, asset_type="stock"):
             del asset_type
             values = [
                 (datetime(2024, 1, 2, 9, 30, 16), 10.1),
@@ -789,7 +794,7 @@ def mark(context):
         lambda *_args, **_kwargs: None,
     )
     advance_scheduled_session(
-        SecondRepository(), engine, MarketData(), day,
+        TickRepository(), engine, MarketData(), day,
         datetime(2024, 1, 2, 9, 31), "stock", "1m",
         finalize=False,
     )
@@ -806,8 +811,8 @@ def mark(context):
 def test_second_precision_callback_uses_last_trade_before_boundary_and_optional_benchmark(monkeypatch):
     day = date(2024, 1, 2)
 
-    class SecondRepository:
-        def get_second_snapshot(self, symbols, at, asset_type="stock"):
+    class TickRepository:
+        def get_tick_snapshot(self, symbols, at, asset_type="stock"):
             del symbols, asset_type
             if at != datetime(2024, 1, 2, 9, 31):
                 return pl.DataFrame()
@@ -843,7 +848,7 @@ def mark(context):
     )
 
     advance_scheduled_session(
-        SecondRepository(), engine, MarketData(), day,
+        TickRepository(), engine, MarketData(), day,
         datetime(2024, 1, 2, 9, 31), "stock", "1m", finalize=False,
     )
 

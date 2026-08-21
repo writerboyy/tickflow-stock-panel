@@ -1178,17 +1178,12 @@ def _read_rows(
         window["until"] = until
     if second_precision:
         get_tick_range = getattr(repo, "get_tick_range", None)
-        legacy_second_range = getattr(repo, "get_second_range", None)
-        if not callable(get_tick_range) and not callable(legacy_second_range):
+        if not callable(get_tick_range):
             raise ValueError(
                 "回测包含秒级定时点，但当前历史 provider 没有 tick/逐笔行情能力；"
                 "请接入 tick 数据后再回测"
             )
-        # Tick is the source of truth for explicit-second callbacks.  The
-        # legacy method is only retained for custom repositories and old test
-        # doubles; it never falls back to minute K.
-        getter = get_tick_range if callable(get_tick_range) else legacy_second_range
-        frame = getter(symbols, start, end, asset_type, **window)
+        frame = get_tick_range(symbols, start, end, asset_type, **window)
         interval_label = "tick"
     else:
         frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
@@ -1211,7 +1206,7 @@ def _read_rows(
         if allow_empty and not second_precision:
             return []
         asset_label = "ETF" if asset_type == "etf" else "股票"
-        source_label = "秒级K历史/tick" if second_precision else f"{interval_label}K"
+        source_label = "tick/逐笔行情" if second_precision else f"{interval_label}K"
         raise ValueError(
             f"没有可用的{asset_label}{source_label}历史数据。"
             f"请先同步{asset_label}{source_label}，"
@@ -1808,16 +1803,11 @@ def _scheduled_snapshot(
         # A minute bar cannot prove what was tradable at 09:30:16.  Only a
         # provider-owned tick snapshot may satisfy a second-precision task.
         get_tick_snapshot = getattr(repo, "get_tick_snapshot", None)
-        legacy_second_snapshot = getattr(repo, "get_second_snapshot", None)
-        if not callable(get_tick_snapshot) and not callable(legacy_second_snapshot):
-            get_second_snapshot = getattr(repo, "get_quote_snapshot", None)
-        else:
-            get_second_snapshot = get_tick_snapshot if callable(get_tick_snapshot) else legacy_second_snapshot
-        if not callable(get_second_snapshot):
+        if not callable(get_tick_snapshot):
             raise ValueError(
                 f"{timestamp.isoformat()} 定时任务需要 tick/逐笔历史行情，当前 provider 只有分钟K"
             )
-        frame = get_second_snapshot(symbols, timestamp, asset_type)
+        frame = get_tick_snapshot(symbols, timestamp, asset_type)
         if frame is None or frame.is_empty():
             raise ValueError(f"{timestamp.isoformat()} tick历史行情为空，无法执行定时任务")
         if not frame.is_empty():
@@ -2057,8 +2047,6 @@ def _process_scheduled_fills(
                 "get_tick_next" if second_precision else "get_minute_next",
                 None,
             )
-            if second_precision and not callable(get_next):
-                get_next = getattr(repo, "get_second_next", None)
             if not callable(get_next):
                 continue
             frame = get_next(

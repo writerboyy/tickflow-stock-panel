@@ -34,6 +34,7 @@ from app.free_strategy.templates import (
     MANAGED_ETF_NAV_ALIGNMENT_SHA256,
     MANAGED_FIVE_FORTUNES_SHA256,
     MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256,
+    MANAGED_STRONG_MOMENTUM_SHA256,
     TEMPLATES,
 )
 from app.market_time import cn_naive_now, cn_today
@@ -405,6 +406,30 @@ def migrate_managed_large_amount_first_board(data_dir: Path) -> list[str]:
     return migrated
 
 
+def migrate_managed_strong_momentum(data_dir: Path) -> list[str]:
+    """Upgrade the known pre-tick strong-momentum snapshot to second schedules."""
+    store = FreeStrategyStore(data_dir)
+    replacement = TEMPLATES["strong_momentum"]["source"]
+    replacement_hash = sha256(replacement.encode("utf-8")).hexdigest()
+    migrated: list[str] = []
+    for summary in store.list():
+        strategy = store.get(str(summary["id"]))
+        if strategy.get("dialect") == "joinquant":
+            continue
+        source_hash = sha256(str(strategy["source"]).encode("utf-8")).hexdigest()
+        if source_hash == replacement_hash or source_hash not in MANAGED_STRONG_MOMENTUM_SHA256:
+            continue
+        store.save(
+            strategy["id"],
+            strategy["name"],
+            replacement,
+            strategy.get("config", {}),
+            dialect="native",
+        )
+        migrated.append(str(strategy["id"]))
+    return migrated
+
+
 def migrate_legacy_external_large_amount_first_board(data_dir: Path) -> list[str]:
     """Replace the untouched JoinQuant first-board import with the native minute strategy."""
     store = FreeStrategyStore(data_dir)
@@ -587,6 +612,7 @@ class PaperWrite(BacktestWrite):
     callback_timeout_seconds: float = Field(default=120, ge=0.1, le=120)
     name: str = Field(default="量化策略 · 模拟", min_length=1, max_length=40)
     market_mode: Literal["bar_1m", "bar_1d", "poll_3s", "websocket"] | None = None
+    market_mode_explicit: bool = Field(default=False, exclude=True, repr=False)
     continuation_job_id: str | None = Field(default=None, min_length=1, max_length=64)
     risk_config: PaperRiskWrite = Field(default_factory=PaperRiskWrite)
 
@@ -597,6 +623,13 @@ class PaperWrite(BacktestWrite):
         if not name:
             raise ValueError("模拟名称不能为空")
         return name
+
+    @model_validator(mode="before")
+    @classmethod
+    def remember_market_mode_explicit(cls, values: Any):
+        data = dict(values or {})
+        data["market_mode_explicit"] = "market_mode" in data
+        return data
 
     @model_validator(mode="after")
     def normalize_market_mode(self):
@@ -1226,9 +1259,12 @@ def list_paper_accounts(request: Request):
 
 @router.post("/paper/accounts")
 def create_paper_account(req: PaperWrite, request: Request):
-    _validate_paper_payload(req, request)
     strategy = _strategy_store(request).get(req.strategy_id)
     _validate_strategy_runtime(strategy)
+    if not req.market_mode_explicit and strategy.get("execution_mode_hint") == "quote":
+        req.market_mode = "websocket"
+        req.timeframe = "1m"
+    _validate_paper_payload(req, request)
     account_id = uuid.uuid4().hex[:12]
     payload = req.model_dump(mode="json")
     risk_config = payload.pop("risk_config")

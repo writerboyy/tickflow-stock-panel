@@ -1,6 +1,7 @@
 """自由策略和模拟账户的 JSON 文件存储。"""
 from __future__ import annotations
 
+import ast
 import fcntl
 import json
 import os
@@ -19,6 +20,23 @@ from app.market_time import cn_today
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def infer_execution_mode(source: str) -> str | None:
+    try:
+        module = ast.parse(source)
+    except SyntaxError:
+        return None
+    callbacks = {
+        node.name
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if "on_quote" in callbacks:
+        return "quote"
+    if "on_bar" in callbacks:
+        return "full_bar"
+    return "scheduled"
 
 
 def _atomic_json_write(path: Path, value: dict[str, Any]) -> None:
@@ -56,6 +74,7 @@ class FreeStrategyStore:
         path = self._path(strategy_id)
         manifest = self._normalize_manifest(json.loads((path / "manifest.json").read_text(encoding="utf-8")))
         manifest["source"] = (path / "strategy.py").read_text(encoding="utf-8")
+        manifest["execution_mode_hint"] = infer_execution_mode(manifest["source"])
         if manifest["dialect"] == "joinquant" and not isinstance(manifest.get("compatibility_report"), dict):
             manifest["compatibility_report"] = analyze_source(manifest["source"])
         return manifest
@@ -109,7 +128,11 @@ class FreeStrategyStore:
             "created_at": previous.get("created_at", now_iso()),
         }
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {**manifest, "source": source}
+        return {
+            **manifest,
+            "source": source,
+            "execution_mode_hint": infer_execution_mode(source),
+        }
 
     def rename(self, strategy_id: str, name: str) -> dict[str, Any]:
         path = self._path(strategy_id)
@@ -118,7 +141,12 @@ class FreeStrategyStore:
         manifest["name"] = name
         manifest["updated_at"] = now_iso()
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {**manifest, "source": (path / "strategy.py").read_text(encoding="utf-8")}
+        source = (path / "strategy.py").read_text(encoding="utf-8")
+        return {
+            **manifest,
+            "source": source,
+            "execution_mode_hint": infer_execution_mode(source),
+        }
 
     def delete(self, strategy_id: str) -> None:
         shutil.rmtree(self._path(strategy_id))

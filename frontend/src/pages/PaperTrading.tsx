@@ -409,20 +409,36 @@ function CreateAccountDialog({ strategyId, backtestJobId, onClose, onCreated }: 
     risk_config: DEFAULT_RISK,
   })
   const [pending, setPending] = useState(false)
+  const strategyDetail = useQuery({
+    queryKey: ['free-strategy', form.strategy_id],
+    queryFn: () => api.freeStrategy(form.strategy_id),
+    enabled: Boolean(form.strategy_id),
+  })
 
   useEffect(() => {
     if (!form.strategy_id && initialStrategy) setForm(current => ({ ...current, strategy_id: initialStrategy }))
   }, [form.strategy_id, initialStrategy])
 
   useEffect(() => {
-    const selected = list.find(item => item.id === form.strategy_id)
+    const selected = strategyDetail.data
     if (!selected) return
     const saved = selected.config ?? {}
+    const configuredMode = String(saved.paper_market_mode ?? '')
+    const preferredMode: PaperMarketMode = (
+      configuredMode === 'bar_1m'
+      || configuredMode === 'bar_1d'
+      || configuredMode === 'poll_3s'
+      || configuredMode === 'websocket'
+    )
+      ? configuredMode
+      : selected.execution_mode_hint === 'quote'
+        ? 'websocket'
+        : saved.timeframe === '1d' ? 'bar_1d' : 'bar_1m'
     setForm(current => ({
       ...current,
       name: current.name === '量化策略 · 模拟' ? `${selected.name} · 模拟` : current.name,
       asset_type: saved.asset_type === 'stock' ? 'stock' : 'etf',
-      market_mode: saved.timeframe === '1d' ? 'bar_1d' : 'bar_1m',
+      market_mode: preferredMode,
       initial_capital: Number(saved.paper_initial_capital ?? saved.initial_capital ?? current.initial_capital),
       fees_pct: Number(saved.fees_pct ?? current.fees_pct),
       commission_pct: saved.commission_pct == null ? null : Number(saved.commission_pct),
@@ -442,7 +458,7 @@ function CreateAccountDialog({ strategyId, backtestJobId, onClose, onCreated }: 
       fill_policy: saved.fill_policy === 'close' ? 'close' : 'next_open',
       continuation_job_id: backtestJobId || null,
     }))
-  }, [backtestJobId, form.strategy_id, list])
+  }, [backtestJobId, form.strategy_id, strategyDetail.data])
 
   const setRisk = (key: keyof typeof DEFAULT_RISK, value: number) => setForm(current => ({ ...current, risk_config: { ...current.risk_config, [key]: value } }))
   const submit = async () => {

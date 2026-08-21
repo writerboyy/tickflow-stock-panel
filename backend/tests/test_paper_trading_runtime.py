@@ -1224,6 +1224,50 @@ def run(context):
     assert len(engine.account.fills) == 1
 
 
+def test_scheduled_historical_catch_up_rejects_legacy_second_rows(tmp_path):
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '09:30:16', symbols=['X'])
+
+def run(context):
+    pass
+"""
+    engine = FreeStrategyEngine(source, timeframe="1m")
+
+    class LegacySecondRepository:
+        def get_second_range(self, *_args, **_kwargs):
+            return pl.DataFrame({
+                "symbol": ["X"],
+                "datetime": [datetime(2026, 8, 20, 9, 30, 16)],
+                "open": [10.0], "high": [10.0], "low": [10.0],
+                "close": [10.0], "volume": [100.0], "amount": [1000.0],
+            })
+
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "strategy_id": "second-test",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+    })
+
+    with pytest.raises(ValueError, match="没有 tick/逐笔行情能力"):
+        _process_scheduled_day(
+            store,
+            "paper",
+            current,
+            engine,
+            LegacySecondRepository(),
+            MarketData(),
+            date(2026, 8, 20),
+            datetime(2026, 8, 20, 9, 30, 16),
+            "stock",
+            "1m",
+            finalize=False,
+        )
+
+
 def test_websocket_account_is_rejected_above_deduplicated_limit():
     hub = MarketDataHub(FakeQuoteService(), repo=None)
     with pytest.raises(ValueError, match="最多 200"):
