@@ -132,7 +132,13 @@ def _tick_records(data: Any, default_symbol: str | None = None) -> list[dict[str
     if not isinstance(data, dict):
         return []
     if data.get("__bigqmt_type__") == "DataFrame":
-        return _tick_records(data.get("records") or [], default_symbol)
+        records = data.get("records") or []
+        if isinstance(records, dict):
+            try:
+                records = pl.DataFrame(records).to_dicts()
+            except Exception:  # noqa: BLE001
+                return []
+        return _tick_records(records, default_symbol)
     if isinstance(data.get("records"), list):
         return _tick_records(data["records"], default_symbol)
     known = {

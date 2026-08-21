@@ -13,6 +13,7 @@ from app.data_providers.tickflow_provider import TickFlowProvider
 from app.free_strategy.tick_health import inspect_tick_data, require_tick_data
 from app.services.qmt_tick_import import import_qmt_ticks
 from app.tickflow.repository import DataStore, KlineRepository
+from scripts.import_qmt_ticks import _local_trading_dates
 
 
 def _raw_tick(symbol: str, timestamp: str, price: float, sequence: int = 1) -> dict:
@@ -36,6 +37,21 @@ def _raw_tick(symbol: str, timestamp: str, price: float, sequence: int = 1) -> d
         {
             "__bigqmt_type__": "DataFrame",
             "records": [_raw_tick("600000.SH", "20240801093000", 10.0)],
+        },
+        {
+            "600000.SH": {
+                "__bigqmt_type__": "DataFrame",
+                "records": {
+                    "time": ["20240801093000"],
+                    "lastPrice": [10.0],
+                    "open": [10.0],
+                    "high": [10.0],
+                    "low": [10.0],
+                    "volume": [100],
+                    "amount": [1000.0],
+                    "seq": [1],
+                },
+            },
         },
         {"600000.SH": [_raw_tick("600000.SH", "20240801093000", 10.0)]},
     ],
@@ -163,6 +179,23 @@ class _ImportProvider:
         return normalize_tick(self.rows.get(symbol, []), default_symbol=symbol, source="qmt")
 
 
+def test_import_cli_uses_local_index_calendar(monkeypatch, tmp_path):
+    days = [date(2024, 8, 1), date(2024, 8, 2)]
+
+    class Repository:
+        @staticmethod
+        def get_daily_asset(asset_type, symbol, start, end, columns):
+            assert (asset_type, symbol, start, end, columns) == (
+                "index", "000001.SH", days[0], days[-1], ["date"],
+            )
+            return pl.DataFrame({"date": days})
+
+    monkeypatch.setattr("scripts.import_qmt_ticks.DataStore", lambda path: path)
+    monkeypatch.setattr("scripts.import_qmt_ticks.KlineRepository", lambda _store: Repository())
+
+    assert _local_trading_dates(tmp_path, days[0], days[-1]) == days
+
+
 def test_import_is_atomic_per_day_and_preserves_duplicate_timestamps(tmp_path):
     provider = _ImportProvider({
         "600000.SH": [
@@ -191,6 +224,41 @@ def test_import_is_atomic_per_day_and_preserves_duplicate_timestamps(tmp_path):
             date(2024, 8, 1), date(2024, 8, 1),
         )
     assert part.read_bytes() == before
+
+
+def test_import_uses_explicit_local_calendar_without_provider_calendar(tmp_path):
+    day = date(2024, 8, 1)
+    provider = _ImportProvider({
+        "600000.SH": [_raw_tick("600000.SH", "20240801093000", 10.0)],
+    })
+    provider.get_trading_dates = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("provider calendar must not be called"),
+    )
+
+    result = import_qmt_ticks(
+        provider,
+        tmp_path,
+        ["600000.SH"],
+        day,
+        day,
+        trading_dates=[day],
+    )
+
+    assert result["trading_dates"] == ["2024-08-01"]
+
+
+def test_import_rejects_explicit_calendar_outside_requested_range(tmp_path):
+    provider = _ImportProvider({})
+
+    with pytest.raises(ValueError, match="请求区间外"):
+        import_qmt_ticks(
+            provider,
+            tmp_path,
+            ["600000.SH"],
+            date(2024, 8, 1),
+            date(2024, 8, 1),
+            trading_dates=[date(2024, 8, 2)],
+        )
 
 
 def test_import_rejects_invalid_canonical_values_before_replacing_partition(tmp_path):

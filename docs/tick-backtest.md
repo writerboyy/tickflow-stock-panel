@@ -22,10 +22,11 @@ cd backend
 uv run python scripts/import_qmt_ticks.py \
   --symbols 600000.SH,000001.SZ \
   --start 2026-08-03 \
-  --end 2026-08-07
+  --end 2026-08-07 \
+  --rpc-timeout 120
 ```
 
-每个交易日的全部请求都成功并通过 schema 检查后，才会原子替换当日分区。
+导入命令使用本地 `000001.SH` 指数日线作为交易日历，不依赖远程 QMT 日历请求。本地日历为空时直接拒绝导入。历史 Tick 响应较大，命令的独立 RPC 超时默认为 120 秒，不影响账户同步和实盘查询。每个交易日的全部请求都成功并通过 schema 检查后，才会原子替换当日分区。
 
 ## TickFlow/QMT 实时对比
 

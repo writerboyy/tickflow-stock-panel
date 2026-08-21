@@ -114,6 +114,7 @@ def import_qmt_ticks(
     start: date,
     end: date,
     *,
+    trading_dates: Iterable[date] | None = None,
     on_progress: Callable[[str, date, int], None] | None = None,
 ) -> dict[str, Any]:
     if end < start:
@@ -125,12 +126,18 @@ def import_qmt_ticks(
         raise ValueError("至少需要一个股票代码")
     if not bool(getattr(getattr(provider, "capabilities", None), "tick", False)):
         raise ValueError("当前 provider 未声明 Tick 能力")
-    trading_dates = provider.get_trading_dates(start, end)
-    if not trading_dates:
-        raise ValueError(f"{start.isoformat()} 至 {end.isoformat()} 没有 QMT 交易日")
+    calendar_dates = sorted(set(
+        provider.get_trading_dates(start, end)
+        if trading_dates is None else trading_dates
+    ))
+    outside = [day for day in calendar_dates if day < start or day > end]
+    if outside:
+        raise ValueError("交易日历包含请求区间外的日期")
+    if not calendar_dates:
+        raise ValueError(f"{start.isoformat()} 至 {end.isoformat()} 没有可用交易日")
     imported_rows = 0
     partitions: set[date] = set()
-    for day in trading_dates:
+    for day in calendar_dates:
         begin = datetime.combine(day, time.min)
         finish = datetime.combine(day, time.max)
         day_frames: list[pl.DataFrame] = []
@@ -153,7 +160,7 @@ def import_qmt_ticks(
         "symbols": normalized_symbols,
         "start": start.isoformat(),
         "end": end.isoformat(),
-        "trading_dates": [day.isoformat() for day in trading_dates],
+        "trading_dates": [day.isoformat() for day in calendar_dates],
         "partitions": len(partitions),
         "rows": imported_rows,
     }
