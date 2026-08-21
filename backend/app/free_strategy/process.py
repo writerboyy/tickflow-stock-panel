@@ -41,7 +41,6 @@ from .readiness import (
     persist_readiness_report,
 )
 from .research_periods import build_research_periods
-from .schedule import has_explicit_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -1719,6 +1718,8 @@ def _live_scheduled_snapshot(
     symbols: list[str],
     timestamp: datetime,
     timeframe: str,
+    *,
+    second_precision: bool = False,
 ) -> list[Bar]:
     visible = [
         bar for bar in live_bars
@@ -1727,7 +1728,13 @@ def _live_scheduled_snapshot(
         and bar.symbol in symbols
     ]
     freshness_floor = timestamp
-    if time(11, 30) < timestamp.time() < time(13, 0):
+    if second_precision:
+        # Explicit-second callbacks see the last quote that had arrived at the
+        # boundary.  The quote must still belong to the current continuous
+        # trading session; a morning quote cannot satisfy an afternoon task.
+        session_start = time(9, 30) if timestamp.time() < time(12, 0) else time(13, 0)
+        freshness_floor = datetime.combine(timestamp.date(), session_start)
+    elif time(11, 30) < timestamp.time() < time(13, 0):
         freshness_floor = datetime.combine(timestamp.date(), time(11, 30))
     latest_timestamp: dict[str, datetime] = {}
     for bar in visible:
@@ -1770,7 +1777,13 @@ def _scheduled_snapshot(
     if live_only:
         # Historical rows remain available to history()/indicators, but they can
         # never become today's execution snapshot.
-        return _live_scheduled_snapshot(live_bars or (), symbols, timestamp, timeframe)
+        return _live_scheduled_snapshot(
+            live_bars or (),
+            symbols,
+            timestamp,
+            timeframe,
+            second_precision=second_precision,
+        )
     intraday_second = time(9, 30) <= timestamp.time() < time(15, 0)
     if (second_precision and intraday_second) or timestamp.time().second or timestamp.time().microsecond:
         # A minute bar cannot prove what was tradable at 09:30:16.  Only a
@@ -2048,12 +2061,11 @@ def replay_second_precision_session(
 ) -> int:
     """Replay a second-level session without moving a callback past its target.
 
-    A strategy may combine ``on_quote`` with explicit schedules.  Feeding all
-    rows through ``engine.run`` lets a late row (for example 09:31:05) catch up
-    a 09:31:00 task while exposing that future row to the callback.  The
-    original scheduled API sees the latest trade *at or before* the target, so
-    market callbacks and scheduled callbacks are replayed in two ordered
-    phases here.
+    A strategy may combine ``on_quote`` with explicit schedules.  Each target
+    consumes rows only through its own boundary, then runs the scheduled
+    callback against the latest visible row.  Market callbacks and scheduled
+    callbacks are replayed in two ordered phases so a later row can never be
+    exposed to an earlier callback.
     """
     grouped = [
         (timestamp, list(values))
@@ -2136,16 +2148,18 @@ def advance_scheduled_session(
     second_precision = bool(engine.second_precision_schedules)
     live_values = tuple(live_bars or ())
     replayed_live_keys: set[tuple[datetime, str]] = set()
-    last_event_timestamp: datetime | None = None
 
     def replay_live_quotes_through(target: datetime) -> None:
         """Replay received quotes once, without crossing a scheduled boundary."""
         grouped: dict[datetime, dict[str, Bar]] = {}
+        last_timestamp = engine._last_timestamp  # noqa: SLF001
         for bar in live_values:
             if bar.date != day or bar.timestamp > target:
                 continue
             key = (bar.timestamp, bar.symbol)
-            if key not in replayed_live_keys:
+            if key not in replayed_live_keys and (
+                last_timestamp is None or bar.timestamp > last_timestamp
+            ):
                 grouped.setdefault(bar.timestamp, {})[bar.symbol] = bar
         for timestamp, by_symbol in sorted(grouped.items()):
             values = [
@@ -2182,29 +2196,10 @@ def advance_scheduled_session(
         )
         symbols = _scheduled_symbols(engine, timestamp)
         required_symbols = _scheduled_required_symbols(engine, timestamp)
-        # A live poll may land a few seconds after the requested boundary.  Use
-        # the first common realtime snapshot at/after that boundary for the
-        # callback, while retaining ``scheduled_at`` as the strategy event ID.
+        # The callback boundary is a logical clock.  Its snapshot may only use
+        # quotes already visible at that instant; a later poll must not be
+        # backdated into this callback.
         event_timestamp = timestamp
-        if live_only and has_explicit_seconds(at):
-            available_by_time: dict[datetime, set[str]] = {}
-            for bar in live_values:
-                if (
-                    bar.date == day
-                    and timestamp <= bar.timestamp <= cutoff
-                    and (not required_symbols or bar.symbol in required_symbols)
-                ):
-                    available_by_time.setdefault(bar.timestamp, set()).add(bar.symbol)
-            required = set(required_symbols)
-            common_times = sorted(
-                value
-                for value, symbols_at_time in available_by_time.items()
-                if not required or required.issubset(symbols_at_time)
-            )
-            if common_times:
-                # A poll can contain several snapshots.  Consume the first
-                # snapshot that covers every required symbol after the target.
-                event_timestamp = common_times[0]
         snapshot = _scheduled_snapshot(
             repo,
             engine,
@@ -2227,28 +2222,29 @@ def advance_scheduled_session(
                 retry_times.append(first_continuous_minute)
             if cutoff > timestamp and cutoff not in retry_times:
                 retry_times.append(cutoff)
-            for retry_timestamp in retry_times:
-                retry_snapshot = _scheduled_snapshot(
-                    repo,
-                    engine,
-                    market,
-                    retry_timestamp,
-                    asset_type,
-                    timeframe,
-                    symbols=symbols,
-                    live_bars=live_values,
-                    live_only=live_only,
-                    second_precision=second_precision,
-                )
-                retry_missing = _missing_snapshot_symbols(
-                    retry_snapshot, required_symbols,
-                )
-                if not retry_missing:
-                    event_timestamp = retry_timestamp
-                    snapshot = retry_snapshot
-                    missing_required = []
-                    break
-                missing_required = retry_missing
+            if not (live_only and second_precision):
+                for retry_timestamp in retry_times:
+                    retry_snapshot = _scheduled_snapshot(
+                        repo,
+                        engine,
+                        market,
+                        retry_timestamp,
+                        asset_type,
+                        timeframe,
+                        symbols=symbols,
+                        live_bars=live_values,
+                        live_only=live_only,
+                        second_precision=second_precision,
+                    )
+                    retry_missing = _missing_snapshot_symbols(
+                        retry_snapshot, required_symbols,
+                    )
+                    if not retry_missing:
+                        event_timestamp = retry_timestamp
+                        snapshot = retry_snapshot
+                        missing_required = []
+                        break
+                    missing_required = retry_missing
             if event_timestamp == timestamp:
                 if live_only:
                     missing_text = _missing_snapshot_text(missing_required)
@@ -2308,25 +2304,17 @@ def advance_scheduled_session(
                 second_precision=second_precision,
             )
         if live_only and second_precision:
-            # Consume only actual quotes at or before this boundary. A future
-            # quote used as a late snapshot is replayed before the next
-            # boundary (or after the final boundary), exactly once.
+            # Consume only actual quotes at or before this boundary. Quotes
+            # after it remain for a later boundary or the final replay.
             replay_live_quotes_through(timestamp)
-            if event_timestamp > timestamp:
-                # A poll can arrive after the source callback boundary.  Keep
-                # the late quote as the snapshot source, but publish its
-                # logical bar at the scheduled time so strategy callbacks and
-                # fills retain the original second-level timestamp.
-                snapshot = [replace(bar, timestamp=timestamp) for bar in snapshot]
         engine.advance_event(
             timestamp if live_only and second_precision else event_timestamp,
             snapshot,
             event_type="scheduled",
             scheduled_at=at,
         )
-        last_event_timestamp = max(last_event_timestamp or event_timestamp, event_timestamp)
     if live_only and second_precision:
-        replay_live_quotes_through(last_event_timestamp or cutoff)
+        replay_live_quotes_through(cutoff)
     _process_scheduled_fills(
         repo, engine, market, cutoff, asset_type, timeframe,
         live_bars=live_values, live_only=live_only, second_precision=second_precision,

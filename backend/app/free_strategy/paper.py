@@ -210,7 +210,7 @@ def _quotes_from_records(records: list[dict[str, Any]]) -> list[Quote]:
 
 
 def _quote_to_live_bar(quote: Quote, *, cutoff: datetime | None = None) -> Bar:
-    """将一个实时快照转换为当前可见价格 Bar，不引入历史 OHLC。"""
+    """将一个实时快照转换为当前可见价格 Bar。"""
     # 保留报价原始秒数；调度和成交都以该时间戳作为唯一事实。
     timestamp = quote.timestamp
     if (
@@ -225,10 +225,12 @@ def _quote_to_live_bar(quote: Quote, *, cutoff: datetime | None = None) -> Bar:
     return Bar(
         symbol=quote.symbol,
         timestamp=timestamp,
-        open=price,
-        high=price,
-        low=price,
+        open=float(quote.open if quote.open is not None else price),
+        high=float(quote.high if quote.high is not None else price),
+        low=float(quote.low if quote.low is not None else price),
         close=price,
+        volume=float(quote.volume or 0),
+        amount=float(quote.amount or 0),
         session_volume=float(quote.volume or 0),
         raw_open=price,
         raw_high=price,
@@ -366,6 +368,10 @@ class MarketDataHub:
         self._live_quote_last: dict[tuple[str, str], tuple[datetime, float, float]] = {}
         self._live_quote_buckets: dict[tuple[str, str], _LiveMinuteBucket] = {}
         self._live_bars: dict[tuple[str, str], deque[Bar]] = {}
+        # The quote service intentionally exposes only its latest snapshot.
+        # Keep a bounded session history here so a delayed clock can still
+        # reconstruct the last quote visible at an explicit-second boundary.
+        self._quote_history: dict[str, deque[dict[str, Any]]] = {}
         self._bar_stop = threading.Event()
         self._bar_thread: threading.Thread | None = None
         self._stream = None
@@ -775,6 +781,15 @@ class MarketDataHub:
         normalized = [item for item in (_quote_record(row) for row in records) if item is not None]
         if not normalized:
             return
+        with self._lock:
+            for row in normalized:
+                symbol = row["symbol"]
+                history = self._quote_history.setdefault(symbol, deque(maxlen=600))
+                timestamp = row["timestamp"]
+                if not history or history[-1]["timestamp"] < timestamp:
+                    history.append(dict(row))
+                elif history[-1]["timestamp"] == timestamp:
+                    history[-1] = dict(row)
         self._last_quote_at = max(str(item["timestamp"]) for item in normalized)
         by_symbol = {str(item["symbol"]): item for item in normalized}
         with self._lock:
@@ -918,18 +933,25 @@ class MarketDataHub:
             )
             if due is None:
                 continue
-            fresh_quotes = self._fresh_quote_records(sub.symbols, due.date())
-            quote_times = [
-                self._quote_datetime(row.get("timestamp"))
-                for row in fresh_quotes
-            ]
-            latest_quote = max(
-                (value for value in quote_times if value is not None and value <= now),
-                default=None,
+            with self._lock:
+                history_quotes = [
+                    dict(row)
+                    for symbol in sub.symbols
+                    for row in self._quote_history.get(symbol, ())
+                    if (
+                        (timestamp := self._quote_datetime(row.get("timestamp"))) is not None
+                        and timestamp.date() == due.date()
+                        and timestamp <= due
+                    )
+                ]
+            fresh_quotes = history_quotes or self._fresh_quote_records(
+                sub.symbols,
+                due.date(),
+                cutoff=due,
             )
-            # Keep the scheduled boundary in the strategy metadata, but let
-            # the live snapshot advance to the first quote received after it.
-            cutoff = max(due, latest_quote) if latest_quote is not None else due
+            # The scheduled boundary is the only logical clock.  Quotes after
+            # it are retained in the next poll's history, never backdated.
+            cutoff = due
             cutoff_value = cutoff.isoformat()
             monotonic_now = time.monotonic()
             if (

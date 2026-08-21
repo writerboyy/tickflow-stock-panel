@@ -84,6 +84,28 @@ def test_session_final_quote_is_clamped_to_closed_market_boundary():
     ).timestamp == datetime(2026, 8, 7, 10, 5, 6)
 
 
+def test_quote_to_live_bar_preserves_quote_ohlc_and_trade_totals():
+    converted = _quote_to_live_bar(Quote(
+        "X",
+        datetime(2026, 8, 7, 9, 31, 0),
+        10.8,
+        prev_close=10.0,
+        open=10.2,
+        high=11.0,
+        low=10.1,
+        volume=1234,
+        amount=13_000,
+    ))
+
+    assert (converted.open, converted.high, converted.low, converted.close) == (
+        10.2, 11.0, 10.1, 10.8,
+    )
+    assert (converted.volume, converted.amount, converted.session_volume) == (
+        1234, 13_000, 1234,
+    )
+    assert converted.execution_price("close") == 10.8
+
+
 def test_enabled_paper_notification_uses_current_wecom_hook(monkeypatch):
     submitted = []
 
@@ -1034,8 +1056,44 @@ def test_second_precision_clock_is_emitted_for_quote_execution_on_bar_feed():
     hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 9, 30, 20))  # noqa: SLF001
 
     payload = target.get_nowait()
-    assert payload["cutoff"] == "2024-01-02T09:30:18"
-    assert payload["quotes"][0]["timestamp"] == "2024-01-02T09:30:18"
+    assert payload["cutoff"] == "2024-01-02T09:30:16"
+    assert payload["quotes"] == []
+
+
+def test_second_precision_clock_uses_quote_history_before_boundary():
+    target = queue.Queue(maxsize=2)
+    subscription = _Subscription(
+        "paper",
+        "bar_1m",
+        {"A"},
+        "stock",
+        target,
+        execution_mode="scheduled",
+        scheduled_times=("09:30:16",),
+    )
+    hub = MarketDataHub(FakeQuoteService(), repo=None)
+    hub._dispatch_quotes("poll_3s", [
+        {
+            "symbol": "A",
+            "last_price": 10.0,
+            "timestamp": "2024-01-02T09:30:15",
+            "volume": 100,
+        },
+        {
+            "symbol": "A",
+            "last_price": 11.0,
+            "timestamp": "2024-01-02T09:30:18",
+            "volume": 110,
+        },
+    ])
+
+    hub._dispatch_scheduled_clocks([subscription], datetime(2024, 1, 2, 9, 30, 20))  # noqa: SLF001
+
+    payload = target.get_nowait()
+    assert payload["cutoff"] == "2024-01-02T09:30:16"
+    assert [row["timestamp"] for row in payload["quotes"]] == [
+        "2024-01-02T09:30:15",
+    ]
 
 
 def test_paper_detects_explicit_zero_second_schedule():
@@ -1043,7 +1101,7 @@ def test_paper_detects_explicit_zero_second_schedule():
     assert not _has_second_precision_schedule(("09:31",))
 
 
-def test_scheduled_live_second_callback_uses_first_common_quote_and_is_idempotent(
+def test_scheduled_live_second_callback_uses_latest_prior_quote_and_is_idempotent(
     monkeypatch, tmp_path,
 ):
     day = date(2026, 8, 20)
@@ -1072,6 +1130,7 @@ def run(context):
         ),
     )
     live_bars = [
+        Bar("X", datetime(2026, 8, 20, 9, 30, 15), 10, 10, 10, 10, volume=100),
         Bar("X", datetime(2026, 8, 20, 9, 30, 18), 10, 10, 10, 10, volume=100),
         Bar("X", datetime(2026, 8, 20, 9, 30, 21), 11, 11, 11, 11, volume=100),
     ]
@@ -1105,8 +1164,12 @@ def run(context):
     assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
         ("2026-08-20T09:30:16", 10),
     ]
-    assert engine.context.state["quote_times"] == ["2026-08-20T09:30:18"]
-    assert current["last_bar"] == "2026-08-20T09:30:18"
+    assert engine.context.state["quote_times"] == [
+        "2026-08-20T09:30:15",
+        "2026-08-20T09:30:18",
+        "2026-08-20T09:30:21",
+    ]
+    assert current["last_bar"] == "2026-08-20T09:30:21"
 
     # The schedule is marked done in the engine session, so a duplicate poll
     # cannot submit or fill the same callback again.

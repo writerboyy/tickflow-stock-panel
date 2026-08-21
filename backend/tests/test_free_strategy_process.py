@@ -1788,7 +1788,7 @@ def run(context):
     }
 
 
-def test_live_explicit_zero_second_callback_preserves_schedule_timestamp_with_late_quote():
+def test_live_explicit_zero_second_callback_uses_prior_quote_and_preserves_schedule_timestamp():
     source = """
 def initialize(context):
     context.schedule(run, '09:31:00', symbols=['X'])
@@ -1814,15 +1814,51 @@ def run(context):
         datetime(2024, 1, 2, 9, 31, 5),
         "stock",
         "1m",
-        live_bars=[Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11)],
+        live_bars=[
+            Bar("X", datetime(2024, 1, 2, 9, 30, 59), 10, 10, 10, 10),
+            Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11),
+        ],
         live_only=True,
     )
 
     assert engine.context.state == {
         "executed_at": "2024-01-02T09:31:00",
-        "price": 11.0,
-        "quote_times": ["2024-01-02T09:31:05"],
+        "price": 10.0,
+        "quote_times": [
+            "2024-01-02T09:30:59",
+            "2024-01-02T09:31:05",
+        ],
     }
+
+
+def test_live_explicit_second_callback_rejects_only_future_quote():
+    source = """
+def initialize(context):
+    context.schedule(run, '09:31:00', symbols=['X'])
+
+def run(context):
+    context.state['executed'] = True
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    with pytest.raises(ScheduledOpeningDataPending):
+        advance_scheduled_session(
+            ScheduledRepository([]),
+            engine,
+            scheduled_market("X"),
+            date(2024, 1, 2),
+            datetime(2024, 1, 2, 9, 31, 5),
+            "stock",
+            "1m",
+            live_bars=[Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11)],
+            live_only=True,
+        )
+
+    assert "executed" not in engine.context.state
 
 
 def test_live_late_quote_is_replayed_once_across_adjacent_second_callbacks():
@@ -1852,16 +1888,24 @@ def run(context):
         datetime(2024, 1, 2, 9, 31, 5),
         "stock",
         "1m",
-        live_bars=[Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11)],
+        live_bars=[
+            Bar("X", datetime(2024, 1, 2, 9, 30, 15), 10, 10, 10, 10),
+            Bar("X", datetime(2024, 1, 2, 9, 30, 59), 10.5, 10.5, 10.5, 10.5),
+            Bar("X", datetime(2024, 1, 2, 9, 31, 5), 11, 11, 11, 11),
+        ],
         live_only=True,
     )
 
     assert engine.context.state == {
         "scheduled": [
-            ("2024-01-02T09:30:16", 11.0),
-            ("2024-01-02T09:31:00", 11.0),
+            ("2024-01-02T09:30:16", 10.0),
+            ("2024-01-02T09:31:00", 10.5),
         ],
-        "quote_times": ["2024-01-02T09:31:05"],
+        "quote_times": [
+            "2024-01-02T09:30:15",
+            "2024-01-02T09:30:59",
+            "2024-01-02T09:31:05",
+        ],
     }
 
 
