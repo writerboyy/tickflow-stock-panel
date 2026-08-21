@@ -1203,34 +1203,18 @@ class MarketDataHub:
         if not records:
             records = self._cached_quote_records()
         by_symbol = {str(row.get("symbol")): row for row in records}
-        from app.free_strategy.process import _read_rows
 
         with self._lock:
             targets = [sub for sub in self._subscriptions.values() if sub.mode == "websocket"]
         for sub in targets:
-            bars: list[Bar] = []
-            try:
-                if sub.asset_type == "mixed":
-                    for asset_type in ("stock", "etf", "index"):
-                        symbols = {
-                            symbol for symbol in sub.symbols
-                            if self.repo.resolve_asset_type(symbol) == asset_type
-                        }
-                        if symbols:
-                            bars.extend(_read_rows(
-                                self.repo, sorted(symbols), cn_today(), cn_today(), asset_type, "1m",
-                            ))
-                else:
-                    bars = _read_rows(self.repo, sorted(sub.symbols), cn_today(), cn_today(), sub.asset_type, "1m")
-            except ValueError:
-                pass
-            if self._ws_disconnected_at is not None:
-                bars = [bar for bar in bars if bar.timestamp >= self._ws_disconnected_at.replace(tzinfo=None)]
+            # WebSocket paper accounts have no historical-minute fallback. A
+            # recovery snapshot only restores the latest real-time quote;
+            # subsequent quote/depth frames rebuild the live state.
             snapshot = [item for symbol in sub.symbols if (item := _quote_record(by_symbol.get(symbol, {}))) is not None]
             _put_latest(sub.input_queue, {
                 "type": "recovery",
                 "account_id": sub.account_id,
-                "bars": [bar.as_dict() for bar in bars],
+                "bars": [],
                 "quotes": snapshot,
             })
         self._ws_disconnected_at = None

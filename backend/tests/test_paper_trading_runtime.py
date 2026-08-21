@@ -1507,7 +1507,7 @@ def test_websocket_reconnect_resubscribes_and_recovers_before_quotes(monkeypatch
     monkeypatch.setattr("tickflow.resources.stream.MarketStream", FakeStream)
 
     def no_minute_data(*_args, **_kwargs):
-        raise ValueError("no data")
+        raise AssertionError("WebSocket recovery must not read minute data")
 
     monkeypatch.setattr("app.free_strategy.process._read_rows", no_minute_data)
     hub = MarketDataHub(FakeQuoteService(), repo=None)
