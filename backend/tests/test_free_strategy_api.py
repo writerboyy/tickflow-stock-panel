@@ -4,6 +4,7 @@ from hashlib import sha256
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import polars as pl
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,7 @@ from app.api.free_strategy import (
 )
 from app.free_strategy.store import FreeStrategyStore, PaperAccountStore
 from app.free_strategy.templates import LEGACY_FIVE_FORTUNES_SOURCE, TEMPLATES
+from app.tickflow.repository import DataStore, KlineRepository
 
 
 def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
@@ -50,6 +52,35 @@ def test_etf_asset_type_is_preserved_in_engine_config(tmp_path):
 
 def test_paper_write_uses_longer_callback_timeout_than_backtests():
     assert PaperWrite(strategy_id="paper").callback_timeout_seconds == 120
+
+
+def test_tick_backtest_contract_uses_qmt_and_rejects_etf(tmp_path):
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        datastore=SimpleNamespace(data_dir=tmp_path),
+    )))
+    strategy = {
+        "id": "tick", "name": "Tick", "source": "def on_quote(context, quotes): pass",
+        "revision": 1,
+    }
+    payload = _job_payload(
+        BacktestWrite(
+            strategy_id="tick",
+            symbols=["600000.SH"],
+            timeframe="tick",
+            asset_type="stock",
+        ),
+        strategy,
+        request,
+    )
+    assert payload["data_provider"] == "qmt"
+
+    app = FastAPI()
+    app.include_router(router)
+    response = TestClient(app).post("/api/free-strategies/backtest/data-health", json={
+        "strategy_id": "tick", "timeframe": "tick", "asset_type": "etf",
+    })
+    assert response.status_code == 400
+    assert "不支持 ETF" in response.json()["detail"]
 
 
 def test_strategy_detail_reports_quote_execution_mode_for_paper_default(tmp_path):
@@ -232,6 +263,58 @@ def on_bar(context, bars):
         "min_daily_bars": 1,
         "persist_scan": False,
     }
+
+
+def test_tick_data_health_reports_qmt_coverage(tmp_path):
+    source = """def initialize(context):
+    context.set_universe([\"600000.SH\"])
+
+def on_quote(context, quotes):
+    pass
+"""
+    strategy = FreeStrategyStore(tmp_path).save(None, "Tick预检", source, {})
+    day = date(2024, 8, 1)
+    part = tmp_path / "tick" / f"date={day.isoformat()}" / "part.parquet"
+    part.parent.mkdir(parents=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [datetime(2024, 8, 1, 9, 30)],
+        "last_price": [10.0],
+        "close": [10.0],
+        "open": [10.0],
+        "high": [10.0],
+        "low": [10.0],
+        "prev_close": [9.9],
+        "volume": [100.0],
+        "amount": [1000.0],
+        "limit_up": [11.0],
+        "limit_down": [9.0],
+        "suspended": [False],
+        "source": ["qmt"],
+        "sequence": ["1"],
+        "trade_id": [None],
+        "source_order": [0],
+    }).write_parquet(part)
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.state.repo = KlineRepository(DataStore(tmp_path))
+    app.include_router(router)
+
+    response = TestClient(app).post("/api/free-strategies/backtest/data-health", json={
+        "strategy_id": strategy["id"],
+        "asset_type": "stock",
+        "timeframe": "tick",
+        "start": day.isoformat(),
+        "end": day.isoformat(),
+    })
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "healthy"
+    assert payload["provider"] == "qmt"
+    assert payload["rows"] == 1
+    assert payload["sources"] == ["qmt"]
+    assert payload["coverage"] == {"600000.SH": [day.isoformat()]}
 
 
 def test_job_payload_keeps_legacy_saved_universe_as_fallback(tmp_path):

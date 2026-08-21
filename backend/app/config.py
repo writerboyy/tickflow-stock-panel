@@ -113,6 +113,7 @@ class Settings(BaseSettings):
     # 云端 QMT ZMQ RPC。连接地址和账户只能通过环境变量注入。
     qmt_enabled: bool = False
     qmt_zmq_connect_address: str = ""
+    qmt_quote_zmq_connect_address: str = ""
     qmt_account_id: str = ""
     qmt_rpc_timeout_seconds: float = 6.0
     qmt_trade_enabled: bool = False

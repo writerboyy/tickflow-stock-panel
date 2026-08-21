@@ -26,6 +26,7 @@ from app.free_strategy.process import (
     _set_daily_row,
     advance_scheduled_session,
     replay_second_precision_session,
+    replay_tick_session,
     execute_backtest,
     ScheduledOpeningDataPending,
 )
@@ -41,6 +42,188 @@ def Bar(*args, **kwargs):  # noqa: N802, ANN002, ANN003, ANN201
     if len(args) < 7:
         kwargs.setdefault("volume", 100.0)
     return _Bar(*args, **kwargs)
+
+
+def test_tick_replay_preserves_duplicate_timestamp_events_and_next_tick_fill():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+
+def on_quote(context, quotes):
+    price = quotes['X'].last_price
+    context.state.setdefault('prices', []).append(price)
+    if len(context.state['prices']) == 1:
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="tick",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="next_open",
+            settlement="t0",
+            benchmark_symbol="",
+        ),
+    )
+    timestamp = datetime(2024, 8, 1, 9, 30)
+    rows = [
+        Bar("X", timestamp, 10, 10, 10, 10, volume=100),
+        Bar("X", timestamp, 10.1, 10.1, 10.1, 10.1, volume=200),
+    ]
+
+    replay_tick_session(engine, timestamp.date(), rows, datetime(2024, 8, 1, 15))
+
+    assert engine.context.state["prices"] == [10.0, 10.1]
+    assert [(fill.timestamp, fill.price, fill.quantity) for fill in engine.account.fills] == [
+        ("2024-08-01T09:30:00", 10.1, 100),
+    ]
+
+
+def test_tick_close_fill_uses_current_tick():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+
+def on_quote(context, quotes):
+    if not context.state.get('ordered'):
+        context.state['ordered'] = True
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="tick",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t0",
+            benchmark_symbol="",
+        ),
+    )
+    timestamp = datetime(2024, 8, 1, 9, 30)
+
+    replay_tick_session(
+        engine,
+        timestamp.date(),
+        [Bar("X", timestamp, 10, 10, 10, 10, volume=100)],
+        datetime(2024, 8, 1, 15),
+    )
+
+    assert [(fill.timestamp, fill.price, fill.quantity) for fill in engine.account.fills] == [
+        ("2024-08-01T09:30:00", 10, 100),
+    ]
+
+
+def test_tick_next_open_waits_through_limit_up_for_first_tradable_tick():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+
+def on_quote(context, quotes):
+    if not context.state.get('ordered'):
+        context.state['ordered'] = True
+        context.buy('X', quantity=100)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="tick",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="next_open",
+            settlement="t0",
+            benchmark_symbol="",
+        ),
+    )
+    timestamp = datetime(2024, 8, 1, 9, 30)
+    rows = [
+        Bar("X", timestamp, 9.9, 9.9, 9.9, 9.9, volume=100, limit_up=10),
+        Bar("X", timestamp.replace(second=1), 10, 10, 10, 10, volume=100, limit_up=10),
+        Bar("X", timestamp.replace(second=2), 9.98, 9.98, 9.98, 9.98, volume=100, limit_up=10),
+    ]
+
+    replay_tick_session(engine, timestamp.date(), rows, datetime(2024, 8, 1, 15))
+
+    assert [(fill.timestamp, fill.price) for fill in engine.account.fills] == [
+        ("2024-08-01T09:30:02", 9.98),
+    ]
+
+
+def test_tick_replay_keeps_t1_and_cash_constraints():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+
+def on_quote(context, quotes):
+    count = context.state.get('count', 0)
+    context.state['count'] = count + 1
+    if count == 0:
+        context.buy('X', quantity=100)
+    elif count == 1:
+        context.sell('X', quantity=100)
+        context.buy('X', quantity=10000)
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="tick",
+        config=FreeStrategyConfig(
+            initial_capital=2_000,
+            fees_pct=0,
+            slippage_bps=0,
+            fill_policy="close",
+            settlement="t1",
+            benchmark_symbol="",
+        ),
+    )
+    timestamp = datetime(2024, 8, 1, 9, 30)
+
+    replay_tick_session(
+        engine,
+        timestamp.date(),
+        [
+            Bar("X", timestamp, 10, 10, 10, 10, volume=100),
+            Bar("X", timestamp.replace(second=1), 10, 10, 10, 10, volume=100),
+        ],
+        datetime(2024, 8, 1, 15),
+    )
+
+    assert [(fill.side, fill.quantity) for fill in engine.account.fills] == [
+        ("buy", 100),
+        ("buy", 100),
+    ]
+    assert engine.account.cash == 0
+    assert engine.account.orders[1].reason == "数量不足、现金不足或 T+1 未结算"
+
+
+def test_tick_schedule_uses_last_event_before_callback_boundary():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(mark, '09:31:00', symbols=['X'])
+
+def on_quote(context, quotes):
+    pass
+
+def mark(context):
+    context.state['price'] = context.current_bars()['X'].close
+    context.state['time'] = context.now.isoformat()
+"""
+    engine = FreeStrategyEngine(source, timeframe="tick")
+    rows = [
+        Bar("X", datetime(2024, 8, 1, 9, 30, 59), 10, 10, 10, 10),
+        Bar("X", datetime(2024, 8, 1, 9, 31, 1), 11, 11, 11, 11),
+    ]
+
+    replay_tick_session(
+        engine, date(2024, 8, 1), rows, datetime(2024, 8, 1, 15),
+    )
+
+    assert engine.context.state["price"] == 10
+    assert engine.context.state["time"] == "2024-08-01T09:31:00"
 
 
 class DailyRepository:

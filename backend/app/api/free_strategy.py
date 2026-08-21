@@ -572,7 +572,7 @@ class RenameWrite(BaseModel):
 class BacktestWrite(BaseModel):
     strategy_id: str
     symbols: list[str] = Field(default_factory=list)
-    timeframe: Literal["1d", "30m", "5m", "1m"] = "1d"
+    timeframe: Literal["1d", "30m", "5m", "1m", "tick"] = "1d"
     start: date | None = None
     end: date | None = None
     asset_type: Literal["stock", "etf"] = "stock"
@@ -654,7 +654,9 @@ class PaperRenameWrite(BaseModel):
 
 
 def _validate_payload(req: BacktestWrite, request: Request) -> None:
-    if req.timeframe != "1d":
+    if req.timeframe == "tick" and req.asset_type != "stock":
+        raise HTTPException(status_code=400, detail="Tick 回测首版仅支持股票，不支持 ETF")
+    if req.timeframe not in {"1d", "tick"}:
         capabilities = getattr(request.app.state, "capabilities", None)
         from app.tickflow.capabilities import Cap
         if capabilities is not None and not capabilities.has(Cap.KLINE_MINUTE_BATCH):
@@ -890,13 +892,20 @@ def _job_payload(req: BacktestWrite, strategy: dict[str, Any], request: Request)
             "dialect": strategy.get("dialect", "native"),
             "compatibility_report": strategy.get("compatibility_report"), "symbols": legacy_symbols,
             "timeframe": req.timeframe, "asset_type": req.asset_type, "start": start.isoformat(), "end": end.isoformat(), "config": config,
-            "data_provider": preferences.get_daily_data_provider() if req.timeframe == "1d" else preferences.get_minute_data_provider()}
+            "data_provider": (
+                "qmt"
+                if req.timeframe == "tick"
+                else preferences.get_daily_data_provider()
+                if req.timeframe == "1d"
+                else preferences.get_minute_data_provider()
+            )}
 
 
 @router.post("/backtest/data-health")
 async def backtest_data_health(req: DataHealthWrite, request: Request):
-    """Resolve the saved strategy universe, then inspect its ETF backtest data."""
-    if req.asset_type != "etf":
+    """Resolve the strategy universe, then inspect its required backtest data."""
+    _validate_payload(req, request)
+    if req.asset_type != "etf" and req.timeframe != "tick":
         return {"status": "not_applicable", "issues": [], "symbol_count": 0, "scan_id": None}
     try:
         strategy = _strategy_store(request).get(req.strategy_id)
@@ -929,6 +938,22 @@ async def backtest_data_health(req: DataHealthWrite, request: Request):
             dialect=strategy.get("dialect", "native"),
         )
         symbols, universe_source = _resolve_symbols(engine, payload)
+        if req.timeframe == "tick":
+            from app.free_strategy.tick_health import inspect_tick_data
+
+            result = await asyncio.to_thread(
+                inspect_tick_data,
+                repo,
+                symbols,
+                date.fromisoformat(payload["start"]),
+                date.fromisoformat(payload["end"]),
+            )
+            return {
+                **result,
+                "execution_mode": engine.execution_mode,
+                "universe_source": universe_source,
+                "provider": "qmt",
+            }
         scheduled_intraday = engine.execution_mode == "scheduled" and any(
             time.fromisoformat(value) < time(15, 0) for value in engine.scheduled_times
         )

@@ -24,6 +24,7 @@ class TickFlowProvider:
         daily=True,
         adj_factor=True,
         minute=True,
+        tick=False,
         realtime=True,
         financial=True,
     )
@@ -121,3 +122,13 @@ class TickFlowProvider:
         else:
             return pl.DataFrame()
         return pl.DataFrame(resp or [])
+
+    def get_tick(
+        self,
+        symbols: list[str],  # noqa: ARG002
+        start_time: datetime | None,  # noqa: ARG002
+        end_time: datetime | None,  # noqa: ARG002
+        asset_type: AssetType,  # noqa: ARG002
+    ) -> pl.DataFrame:
+        """TickFlow provider currently has no canonical historical Tick endpoint."""
+        return pl.DataFrame()

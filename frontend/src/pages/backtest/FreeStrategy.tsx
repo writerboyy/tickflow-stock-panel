@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import {
   api,
+  type BacktestDataScan,
   type FreeBacktestConfig,
   type FreeBacktestResult,
   type StrategyCompatibilityReport,
@@ -59,7 +60,7 @@ type RenameTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
 type DeleteTarget = { type: 'strategy' | 'backtest'; id: string; name: string }
 
 function executionModeLabel(value: unknown) {
-  return value === 'scheduled' ? '定时执行' : value === 'full_bar' ? '完整回放' : ''
+  return value === 'scheduled' ? '定时执行' : value === 'full_bar' ? '完整回放' : value === 'quote' ? '逐笔行情' : ''
 }
 
 const DEFAULT_CONFIG: FreeBacktestConfig = {
@@ -212,16 +213,23 @@ export function FreeStrategy() {
     item => item.status === 'degraded' || item.status === 'unavailable',
   ) ?? []
   const detailLoading = Boolean(selectedId) && (detail.isFetching || detail.data?.id !== selectedId)
-  const dataHealth = useQuery({
-    queryKey: QK.freeDataHealth(config.strategy_id, config.start, config.end, config.timeframe),
-    queryFn: () => api.freeBacktestDataHealth({
-      strategy_id: config.strategy_id,
-      asset_type: config.asset_type,
-      timeframe: config.timeframe,
-      start: config.start,
-      end: config.end,
-    }),
-    enabled: Boolean(config.strategy_id) && config.asset_type === 'etf' && !dirty,
+  const dataHealth = useQuery<BacktestDataScan>({
+    queryKey: QK.freeDataHealth(config.strategy_id, config.asset_type, config.start, config.end, config.timeframe),
+    queryFn: async () => {
+      const payload = {
+        strategy_id: config.strategy_id,
+        asset_type: config.asset_type,
+        timeframe: config.timeframe,
+        start: config.start,
+        end: config.end,
+      }
+      return config.timeframe === 'tick'
+        ? api.freeTickBacktestDataHealth(payload)
+        : api.freeBacktestDataHealth(payload)
+    },
+    enabled: Boolean(config.strategy_id)
+      && (config.asset_type === 'etf' || config.timeframe === 'tick')
+      && !dirty,
     staleTime: 60_000,
     retry: false,
   })
@@ -508,8 +516,8 @@ export function FreeStrategy() {
         <div className="mb-2 text-xs font-medium">运行设置</div>
         <div className="grid grid-cols-2 gap-2 text-[11px]">
           <label className="col-span-2">策略方言<select className={INPUT} value={dialect} onChange={event => setDialect(event.target.value as StrategyDialect)}><option value="native">系统原生</option><option value="joinquant">JoinQuant</option></select></label>
-          <label>资产<select className={INPUT} value={config.asset_type} onChange={event => setConfig({ ...config, asset_type: event.target.value as FreeBacktestConfig['asset_type'] })}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
-          <label>周期<select className={INPUT} value={config.timeframe} onChange={event => setConfig({ ...config, timeframe: event.target.value as FreeBacktestConfig['timeframe'] })}><option value="1d">1d</option><option value="30m">30m</option><option value="5m">5m</option><option value="1m">1m</option></select></label>
+          <label>资产<select className={INPUT} value={config.asset_type} onChange={event => { const assetType = event.target.value as FreeBacktestConfig['asset_type']; setConfig({ ...config, asset_type: assetType, timeframe: assetType === 'etf' && config.timeframe === 'tick' ? '1d' : config.timeframe }) }}><option value="etf">ETF</option><option value="stock">股票</option></select></label>
+          <label>周期<select className={INPUT} value={config.timeframe} onChange={event => setConfig({ ...config, timeframe: event.target.value as FreeBacktestConfig['timeframe'] })}><option value="1d">1d</option><option value="30m">30m</option><option value="5m">5m</option><option value="1m">1m</option><option value="tick" disabled={config.asset_type !== 'stock'}>Tick</option></select></label>
           <label className="col-span-2">基准<input className={INPUT} value={config.benchmark_symbol} onChange={event => setConfig({ ...config, benchmark_symbol: event.target.value.trim() })} /></label>
           <div><label className="mb-1 block">开始</label><DatePicker value={config.start ?? ''} onChange={value => setConfig({ ...config, start: value })} max={config.end || undefined} className="w-full" buttonClassName="w-full justify-start" align="left" /></div>
           <div><label className="mb-1 block">结束</label><DatePicker value={config.end ?? ''} onChange={value => setConfig({ ...config, end: value })} min={config.start || undefined} className="w-full" buttonClassName="w-full justify-start" /></div>
@@ -523,8 +531,8 @@ export function FreeStrategy() {
             {compatibilityIssues.length ? <div className="mt-1 break-words text-muted">{compatibilityIssues.map(item => item.name).join('、')}</div> : null}
           </div> : <div className="text-muted">保存后检查 JoinQuant 兼容性</div>}
         </div> : null}
-        {config.asset_type === 'etf' && config.strategy_id && !dirty ? <div className="mt-3 border-t border-border pt-3 text-[11px]">
-          {dataHealth.isFetching ? <div className="inline-flex items-center gap-1.5 text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在检查回测数据…</div> : dataHealth.isError ? <div className="flex items-center justify-between gap-2 text-muted"><span className="inline-flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" />数据预检暂不可用，不阻止回测</span><button type="button" onClick={openDataRepair} className="text-accent hover:underline">前往检查</button></div> : dataHealth.data?.status === 'issues' ? <div className="flex items-center justify-between gap-2 text-warning"><span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3.5 w-3.5" />发现 {dataHealth.data.issues.length} 个数据问题，可能影响结果</span><button type="button" onClick={openDataRepair} className="shrink-0 text-accent hover:underline">查看并修复</button></div> : dataHealth.data?.status === 'healthy' ? <div className="inline-flex items-center gap-1.5 text-success"><CheckCircle2 className="h-3.5 w-3.5" />回测数据完整 · 已检查 {dataHealth.data.symbol_count} 只 ETF</div> : null}
+        {(config.asset_type === 'etf' || config.timeframe === 'tick') && config.strategy_id && !dirty ? <div className="mt-3 border-t border-border pt-3 text-[11px]">
+          {dataHealth.isFetching ? <div className="inline-flex items-center gap-1.5 text-muted"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在检查回测数据…</div> : dataHealth.isError ? <div className="flex items-center justify-between gap-2 text-muted"><span className="inline-flex items-center gap-1.5"><AlertTriangle className="h-3.5 w-3.5" />数据预检暂不可用</span>{config.asset_type === 'etf' ? <button type="button" onClick={openDataRepair} className="text-accent hover:underline">前往检查</button> : null}</div> : dataHealth.data?.status === 'issues' ? <div className="flex items-center justify-between gap-2 text-warning"><span className="inline-flex items-center gap-1.5"><CircleAlert className="h-3.5 w-3.5" />发现 {dataHealth.data.issues.length} 个数据问题，回测将被拒绝</span>{config.asset_type === 'etf' ? <button type="button" onClick={openDataRepair} className="shrink-0 text-accent hover:underline">查看并修复</button> : null}</div> : dataHealth.data?.status === 'healthy' ? <div className="inline-flex items-center gap-1.5 text-success"><CheckCircle2 className="h-3.5 w-3.5" />{config.timeframe === 'tick' ? `QMT Tick 完整 · ${dataHealth.data.symbol_count} 只股票 · ${'rows' in dataHealth.data ? dataHealth.data.rows : 0} 条` : `回测数据完整 · 已检查 ${dataHealth.data.symbol_count} 只 ETF`}</div> : null}
         </div> : null}
         {error ? <div className="mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />{error}</div> : null}
         <div className="mt-3 flex gap-2"><button disabled={running || dirty || saving || detailLoading || runBlockedByCompatibility} title={runBlockedByCompatibility ? '当前 JoinQuant 能力不可运行' : dirty ? '请先保存当前修改' : undefined} onClick={run} className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-btn bg-accent px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><CirclePlay className="h-3.5 w-3.5" />历史回测</button><button disabled={!running} onClick={cancel} className="inline-flex items-center justify-center gap-1.5 rounded-btn border border-border px-3 py-2 text-xs disabled:opacity-50"><Square className="h-3.5 w-3.5" />停止</button></div>

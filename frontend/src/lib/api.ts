@@ -2171,7 +2171,7 @@ export interface FreeStrategySummary {
 export interface FreeBacktestConfig {
   strategy_id: string
   symbols?: string[]
-  timeframe: '1d' | '30m' | '5m' | '1m'
+  timeframe: '1d' | '30m' | '5m' | '1m' | 'tick'
   start?: string
   end?: string
   asset_type: 'stock' | 'etf'
@@ -2502,10 +2502,38 @@ export interface EtfDataScan {
   symbol_count: number
   require_minute?: boolean
   min_daily_bars?: number
-  execution_mode?: 'full_bar' | 'scheduled'
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
   universe_source?: string
   issues: EtfDataIssue[]
 }
+
+export interface TickDataIssue {
+  type: 'missing_partition' | 'invalid_partition' | 'missing_fields' | 'invalid_schema' | 'wrong_partition_date' | 'missing_symbol_date' | 'invalid_rows' | 'out_of_order'
+  detail: string
+  action: string
+  repairable: false
+  missing_dates?: string[]
+}
+
+export interface TickDataScan {
+  scan_id: null
+  status: 'healthy' | 'issues'
+  checked_at: string
+  start: string
+  end: string
+  symbols: string[]
+  symbol_count: number
+  timeframe: 'tick'
+  provider?: 'qmt' | string
+  rows: number
+  sources: string[]
+  coverage: Record<string, string[]>
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
+  universe_source?: string
+  issues: TickDataIssue[]
+}
+
+export type BacktestDataScan = EtfDataScan | TickDataScan
 
 export interface EtfRepairRecord {
   id: string
@@ -2550,6 +2578,12 @@ export const api = {
       & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>
       & { persist_scan?: boolean },
   ) => request<EtfDataScan>('/api/free-strategies/backtest/data-health', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  freeTickBacktestDataHealth: (
+    payload: Pick<FreeBacktestConfig, 'strategy_id' | 'asset_type' | 'timeframe'>
+      & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>,
+  ) => request<TickDataScan>('/api/free-strategies/backtest/data-health', {
     method: 'POST', body: JSON.stringify(payload),
   }),
   paperAccounts: () => request<{ accounts: PaperAccount[] }>('/api/free-strategies/paper/accounts'),

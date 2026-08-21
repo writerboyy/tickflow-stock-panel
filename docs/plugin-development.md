@@ -24,7 +24,7 @@ display_name: "我的数据源"                 # 设置页显示名
 runtime: python                          # 运行时类型: node | python | none
 entry: app.plugins.my_source.provider:MyProvider   # provider 类的导入路径
 check: app.plugins.my_source.bridge:availability   # 可用性检测函数(可选)
-datasets: [daily, adj_factor, minute, realtime]     # 支持的数据集
+datasets: [daily, adj_factor, minute, tick, realtime]     # 支持的数据集
 description: "数据源描述"
 install_hint: "pip install xxx"          # 未装依赖时显示的安装提示
 ```
@@ -85,6 +85,9 @@ class MyProvider:
     def get_minute(self, symbols, start_time, end_time, asset_type="stock", on_chunk_done=None, freq="1m") -> pl.DataFrame:
         """分钟K: 返回 schema [symbol, datetime, open, high, low, close, volume, amount]"""
 
+    def get_tick(self, symbols, start_time, end_time, asset_type="stock") -> pl.DataFrame:
+        """逐笔: 返回标准 Tick schema，不得使用分钟 K 代替"""
+
     def get_realtime(self) -> list[dict]:
         """全市场实时快照: 返回 list[dict], 每行含 symbol/last_price/prev_close/open/high/low/volume"""
 
@@ -96,7 +99,7 @@ class MyProvider:
 
 `provider_has_dataset(name, dataset)` 通过 `dataset in provider.config.datasets` 判断。
 这是 services 层路由的关键: 用户在设置页选了插件, 但某数据集未声明时, 该数据集
-自动回退 TickFlow。
+日线、分钟线和实时快照按现有路由规则处理。`tick` 是 fail-closed 数据集：未声明能力或历史数据缺口时必须拒绝，不得回退到分钟 K。
 
 ```python
 class MyConfig:

@@ -1603,6 +1603,7 @@ class KlineRepository:
             name for name in (
                 "symbol", "datetime", price_column, "prev_close", "open", "high", "low",
                 "volume", "amount", "limit_up", "limit_down", "suspended",
+                "source", "sequence", "trade_id", "source_order",
             ) if name in available
         ]
         return columns, price_column == "last_price"
@@ -1650,7 +1651,13 @@ class KlineRepository:
             for field in ("open", "high", "low"):
                 if field not in result.collect_schema().names():
                     result = result.with_columns(pl.col("last_price").alias(field))
-            return result.sort(["datetime", "symbol"]).collect(engine="streaming")
+            available = set(result.collect_schema().names())
+            sort_columns = [
+                column for column in (
+                    "datetime", "symbol", "source_order", "sequence", "trade_id",
+                ) if column in available
+            ]
+            return result.sort(sort_columns, maintain_order=True).collect(engine="streaming")
         except Exception as exc:  # noqa: BLE001
             logger.warning("tick行情查询失败: %s", exc)
             return pl.DataFrame()
@@ -1665,11 +1672,14 @@ class KlineRepository:
         frame = self.get_tick_range(symbols, at.date(), at.date(), asset_type, until=at)
         if frame.is_empty():
             return frame
+        sort_columns = [column for column in (
+            "symbol", "datetime", "source_order", "sequence", "trade_id",
+        ) if column in frame.columns]
         return (
-            frame.sort(["symbol", "datetime"])
+            frame.sort(sort_columns, maintain_order=True)
             .group_by("symbol", maintain_order=True)
             .tail(1)
-            .sort(["datetime", "symbol"])
+            .sort(["datetime", "symbol"], maintain_order=True)
         )
 
     def get_tick_next(
@@ -1685,12 +1695,29 @@ class KlineRepository:
         )
         if frame.is_empty():
             return frame
+        sort_columns = [column for column in (
+            "symbol", "datetime", "source_order", "sequence", "trade_id",
+        ) if column in frame.columns]
         return (
-            frame.sort(["symbol", "datetime"])
+            frame.sort(sort_columns, maintain_order=True)
             .group_by("symbol", maintain_order=True)
             .head(1)
-            .sort(["datetime", "symbol"])
+            .sort(["datetime", "symbol"], maintain_order=True)
         )
+
+    def get_tick_symbols(self, start: date, end: date) -> set[str]:
+        """Return symbols present in canonical Tick partitions."""
+        parts = self._tick_parts(start, end)
+        if not parts:
+            return set()
+        try:
+            frame = scan_parquet_compat(parts)
+            if "symbol" not in frame.collect_schema().names():
+                return set()
+            return set(frame.select("symbol").unique().collect()["symbol"].to_list())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tick标的查询失败: %s", exc)
+            return set()
 
     def get_second_range(
         self,

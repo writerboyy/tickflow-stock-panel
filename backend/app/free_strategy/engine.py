@@ -982,6 +982,7 @@ class FreeStrategyEngine:
         self.market_history_metadata: dict[str, Any] = {"enabled": False}
         self._instruments = [dict(item) for item in (instruments or [])]
         self.pending: list[tuple[Order, datetime]] = []
+        self._pending_event_sequences: dict[str, int] = {}
         self._immediate: list[Order] = []
         self._bought_dates: dict[str, date] = {}
         self._counter = 0
@@ -1011,6 +1012,7 @@ class FreeStrategyEngine:
         self._session_equity_snapshot: dict[str, Any] | None = None
         self._session_benchmark_close: float | None = None
         self._next_timestamp = cn_naive_now()
+        self._event_sequence = 0
         self._order_times: deque[datetime] = deque()
         self._risk_peak_equity = float(self.config.initial_capital)
         self._risk_day: date | None = None
@@ -1434,6 +1436,7 @@ class FreeStrategyEngine:
             self._immediate.append(order)
         else:
             self.pending.append((order, self._next_timestamp))
+            self._pending_event_sequences[order.id] = self._event_sequence
         return order
 
     def _order_increases_risk(self, order: Order) -> bool:
@@ -1506,6 +1509,12 @@ class FreeStrategyEngine:
                     order.status = "cancelled"
                     order.reason = f"统一风控：{reason}"
             self.pending = [item for item in self.pending if item[0].status == "pending"]
+            pending_ids = {order.id for order, _due_at in self.pending}
+            self._pending_event_sequences = {
+                order_id: sequence
+                for order_id, sequence in self._pending_event_sequences.items()
+                if order_id in pending_ids
+            }
 
     def _sell_first(self, item: tuple[Order, datetime] | Order) -> int:
         order = item[0] if isinstance(item, tuple) else item
@@ -2035,9 +2044,14 @@ class FreeStrategyEngine:
                 for symbol, lots in self._position_lots.items()
             },
             "pending_orders": [
-                {"order_id": order.id, "due_at": due_at.isoformat()}
+                {
+                    "order_id": order.id,
+                    "due_at": due_at.isoformat(),
+                    "event_sequence": self._pending_event_sequences.get(order.id),
+                }
                 for order, due_at in self.pending
             ],
+            "event_sequence": self._event_sequence,
             "order_counter": self._counter,
             "risk": {
                 "status": self.risk_status,
@@ -2088,6 +2102,13 @@ class FreeStrategyEngine:
             for item in raw.get("pending_orders", [])
             if item.get("order_id") in orders_by_id
         ]
+        self._event_sequence = int(raw.get("event_sequence", 0))
+        self._pending_event_sequences = {
+            str(item["order_id"]): int(item["event_sequence"])
+            for item in raw.get("pending_orders", [])
+            if item.get("order_id") in orders_by_id
+            and item.get("event_sequence") is not None
+        }
         self._counter = int(raw.get("order_counter", len(self.account.orders)))
         risk = raw.get("risk", {})
         self._risk_status.update(risk.get("status", {}))
@@ -2361,6 +2382,7 @@ class FreeStrategyEngine:
             raise ValueError("只有 quote 事件可以携带 quotes")
         bars_now = BarsView({bar.symbol: bar for bar in values})
         quote_view = QuotesView({quote.symbol: quote for quote in quote_values})
+        self._event_sequence += 1
         if self._active_session_date != timestamp.date():
             self.finish_session()
             premarket = datetime.combine(timestamp.date(), datetime.min.time()).replace(
@@ -2387,7 +2409,14 @@ class FreeStrategyEngine:
             order, submitted_at = item
             bar = bars_now.get(order.symbol)
             if (
-                submitted_at < timestamp
+                (
+                    submitted_at < timestamp
+                    or (
+                        self.timeframe == "tick"
+                        and self._pending_event_sequences.get(order.id, -1)
+                        < self._event_sequence
+                    )
+                )
                 and bar is not None
                 and math.isfinite(bar.volume)
                 and bar.volume > 0
@@ -2396,13 +2425,31 @@ class FreeStrategyEngine:
             else:
                 remaining.append(item)
         self.pending = remaining
+        for order, _submitted_at in due:
+            self._pending_event_sequences.pop(order.id, None)
         self._fill_orders(due, bars_now, timestamp, "open")
+        if self.timeframe == "tick":
+            retryable_reasons = {
+                "证券停牌或不可交易",
+                "当前行情无成交量",
+                "涨停，买入未成交",
+                "跌停，卖出未成交",
+            }
+            for order, _submitted_at in due:
+                if order.status != "rejected" or order.reason not in retryable_reasons:
+                    continue
+                order.status = "pending"
+                order.reason = ""
+                self.pending.append((order, timestamp))
+                self._pending_event_sequences[order.id] = self._event_sequence
 
         # 3. Publish the market snapshot and history visible at this timestamp.
         self._publish_market(
             timestamp,
             bars_now,
-            record_history=event_type == "bar",
+            record_history=event_type == "bar" or (
+                event_type == "quote" and self.timeframe == "tick"
+            ),
         )
 
         # 4. Primary market callback.

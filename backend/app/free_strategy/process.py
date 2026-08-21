@@ -397,9 +397,15 @@ def _instrument_records(
     if frame.is_empty() or "symbol" not in frame.columns:
         return []
     minute_symbols: set[str] | None = None
-    get_minute_symbols = getattr(repo, "get_minute_symbols", None)
-    if timeframe != "1d" and callable(get_minute_symbols):
-        minute_symbols = get_minute_symbols(asset_type, start, end)
+    tick_symbols: set[str] | None = None
+    if timeframe == "tick":
+        get_tick_symbols = getattr(repo, "get_tick_symbols", None)
+        if callable(get_tick_symbols) and start is not None and end is not None:
+            tick_symbols = get_tick_symbols(start, end)
+    else:
+        get_minute_symbols = getattr(repo, "get_minute_symbols", None)
+        if timeframe != "1d" and callable(get_minute_symbols):
+            minute_symbols = get_minute_symbols(asset_type, start, end)
     name_changes = load_instrument_name_changes(repo) if asset_type == "stock" else {}
     industries = load_industry_dimensions(repo) if asset_type == "stock" else {}
     records = []
@@ -411,6 +417,8 @@ def _instrument_records(
         item["symbol"] = str(item["symbol"])
         item["asset_type"] = str(item.get("asset_type") or asset_type).lower()
         item["has_minute"] = minute_symbols is None or item["symbol"] in minute_symbols
+        if timeframe == "tick":
+            item["has_tick"] = tick_symbols is None or item["symbol"] in tick_symbols
         item["name_changes"] = [
             {
                 "date": change_date.isoformat(),
@@ -1176,7 +1184,8 @@ def _read_rows(
         window["after"] = after
     if until is not None:
         window["until"] = until
-    if second_precision:
+    use_tick = timeframe == "tick" or second_precision
+    if use_tick:
         get_tick_range = getattr(repo, "get_tick_range", None)
         if not callable(get_tick_range):
             raise ValueError(
@@ -1188,7 +1197,7 @@ def _read_rows(
     else:
         frame = repo.get_minute_range(symbols, start, end, asset_type, **window)
         interval_label = "分钟"
-    if second_precision and not frame.is_empty():
+    if use_tick and not frame.is_empty():
         columns = set(frame.columns)
         if "close" not in columns and "last_price" in columns:
             frame = frame.with_columns(pl.col("last_price").alias("close"))
@@ -1203,10 +1212,10 @@ def _read_rows(
     if not frame.is_empty():
         frame = frame.drop_nulls(["open", "high", "low", "close"])
     if frame.is_empty():
-        if allow_empty and not second_precision:
+        if allow_empty and not use_tick:
             return []
         asset_label = "ETF" if asset_type == "etf" else "股票"
-        source_label = "tick/逐笔行情" if second_precision else f"{interval_label}K"
+        source_label = "tick/逐笔行情" if use_tick else f"{interval_label}K"
         raise ValueError(
             f"没有可用的{asset_label}{source_label}历史数据。"
             f"请先同步{asset_label}{source_label}，"
@@ -1231,11 +1240,24 @@ def _read_rows(
                 amount=float(row.get("amount") or 0),
                 raw_open=float(row["open"]) * scale, raw_high=float(row["high"]) * scale,
                 raw_low=float(row["low"]) * scale, raw_close=float(row["close"]) * scale,
-                limit_up=observed.get("limit_up"), limit_down=observed.get("limit_down"),
+                limit_up=(
+                    float(row["limit_up"])
+                    if row.get("limit_up") is not None else observed.get("limit_up")
+                ),
+                limit_down=(
+                    float(row["limit_down"])
+                    if row.get("limit_down") is not None else observed.get("limit_down")
+                ),
+                suspended=bool(row.get("suspended", False)),
+                tradable=not bool(row.get("suspended", False)) and float(row["close"]) > 0,
+                previous_close=(
+                    float(row["prev_close"])
+                    if row.get("prev_close") is not None else observed.get("previous_close")
+                ),
                 split_ratio=float(observed.get("split_ratio", 1.0)),
             )
 
-    if timeframe == "1m":
+    if timeframe in {"1m", "tick"}:
         return minute_rows()
     return group_bars(minute_rows(), timeframe)
 
@@ -1294,7 +1316,7 @@ def _prepare_market_data(
     if timeframe == "1d":
         prior_bars = _daily_bars(market_symbols, load_start, warmup_end, asset_type, market_data)
     else:
-        if engine.execution_mode == "full_bar":
+        if engine.execution_mode == "full_bar" and timeframe != "tick":
             _prime_minute_market_data(repo, market_symbols, start, asset_type, market_data)
         prior_bars = (
             _aligned_warmup_bars(market_symbols, load_start, warmup_end, market_data)
@@ -1495,7 +1517,10 @@ def _scheduled_minute_bars(
     if frame.is_empty():
         return []
     rows: list[Bar] = []
-    for row in frame.sort(["datetime", "symbol"]).iter_rows(named=True):
+    sort_columns = [column for column in (
+        "datetime", "symbol", "source_order", "sequence", "trade_id",
+    ) if column in frame.columns]
+    for row in frame.sort(sort_columns, maintain_order=True).iter_rows(named=True):
         symbol = str(row["symbol"])
         timestamp = row["datetime"]
         metadata = _scheduled_price_metadata(market, symbol, timestamp.date(), asset_type)
@@ -1919,6 +1944,12 @@ def _load_scheduled_history(
             bar for day in days[-count:]
             if (bar := _scheduled_daily_bar(market, symbol, day, asset_type)) is not None
         ]
+    if timeframe == "tick":
+        start = cutoff.date() - timedelta(days=max(7, count // 1000 + 1))
+        frame = repo.get_tick_range(
+            [symbol], start, cutoff.date(), asset_type, until=cutoff,
+        )
+        return _scheduled_minute_bars(frame, market, asset_type)[-count:]
     minutes = int(timeframe[:-1])
     start = cutoff.date() - timedelta(days=max(7, count * minutes // 120 + 7))
     frame = repo.get_minute_range([symbol], start, cutoff.date(), asset_type)
@@ -1967,7 +1998,7 @@ def _load_scheduled_history_batch(
 
 
 def _next_period_after(timestamp: datetime, timeframe: str) -> datetime:
-    if timeframe == "1m" or timeframe == "1d":
+    if timeframe in {"tick", "1m", "1d"}:
         return timestamp
     minutes = int(timeframe[:-1])
     current = timestamp.time()
@@ -2140,6 +2171,92 @@ def replay_second_precision_session(
     if finalize:
         engine.finish_session()
     return len(grouped)
+
+
+def replay_tick_session(
+    engine: FreeStrategyEngine,
+    day: date,
+    rows: Iterable[Bar],
+    cutoff: datetime,
+    *,
+    closing_bars: Iterable[Bar] = (),
+    finalize: bool = True,
+) -> int:
+    """Replay canonical Tick rows one event at a time in stable input order."""
+    indexed = list(enumerate(
+        row for row in rows if row.date == day and row.timestamp <= cutoff
+    ))
+    ordered = [
+        row for _index, row in sorted(
+            indexed,
+            key=lambda item: (item[1].timestamp, item[0]),
+        )
+    ]
+    engine.begin_session(day)
+    latest: dict[str, Bar] = {}
+    offset = 0
+
+    def consume_until(target: datetime) -> None:
+        nonlocal offset
+        while offset < len(ordered) and ordered[offset].timestamp <= target:
+            bar = ordered[offset]
+            if engine.execution_mode == "quote":
+                engine.advance_event(
+                    bar.timestamp,
+                    event_type="quote",
+                    quotes=[_bar_as_quote(bar)],
+                    run_schedules=False,
+                )
+            else:
+                engine.advance_event(
+                    bar.timestamp,
+                    [bar],
+                    event_type="bar" if engine.execution_mode == "full_bar" else "market",
+                    run_schedules=False,
+                )
+            latest[bar.symbol] = bar
+            offset += 1
+
+    schedules = sorted(
+        at for at in engine.scheduled_times
+        if at != "every_bar"
+        and datetime.combine(day, time.fromisoformat(at)) <= cutoff
+    )
+    for at in schedules:
+        target = datetime.combine(day, time.fromisoformat(at))
+        if not engine.prepare_scheduled_event(target):
+            continue
+        consume_until(target)
+        scoped = _scheduled_symbols(engine, target)
+        snapshot = [latest[symbol] for symbol in scoped if symbol in latest]
+        missing = [
+            symbol for symbol in _scheduled_required_symbols(engine, target)
+            if symbol not in latest
+        ]
+        if missing:
+            raise ValueError(
+                f"{target.isoformat()} Tick 回调边界缺少快照: "
+                f"{', '.join(missing[:8])}"
+            )
+        engine.advance_event(
+            target,
+            snapshot,
+            event_type="scheduled",
+            scheduled_at=at,
+        )
+
+    consume_until(cutoff)
+    closing = list(closing_bars)
+    if closing:
+        engine.advance_event(
+            max(cutoff, datetime.combine(day, time(15, 0))),
+            closing,
+            event_type="market",
+            run_schedules=False,
+        )
+    if finalize:
+        engine.finish_session()
+    return len(ordered)
 
 
 def advance_scheduled_session(
@@ -2473,6 +2590,21 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             if payload["asset_type"] == "etf"
             else "kline_minute"
         )
+        tick_health_report: dict[str, Any] | None = None
+        if payload["timeframe"] == "tick":
+            if payload["asset_type"] != "stock":
+                raise ValueError("Tick 回测首版仅支持股票")
+            if not trading_dates:
+                raise ValueError("回测区间没有可用的交易日行情")
+            from .tick_health import require_tick_data
+
+            tick_health_report = require_tick_data(
+                repo,
+                symbols,
+                start,
+                end,
+                expected_dates=trading_dates,
+            )
         try:
             readiness_manifest = build_readiness_manifest(
                 Path(payload["data_dir"]),
@@ -2485,7 +2617,11 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 benchmark_dates=benchmark_dates,
                 dataset_roots=[
                     Path(daily_root),
-                    Path(minute_root) if payload["timeframe"] != "1d" else Path(daily_root),
+                    Path("tick")
+                    if payload["timeframe"] == "tick"
+                    else Path(minute_root)
+                    if payload["timeframe"] != "1d"
+                    else Path(daily_root),
                 ],
             )
             readiness_manifest["strategy_runtime"] = {
@@ -2517,7 +2653,71 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
             else list(symbols)
         )
         trading_days = 0
-        if engine.execution_mode == "scheduled":
+        if payload["timeframe"] == "tick":
+            output.put({
+                "type": "progress",
+                "message": "按交易日逐 Tick 回放 QMT 历史行情",
+                "progress": 0.35,
+                "execution_mode": engine.execution_mode,
+            })
+            engine.set_history_loader(
+                lambda symbol, count, timeframe, cutoff: _load_scheduled_history(
+                    repo, market_data, payload["asset_type"],
+                    symbol, count, timeframe, cutoff,
+                )
+            )
+            engine.set_history_batch_loader(
+                lambda history_symbols, count, timeframe, cutoff: _load_scheduled_history_batch(
+                    repo, market_data, payload["asset_type"],
+                    history_symbols, count, timeframe, cutoff,
+                )
+            )
+            for index, trading_day in enumerate(trading_dates, start=1):
+                # Dynamic universes are resolved by before_trading_start, so the
+                # session must begin before deciding which Tick rows to load.
+                engine.begin_session(trading_day)
+                held_symbols = [
+                    symbol for symbol, quantity in engine.account.positions.items()
+                    if float(quantity) > 0
+                ]
+                session_symbols = list(dict.fromkeys([*engine.universe, *held_symbols]))
+                rows = list(_read_rows(
+                    repo,
+                    session_symbols,
+                    trading_day,
+                    trading_day,
+                    payload["asset_type"],
+                    "tick",
+                    require_all_symbols=True,
+                    market_data=market_data,
+                ))
+                benchmark_bar = _scheduled_daily_bar(
+                    market_data,
+                    config.benchmark_symbol,
+                    trading_day,
+                    _market_asset_type(repo, config.benchmark_symbol, "index"),
+                ) if config.benchmark_symbol else None
+                replayed_rows += replay_tick_session(
+                    engine,
+                    trading_day,
+                    rows,
+                    datetime.combine(trading_day, time(15, 0)),
+                    closing_bars=[benchmark_bar] if benchmark_bar is not None else [],
+                )
+                trading_days += 1
+                symbols_seen.update(bar.symbol for bar in rows)
+                if rows:
+                    first_bar = rows[0].timestamp if first_bar is None else min(first_bar, rows[0].timestamp)
+                    last_bar = rows[-1].timestamp if last_bar is None else max(last_bar, rows[-1].timestamp)
+                if index % 20 == 0:
+                    output.put({
+                        "type": "progress",
+                        "message": f"已逐 Tick 回放 {index} 个交易日",
+                        "progress": min(0.9, 0.35 + 0.55 * index / len(trading_dates)),
+                    })
+            engine.state = engine.context.state.copy()
+            result = engine.result()
+        elif engine.execution_mode == "scheduled":
             output.put({
                 "type": "progress",
                 "message": f"按交易日执行定时任务（{', '.join(engine.scheduled_times)}）",
@@ -2777,6 +2977,12 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         strategy_metadata = five_fortunes or five_fortunes_v2
         if payload["timeframe"] == "1d" or engine.execution_mode == "scheduled":
             available_symbols = symbols_seen
+        elif payload["timeframe"] == "tick":
+            get_tick_symbols = getattr(repo, "get_tick_symbols", None)
+            available_symbols = (
+                set(get_tick_symbols(start, end))
+                if callable(get_tick_symbols) else symbols_seen
+            )
         else:
             get_minute_symbols = getattr(repo, "get_minute_symbols", None)
             available_symbols = (
@@ -2858,10 +3064,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                 "configured_provider": payload.get("data_provider", "tickflow"),
                 "storage": (
                     "tick"
-                    if engine.second_precision_schedules
+                    if payload["timeframe"] == "tick" or engine.second_precision_schedules
                     else "event_snapshots"
                     if engine.execution_mode == "scheduled"
                     else "kline_daily" if payload["timeframe"] == "1d" else minute_table
+                ),
+                **(
+                    {"tick_health": tick_health_report}
+                    if payload["timeframe"] == "tick" else {}
                 ),
             },
         }
