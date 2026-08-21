@@ -122,7 +122,9 @@ def inspect_tick_data(
             })
             continue
         try:
-            day_frame = frame.filter(pl.col("datetime").dt.date() == day)
+            day_frame = frame.with_row_index("_partition_order").filter(
+                pl.col("datetime").dt.date() == day
+            )
         except Exception as exc:  # noqa: BLE001
             issues.append({
                 "type": "invalid_schema",
@@ -139,9 +141,10 @@ def inspect_tick_data(
                 "repairable": False,
             })
             continue
+        selected = day_frame.filter(pl.col("symbol").is_in(expected_symbols))
+        available_symbols = set(selected["symbol"].unique().to_list())
         for symbol in expected_symbols:
-            selected = day_frame.filter(pl.col("symbol") == symbol)
-            if selected.is_empty():
+            if symbol not in available_symbols:
                 issues.append({
                     "type": "missing_symbol_date",
                     "detail": f"{symbol} 缺少 {day.isoformat()} Tick",
@@ -149,60 +152,87 @@ def inspect_tick_data(
                     "repairable": False,
                     "missing_dates": [day.isoformat()],
                 })
-                continue
-            invalid_expression = (
-                pl.col("datetime").is_null()
-                | pl.col(price_column).is_null()
-                | ~pl.col(price_column).is_finite()
-                | (pl.col(price_column) <= 0)
-                | pl.col("open").is_null()
-                | ~pl.col("open").is_finite()
-                | (pl.col("open") <= 0)
-                | pl.col("high").is_null()
-                | ~pl.col("high").is_finite()
-                | (pl.col("high") <= 0)
-                | pl.col("low").is_null()
-                | ~pl.col("low").is_finite()
-                | (pl.col("low") <= 0)
-                | pl.col("source").is_null()
-                | (pl.col("source").str.strip_chars() == "")
-                | pl.col("volume").is_null()
-                | ~pl.col("volume").is_finite()
-                | (pl.col("volume") < 0)
-                | pl.col("amount").is_null()
-                | ~pl.col("amount").is_finite()
-                | (pl.col("amount") < 0)
-                | pl.col("source_order").is_null()
-                | (pl.col("source_order") < 0)
+        if selected.is_empty():
+            continue
+        invalid_expression = (
+            pl.col("datetime").is_null()
+            | pl.col(price_column).is_null()
+            | ~pl.col(price_column).is_finite()
+            | (pl.col(price_column) <= 0)
+            | pl.col("open").is_null()
+            | ~pl.col("open").is_finite()
+            | (pl.col("open") <= 0)
+            | pl.col("high").is_null()
+            | ~pl.col("high").is_finite()
+            | (pl.col("high") <= 0)
+            | pl.col("low").is_null()
+            | ~pl.col("low").is_finite()
+            | (pl.col("low") <= 0)
+            | pl.col("source").is_null()
+            | (pl.col("source").str.strip_chars() == "")
+            | pl.col("volume").is_null()
+            | ~pl.col("volume").is_finite()
+            | (pl.col("volume") < 0)
+            | pl.col("amount").is_null()
+            | ~pl.col("amount").is_finite()
+            | (pl.col("amount") < 0)
+            | pl.col("source_order").is_null()
+            | (pl.col("source_order") < 0)
+        )
+        for column in _OPTIONAL_NUMERIC:
+            invalid_expression |= pl.col(column).is_not_null() & (
+                ~pl.col(column).is_finite() | (pl.col(column) <= 0)
             )
-            for column in _OPTIONAL_NUMERIC:
-                invalid_expression |= pl.col(column).is_not_null() & (
-                    ~pl.col(column).is_finite() | (pl.col(column) <= 0)
-                )
-            invalid = selected.filter(invalid_expression)
-            if not invalid.is_empty():
+        summary = (
+            selected
+            .with_columns(invalid_expression.alias("_invalid"))
+            .group_by("symbol", maintain_order=True)
+            .agg(
+                pl.len().alias("rows"),
+                pl.col("_invalid").sum().alias("invalid_rows"),
+                pl.col("source").drop_nulls().unique().alias("sources"),
+            )
+        )
+        by_symbol = {row["symbol"]: row for row in summary.iter_rows(named=True)}
+        order_columns = [
+            column for column in ("datetime", "source_order", "sequence", "trade_id")
+            if column in selected.columns
+        ]
+        out_of_order = set(
+            selected
+            .select("symbol", "_partition_order", *order_columns)
+            .sort(["symbol", *order_columns], maintain_order=True)
+            .group_by("symbol", maintain_order=True)
+            .agg(
+                (pl.col("_partition_order").diff().fill_null(0) < 0)
+                .any()
+                .alias("out_of_order")
+            )
+            .filter(pl.col("out_of_order"))["symbol"]
+            .to_list()
+        )
+        for symbol in expected_symbols:
+            summary_row = by_symbol.get(symbol)
+            if summary_row is None:
+                continue
+            invalid_rows = int(summary_row["invalid_rows"] or 0)
+            if invalid_rows:
                 issues.append({
                     "type": "invalid_rows",
-                    "detail": f"{symbol} {day.isoformat()} 有 {invalid.height} 条无效 Tick",
+                    "detail": f"{symbol} {day.isoformat()} 有 {invalid_rows} 条无效 Tick",
                     "action": "核对 QMT 原始响应并重新导入",
                     "repairable": False,
                 })
-            order_columns = [
-                column for column in ("datetime", "source_order", "sequence", "trade_id")
-                if column in selected.columns
-            ]
-            if selected.select(order_columns).rows() != selected.sort(
-                order_columns, maintain_order=True,
-            ).select(order_columns).rows():
+            if symbol in out_of_order:
                 issues.append({
                     "type": "out_of_order",
                     "detail": f"{symbol} {day.isoformat()} Tick 顺序异常",
                     "action": "按原始序列重新导入",
                     "repairable": False,
                 })
-            rows += selected.height
+            rows += int(summary_row["rows"])
             covered[symbol].append(day.isoformat())
-            sources.update(str(value) for value in selected["source"].drop_nulls().unique())
+            sources.update(str(value) for value in summary_row["sources"])
     return {
         "scan_id": None,
         "status": "issues" if issues else "healthy",

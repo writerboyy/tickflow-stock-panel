@@ -226,6 +226,28 @@ def mark(context):
     assert engine.context.state["time"] == "2024-08-01T09:31:00"
 
 
+def test_tick_history_keeps_latest_five_thousand_events():
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+
+def on_quote(context, quotes):
+    pass
+"""
+    engine = FreeStrategyEngine(source, timeframe="tick")
+    start = datetime(2024, 8, 1, 9, 30)
+    rows = [
+        Bar("X", start + timedelta(microseconds=index), 10, 10, 10, 10 + index)
+        for index in range(5_002)
+    ]
+
+    replay_tick_session(engine, start.date(), rows, datetime(2024, 8, 1, 15))
+
+    history = engine.context.history_bars("X", count=6_000)
+    assert len(history) == 5_000
+    assert [history[0].close, history[-1].close] == [12, 5_011]
+
+
 class DailyRepository:
     def __init__(self, rows: dict[str, list[dict]]) -> None:
         self.rows = rows

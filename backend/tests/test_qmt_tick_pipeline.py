@@ -373,3 +373,25 @@ def test_tick_health_reports_invalid_schema_without_raising_polars_error(tmp_pat
 
     assert report["status"] == "issues"
     assert report["issues"][0]["type"] == "invalid_schema"
+
+
+def test_tick_health_reports_out_of_order_per_symbol(tmp_path):
+    day = date(2024, 8, 1)
+    part = tmp_path / "tick" / f"date={day.isoformat()}" / "part.parquet"
+    part.parent.mkdir(parents=True)
+    frame = normalize_tick([
+        _raw_tick("600000.SH", "20240801093000.001", 10.0, 1),
+        _raw_tick("600000.SH", "20240801093000.002", 10.1, 2),
+        _raw_tick("000001.SZ", "20240801093000.001", 9.0, 1),
+    ], source="qmt")
+    frame[[1, 0, 2]].write_parquet(part)
+    repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
+
+    report = inspect_tick_data(
+        repo, ["600000.SH", "000001.SZ"], day, day, expected_dates=[day],
+    )
+
+    issues = [issue for issue in report["issues"] if issue["type"] == "out_of_order"]
+    assert [issue["detail"] for issue in issues] == [
+        "600000.SH 2024-08-01 Tick 顺序异常",
+    ]

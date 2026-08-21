@@ -1227,32 +1227,62 @@ def _read_rows(
         raise ValueError(f"{interval_label}历史缺少标的: {', '.join(missing[:8])}")
     bar_metadata = _minute_metadata(frame, market_data, asset_type) if market_data is not None else {}
 
+    row_columns = [
+        "symbol", "datetime", "open", "high", "low", "close", "volume", "amount",
+        "limit_up", "limit_down", "suspended", "prev_close",
+    ]
+    optional_defaults: dict[str, Any] = {
+        "volume": 0.0,
+        "amount": 0.0,
+        "limit_up": None,
+        "limit_down": None,
+        "suspended": False,
+        "prev_close": None,
+    }
+    row_frame = frame.select([
+        pl.col(column) if column in frame.columns else pl.lit(optional_defaults[column]).alias(column)
+        for column in row_columns
+    ])
+
     def minute_rows() -> Iterable[Bar]:
-        for row in frame.iter_rows(named=True):
-            symbol = str(row["symbol"])
-            day = row["datetime"].date()
+        for (
+            symbol_value,
+            timestamp,
+            open_price,
+            high_price,
+            low_price,
+            close_price,
+            volume,
+            amount,
+            limit_up,
+            limit_down,
+            suspended,
+            prev_close,
+        ) in row_frame.iter_rows():
+            symbol = str(symbol_value)
+            day = timestamp.date()
             observed = bar_metadata.get((symbol, day), {})
             scale = float(observed.get("scale", 1.0))
             yield Bar(
-                symbol=symbol, timestamp=row["datetime"],
-                open=float(row["open"]), high=float(row["high"]), low=float(row["low"]),
-                close=float(row["close"]), volume=float(row.get("volume") or 0),
-                amount=float(row.get("amount") or 0),
-                raw_open=float(row["open"]) * scale, raw_high=float(row["high"]) * scale,
-                raw_low=float(row["low"]) * scale, raw_close=float(row["close"]) * scale,
+                symbol=symbol, timestamp=timestamp,
+                open=float(open_price), high=float(high_price), low=float(low_price),
+                close=float(close_price), volume=float(volume or 0),
+                amount=float(amount or 0),
+                raw_open=float(open_price) * scale, raw_high=float(high_price) * scale,
+                raw_low=float(low_price) * scale, raw_close=float(close_price) * scale,
                 limit_up=(
-                    float(row["limit_up"])
-                    if row.get("limit_up") is not None else observed.get("limit_up")
+                    float(limit_up)
+                    if limit_up is not None else observed.get("limit_up")
                 ),
                 limit_down=(
-                    float(row["limit_down"])
-                    if row.get("limit_down") is not None else observed.get("limit_down")
+                    float(limit_down)
+                    if limit_down is not None else observed.get("limit_down")
                 ),
-                suspended=bool(row.get("suspended", False)),
-                tradable=not bool(row.get("suspended", False)) and float(row["close"]) > 0,
+                suspended=bool(suspended),
+                tradable=not bool(suspended) and float(close_price) > 0,
                 previous_close=(
-                    float(row["prev_close"])
-                    if row.get("prev_close") is not None else observed.get("previous_close")
+                    float(prev_close)
+                    if prev_close is not None else observed.get("previous_close")
                 ),
                 split_ratio=float(observed.get("split_ratio", 1.0)),
             )
@@ -2183,15 +2213,16 @@ def replay_tick_session(
     finalize: bool = True,
 ) -> int:
     """Replay canonical Tick rows one event at a time in stable input order."""
-    indexed = list(enumerate(
-        row for row in rows if row.date == day and row.timestamp <= cutoff
-    ))
-    ordered = [
-        row for _index, row in sorted(
-            indexed,
-            key=lambda item: (item[1].timestamp, item[0]),
-        )
-    ]
+    ordered = rows if isinstance(rows, list) else list(rows)
+    if any(row.date != day or row.timestamp > cutoff for row in ordered):
+        ordered = [
+            row for row in ordered if row.date == day and row.timestamp <= cutoff
+        ]
+    if any(
+        ordered[index].timestamp < ordered[index - 1].timestamp
+        for index in range(1, len(ordered))
+    ):
+        ordered = sorted(ordered, key=lambda row: row.timestamp)
     engine.begin_session(day)
     latest: dict[str, Bar] = {}
     offset = 0

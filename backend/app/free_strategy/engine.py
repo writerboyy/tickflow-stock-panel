@@ -13,7 +13,7 @@ from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time as datetime_time, timedelta
 from decimal import Decimal
-from itertools import groupby
+from itertools import groupby, islice
 from statistics import mean, pstdev
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Literal
@@ -32,6 +32,14 @@ from app.services.data_authority import normalize_reference_asset
 logger = logging.getLogger(__name__)
 
 EventType = Literal["bar", "quote", "scheduled", "fill", "market"]
+
+
+def _history_tail(values: list[Bar] | deque[Bar], count: int) -> list[Bar]:
+    if count <= 0:
+        return []
+    if isinstance(values, list):
+        return list(values[-count:])
+    return list(islice(values, max(0, len(values) - count), None))
 
 
 @dataclass(slots=True)
@@ -721,16 +729,21 @@ class Context:
             self._engine.market_rows_consumed += sum(len(values) for values in visible.values())
             return visible
         return {
-            symbol: list(self._engine._history_by_period.get(period, {}).get(symbol, [])[-count:])
+            symbol: _history_tail(
+                self._engine._history_by_period.get(period, {}).get(symbol, []),
+                count,
+            )
             for symbol in normalized
         }
 
-    def _sync(self, prices: dict[str, float]) -> None:
+    def _sync(self, prices: dict[str, float], *, equity: float | None = None) -> None:
         self.portfolio.cash = self._engine.account.cash
         self.portfolio.positions = dict(self._engine.account.positions)
         self.portfolio.available_positions = dict(self._engine.account.available)
         self.portfolio.avg_cost = dict(self._engine.account.avg_cost)
-        self.portfolio.total_value = self._engine.account.equity(prices)
+        self.portfolio.total_value = (
+            self._engine.account.equity(prices) if equity is None else equity
+        )
 
     def schedule(
         self,
@@ -877,7 +890,7 @@ class Context:
             self._engine.market_rows_consumed += len(visible)
             return list(visible[-count:])
         history = self._engine._history_by_period.get(timeframe or self.period, {})
-        return list(history.get(symbol or "", [])[-count:])
+        return _history_tail(history.get(symbol or "", []), count)
 
     def extra_history(
         self,
@@ -974,8 +987,10 @@ class FreeStrategyEngine:
         self.state = state or {}
         self.logs: list[dict[str, Any]] = []
         self._signals: list[dict[str, Any]] = []
-        self.history: dict[str, list[Bar]] = {}
-        self._history_by_period: dict[str, dict[str, list[Bar]]] = {timeframe: self.history}
+        self.history: dict[str, deque[Bar]] = {}
+        self._history_by_period: dict[
+            str, dict[str, list[Bar] | deque[Bar]]
+        ] = {timeframe: self.history}
         self._market_history_by_period: dict[str, dict[str, list[Bar]]] = {}
         self._tradable_dates: set[tuple[str, date]] = set()
         self._market_dates: set[date] = set()
@@ -1364,7 +1379,10 @@ class FreeStrategyEngine:
         history = self._history_by_period.setdefault(timeframe, {})
         count = 0
         for bar in sorted(bars, key=lambda item: (item.timestamp, item.symbol)):
-            values = history.setdefault(bar.symbol, [])
+            values = history.get(bar.symbol)
+            if values is None:
+                values = deque(maxlen=5_000) if timeframe == self.timeframe else []
+                history[bar.symbol] = values
             if values:
                 if values[-1].timestamp == bar.timestamp:
                     values[-1] = bar
@@ -1372,7 +1390,7 @@ class FreeStrategyEngine:
                 if values[-1].timestamp > bar.timestamp:
                     continue
             values.append(bar)
-            if len(values) > 5_000:
+            if isinstance(values, list) and len(values) > 5_000:
                 del values[:-5_000]
             count += 1
         return count
@@ -1482,8 +1500,9 @@ class FreeStrategyEngine:
             self._risk_status["reason"] = None
             self._risk_status["triggered_at"] = None
 
-    def _update_risk(self, timestamp: datetime) -> None:
-        equity = self.account.equity(self._current_close_prices)
+    def _update_risk(self, timestamp: datetime, equity: float | None = None) -> None:
+        if equity is None:
+            equity = self.account.equity(self._current_close_prices)
         if self._risk_day != timestamp.date():
             self._risk_day = timestamp.date()
             self._risk_day_start_equity = equity
@@ -1543,6 +1562,8 @@ class FreeStrategyEngine:
         field: str,
     ) -> None:
         values = [item[0] if isinstance(item, tuple) else item for item in orders]
+        if not values:
+            return
         ordered = sorted(values, key=self._sell_first)
         weighted = [order for order in ordered if order.cash_weight is not None]
         for order in ordered:
@@ -2308,10 +2329,11 @@ class FreeStrategyEngine:
         bars_now: BarsView,
         *,
         record_history: bool,
-    ) -> None:
+    ) -> float:
         self._current_close_prices.update({symbol: bar.execution_price("close") for symbol, bar in bars_now.items()})
         self.context.now = timestamp
-        self.context._sync(self._current_close_prices)
+        equity = self.account.equity(self._current_close_prices)
+        self.context._sync(self._current_close_prices, equity=equity)
         current_bar = next(iter(bars_now.values()), None)
         if current_bar is not None:
             self._current_bar = current_bar
@@ -2325,16 +2347,15 @@ class FreeStrategyEngine:
         if record_history:
             self._accumulate_session_daily_bars(bars_now)
             for symbol, bar in bars_now.items():
-                self.history.setdefault(symbol, []).append(bar)
-                if len(self.history[symbol]) > 5_000:
-                    del self.history[symbol][:-5_000]
+                self.history.setdefault(symbol, deque(maxlen=5_000)).append(bar)
         self._session_equity_snapshot = {
             "timestamp": timestamp.isoformat(),
-            "equity": self.account.equity(self._current_close_prices),
+            "equity": equity,
             "cash": self.account.cash,
             "positions": dict(self.account.positions),
         }
-        self._update_risk(timestamp)
+        self._update_risk(timestamp, equity)
+        return equity
 
     @staticmethod
     def _quote_bar(quote: Quote) -> Bar:
@@ -2444,13 +2465,15 @@ class FreeStrategyEngine:
                 self._pending_event_sequences[order.id] = self._event_sequence
 
         # 3. Publish the market snapshot and history visible at this timestamp.
-        self._publish_market(
+        published_equity = self._publish_market(
             timestamp,
             bars_now,
             record_history=event_type == "bar" or (
                 event_type == "quote" and self.timeframe == "tick"
             ),
         )
+        published_cash = self.account.cash
+        published_fill_count = len(self.account.fills)
 
         # 4. Primary market callback.
         if event_type == "bar":
@@ -2499,10 +2522,17 @@ class FreeStrategyEngine:
             self._fill_immediate_orders(bars_now, timestamp)
 
         # 7. Record the complete post-event state used by checkpoints and paper mode.
-        self.context._sync(self._current_close_prices)
+        if (
+            self.account.cash == published_cash
+            and len(self.account.fills) == published_fill_count
+        ):
+            final_equity = published_equity
+        else:
+            final_equity = self.account.equity(self._current_close_prices)
+        self.context._sync(self._current_close_prices, equity=final_equity)
         self._session_equity_snapshot = {
             "timestamp": timestamp.isoformat(),
-            "equity": self.account.equity(self._current_close_prices),
+            "equity": final_equity,
             "cash": self.account.cash,
             "positions": dict(self.account.positions),
         }

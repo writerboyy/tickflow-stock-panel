@@ -6,7 +6,7 @@ import polars as pl
 
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
-from app.free_strategy.strong_momentum import _passes_intraday_gate
+from app.free_strategy.strong_momentum import _passes_intraday_gate, _raw
 from app.free_strategy.strong_momentum_snapshot import _with_candidate_features
 from app.free_strategy.templates import TEMPLATES
 
@@ -104,12 +104,21 @@ def test_strong_momentum_template_uses_minute_morning_contract():
     assert "jqdata" not in template["source"]
     assert "context.require_strong_momentum_snapshot" in template["source"]
     assert "09:30:16" in template["source"]
+    assert "_on_market(context, quotes, context.current_bars())" in template["source"]
 
     engine = _engine()
     assert engine.scheduled_times == [
         "09:30:16", "09:31:00", "09:32:00", "09:37:00", "10:29:00",
     ]
     assert engine.second_precision_schedules == engine.scheduled_times
+
+
+def test_quote_raw_prices_fall_back_to_last_price():
+    quote = Quote(SYMBOL, datetime(2026, 8, 20, 9, 30), 10.25)
+
+    assert [_raw(quote, field) for field in ("open", "high", "low", "close")] == [
+        10.25, 10.25, 10.25, 10.25,
+    ]
 
 
 def test_candidate_features_shift_all_selection_inputs_to_d1():
