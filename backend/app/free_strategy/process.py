@@ -40,6 +40,7 @@ from .readiness import (
     persist_readiness_report,
 )
 from .research_periods import build_research_periods
+from .schedule import has_explicit_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -2060,7 +2061,7 @@ def advance_scheduled_session(
         # the first common realtime snapshot at/after that boundary for the
         # callback, while retaining ``scheduled_at`` as the strategy event ID.
         event_timestamp = timestamp
-        if live_only and timestamp.time().second:
+        if live_only and has_explicit_seconds(at):
             available_by_time: dict[datetime, set[str]] = {}
             for bar in live_bars or ():
                 if (
