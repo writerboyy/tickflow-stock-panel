@@ -777,6 +777,56 @@ def mark(context):
     ] == [("2024-01-02T09:30:16", "X", 100)]
 
 
+def test_second_precision_callback_uses_last_trade_before_boundary_and_optional_benchmark(monkeypatch):
+    day = date(2024, 1, 2)
+
+    class SecondRepository:
+        def get_second_snapshot(self, symbols, at, asset_type="stock"):
+            del symbols, asset_type
+            if at != datetime(2024, 1, 2, 9, 31):
+                return pl.DataFrame()
+            return pl.DataFrame({
+                "symbol": ["X"],
+                "datetime": [datetime(2024, 1, 2, 9, 30, 59)],
+                "open": [10.0], "high": [10.2], "low": [10.0], "close": [10.2],
+                "volume": [100.0], "amount": [1020.0],
+            })
+
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(mark, '09:31:00', symbols=['X'])
+
+def mark(context):
+    context.state['executed_at'] = context.now.isoformat()
+    context.state['price'] = context.current_bars()['X'].close
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            benchmark_symbol="Y",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process._ensure_scheduled_market_data",
+        lambda *_args, **_kwargs: None,
+    )
+
+    advance_scheduled_session(
+        SecondRepository(), engine, MarketData(), day,
+        datetime(2024, 1, 2, 9, 31), "stock", "1m", finalize=False,
+    )
+
+    assert engine.context.state == {
+        "executed_at": "2024-01-02T09:31:00",
+        "price": 10.2,
+    }
+
+
 def test_market_preparation_does_not_inject_undeclared_history():
     start = datetime(2024, 2, 1).date()
     rows = {"X": [daily_row(start - timedelta(days=day), float(day)) for day in range(1, 11)]}

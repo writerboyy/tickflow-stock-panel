@@ -235,6 +235,35 @@ def test_second_level_entry_matches_reference_symbols_and_lots():
     ]
 
 
+def test_entry_accepts_latest_trade_before_explicit_zero_second_callback():
+    day = date(2026, 8, 20)
+    engine = _engine()
+    engine.begin_session(day)
+    engine.advance_event(
+        datetime(day.year, day.month, day.day, 9, 31),
+        [Bar(
+            SYMBOL,
+            datetime(day.year, day.month, day.day, 9, 30, 59),
+            10.0, 10.2, 10.0, 10.2,
+            volume=10_000,
+            amount=102_000,
+            raw_open=10.0,
+            raw_high=10.2,
+            raw_low=10.0,
+            raw_close=10.2,
+            limit_up=11.0,
+            limit_down=9.0,
+        )],
+        event_type="scheduled",
+        scheduled_at="09:31:00",
+    )
+
+    assert engine.context.now == datetime(day.year, day.month, day.day, 9, 31)
+    assert engine.context.current_bars()[SYMBOL].timestamp == datetime(
+        day.year, day.month, day.day, 9, 30, 59,
+    )
+
+
 def test_auction_gate_rejects_open_above_eight_percent():
     day = date(2026, 1, 5)
     result = _engine().run([

@@ -1649,11 +1649,10 @@ def _scheduled_required_symbols(
         for symbol, quantity in engine.account.positions.items()
         if float(quantity) > 0
     ]
-    for symbol in [
-        *(engine.universe if scoped is None else scoped),
-        *held_symbols,
-        engine.config.benchmark_symbol,
-    ]:
+    # The benchmark is included in the visible snapshot for valuation, but it
+    # is not a strategy input and therefore must not block a second-precision
+    # callback when the provider has no benchmark tick history.
+    for symbol in [*(engine.universe if scoped is None else scoped), *held_symbols]:
         if symbol and symbol not in result:
             result.append(symbol)
     return result

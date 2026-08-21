@@ -251,7 +251,10 @@ def _entry_candidates(context, state, *, force=False):
         if symbol in held or symbol in state["pending_entries"]:
             continue
         bar = current_bars.get(symbol)
-        if bar is None or bar.timestamp != context.now or not bar.tradable or float(bar.volume or 0) <= 0:
+        # A provider snapshot at an exact callback boundary may contain the
+        # last trade just before that boundary.  The original current_data
+        # API exposes that latest trade, so only future rows are invalid.
+        if bar is None or bar.timestamp > context.now or not bar.tradable or float(bar.volume or 0) <= 0:
             continue
         gate = _passes_intraday_gate(state, symbol, meta, bar)
         if gate is None:
