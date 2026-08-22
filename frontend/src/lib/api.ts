@@ -1077,6 +1077,8 @@ export interface PositionRiskFeatureSnapshot {
   bars_1m?: number
   bars_5m?: number
   last_price?: number | null
+  limit_up?: number | null
+  limit_down?: number | null
   session_vwap?: number | null
   opening_range_high?: number | null
   opening_range_low?: number | null
@@ -1106,7 +1108,37 @@ export interface PositionRiskFeatureSnapshot {
   t_trade_count?: number
   t_trade_date?: string | null
   closed_bars_5m?: Array<{ close?: number | null }>
+  daily?: {
+    available?: boolean
+    reason?: string
+    as_of?: string | null
+    latest_signal?: string | null
+  }
+  decision?: PositionRiskDecision
   context?: PositionRiskContext
+}
+
+export interface PositionRiskDataQualityBlock {
+  status: 'available' | 'partial' | 'missing' | 'not_supported' | string
+  reason: string
+  as_of?: string | null
+  samples?: number
+  missing?: string[]
+}
+
+export interface PositionRiskDecision {
+  action: 'hold' | 'observe' | 'reduce_25' | 'reduce_50' | 'exit' | string
+  action_label: string
+  suggested_pct: number
+  risk_level: 'low' | 'medium' | 'high' | 'unknown' | string
+  confidence: number
+  reason: string
+  evidence: Array<{ source: string; label: string; detail: string; tone?: string }>
+  watch_conditions: string[]
+  data_quality: Record<string, PositionRiskDataQualityBlock>
+  missing: string[]
+  event?: { kind: string; label: string; optional_action_pct?: number } | null
+  manual_confirmation: boolean
 }
 
 export interface PositionRiskContext {

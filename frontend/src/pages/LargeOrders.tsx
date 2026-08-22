@@ -26,11 +26,12 @@ import {
   type PositionRiskContext,
   type PositionRiskPosition,
   type PositionRiskPortfolio,
+  type PositionRiskFeatureSnapshot,
   type PositionRiskStatus,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
-import { cnSignal, cnSignalText } from '@/lib/signals'
+import { cnSignalText } from '@/lib/signals'
 
 type Tab = 'positions' | 'events'
 
@@ -150,6 +151,29 @@ function contextStateClass(value?: string | null) {
 function contextDimensionLabel(context?: PositionRiskContext) {
   if (!context?.sector_name) return '板块待就绪'
   return `${context.sector_kind === 'industry' ? '行业' : '题材'} ${context.sector_name}`
+}
+
+const DECISION_RISK_LABELS: Record<string, string> = {
+  low: '低风险', medium: '中风险', high: '高风险', unknown: '数据不足',
+}
+
+const QUALITY_STATUS_LABELS: Record<string, string> = {
+  available: '已参与', partial: '部分可用', missing: '缺失', not_supported: '未接入',
+}
+
+const QUALITY_SOURCE_LABELS: Record<string, string> = {
+  quote: '行情', daily: '日线', technical: '技术面', fund_flow: '资金流', market_context: '市场上下文', news: '新闻面',
+}
+
+function decisionRiskClass(value?: string) {
+  return value === 'high' ? 'text-danger' : value === 'medium' ? 'text-warning' : value === 'low' ? 'text-bull' : 'text-muted'
+}
+
+function decisionDisplay(feature?: PositionRiskFeatureSnapshot) {
+  const decision = feature?.decision
+  if (!decision) return '观察'
+  if (decision.event?.label) return `${decision.event.label} · 可选减仓 ${decision.event.optional_action_pct ?? 25}%`
+  return decision.action_label
 }
 
 function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
@@ -439,8 +463,28 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
           {(() => {
             const feature = featuresQuery.data?.features[row.symbol]
             const featureState = feature?.fresh ? '数据新鲜' : feature?.reason || '等待闭合分钟数据'
+            const decision = feature?.decision
             return (
               <section className="mt-3 border-y border-border bg-elevated/30 px-3 py-2 text-[10px]">
+                {decision && (
+                  <div className="border-b border-border/70 pb-3">
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                        <span className="text-muted">综合建议</span>
+                        <b className={cn('text-sm', decisionRiskClass(decision.risk_level))}>{decisionDisplay(feature)}</b>
+                        <span className="text-muted">置信度 {Math.round(decision.confidence * 100)}%</span>
+                        <span className={decisionRiskClass(decision.risk_level)}>{DECISION_RISK_LABELS[decision.risk_level] ?? decision.risk_level}</span>
+                      </div>
+                      <span className="text-muted">委托仍需人工确认</span>
+                    </div>
+                    <p className="mt-1 leading-4 text-secondary">{decision.reason}</p>
+                    {decision.evidence.length > 0 && <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted">{decision.evidence.slice(0, 4).map(item => <span key={`${item.source}-${item.label}`}>{item.label}：<b className="text-foreground">{item.detail}</b></span>)}</div>}
+                    {decision.watch_conditions.length > 0 && <div className="mt-1 text-warning">关注：{decision.watch_conditions[0]}</div>}
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+                      {Object.entries(decision.data_quality).map(([source, block]) => <span key={source} className="text-muted">{QUALITY_SOURCE_LABELS[source] ?? source} <b className={block.status === 'available' ? 'text-bull' : block.status === 'not_supported' ? 'text-muted' : 'text-warning'}>{QUALITY_STATUS_LABELS[block.status] ?? block.status}</b></span>)}
+                    </div>
+                  </div>
+                )}
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                   <span className={cn('font-medium', feature?.fresh ? 'text-bull' : 'text-warning')}>{featureState}</span>
                   <span className="text-muted">阶段 <b className="text-foreground">{feature?.stage || 'initial'}</b></span>
@@ -480,7 +524,13 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             )
           })()}
 
-          <nav className="mt-5 flex border-b border-border" aria-label="单股风控模块">
+          <details className="mt-4 border-y border-border">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-xs text-secondary">
+              <span className="flex items-center gap-2"><ChevronDown className="h-3.5 w-3.5" />高级规则与参数</span>
+              <span className="text-[10px] text-muted">需要调整规则时展开</span>
+            </summary>
+            <div className="pb-3">
+          <nav className="flex border-b border-border" aria-label="单股风控模块">
             {INTRADAY_RULE_TAB.map(([id, label]) => (
               <button key={id} type="button" onClick={() => { setActiveRuleTab(id); setExpandedRule(null) }} className={cn('h-9 flex-1 border-b-2 text-xs', activeRuleTab === id ? 'border-accent text-foreground' : 'border-transparent text-muted hover:text-foreground')}>
                 {label}
@@ -561,6 +611,8 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
               <div>{renderSignalGroups(signalGroups.filter(([title]) => title === '分时信号'))}</div>
             </section>
           )}
+            </div>
+          </details>
         </div>
         <div className="flex items-center justify-between border-t border-border px-4 py-3">
           <span className="text-[11px] text-muted">{Object.keys(override).length ? '存在单股覆盖' : '全部继承全局模板'}</span>
@@ -698,7 +750,7 @@ export function LargeOrders() {
           <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[1160px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价 / 持仓盈亏', '仓位', '上下文', '风控设置', '操作', '信号'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价 / 持仓盈亏', '仓位', '上下文', '风控设置', '操作', '综合建议'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -714,14 +766,14 @@ export function LargeOrders() {
                 </td>
                 <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
                 <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
-                <td className="max-w-36 truncate px-3 py-2 text-muted" title={row.latest_signal ? cnSignal(row.latest_signal) : ''}>{row.latest_signal ? cnSignal(row.latest_signal) : '—'}</td>
+                <td className="max-w-44 truncate px-3 py-2 text-muted" title={decisionDisplay(features.data?.features[row.symbol])}>{decisionDisplay(features.data?.features[row.symbol])}</td>
               </tr>)}
             </tbody>
           </table>
         </div>
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div><div className="mt-1 text-[11px] text-muted">{row.latest_signal ? cnSignal(row.latest_signal) : '观察'}</div><div className="mt-2 border-t border-border/70 pt-2"><div className={cn('mb-1 text-[11px] font-medium', contextStateClass(features.data?.features[row.symbol]?.context?.state))}>上下文 {contextStateLabel(features.data?.features[row.symbol]?.context?.state)} · {features.data?.features[row.symbol]?.context?.emotion_phase || '数据不足'}</div><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
+            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div><div className="mt-1 text-[11px] text-secondary">建议 {decisionDisplay(features.data?.features[row.symbol])}</div><div className="mt-2 border-t border-border/70 pt-2"><div className={cn('mb-1 text-[11px] font-medium', contextStateClass(features.data?.features[row.symbol]?.context?.state))}>上下文 {contextStateLabel(features.data?.features[row.symbol]?.context?.state)} · {features.data?.features[row.symbol]?.context?.emotion_phase || '数据不足'}</div><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
             <div className="flex items-center gap-2"><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
         </div>

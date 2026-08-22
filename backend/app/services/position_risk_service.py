@@ -20,6 +20,7 @@ from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now
 from app.services import alert_store
 from app.services.position_risk_context import PositionRiskContextService
+from app.services.position_risk_decision import build_position_decision
 from app.services.position_risk_store import PositionRiskStore
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
@@ -850,6 +851,8 @@ class PositionRiskService:
         positions = {str(item.get("symbol")): item for item in portfolio.get("positions", [])}
         for symbol in selected:
             position = positions.get(symbol) or {}
+            quote = dict(self._latest_quotes.get(symbol) or {})
+            history = self._history.get(symbol) or {}
             runtime = self.store.get_runtime(f"position:{symbol}", {}) or {}
             cost = _finite(position.get("cost_price"))
             stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
@@ -860,6 +863,18 @@ class PositionRiskService:
                 "reason": "分时特征不可用", "source": None, "as_of": None,
             })
             item.update({
+                "last_price": _finite(quote.get("last_price")) or _finite(position.get("import_price")),
+                "limit_up": _finite(quote.get("limit_up")),
+                "limit_down": _finite(quote.get("limit_down")),
+                "daily": {
+                    "available": bool(history),
+                    "reason": "日线指标已获取" if history else "日线指标不可用",
+                    "as_of": self._history_as_of.get(symbol),
+                    "latest_signal": next(
+                        (key for key, value in history.items() if key.startswith("signal_") and value is True),
+                        None,
+                    ),
+                },
                 "stage": runtime.get("stage", "initial"),
                 "r_multiple": runtime.get("r_multiple"),
                 "effective_stop_price": runtime.get("effective_stop_price") or hard_stop,
@@ -875,6 +890,18 @@ class PositionRiskService:
                     "emotion_phase": "数据不足",
                 }),
             })
+            item["decision"] = build_position_decision(
+                item,
+                position={
+                    **position,
+                    "profit_loss_pct": (
+                        item["last_price"] / cost - 1
+                        if item.get("last_price") is not None and cost
+                        else None
+                    ),
+                },
+                quote=quote,
+            )
             result[symbol] = item
         return result
 
