@@ -517,6 +517,7 @@ export function PaperTrading() {
   const detailQuery = useQuery({ queryKey: ['free-paper-account', selectedId], queryFn: () => api.paperAccount(selectedId), enabled: Boolean(selectedId), refetchInterval: selectedId ? 5_000 : false })
   const eventsQuery = useQuery({ queryKey: ['free-paper-events', selectedId], queryFn: () => api.paperEvents(selectedId), enabled: Boolean(selectedId) })
   const signalsQuery = useQuery({ queryKey: ['free-paper-signals', selectedId], queryFn: () => api.paperSignals(selectedId), enabled: Boolean(selectedId) })
+  const logsQuery = useQuery({ queryKey: ['free-paper-logs', selectedId], queryFn: () => api.paperLogs(selectedId), enabled: Boolean(selectedId) })
   const accounts = accountsQuery.data?.accounts ?? []
   const account = detailQuery.data ?? accounts.find(item => item.id === selectedId)
   const events = useMemo(() => eventsQuery.data?.events ?? [], [eventsQuery.data?.events])
@@ -565,6 +566,7 @@ export function PaperTrading() {
       void qc.invalidateQueries({ queryKey: ['free-paper-account', selectedId] })
       void qc.invalidateQueries({ queryKey: ['free-paper-events', selectedId] })
       if (event.type === 'signal') void qc.invalidateQueries({ queryKey: ['free-paper-signals', selectedId] })
+      if (event.type === 'log') void qc.invalidateQueries({ queryKey: ['free-paper-logs', selectedId] })
       if (['fill', 'rejected', 'risk'].includes(event.type)) {
         pushAlertToast({ ts: Date.now(), source: 'strategy', type: event.type, symbol: event.symbol, message: eventText(event), severity: event.type === 'risk' ? 'critical' : event.type === 'rejected' ? 'warn' : 'info' })
       }
@@ -577,7 +579,7 @@ export function PaperTrading() {
     setPendingAction(value)
     try {
       await api.paperAction(account.id, value)
-      await Promise.all([accountsQuery.refetch(), detailQuery.refetch(), statusQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])
+      await Promise.all([accountsQuery.refetch(), detailQuery.refetch(), statusQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch(), logsQuery.refetch()])
     } catch {
       return
     } finally {
@@ -628,7 +630,7 @@ export function PaperTrading() {
   const decisionEvents = signalsQuery.data?.signals ?? []
   const allFills = accountState?.fills ?? []
   const allOrders = accountState?.orders ?? []
-  const allLogEvents = events.filter(event => event.type === 'log' && event.source === 'strategy')
+  const allLogEvents = logsQuery.data?.logs ?? []
   const availableDates = [...new Set([
     ...equityRows.map(row => row.timestamp.slice(0, 10)),
     account?.valuation?.date ?? '',
@@ -718,7 +720,7 @@ export function PaperTrading() {
               <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-success/40 text-success hover:border-success hover:bg-success/10 disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
               <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-warning/40 text-warning hover:border-warning hover:bg-warning/10 disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
               <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-danger/40 text-danger hover:border-danger hover:bg-danger/10 disabled:opacity-35"><Square className="h-4 w-4" /></button>
-              <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-accent/40 text-accent hover:border-accent hover:bg-accent/10"><RefreshCw className="h-4 w-4" /></button>
+              <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch(), logsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-accent/40 text-accent hover:border-accent hover:bg-accent/10"><RefreshCw className="h-4 w-4" /></button>
               <button type="button" title={account.status === 'stopped' ? '删除' : '请先停止账户'} disabled={Boolean(pendingAction) || account.status !== 'stopped'} onClick={() => setDeleteTarget(account)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-danger/40 text-danger hover:border-danger hover:bg-danger/10 disabled:opacity-35"><Trash2 className="h-4 w-4" /></button>
             </div>
           </div>
