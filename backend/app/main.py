@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, limit_board, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, limit_board, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist, xiaoshi
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -526,6 +526,8 @@ app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(xiaoshi.router)
+app.include_router(xiaoshi.settings_router)
 app.include_router(large_orders.router)
 app.include_router(position_risk.router)
 app.include_router(limit_board.router)
