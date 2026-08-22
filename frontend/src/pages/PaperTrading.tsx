@@ -10,7 +10,6 @@ import {
   ArrowUpRight,
   CirclePause,
   CirclePlay,
-  ChevronDown,
   FileText,
   Gauge,
   ListOrdered,
@@ -23,6 +22,7 @@ import {
   Trash2,
   WalletCards,
   Wifi,
+  X,
 } from 'lucide-react'
 import * as echarts from 'echarts'
 import type { EChartsOption } from 'echarts'
@@ -98,30 +98,29 @@ function syncClass(account: PaperAccount) {
   return 'text-muted'
 }
 
-function AlgorithmOverview({ algorithm }: { algorithm: PaperAccount['algorithm'] }) {
-  const [open, setOpen] = useState(true)
+function AlgorithmDialog({ account, onClose }: { account: PaperAccount; onClose: () => void }) {
+  const algorithm = account.algorithm
   if (!algorithm) return null
-  return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="group border-b border-border bg-elevated/20">
-    <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium hover:bg-elevated/50">
+  return <Modal labelledBy="paper-algorithm-title" onClose={onClose} panelClassName="flex max-h-[82vh] w-[94vw] max-w-3xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
+    <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
       <BookOpen className="h-4 w-4 shrink-0 text-accent" />
-      <span className="shrink-0">算法说明</span>
-      <span className="min-w-0 flex-1 truncate text-[10px] font-normal text-muted">{algorithm.summary}</span>
-      <ChevronDown className="h-4 w-4 shrink-0 text-muted transition-transform group-open:rotate-180" />
-    </summary>
-    <div className="border-t border-border px-4 py-3">
-      <p className="max-w-5xl text-xs leading-5 text-secondary">{algorithm.summary}</p>
-      <ol className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 max-lg:grid-cols-1">
-        {algorithm.steps.map((step, index) => <li key={`${step.title}-${index}`} className="grid grid-cols-[24px_minmax(0,1fr)] gap-2 border-l border-border pl-2">
+      <h2 id="paper-algorithm-title" className="min-w-0 flex-1 truncate text-sm font-semibold">{account.name} · 算法说明</h2>
+      <button type="button" title="关闭" onClick={onClose} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><X className="h-4 w-4" /></button>
+    </div>
+    <div className="min-h-0 overflow-y-auto px-4 py-4">
+      <p className="text-xs leading-5 text-secondary">{algorithm.summary}</p>
+      <ol className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 max-md:grid-cols-1">
+        {algorithm.steps.map((step, index) => <li key={`${step.title}-${index}`} className="grid grid-cols-[28px_minmax(0,1fr)] gap-2 border-l border-border pl-2">
           <span className="font-mono text-[10px] text-accent">{String(index + 1).padStart(2, '0')}</span>
-          <div className="min-w-0"><div className="text-[11px] font-medium">{step.title}</div><div className="mt-0.5 text-[10px] leading-4 text-muted">{step.detail}</div></div>
+          <div className="min-w-0"><div className="text-xs font-medium">{step.title}</div><div className="mt-1 text-[11px] leading-5 text-muted">{step.detail}</div></div>
         </li>)}
       </ol>
-      {algorithm.runtime.length ? <div className="mt-3 border-t border-border pt-2">
-        <div className="text-[10px] font-medium text-secondary">当前模拟运行方式</div>
-        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted">{algorithm.runtime.map(item => <span key={item}>· {item}</span>)}</div>
+      {algorithm.runtime.length ? <div className="mt-4 border-t border-border pt-3">
+        <div className="text-[11px] font-medium text-secondary">当前模拟运行方式</div>
+        <div className="mt-2 space-y-1 text-[11px] leading-5 text-muted">{algorithm.runtime.map(item => <div key={item}>· {item}</div>)}</div>
       </div> : null}
     </div>
-  </details>
+  </Modal>
 }
 
 function returnClass(value?: number) {
@@ -539,6 +538,7 @@ export function PaperTrading() {
   const [pendingAction, setPendingAction] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<PaperAccount | null>(null)
   const [renameTarget, setRenameTarget] = useState<PaperAccount | null>(null)
+  const [algorithmOpen, setAlgorithmOpen] = useState(false)
   const notifiedSequence = useRef(0)
   const accountsQuery = useQuery({ queryKey: ['free-paper-accounts'], queryFn: api.paperAccounts, refetchInterval: 10_000 })
   const statusQuery = useQuery({ queryKey: ['free-paper-status'], queryFn: api.paperStatus, refetchInterval: 3_000 })
@@ -579,6 +579,7 @@ export function PaperTrading() {
 
   useEffect(() => {
     setSelectedDate('')
+    setAlgorithmOpen(false)
   }, [selectedId])
 
   useEffect(() => {
@@ -739,7 +740,7 @@ export function PaperTrading() {
       </aside>
       {!account ? <EmptyState icon={WalletCards} title="选择或创建模拟账户" /> : <main className="min-h-0 min-w-0 overflow-y-auto">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
-          <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{syncLabel(account) ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
+          <div className="min-w-0"><div className="flex items-center gap-1.5"><h2 className="truncate text-sm font-semibold">{account.name}</h2><button type="button" title="修改模拟名称" onClick={() => setRenameTarget(account)} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><Pencil className="h-3.5 w-3.5" /></button><button type="button" title="查看算法说明" onClick={() => setAlgorithmOpen(true)} disabled={!account.algorithm} className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-accent disabled:opacity-30"><BookOpen className="h-3.5 w-3.5" /></button><span className={`text-[11px] ${statusClass(account.status)}`}>{statusLabel(account.status)}</span>{syncLabel(account) ? <span className={`text-[10px] ${syncClass(account)}`}>{syncLabel(account)}</span> : null}</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted"><span>{MODE_LABEL[account.market_mode]}</span><span>策略 r{account.source_revision}</span><span className="font-mono">{account.source_hash?.slice(0, 8)}</span><span>{account.execution_mode === 'scheduled' ? '定时执行' : account.execution_mode === 'quote' ? '报价驱动' : '闭合1分钟K线'}</span></div></div>
           <div className="flex flex-wrap items-center justify-end gap-2">
             <DatePicker value={activeDate} onChange={selectTradingDate} min={availableDates[0]} max={latestDate} align="right" />
             <div className="flex items-center gap-1">
@@ -755,8 +756,6 @@ export function PaperTrading() {
 
         {account.last_error ? <div className="mx-4 mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"><AlertTriangle className="h-4 w-4 shrink-0" />{account.last_error}</div> : null}
         {(account.risk_status?.daily_loss_locked || account.risk_status?.drawdown_locked) ? <div className="mx-4 mt-3 flex items-center gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"><ShieldAlert className="h-4 w-4" /><span className="flex-1">{account.risk_status.reason ?? '风控锁定'}</span>{account.risk_status.drawdown_locked ? <button type="button" onClick={() => void action('unlock-risk')} className="rounded border border-warning/50 px-2 py-1 text-[11px]">确认恢复</button> : null}</div> : null}
-
-        <AlgorithmOverview algorithm={account.algorithm} />
 
         <section className="grid grid-cols-[1.15fr_1fr_1fr_1fr] border-b border-border max-lg:grid-cols-2">
           <div className={`relative min-w-0 overflow-hidden border-r border-border px-4 py-3.5 max-lg:border-b ${selectedDailyPerformance == null || selectedDailyPerformance.amount === 0 ? '' : selectedDailyPerformance.amount > 0 ? 'bg-bull/[0.045]' : 'bg-bear/[0.045]'}`}>
@@ -816,6 +815,7 @@ export function PaperTrading() {
       </main>}
     </div>
     {showCreate ? <CreateAccountDialog strategyId={searchParams.get('strategy_id') ?? ''} backtestJobId={searchParams.get('backtest_job_id') ?? ''} onClose={() => { setShowCreate(false); setSearchParams({}) }} onCreated={created => { setShowCreate(false); setSearchParams({}); setSelectedId(created.id); void accountsQuery.refetch() }} /> : null}
+    {algorithmOpen && account ? <AlgorithmDialog account={account} onClose={() => setAlgorithmOpen(false)} /> : null}
     {renameTarget ? <RenameAccountDialog account={renameTarget} onClose={() => setRenameTarget(null)} onSaved={() => Promise.all([accountsQuery.refetch(), detailQuery.refetch()])} /> : null}
     {deleteTarget ? <Modal labelledBy="delete-paper-title" onClose={() => setDeleteTarget(null)} panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl"><div className="p-4"><h2 id="delete-paper-title" className="text-sm font-semibold">删除「{deleteTarget.name}」？</h2><div className="mt-2 text-xs text-muted">账户 checkpoint 与事件流水将被删除。</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setDeleteTarget(null)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted">取消</button><button type="button" disabled={pendingAction === 'delete'} onClick={() => void remove()} className="rounded-btn bg-danger px-3 py-1.5 text-xs font-medium text-white">确认删除</button></div></div></Modal> : null}
   </div>
