@@ -1160,9 +1160,16 @@ class FreeStrategyEngine:
             message = message[:-1]
         self.context.log(message)
 
-    def _append_log(self, message: str, *, level: str, source: str) -> None:
+    def _append_log(
+        self,
+        message: str,
+        *,
+        level: str,
+        source: str,
+        timestamp: datetime | None = None,
+    ) -> None:
         self._log_sequence += 1
-        timestamp = self.context.now or cn_naive_now()
+        timestamp = timestamp or self.context.now or cn_naive_now()
         self.logs.append({
             "timestamp": timestamp.isoformat(),
             "level": str(level).upper(),
@@ -2027,7 +2034,27 @@ class FreeStrategyEngine:
             self._protected_call(f"{name} 回调", callback, self.context)
 
     def _run_scheduled_callback(self, callback: Callable[..., Any], at: str) -> None:
-        self._protected_call(f"定时回调 {at}", callback, self.context)
+        label = f"定时回调 {at}"
+        event_timestamp = self.context.now
+        started = time.monotonic()
+        try:
+            self._protected_call(label, callback, self.context)
+        except Exception as exc:  # noqa: BLE001
+            elapsed = time.monotonic() - started
+            self._append_log(
+                f"{label} 失败，耗时 {elapsed:.3f} 秒：{exc}",
+                level="ERROR",
+                source="engine",
+                timestamp=event_timestamp,
+            )
+            raise
+        elapsed = time.monotonic() - started
+        self._append_log(
+            f"{label} 完成，耗时 {elapsed:.3f} 秒",
+            level="INFO",
+            source="engine",
+            timestamp=event_timestamp,
+        )
         self.callbacks_executed += 1
 
     def _protected_call(self, label: str, callback: Callable[..., Any], *args: Any) -> Any:

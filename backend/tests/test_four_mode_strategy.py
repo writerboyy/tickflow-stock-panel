@@ -20,7 +20,7 @@ def test_four_mode_template_is_native_and_scheduled():
         "require_auction": True,
     }
     assert [task.resolved_time for task in engine.context._scheduled] == [
-        "09:05", "09:24", "09:25", "09:27", "09:28", "10:00",
+        "09:05", "09:24", "09:25:45", "09:27", "09:28", "10:00",
         "11:30", "14:30", "15:01", "15:02", "15:05",
     ]
 

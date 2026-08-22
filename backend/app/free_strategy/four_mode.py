@@ -64,9 +64,9 @@ def initialize(context):
     for callback, at in (
         (_preselect, "09:05"),
         (_market_risk, "09:24"),
-        # The native scheduler is minute-resolution; the 09:25 callback
-        # consumes the persisted final 09:25 auction snapshot.
-        (_confirm_auction, "09:25"),
+        # Preserve the source strategy's final auction boundary. The replay
+        # path uses Tick data when a schedule includes explicit seconds.
+        (_confirm_auction, "09:25:45"),
         (_open_sell, "09:27"),
         (_buy, "09:28"),
         (_sell_30m, "10:00"),

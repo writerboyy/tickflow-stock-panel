@@ -135,6 +135,49 @@ def on_bar(context, bars):
     assert all(item["timestamp"] for item in result["logs"])
 
 
+def test_scheduled_runtime_log_preserves_second_precision_timestamp():
+    source = """
+def scheduled(context):
+    pass
+
+def initialize(context):
+    context.schedule(scheduled, '09:30:16')
+"""
+    result = FreeStrategyEngine(source).run([
+        Bar("X", datetime(2026, 8, 5, 9, 30, 16), 10, 10, 10, 10),
+    ])
+
+    traces = [
+        item for item in result["logs"]
+        if item.get("source") == "engine" and "定时回调 09:30:16" in item["message"]
+    ]
+    assert len(traces) == 1
+    assert traces[0]["timestamp"] == "2026-08-05T09:30:16"
+    assert "耗时" in traces[0]["message"]
+
+
+def test_failed_scheduled_callback_is_written_before_error_propagates():
+    source = """
+def scheduled(context):
+    raise ValueError('scheduled failure')
+
+def initialize(context):
+    context.schedule(scheduled, '09:30:16')
+"""
+    engine = FreeStrategyEngine(source)
+
+    with pytest.raises(ValueError, match="scheduled failure"):
+        engine.run([Bar("X", datetime(2026, 8, 5, 9, 30, 16), 10, 10, 10, 10)])
+
+    failures = [
+        item for item in engine.logs
+        if item.get("source") == "engine" and "定时回调 09:30:16 失败" in item["message"]
+    ]
+    assert len(failures) == 1
+    assert failures[0]["timestamp"] == "2026-08-05T09:30:16"
+    assert failures[0]["level"] == "ERROR"
+
+
 def test_before_trading_start_uses_previous_close_for_portfolio_value():
     source = """
 def initialize(context):
