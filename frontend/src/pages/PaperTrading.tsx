@@ -18,7 +18,6 @@ import {
   Minus,
   Pencil,
   Plus,
-  RefreshCw,
   ShieldAlert,
   Square,
   Trash2,
@@ -807,10 +806,8 @@ export function PaperTrading() {
             <DatePicker value={activeDate} onChange={selectTradingDate} min={availableDates[0]} max={latestDate} align="right" />
             <div className="flex items-center gap-1">
               <button type="button" title={account.system_notify_enabled ? '关闭策略通知（系统与 Webhook）' : '开启策略通知（系统与 Webhook）'} onClick={() => void toggleSystemNotify()} className={`inline-flex h-8 w-8 items-center justify-center rounded border ${account.system_notify_enabled ? 'border-warning bg-warning text-base shadow-[0_0_12px_rgba(245,158,11,0.6)] hover:bg-warning/85' : 'border-border text-muted hover:border-accent hover:text-accent'}`}><Bell className="h-4 w-4" /></button>
-              <button type="button" title={account.status === 'paused' ? '恢复' : '启动'} disabled={Boolean(pendingAction) || account.status === 'running'} onClick={() => void action(account.status === 'paused' ? 'resume' : 'start')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-success/40 text-success hover:border-success hover:bg-success/10 disabled:opacity-35"><CirclePlay className="h-4 w-4" /></button>
-              <button type="button" title="暂停" disabled={Boolean(pendingAction) || account.status !== 'running'} onClick={() => void action('pause')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-warning/40 text-warning hover:border-warning hover:bg-warning/10 disabled:opacity-35"><CirclePause className="h-4 w-4" /></button>
+              <button type="button" title={account.status === 'running' ? '暂停' : account.status === 'paused' ? '继续' : '启动'} disabled={Boolean(pendingAction)} onClick={() => void action(account.status === 'running' ? 'pause' : account.status === 'paused' ? 'resume' : 'start')} className={`inline-flex h-8 w-8 items-center justify-center rounded border ${account.status === 'running' ? 'border-warning/40 text-warning hover:border-warning hover:bg-warning/10' : 'border-success/40 text-success hover:border-success hover:bg-success/10'} disabled:opacity-35`}>{account.status === 'running' ? <CirclePause className="h-4 w-4" /> : <CirclePlay className="h-4 w-4" />}</button>
               <button type="button" title="停止" disabled={Boolean(pendingAction) || account.status === 'stopped'} onClick={() => void action('stop')} className="inline-flex h-8 w-8 items-center justify-center rounded border border-danger/40 text-danger hover:border-danger hover:bg-danger/10 disabled:opacity-35"><Square className="h-4 w-4" /></button>
-              <button type="button" title="刷新" onClick={() => void Promise.all([detailQuery.refetch(), eventsQuery.refetch(), signalsQuery.refetch(), logsQuery.refetch()])} className="inline-flex h-8 w-8 items-center justify-center rounded border border-accent/40 text-accent hover:border-accent hover:bg-accent/10"><RefreshCw className="h-4 w-4" /></button>
               <button type="button" title={account.status === 'stopped' ? '删除' : '请先停止账户'} disabled={Boolean(pendingAction) || account.status !== 'stopped'} onClick={() => setDeleteTarget(account)} className="inline-flex h-8 w-8 items-center justify-center rounded border border-danger/40 text-danger hover:border-danger hover:bg-danger/10 disabled:opacity-35"><Trash2 className="h-4 w-4" /></button>
             </div>
           </div>
