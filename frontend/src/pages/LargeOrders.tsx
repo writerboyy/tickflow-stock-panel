@@ -629,7 +629,6 @@ export function LargeOrders() {
     if (!row) return
     const action = event.trade_action
     const price = event.price ?? row.price
-    const actionPct = Math.max(0, Math.min(100, Number(event.action_pct ?? 0)))
     setSelected(null)
     setTradeRow(row)
     setTradePreset({
@@ -642,7 +641,6 @@ export function LargeOrders() {
       enforceRisk && event.fingerprint
         ? {
             fingerprint: event.fingerprint,
-            maxVolume: action === 'SELL' ? Math.floor(row.available * actionPct / 100 / 100) * 100 : null,
           }
         : null,
     )

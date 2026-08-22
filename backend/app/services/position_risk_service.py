@@ -2172,17 +2172,6 @@ class PositionRiskService:
         )
         if position is None:
             raise ValueError("当前持仓中不存在该标的")
-        action_pct = int(_finite(pending.get("action_pct")) or 0)
-        if rule_id.startswith("t:"):
-            allowed_volume = self._t_trade_volume(
-                portfolio, position, price, cleaned_action, action_pct,
-            )
-        else:
-            available = max(0, int(_finite(position.get("available")) or 0))
-            allowed_volume = int(available * action_pct / 100 // 100 * 100)
-        if allowed_volume <= 0 or int(volume) > allowed_volume:
-            raise ValueError(f"确认数量超过风控动作可执行上限 {allowed_volume} 股")
-
         return {
             "action": cleaned_action,
             "symbol": cleaned_symbol,

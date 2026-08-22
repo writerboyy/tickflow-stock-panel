@@ -32,7 +32,6 @@ export type QmtTradePreset = {
 
 export type QmtRiskTradeContext = {
   fingerprint: string
-  maxVolume?: number | null
 }
 
 const QMT_ORDER_STATUS: Record<string, string> = {
@@ -134,12 +133,7 @@ export function QmtTradePanel({
     retry: false,
   })
   const serverPreview = preview.data?.preview
-  const riskMaxVolume = riskContext?.maxVolume == null
-    ? null
-    : Math.floor(Math.max(0, riskContext.maxVolume) / 100) * 100
-  const tradeVolume = serverPreview
-    ? Math.min(serverPreview.volume, riskMaxVolume ?? serverPreview.volume)
-    : 0
+  const tradeVolume = serverPreview?.volume ?? 0
   const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
   const tradeReady = qmt.data?.trade_enabled === true && qmt.data.state === 'ready'
   const canSubmit = tradeReady && tradeVolume >= 100 && validReferencePrice && validAllocation && !preview.isFetching
@@ -235,8 +229,7 @@ export function QmtTradePanel({
               <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>
             </div>
           </div>
-          {riskMaxVolume != null && serverPreview && serverPreview.volume > riskMaxVolume ? <p className="mt-2 text-[10px] text-warning">已按本次风控动作上限缩减至 {riskMaxVolume.toLocaleString()} 股。</p> : null}
-          {serverPreview?.capped && (!riskMaxVolume || serverPreview.volume <= riskMaxVolume) ? <p className="mt-2 text-[10px] text-muted">目标金额已按可用资金或持仓，以及 100 股整手向下调整。</p> : null}
+          {serverPreview?.capped ? <p className="mt-2 text-[10px] text-muted">目标金额已按可用资金或持仓，以及 100 股整手向下调整。</p> : null}
           {preview.isError ? <p className="mt-2 text-[10px] text-warning">{preview.error instanceof Error ? preview.error.message : '委托金额暂时无法计算'}</p> : null}
           <button type="button" disabled={!canSubmit || tradeMutation.isPending} onClick={submit} className={cn('mt-3 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}

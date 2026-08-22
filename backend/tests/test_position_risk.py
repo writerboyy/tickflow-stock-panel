@@ -367,11 +367,11 @@ def test_position_risk_context_gate_registers_short_lived_sell_action(tmp_path: 
             event["fingerprint"], "600036.SH", "BUY", 500,
             now=event_time + timedelta(seconds=10),
         )
-    with pytest.raises(ValueError, match="上限 500 股"):
-        service.confirmed_action_order(
-            event["fingerprint"], "600036.SH", "SELL", 600,
-            now=event_time + timedelta(seconds=10),
-        )
+    expanded = service.confirmed_action_order(
+        event["fingerprint"], "600036.SH", "SELL", 600,
+        now=event_time + timedelta(seconds=10),
+    )
+    assert expanded["volume"] == 600
 
 
 
