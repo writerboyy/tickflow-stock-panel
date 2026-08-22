@@ -152,14 +152,16 @@ def test_managed_strong_momentum_migration_replaces_only_known_old_source(tmp_pa
     assert migrated["revision"] == 2
 
 
-def test_four_mode_template_is_provisioned_once_and_listed_for_paper(tmp_path):
-    assert provision_managed_template_strategies(tmp_path) == ["four_mode"]
+def test_managed_templates_are_provisioned_once_and_listed_for_paper(tmp_path):
+    assert provision_managed_template_strategies(tmp_path) == ["strong_momentum", "four_mode"]
     assert provision_managed_template_strategies(tmp_path) == []
 
-    loaded = FreeStrategyStore(tmp_path).get("four_mode")
-    assert loaded["name"] == TEMPLATES["four_mode"]["name"]
-    assert loaded["source"] == TEMPLATES["four_mode"]["source"]
-    assert loaded["config"] == TEMPLATES["four_mode"]["config"]
+    store = FreeStrategyStore(tmp_path)
+    for template_id in ("strong_momentum", "four_mode"):
+        loaded = store.get(template_id)
+        assert loaded["name"] == TEMPLATES[template_id]["name"]
+        assert loaded["source"] == TEMPLATES[template_id]["source"]
+        assert loaded["config"] == TEMPLATES[template_id]["config"]
 
     app = FastAPI()
     app.state.datastore = SimpleNamespace(data_dir=tmp_path)
@@ -167,7 +169,34 @@ def test_four_mode_template_is_provisioned_once_and_listed_for_paper(tmp_path):
     response = TestClient(app).get("/api/free-strategies")
 
     assert response.status_code == 200
+    assert any(item["id"] == "strong_momentum" for item in response.json()["strategies"])
     assert any(item["id"] == "four_mode" for item in response.json()["strategies"])
+
+
+def test_managed_templates_default_to_their_paper_market_modes(tmp_path):
+    provision_managed_template_strategies(tmp_path)
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.state.quote_service = SimpleNamespace(
+        is_realtime_allowed=lambda: True,
+        get_min_interval=lambda: 3.0,
+    )
+    app.include_router(router)
+    client = TestClient(app)
+
+    strong = client.post(
+        "/api/free-strategies/paper/accounts",
+        json={"strategy_id": "strong_momentum", "name": "强者恒强模拟"},
+    )
+    four_mode = client.post(
+        "/api/free-strategies/paper/accounts",
+        json={"strategy_id": "four_mode", "name": "四合一模拟"},
+    )
+
+    assert strong.status_code == 200
+    assert strong.json()["market_mode"] == "websocket"
+    assert four_mode.status_code == 200
+    assert four_mode.json()["market_mode"] == "bar_1m"
 
 
 def test_paper_logs_only_return_strategy_output(tmp_path):

@@ -316,7 +316,7 @@ def provision_managed_template_strategies(data_dir: Path) -> list[str]:
     store = FreeStrategyStore(data_dir)
     existing = {str(item.get("id")) for item in store.list()}
     provisioned: list[str] = []
-    for template_id in ("four_mode",):
+    for template_id in ("strong_momentum", "four_mode"):
         if template_id in existing:
             continue
         template = TEMPLATES[template_id]
@@ -1286,9 +1286,13 @@ def list_paper_accounts(request: Request):
 def create_paper_account(req: PaperWrite, request: Request):
     strategy = _strategy_store(request).get(req.strategy_id)
     _validate_strategy_runtime(strategy)
-    if not req.market_mode_explicit and strategy.get("execution_mode_hint") == "quote":
-        req.market_mode = "websocket"
-        req.timeframe = "1m"
+    if not req.market_mode_explicit:
+        if strategy.get("execution_mode_hint") == "quote":
+            req.market_mode = "websocket"
+            req.timeframe = "1m"
+        elif (strategy.get("config") or {}).get("timeframe") == "1m":
+            req.market_mode = "bar_1m"
+            req.timeframe = "1m"
     _validate_paper_payload(req, request)
     account_id = uuid.uuid4().hex[:12]
     payload = req.model_dump(mode="json")
