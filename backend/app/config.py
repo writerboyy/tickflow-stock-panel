@@ -117,7 +117,6 @@ class Settings(BaseSettings):
     qmt_account_id: str = ""
     qmt_rpc_timeout_seconds: float = 6.0
     qmt_trade_enabled: bool = False
-    qmt_max_order_lots: int = 1
     qmt_account_type: str = "STOCK"
     qmt_auto_sync: bool = True
     qmt_auto_sync_interval_seconds: float = 30.0

@@ -323,7 +323,6 @@ class QmtTradingService:
 
     def __init__(self, data_dir, settings: Any) -> None:
         self.client = QmtZmqRpcClient(settings)
-        self.max_order_volume = max(100, int(getattr(settings, "qmt_max_order_lots", 1)) * 100)
         self.trade_authorized = bool(getattr(settings, "qmt_trade_enabled", False))
         self.trade_enabled = self.trade_authorized and self.client.configured
         self.account_type = str(getattr(settings, "qmt_account_type", "STOCK") or "STOCK").upper()
@@ -354,7 +353,6 @@ class QmtTradingService:
                 "configured": self.client.configured,
                 "trade_authorized": self.trade_authorized,
                 "trade_enabled": self.trade_enabled,
-                "max_order_lots": self.max_order_volume // 100,
                 "account_id": self.client.account_id or None,
                 "rpc_transport": "zmq",
                 "rpc_address": self.client.connect_address or None,
@@ -613,8 +611,8 @@ class QmtTradingService:
         if not symbol:
             raise ValueError("证券代码不能为空")
         volume = int(request.get("volume") or 0)
-        if volume <= 0 or volume > self.max_order_volume or volume % 100 != 0:
-            raise ValueError(f"委托数量必须是 100 股整数手，且每笔不超过 {self.max_order_volume} 股")
+        if volume <= 0 or volume % 100 != 0:
+            raise ValueError("委托数量必须是正数且为 100 股整数手")
         price_type = str(request.get("price_type") or "LIMIT").upper()
         if price_type not in {"LIMIT", "LATEST", "LATEST_PRICE"}:
             raise ValueError("暂仅支持限价或最新价")
@@ -679,7 +677,6 @@ class QmtTradingService:
             requested_amount = basis_amount * _ALLOCATION_RATIOS[mode]
         target_amount = min(requested_amount, basis_amount)
         volume = int(target_amount / price / 100) * 100
-        volume = min(volume, self.max_order_volume)
         if available_volume is not None:
             volume = min(volume, (available_volume // 100) * 100)
         actual_amount = round(volume * price, 2)
@@ -695,7 +692,6 @@ class QmtTradingService:
             "target_amount": round(target_amount, 2),
             "actual_amount": actual_amount,
             "volume": volume,
-            "max_order_volume": self.max_order_volume,
             "available_volume": available_volume,
             "capped": target_amount < requested_amount or volume * price < target_amount,
             "reason": "金额不足一手" if volume < 100 else None,

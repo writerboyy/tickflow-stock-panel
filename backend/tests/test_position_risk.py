@@ -445,7 +445,6 @@ def _qmt_settings(**overrides):
         "qmt_account_id": "account-1",
         "qmt_rpc_timeout_seconds": 1,
         "qmt_trade_enabled": False,
-        "qmt_max_order_lots": 1,
         "qmt_account_type": "CREDIT",
         "qmt_auto_sync": True,
         "qmt_auto_sync_interval_seconds": 30,
@@ -556,21 +555,19 @@ def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Pa
         service._validate_order({"action": "BUY", "symbol": "600036.SH", "volume": 100, "price": 35}, {"positions": []})
 
 
-def test_qmt_trading_service_enforces_one_lot_and_sell_available_volume(tmp_path: Path):
+def test_qmt_trading_service_allows_multiple_lots_and_enforces_sell_available_volume(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True
-    snapshot = {"positions": [{"symbol": "600036.SH", "available": 100}]}
-    with pytest.raises(ValueError, match="不超过 100 股"):
-        service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 200, "price": 35}, snapshot)
+    snapshot = {"positions": [{"symbol": "600036.SH", "available": 300}]}
+    assert service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 200, "price": 35}, snapshot)["volume"] == 200
     with pytest.raises(ValueError, match="可用持仓不足"):
-        service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, {"positions": [{"symbol": "600036.SH", "available": 0}]})
-    assert service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 100, "price": 35}, snapshot)["volume"] == 100
+        service._validate_order({"action": "SELL", "symbol": "600036.SH", "volume": 400, "price": 35}, snapshot)
 
 
 def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     service = QmtTradingService(
         tmp_path,
-        _qmt_settings(qmt_max_order_lots=1000),
+        _qmt_settings(),
     )
 
     def fake_call(method, _params):
@@ -622,7 +619,7 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
 def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):
     service = QmtTradingService(
         tmp_path,
-        _qmt_settings(qmt_trade_enabled=True, qmt_max_order_lots=1000),
+        _qmt_settings(qmt_trade_enabled=True),
     )
     service.trade_enabled = True
     calls = []
@@ -671,7 +668,6 @@ def test_qmt_order_preview_api_maps_success_and_service_errors():
                 "target_amount": 30_000,
                 "actual_amount": 28_000,
                 "volume": 800,
-                "max_order_volume": 100_000,
                 "available_volume": None,
                 "capped": True,
                 "reason": None,

@@ -236,7 +236,7 @@ export function QmtTradePanel({
             </div>
           </div>
           {riskMaxVolume != null && serverPreview && serverPreview.volume > riskMaxVolume ? <p className="mt-2 text-[10px] text-warning">已按本次风控动作上限缩减至 {riskMaxVolume.toLocaleString()} 股。</p> : null}
-          {serverPreview?.capped && (!riskMaxVolume || serverPreview.volume <= riskMaxVolume) ? <p className="mt-2 text-[10px] text-muted">目标金额已按整手、可用余额和单笔最大手数向下调整。</p> : null}
+          {serverPreview?.capped && (!riskMaxVolume || serverPreview.volume <= riskMaxVolume) ? <p className="mt-2 text-[10px] text-muted">目标金额已按可用资金或持仓，以及 100 股整手向下调整。</p> : null}
           {preview.isError ? <p className="mt-2 text-[10px] text-warning">{preview.error instanceof Error ? preview.error.message : '委托金额暂时无法计算'}</p> : null}
           <button type="button" disabled={!canSubmit || tradeMutation.isPending} onClick={submit} className={cn('mt-3 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}

@@ -968,7 +968,6 @@ export interface QmtStatus {
   configured: boolean
   trade_authorized: boolean
   trade_enabled: boolean
-  max_order_lots: number
   account_id: string | null
   account_type: string
   auto_sync_enabled: boolean
@@ -1009,7 +1008,6 @@ export interface QmtOrderPreview {
   target_amount: number
   actual_amount: number
   volume: number
-  max_order_volume: number
   available_volume: number | null
   capped: boolean
   reason: string | null
