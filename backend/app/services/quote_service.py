@@ -1906,8 +1906,12 @@ class QuoteService:
         return None
 
     def _should_poll_for_phase(self, phase: str) -> bool:
-        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。"""
-        if phase in {"preopen", "morning", "pre_afternoon", "afternoon"}:
+        """是否处于会主动拉行情的阶段。final 阶段成功后即停止。
+
+        常规轮询只允许发生在连续竞价时段。盘前和午后开盘前的
+        集合竞价阶段不拉取实时行情，避免非交易时间持续消耗行情配额。
+        """
+        if phase in {"morning", "afternoon"}:
             return True
         key = self._final_sync_key(phase)
         return bool(key and key not in self._final_sync_done)

@@ -31,6 +31,7 @@ import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
 import { QMT_ALLOCATION_OPTIONS, QmtTradePanel, type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { useQuoteStatus } from '@/lib/useSharedQueries'
 import {
   api,
   type LimitBoardEvent,
@@ -1171,6 +1172,8 @@ function FourModePanel({ report }: { report: FourModeStrategyView }) {
 
 export function LimitBoard() {
   const queryClient = useQueryClient()
+  const { data: quoteStatus } = useQuoteStatus({ poll: true })
+  const isTradingHours = quoteStatus?.is_trading_hours ?? false
   const [tab, setTab] = useState<Tab>('sector')
   const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
@@ -1181,10 +1184,12 @@ export function LimitBoard() {
   const view = useQuery({
     queryKey: QK.limitBoard,
     queryFn: api.limitBoard,
-    refetchInterval: query => Math.max(
-      1,
-      query.state.data?.runtime.refresh_cycle.interval_seconds ?? 5,
-    ) * 1000,
+    refetchInterval: isTradingHours
+      ? query => Math.max(
+        1,
+        query.state.data?.runtime.refresh_cycle.interval_seconds ?? 5,
+      ) * 1000
+      : false,
     placeholderData: previous => previous,
   })
   const unifiedRefreshIntervalMs = Math.max(
@@ -1195,7 +1200,7 @@ export function LimitBoard() {
     queryKey: QK.marketHeatRadar(30),
     queryFn: () => api.marketHeatRadar(30, true),
     enabled: tab === 'sector',
-    refetchInterval: tab === 'sector' ? 60_000 : false,
+    refetchInterval: tab === 'sector' && isTradingHours ? 60_000 : false,
     staleTime: 60_000,
     placeholderData: previous => previous,
   })
@@ -1207,7 +1212,7 @@ export function LimitBoard() {
     queryKey: QK.limitBoardQuotes(heatSymbols.join(',')),
     queryFn: () => api.limitBoardQuotes(heatSymbols, true),
     enabled: tab === 'sector' && heatSymbols.length > 0,
-    refetchInterval: tab === 'sector' ? unifiedRefreshIntervalMs : false,
+    refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
     staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
