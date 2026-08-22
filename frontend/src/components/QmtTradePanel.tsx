@@ -225,11 +225,15 @@ export function QmtTradePanel({
             {allocationMode === 'fixed' ? <label className="col-span-2">固定金额<input type="number" min="100" step="100" value={allocationValue} onChange={event => setAllocationValue(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label> : null}
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-border py-3 text-[10px]">
-            <div><span className="text-muted">{serverPreview?.basis_label || (tradeAction === 'BUY' ? '可用资金' : '可用持仓市值')}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
-            <div><span className="text-muted">{allocationLabel(tradeAction, allocationMode)}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
-            <div><span className="text-muted">委托数量</span><div className="mt-0.5 font-mono text-foreground">{tradeVolume >= 100 ? `${tradeVolume.toLocaleString()} 股` : '—'}</div></div>
-            <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>
+          <div className="mt-3 border-y border-border py-3 text-[10px]">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+              <div className="col-span-2 font-medium text-secondary">金额计算</div>
+              <div><span className="text-muted">{serverPreview?.basis_label || (tradeAction === 'BUY' ? '可用资金' : '可用持仓市值')}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
+              <div><span className="text-muted">{allocationLabel(tradeAction, allocationMode)}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
+              <div className="col-span-2 mt-1 border-t border-border pt-2 font-medium text-secondary">本次委托</div>
+              <div><span className="text-muted">委托数量</span><div className="mt-0.5 font-mono text-foreground">{tradeVolume >= 100 ? `${tradeVolume.toLocaleString()} 股` : '—'}</div></div>
+              <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>
+            </div>
           </div>
           {riskMaxVolume != null && serverPreview && serverPreview.volume > riskMaxVolume ? <p className="mt-2 text-[10px] text-warning">已按本次风控动作上限缩减至 {riskMaxVolume.toLocaleString()} 股。</p> : null}
           {serverPreview?.capped && (!riskMaxVolume || serverPreview.volume <= riskMaxVolume) ? <p className="mt-2 text-[10px] text-muted">目标金额已按整手、可用余额和单笔最大手数向下调整。</p> : null}
