@@ -131,8 +131,12 @@ export function QmtTradePanel({
     queryFn: () => api.qmtPreviewOrder(previewPayload, true),
     enabled: qmt.data?.configured === true && validReferencePrice && validAllocation,
     retry: false,
+    placeholderData: previous => previous,
   })
   const serverPreview = preview.data?.preview
+  const displayedAllocationMode = serverPreview?.allocation_mode === 'quarter' || serverPreview?.allocation_mode === 'third' || serverPreview?.allocation_mode === 'half' || serverPreview?.allocation_mode === 'fixed'
+    ? serverPreview.allocation_mode
+    : allocationMode
   const tradeVolume = serverPreview?.volume ?? 0
   const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
   const tradeReady = qmt.data?.trade_enabled === true && qmt.data.state === 'ready'
@@ -223,7 +227,7 @@ export function QmtTradePanel({
             <div className="grid grid-cols-2 gap-x-4 gap-y-2">
               <div className="col-span-2 font-medium text-secondary">金额计算</div>
               <div><span className="text-muted">{serverPreview?.basis_label || (tradeAction === 'BUY' ? '可用资金' : '可用持仓市值')}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
-              <div><span className="text-muted">{allocationLabel(tradeAction, allocationMode)}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
+              <div><span className="text-muted">{allocationLabel(tradeAction, displayedAllocationMode)}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
               <div className="col-span-2 mt-1 border-t border-border pt-2 font-medium text-secondary">本次委托</div>
               <div><span className="text-muted">委托数量</span><div className="mt-0.5 font-mono text-foreground">{tradeVolume >= 100 ? `${tradeVolume.toLocaleString()} 股` : '—'}</div></div>
               <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
+import time
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -614,6 +615,28 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     assert sell["basis_amount"] == 35_000
     assert sell["volume"] == 100
     assert sell["actual_amount"] == 3_500
+
+
+def test_qmt_order_preview_uses_recent_sync_snapshot(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+    service._last_snapshot = {
+        "account": {"cash": 120_000},
+        "positions": [{"symbol": "600036.SH", "available": 1_000}],
+    }
+    service._last_snapshot_monotonic = time.monotonic()
+
+    def fail_call(_method, _params):
+        raise AssertionError("preview should use the recent sync snapshot")
+
+    service.client.call = fail_call
+    preview = service.preview_order({
+        "action": "SELL",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "third",
+    })
+    assert preview["volume"] == 300
 
 
 def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):

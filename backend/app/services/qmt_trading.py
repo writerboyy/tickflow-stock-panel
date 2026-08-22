@@ -335,6 +335,7 @@ class QmtTradingService:
         self._auto_thread: threading.Thread | None = None
         self._last_status: dict[str, Any] = {}
         self._last_snapshot: dict[str, Any] | None = None
+        self._last_snapshot_monotonic = 0.0
         self._orders: dict[str, dict[str, Any]] = {}
         self._db_path = data_dir / "user_data" / "position_risk" / "runtime.sqlite3"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -538,6 +539,7 @@ class QmtTradingService:
             raise
         with self._lock:
             self._last_snapshot = snapshot
+            self._last_snapshot_monotonic = time.monotonic()
             self._last_status = {
                 "state": "ready",
                 "reason": "QMT账户正在自动同步" if self._auto_thread else "账户、持仓和委托已同步",
@@ -699,7 +701,29 @@ class QmtTradingService:
 
     def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "").upper()
-        snapshot = self._order_preflight(action)
+        # Preview reads the auto-sync snapshot for responsiveness; submission
+        # still performs a fresh QMT preflight before sending the order.
+        with self._lock:
+            cached_snapshot = self._last_snapshot
+            snapshot_age = time.monotonic() - self._last_snapshot_monotonic
+        if cached_snapshot is not None and snapshot_age <= self.auto_sync_interval:
+            if action == "BUY":
+                snapshot = {
+                    "account": dict(cached_snapshot.get("account") or {}),
+                    "positions": [],
+                }
+            elif action == "SELL":
+                snapshot = {
+                    "account": {},
+                    "positions": [
+                        {"symbol": item.get("symbol"), "available": item.get("available", 0)}
+                        for item in cached_snapshot.get("positions") or []
+                    ],
+                }
+            else:
+                snapshot = self._order_preflight(action)
+        else:
+            snapshot = self._order_preflight(action)
         return self._allocation_preview(request, snapshot)
 
     def _order_preflight(self, action: str) -> dict[str, Any]:
