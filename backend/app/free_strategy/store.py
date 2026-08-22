@@ -350,23 +350,31 @@ class PaperAccountStore:
         with self._event_connection(account_id) as connection:
             return self._insert_event(connection, event, ignore_duplicate=True)
 
-    def append_strategy_logs(
+    def append_logs(
         self,
         account_id: str,
         logs: list[dict[str, Any]],
     ) -> None:
         for item in logs:
-            if item.get("source") != "strategy":
-                continue
             raw = ":".join(
                 str(item.get(key) or "")
-                for key in ("timestamp", "level", "source", "message")
+                for key in (
+                    "timestamp", "level", "source", "message", "log_sequence",
+                )
             )
             self.append_event_once(account_id, {
                 "id": f"log:{sha256(raw.encode('utf-8')).hexdigest()[:24]}",
                 "type": "log",
                 **item,
             })
+
+    def log_events(self, account_id: str) -> list[dict[str, Any]]:
+        with self._event_connection(account_id) as connection:
+            rows = connection.execute(
+                "SELECT payload FROM paper_events "
+                "WHERE type IN ('log', 'error') ORDER BY sequence"
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
 
     def events(self, account_id: str, limit: int = 500) -> list[dict[str, Any]]:
         with self._event_connection(account_id) as connection:

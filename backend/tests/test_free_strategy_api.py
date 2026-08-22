@@ -199,7 +199,7 @@ def test_managed_templates_default_to_their_paper_market_modes(tmp_path):
     assert four_mode.json()["market_mode"] == "bar_1m"
 
 
-def test_paper_logs_only_return_strategy_output(tmp_path):
+def test_paper_logs_return_strategy_runtime_and_errors(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({"id": "paper", "status": "running"})
     store.append_event("paper", {
@@ -216,7 +216,32 @@ def test_paper_logs_only_return_strategy_output(tmp_path):
     response = TestClient(app).get("/api/free-strategies/paper/accounts/paper/logs")
 
     assert response.status_code == 200
-    assert [item["message"] for item in response.json()["logs"]] == ["策略输出"]
+    logs = response.json()["logs"]
+    assert [item["message"] for item in logs] == ["策略输出", "框架日志", "运行错误"]
+    assert [item["source"] for item in logs] == ["strategy", "engine", "runtime"]
+    assert logs[-1]["level"] == "ERROR"
+
+
+def test_paper_logs_are_not_limited_by_general_event_page(tmp_path):
+    store = PaperAccountStore(tmp_path)
+    store.save({"id": "paper", "status": "running"})
+    for index in range(505):
+        store.append_event("paper", {
+            "type": "log",
+            "message": f"runtime line {index}",
+            "source": "stdout",
+        })
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    logs = TestClient(app).get(
+        "/api/free-strategies/paper/accounts/paper/logs"
+    ).json()["logs"]
+
+    assert len(logs) == 505
+    assert logs[0]["message"] == "runtime line 0"
+    assert logs[-1]["message"] == "runtime line 504"
 
 
 def test_backtest_payload_preserves_broker_and_symbol_settlement_options(tmp_path):

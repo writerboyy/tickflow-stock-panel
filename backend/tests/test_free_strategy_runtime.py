@@ -95,11 +95,18 @@ def on_bar(context, bars):
 
 def test_strategy_print_is_captured_as_freeform_strategy_output():
     source = """
+import builtins
+import logging
+import sys
+
 print('source', 1, sep=' | ')
 
 def initialize(context):
     print('first line\\nsecond line')
     context.log('warning text', level='warning')
+    builtins.print('imported print')
+    logging.warning('python warning')
+    print('stderr text', file=sys.stderr)
 
 def on_bar(context, bars):
     print('bar', context.now.strftime('%H:%M'), end='')
@@ -114,12 +121,17 @@ def on_bar(context, bars):
         "source | 1",
         "first line\nsecond line",
         "warning text",
+        "imported print",
+        "python warning",
+        "stderr text",
         "bar 15:00",
     ]
     assert [item["level"] for item in result["logs"]] == [
-        "INFO", "INFO", "WARNING", "INFO",
+        "INFO", "INFO", "WARNING", "INFO", "WARNING", "ERROR", "INFO",
     ]
-    assert {item["source"] for item in result["logs"]} == {"strategy"}
+    assert [item["source"] for item in result["logs"]] == [
+        "strategy", "strategy", "strategy", "stdout", "logging", "stderr", "strategy",
+    ]
     assert all(item["timestamp"] for item in result["logs"])
 
 

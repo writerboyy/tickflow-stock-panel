@@ -1551,10 +1551,14 @@ def paper_fills(account_id: str, request: Request):
 
 @router.get("/paper/accounts/{account_id}/logs")
 def paper_logs(account_id: str, request: Request):
+    logs = _paper_store(request).log_events(account_id)
     return {
         "logs": [
-            event
-            for event in _paper_store(request).events(account_id)
-            if event.get("type") == "log" and event.get("source") == "strategy"
+            {
+                **event,
+                "level": event.get("level") or ("ERROR" if event.get("type") == "error" else "INFO"),
+                "source": event.get("source") or "runtime",
+            }
+            for event in logs
         ],
     }

@@ -1713,7 +1713,7 @@ def _append_engine_events(
         event = {"id": _fill_event_id(fill), "type": "fill", **asdict(fill)}
         if store.append_event_once(account_id, event) and notify is not None:
             notify(event)
-    _append_strategy_logs(store, account_id, engine.logs[before_logs:])
+    _append_runtime_logs(store, account_id, engine.logs[before_logs:])
     for signal in engine.drain_signals():
         payload = dict(signal.pop("payload", {}))
         signal_id = str(signal.pop("id"))
@@ -1735,12 +1735,12 @@ def _append_engine_events(
             notify(event)
 
 
-def _append_strategy_logs(
+def _append_runtime_logs(
     store: PaperAccountStore,
     account_id: str,
     logs: list[dict[str, Any]],
 ) -> None:
-    store.append_strategy_logs(account_id, logs)
+    store.append_logs(account_id, logs)
 
 
 def _append_five_fortunes_decision(
@@ -2325,7 +2325,7 @@ def _paper_worker(
             "scheduled_times": engine.scheduled_times,
             "universe": engine.universe,
         })
-        _append_strategy_logs(store, account_id, engine.logs)
+        _append_runtime_logs(store, account_id, engine.logs)
         state = _catch_up_bars(
             store,
             account_id,
@@ -2336,6 +2336,8 @@ def _paper_worker(
             scheduled_market=scheduled_market,
         )
     except Exception as exc:  # noqa: BLE001
+        if engine is not None:
+            _append_runtime_logs(store, account_id, engine.logs)
         latest = store.get(account_id)
         sync = dict(latest.get("sync", {}))
         sync.update({"phase": "error", "error": str(exc), "updated_at": now_iso()})
@@ -2548,6 +2550,7 @@ def _paper_worker(
             })
             continue
         except Exception as exc:  # noqa: BLE001
+            _append_runtime_logs(store, account_id, engine.logs)
             sync = dict(current.get("sync", {}))
             sync.update({
                 "phase": "error",

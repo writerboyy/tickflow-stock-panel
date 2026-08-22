@@ -566,7 +566,7 @@ export function PaperTrading() {
       void qc.invalidateQueries({ queryKey: ['free-paper-account', selectedId] })
       void qc.invalidateQueries({ queryKey: ['free-paper-events', selectedId] })
       if (event.type === 'signal') void qc.invalidateQueries({ queryKey: ['free-paper-signals', selectedId] })
-      if (event.type === 'log') void qc.invalidateQueries({ queryKey: ['free-paper-logs', selectedId] })
+      if (event.type === 'log' || event.type === 'error') void qc.invalidateQueries({ queryKey: ['free-paper-logs', selectedId] })
       if (['fill', 'rejected', 'risk'].includes(event.type)) {
         pushAlertToast({ ts: Date.now(), source: 'strategy', type: event.type, symbol: event.symbol, message: eventText(event), severity: event.type === 'risk' ? 'critical' : event.type === 'rejected' ? 'warn' : 'info' })
       }
@@ -637,7 +637,6 @@ export function PaperTrading() {
     ...allFills.map(fill => fill.timestamp.slice(0, 10)),
     ...allOrders.map(order => order.submitted_at.slice(0, 10)),
     ...decisionEvents.map(eventTradingDate),
-    ...allLogEvents.map(eventTradingDate),
   ].filter(Boolean))].sort()
   const latestDate = availableDates.at(-1) ?? ''
   const activeDate = availableDates.includes(selectedDate) ? selectedDate : latestDate
@@ -650,7 +649,7 @@ export function PaperTrading() {
   const orders = allOrders.filter(order => order.submitted_at.slice(0, 10) === activeDate)
   const visibleDecisionEvents = decisionEvents.filter(event => eventTradingDate(event) === activeDate)
   const latestDecision = visibleDecisionEvents.find(event => event.signal_type === 'daily_decision')
-  const logEvents = allLogEvents.filter(event => eventTradingDate(event) === activeDate)
+  const logEvents = allLogEvents
   const selectedEquity = useCurrentState ? account?.equity : selectedSnapshot?.equity
   const selectedCash = useCurrentState ? account?.cash : selectedSnapshot?.cash
   const selectedReturn = useCurrentState

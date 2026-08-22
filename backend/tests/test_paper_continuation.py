@@ -157,9 +157,8 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "avg_cost": {"X": 9.0},
     }]
     logs = [event for event in store.events("paper") if event.get("type") == "log"]
-    assert len(logs) == 1
-    assert logs[0]["message"] == "原版策略日志"
-    assert logs[0]["source"] == "strategy"
+    assert [event["message"] for event in logs] == ["原版策略日志", "框架日志"]
+    assert [event["source"] for event in logs] == ["strategy", "engine"]
     assert list((store._path("paper") / "backups").glob("state-*.json"))
 
 

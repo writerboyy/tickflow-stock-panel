@@ -10,6 +10,7 @@ import math
 import re
 import time
 from collections import deque
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time as datetime_time, timedelta
 from decimal import Decimal
@@ -32,6 +33,54 @@ from app.services.data_authority import normalize_reference_asset
 logger = logging.getLogger(__name__)
 
 EventType = Literal["bar", "quote", "scheduled", "fill", "market"]
+
+
+class _StrategyTextStream(io.TextIOBase):
+    def __init__(self, engine: "FreeStrategyEngine", *, level: str, source: str) -> None:
+        self.engine = engine
+        self.level = level
+        self.source = source
+        self._buffer = ""
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, value: str) -> int:
+        text = str(value)
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._emit(line.rstrip("\r"))
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._emit(self._buffer.rstrip("\r"))
+            self._buffer = ""
+
+    def _emit(self, message: str) -> None:
+        if message:
+            self.engine._append_log(message, level=self.level, source=self.source)  # noqa: SLF001
+
+
+class _StrategyLoggingHandler(logging.Handler):
+    def __init__(self, engine: "FreeStrategyEngine") -> None:
+        super().__init__(level=logging.DEBUG)
+        self.engine = engine
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if record.exc_info:
+            message = f"{message}\n{logging.Formatter().formatException(record.exc_info)}"
+        self.engine._append_log(  # noqa: SLF001
+            message,
+            level=record.levelname,
+            source="logging",
+        )
 
 
 def _history_tail(values: list[Bar] | deque[Bar], count: int) -> list[Bar]:
@@ -940,13 +989,7 @@ class Context:
         return symbol
 
     def log(self, message: str, level: str = "INFO") -> None:
-        timestamp = self.now or cn_naive_now()
-        self._engine.logs.append({
-            "timestamp": timestamp.isoformat(),
-            "level": str(level).upper(),
-            "message": str(message),
-            "source": "strategy",
-        })
+        self._engine._append_log(message, level=level, source="strategy")  # noqa: SLF001
 
     def emit_signal(
         self,
@@ -986,6 +1029,7 @@ class FreeStrategyEngine:
         self.account = Account(self.config)
         self.state = state or {}
         self.logs: list[dict[str, Any]] = []
+        self._log_sequence = 0
         self._signals: list[dict[str, Any]] = []
         self.history: dict[str, deque[Bar]] = {}
         self._history_by_period: dict[
@@ -1115,6 +1159,17 @@ class FreeStrategyEngine:
         if message.endswith("\n"):
             message = message[:-1]
         self.context.log(message)
+
+    def _append_log(self, message: str, *, level: str, source: str) -> None:
+        self._log_sequence += 1
+        timestamp = self.context.now or cn_naive_now()
+        self.logs.append({
+            "timestamp": timestamp.isoformat(),
+            "level": str(level).upper(),
+            "message": str(message),
+            "source": str(source),
+            "log_sequence": self._log_sequence,
+        })
 
     @property
     def history_requirements(self) -> dict[str, int]:
@@ -1978,6 +2033,13 @@ class FreeStrategyEngine:
     def _protected_call(self, label: str, callback: Callable[..., Any], *args: Any) -> Any:
         timeout = float(self.config.callback_timeout_seconds)
         started = time.monotonic()
+        stdout = _StrategyTextStream(self, level="INFO", source="stdout")
+        stderr = _StrategyTextStream(self, level="ERROR", source="stderr")
+        root_logger = logging.getLogger()
+        previous_handlers = list(root_logger.handlers)
+        previous_level = root_logger.level
+        root_logger.handlers = [_StrategyLoggingHandler(self)]
+        root_logger.setLevel(logging.DEBUG)
         if self._callback_label is not None:
             with self._callback_label.get_lock():
                 self._callback_label.get_obj().value = label
@@ -1985,8 +2047,13 @@ class FreeStrategyEngine:
             with self._callback_deadline.get_lock():
                 self._callback_deadline.value = started + timeout
         try:
-            return callback(*args)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                return callback(*args)
         finally:
+            root_logger.handlers = previous_handlers
+            root_logger.setLevel(previous_level)
+            stdout.flush()
+            stderr.flush()
             elapsed = time.monotonic() - started
             if self._callback_deadline is not None:
                 with self._callback_deadline.get_lock():

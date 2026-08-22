@@ -17,7 +17,7 @@ from app.free_strategy.paper import (
     PaperTradingSupervisor,
     _Subscription,
     _append_engine_events,
-    _append_strategy_logs,
+    _append_runtime_logs,
     _catch_up_bars,
     _catch_up_scheduled,
     _compatible_checkpoint,
@@ -451,7 +451,7 @@ def test_queued_payload_preserves_dict_shape_and_reports_wait():
     assert _queue_delay_seconds(payload) >= 0.49
 
 
-def test_paper_persists_only_strategy_owned_logs(tmp_path):
+def test_paper_persists_all_engine_runtime_logs(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({"id": "paper", "status": "running"})
 
@@ -469,15 +469,12 @@ def test_paper_persists_only_strategy_owned_logs(tmp_path):
             "source": "engine",
         },
     ]
-    _append_strategy_logs(store, "paper", logs)
-    _append_strategy_logs(store, "paper", logs)
+    _append_runtime_logs(store, "paper", logs)
+    _append_runtime_logs(store, "paper", logs)
 
     events = store.events("paper")
-    assert len(events) == 1
-    assert events[0]["message"] == "自由输出\n第二行"
-    assert events[0]["source"] == "strategy"
-
-
+    assert [event["message"] for event in events] == ["自由输出\n第二行", "框架固定日志"]
+    assert [event["source"] for event in events] == ["strategy", "engine"]
 def test_supervisor_start_passes_shared_catch_up_slot(tmp_path):
     class FakeContext:
         def __init__(self):
