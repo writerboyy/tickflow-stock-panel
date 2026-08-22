@@ -53,9 +53,19 @@ const QMT_ORDER_STATUS: Record<string, string> = {
   '57': '废单',
 }
 
-const ALLOCATION_LABELS = Object.fromEntries(QMT_ALLOCATION_OPTIONS.map(option => [option.value, option.label])) as Record<QmtAllocationMode, string>
+const ALLOCATION_FRACTION_LABELS: Record<Exclude<QmtAllocationMode, 'fixed'>, string> = {
+  quarter: '1/4',
+  third: '1/3',
+  half: '1/2',
+}
 
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+function allocationLabel(action: 'BUY' | 'SELL', mode: QmtAllocationMode): string {
+  if (mode === 'fixed') return '固定金额'
+  const basis = action === 'SELL' ? '可用持仓市值' : '可用资金'
+  return `${basis} ${ALLOCATION_FRACTION_LABELS[mode]}`
+}
 
 function qmtOrderStatus(value?: string) {
   return value ? QMT_ORDER_STATUS[value] ?? `状态 ${value}` : '状态未知'
@@ -209,7 +219,7 @@ export function QmtTradePanel({
           <div className="flex items-center justify-between gap-3"><h3 className="text-xs font-semibold text-secondary">委托参数</h3><span className={cn('text-right text-[10px]', tradeReady ? 'text-warning' : 'text-muted')} title={qmt.data?.reason}>{readiness}</span></div>
           <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-muted">
             <label>方向<select value={tradeAction} disabled={Boolean(riskContext)} onChange={event => setTradeAction(event.target.value as 'BUY' | 'SELL')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px] disabled:opacity-60"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
-            <label>资金方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]">{QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label>金额方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]">{QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{allocationLabel(tradeAction, option.value)}</option>)}</select></label>
             <label>价格方式<select value={tradePriceType} onChange={event => setTradePriceType(event.target.value as 'LIMIT' | 'LATEST')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="LIMIT">限价</option><option value="LATEST">最新价</option></select></label>
             <label className={tradePriceType === 'LATEST' ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={tradePrice} disabled={tradePriceType === 'LATEST'} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
             {allocationMode === 'fixed' ? <label className="col-span-2">固定金额<input type="number" min="100" step="100" value={allocationValue} onChange={event => setAllocationValue(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label> : null}
@@ -217,7 +227,7 @@ export function QmtTradePanel({
 
           <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-y border-border py-3 text-[10px]">
             <div><span className="text-muted">{serverPreview?.basis_label || (tradeAction === 'BUY' ? '可用资金' : '可用持仓市值')}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
-            <div><span className="text-muted">{ALLOCATION_LABELS[allocationMode]}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
+            <div><span className="text-muted">{allocationLabel(tradeAction, allocationMode)}</span><div className="mt-0.5 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.target_amount)} 元` : '—'}</div></div>
             <div><span className="text-muted">委托数量</span><div className="mt-0.5 font-mono text-foreground">{tradeVolume >= 100 ? `${tradeVolume.toLocaleString()} 股` : '—'}</div></div>
             <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualAmount > 0 ? `${MONEY.format(actualAmount)} 元` : '—'}</div></div>
           </div>
