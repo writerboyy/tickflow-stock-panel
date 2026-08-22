@@ -48,6 +48,9 @@ MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256 = frozenset({
 MANAGED_STRONG_MOMENTUM_SHA256 = frozenset({
     "273d82a90ea8c1ac08e5cefc83745e934f4eca1d740a9a846285c2af702a126d",
 })
+MANAGED_FOUR_MODE_SHA256 = frozenset({
+    "11e43830ef3ee6495be4708b192b64807302dbbb16d45eaae8c47f9c44f8f6ce",
+})
 LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_MARKERS = (
     "Clone source: https://www.joinquant.com/post/59883",
     "Title: first-board large turnover tick strategy",

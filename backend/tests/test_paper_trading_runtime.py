@@ -1404,7 +1404,11 @@ def test_supervisor_pauses_after_repeated_unreported_exits(tmp_path):
     assert saved["status"] == "paused"
     assert "5 分钟内连续异常退出" in saved["last_error"]
     assert "退出码 1" in saved["last_error"]
-    assert [event["type"] for event in store.events("paper")] == ["error"]
+    events = store.events("paper")
+    assert [event["type"] for event in events] == ["error"]
+    assert events[0]["level"] == "ERROR"
+    assert events[0]["source"] == "runtime"
+    assert events[0]["timestamp"].endswith("+00:00")
 
 
 def test_supervisor_start_defers_strategy_initialization_to_worker(tmp_path):

@@ -95,6 +95,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("managed strong-momentum strategy migration failed: %s", e)
     try:
+        migrated = free_strategy.migrate_managed_four_mode(store.data_dir)
+        if migrated["strategies"] or migrated["accounts"]:
+            logger.info(
+                "migrated managed four-mode strategy: strategies=%d accounts=%d",
+                len(migrated["strategies"]), len(migrated["accounts"]),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("managed four-mode strategy migration failed: %s", e)
+    try:
         migrated = free_strategy.migrate_managed_etf_nav_alignment(store.data_dir)
         if migrated["strategies"] or migrated["accounts"]:
             logger.info(

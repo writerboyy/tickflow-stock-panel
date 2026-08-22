@@ -61,6 +61,16 @@ def _paper_callback_timeout(state: dict[str, Any]) -> float:
     return PAPER_DEFAULT_CALLBACK_TIMEOUT_SECONDS if value is None else float(value)
 
 
+def _runtime_error_event(message: str) -> dict[str, Any]:
+    return {
+        "type": "error",
+        "timestamp": now_iso(),
+        "level": "ERROR",
+        "source": "runtime",
+        "message": str(message),
+    }
+
+
 def _compatible_checkpoint(source: str, checkpoint: dict[str, Any]) -> dict[str, Any]:
     """Migrate checkpoint state keys that changed with a strategy template revision."""
     migrated = deepcopy(checkpoint)
@@ -2350,7 +2360,7 @@ def _paper_worker(
             "last_error": message,
             "sync": sync,
         })
-        store.append_event(account_id, {"type": "error", "message": message})
+        store.append_event(account_id, _runtime_error_event(message))
         return
     finally:
         if slot_acquired:
@@ -2563,7 +2573,7 @@ def _paper_worker(
                 "last_error": str(exc),
                 "sync": sync,
             })
-            store.append_event(account_id, {"type": "error", "message": str(exc)})
+            store.append_event(account_id, _runtime_error_event(str(exc)))
             continue
 
 
@@ -2720,7 +2730,7 @@ class PaperTradingSupervisor:
             except ValueError as exc:
                 self.pause_or_stop(account_id, "paused")
                 self.store.update_fields(account_id, {"last_error": str(exc)})
-                self.store.append_event(account_id, {"type": "error", "message": str(exc)})
+                self.store.append_event(account_id, _runtime_error_event(str(exc)))
 
     def _pause_with_error(
         self,
@@ -2735,7 +2745,7 @@ class PaperTradingSupervisor:
             "last_error": message,
             "sync": sync,
         })
-        self.store.append_event(account_id, {"type": "error", "message": message})
+        self.store.append_event(account_id, _runtime_error_event(message))
 
     def _detach_runtime(self, account_id: str, *, expected_process: Any = ...) -> bool:
         with self._lock:

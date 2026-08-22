@@ -17,6 +17,7 @@ from app.api.free_strategy import (
     migrate_legacy_external_large_amount_first_board,
     migrate_legacy_five_fortunes_strategies,
     migrate_managed_etf_nav_alignment,
+    migrate_managed_four_mode,
     migrate_managed_large_amount_first_board,
     migrate_managed_strong_momentum,
     provision_managed_template_strategies,
@@ -520,6 +521,51 @@ def test_managed_etf_nav_alignment_migrates_strategy_and_paper_snapshot(
     ]
     assert len(migration_events) == 1
     assert migration_events[0]["to_source_hash"] == new_hash
+
+
+def test_managed_four_mode_migrates_unchanged_paper_snapshot_only(monkeypatch, tmp_path):
+    old_source = "# old managed four-mode source\n"
+    new_source = "# second-precision four-mode source\n"
+    old_hash = sha256(old_source.encode("utf-8")).hexdigest()
+    new_hash = sha256(new_source.encode("utf-8")).hexdigest()
+    monkeypatch.setattr(free_strategy, "MANAGED_FOUR_MODE_SHA256", frozenset({old_hash}))
+    monkeypatch.setitem(TEMPLATES["four_mode"], "source", new_source)
+
+    strategy_store = FreeStrategyStore(tmp_path)
+    strategy = strategy_store.save("four_mode", "四合一", old_source, {"timeframe": "1m"})
+    paper_store = PaperAccountStore(tmp_path)
+    paper_store.save({
+        "id": "managed",
+        "strategy_id": strategy["id"],
+        "source_hash": old_hash,
+        "source_revision": strategy["revision"],
+        "status": "running",
+        "checkpoint": {"account": {"cash": 100000}},
+    })
+    paper_store.save({
+        "id": "customized",
+        "strategy_id": strategy["id"],
+        "source_hash": sha256(f"{old_source}# customized\n".encode("utf-8")).hexdigest(),
+        "source_revision": strategy["revision"],
+        "status": "running",
+        "checkpoint": {},
+    })
+    (paper_store._path("managed") / "strategy.py").write_text(old_source, encoding="utf-8")
+    (paper_store._path("customized") / "strategy.py").write_text(f"{old_source}# customized\n", encoding="utf-8")
+
+    migrated = migrate_managed_four_mode(tmp_path)
+    repeated = migrate_managed_four_mode(tmp_path)
+
+    assert migrated == {"strategies": ["four_mode"], "accounts": ["managed"]}
+    assert repeated == {"strategies": [], "accounts": []}
+    assert strategy_store.get("four_mode")["source"] == new_source
+    assert paper_store.get("managed")["source_hash"] == new_hash
+    assert (paper_store._path("managed") / "strategy.py").read_text(encoding="utf-8") == new_source
+    assert paper_store.get("customized")["source_hash"] != new_hash
+    assert (paper_store._path("customized") / "strategy.py").read_text(encoding="utf-8") != new_source
+    backup_roots = list((paper_store._path("managed") / "backups").glob("managed-four-mode-*"))
+    assert len(backup_roots) == 1
+    assert (backup_roots[0] / "strategy.py").read_text(encoding="utf-8") == old_source
 
 
 def test_managed_large_amount_first_board_migrates_only_unchanged_source(

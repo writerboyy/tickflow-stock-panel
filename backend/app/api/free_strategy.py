@@ -33,6 +33,7 @@ from app.free_strategy.templates import (
     LEGACY_EXTERNAL_LARGE_AMOUNT_FIRST_BOARD_SHA256,
     MANAGED_ETF_NAV_ALIGNMENT_SHA256,
     MANAGED_FIVE_FORTUNES_SHA256,
+    MANAGED_FOUR_MODE_SHA256,
     MANAGED_LARGE_AMOUNT_FIRST_BOARD_SHA256,
     MANAGED_STRONG_MOMENTUM_SHA256,
     TEMPLATES,
@@ -428,6 +429,80 @@ def migrate_managed_strong_momentum(data_dir: Path) -> list[str]:
         )
         migrated.append(str(strategy["id"]))
     return migrated
+
+
+def migrate_managed_four_mode(data_dir: Path) -> dict[str, list[str]]:
+    """Upgrade the managed four-mode template and unchanged paper snapshots."""
+    strategy_store = FreeStrategyStore(data_dir)
+    strategy_id = "four_mode"
+    try:
+        strategy = strategy_store.get(strategy_id)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"strategies": [], "accounts": []}
+
+    replacement = str(TEMPLATES[strategy_id]["source"])
+    replacement_hash = sha256(replacement.encode("utf-8")).hexdigest()
+    source_hash = sha256(str(strategy["source"]).encode("utf-8")).hexdigest()
+    if source_hash == replacement_hash:
+        target = strategy
+    elif source_hash in MANAGED_FOUR_MODE_SHA256:
+        target = strategy_store.save(
+            strategy_id,
+            strategy["name"],
+            replacement,
+            strategy.get("config", {}),
+            dialect="native",
+        )
+    else:
+        return {"strategies": [], "accounts": []}
+
+    paper_store = PaperAccountStore(data_dir)
+    migrated_accounts: list[str] = []
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for account in paper_store.list():
+        if str(account.get("strategy_id") or "") != strategy_id:
+            continue
+        account_id = str(account["id"])
+        account_root = paper_store._path(account_id)
+        source_path = account_root / "strategy.py"
+        state_path = account_root / "state.json"
+        try:
+            current_source = source_path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        current_hash = sha256(current_source.encode("utf-8")).hexdigest()
+        state_hash = str(account.get("source_hash") or current_hash)
+        if current_hash == replacement_hash and state_hash == replacement_hash:
+            continue
+        if current_hash not in MANAGED_FOUR_MODE_SHA256 and state_hash not in MANAGED_FOUR_MODE_SHA256:
+            continue
+
+        backup_root = account_root / "backups" / f"managed-four-mode-{stamp}-{account_id}"
+        backup_root.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(state_path, backup_root / "state.json")
+        shutil.copy2(source_path, backup_root / "strategy.py")
+        temporary = source_path.with_name(f".{source_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(replacement, encoding="utf-8")
+            os.replace(temporary, source_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        paper_store.update_fields(account_id, {
+            "source_hash": replacement_hash,
+            "source_revision": target["revision"],
+        })
+        paper_store.append_event_once(account_id, {
+            "id": f"managed-four-mode:{replacement_hash}",
+            "type": "strategy_migration",
+            "from_source_hash": state_hash,
+            "to_source_hash": replacement_hash,
+            "source_revision": target["revision"],
+        })
+        migrated_accounts.append(account_id)
+    return {
+        "strategies": [strategy_id] if source_hash != replacement_hash else [],
+        "accounts": migrated_accounts,
+    }
 
 
 def migrate_legacy_external_large_amount_first_board(data_dir: Path) -> list[str]:
