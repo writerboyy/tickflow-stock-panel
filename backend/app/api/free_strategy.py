@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.config import settings
+from app.free_strategy.algorithm_profile import build_algorithm_profile
 from app.free_strategy.continuation import continue_account_from_backtest
 from app.free_strategy.jq_compat.capabilities import analyze_source
 from app.free_strategy.process import start_process
@@ -1456,6 +1457,15 @@ def get_paper_account(account_id: str, request: Request):
         curve = _legacy_paper_curve(state, account["equity_curve"])
     account["equity_curve"] = curve
     result["account"] = _paper_account_view(account)
+    try:
+        strategy = _strategy_store(request).get(str(state.get("strategy_id") or ""))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        strategy = {
+            "id": state.get("strategy_id"),
+            "name": state.get("name"),
+            "source": "",
+        }
+    result["algorithm"] = build_algorithm_profile(strategy, state)
     result["events"] = store.events(account_id)
     return result
 

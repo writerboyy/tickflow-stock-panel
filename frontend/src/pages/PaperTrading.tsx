@@ -5,10 +5,12 @@ import {
   Activity,
   AlertTriangle,
   Bell,
+  BookOpen,
   ArrowDownRight,
   ArrowUpRight,
   CirclePause,
   CirclePlay,
+  ChevronDown,
   FileText,
   Gauge,
   ListOrdered,
@@ -94,6 +96,32 @@ function syncClass(account: PaperAccount) {
   if (account.sync?.phase === 'catching_up' || account.sync?.phase === 'waiting_market') return 'text-warning'
   if (account.sync?.phase === 'error') return 'text-danger'
   return 'text-muted'
+}
+
+function AlgorithmOverview({ algorithm }: { algorithm: PaperAccount['algorithm'] }) {
+  const [open, setOpen] = useState(true)
+  if (!algorithm) return null
+  return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="group border-b border-border bg-elevated/20">
+    <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium hover:bg-elevated/50">
+      <BookOpen className="h-4 w-4 shrink-0 text-accent" />
+      <span className="shrink-0">算法说明</span>
+      <span className="min-w-0 flex-1 truncate text-[10px] font-normal text-muted">{algorithm.summary}</span>
+      <ChevronDown className="h-4 w-4 shrink-0 text-muted transition-transform group-open:rotate-180" />
+    </summary>
+    <div className="border-t border-border px-4 py-3">
+      <p className="max-w-5xl text-xs leading-5 text-secondary">{algorithm.summary}</p>
+      <ol className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 max-lg:grid-cols-1">
+        {algorithm.steps.map((step, index) => <li key={`${step.title}-${index}`} className="grid grid-cols-[24px_minmax(0,1fr)] gap-2 border-l border-border pl-2">
+          <span className="font-mono text-[10px] text-accent">{String(index + 1).padStart(2, '0')}</span>
+          <div className="min-w-0"><div className="text-[11px] font-medium">{step.title}</div><div className="mt-0.5 text-[10px] leading-4 text-muted">{step.detail}</div></div>
+        </li>)}
+      </ol>
+      {algorithm.runtime.length ? <div className="mt-3 border-t border-border pt-2">
+        <div className="text-[10px] font-medium text-secondary">当前模拟运行方式</div>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted">{algorithm.runtime.map(item => <span key={item}>· {item}</span>)}</div>
+      </div> : null}
+    </div>
+  </details>
 }
 
 function returnClass(value?: number) {
@@ -727,6 +755,8 @@ export function PaperTrading() {
 
         {account.last_error ? <div className="mx-4 mt-3 flex gap-2 rounded border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger"><AlertTriangle className="h-4 w-4 shrink-0" />{account.last_error}</div> : null}
         {(account.risk_status?.daily_loss_locked || account.risk_status?.drawdown_locked) ? <div className="mx-4 mt-3 flex items-center gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning"><ShieldAlert className="h-4 w-4" /><span className="flex-1">{account.risk_status.reason ?? '风控锁定'}</span>{account.risk_status.drawdown_locked ? <button type="button" onClick={() => void action('unlock-risk')} className="rounded border border-warning/50 px-2 py-1 text-[11px]">确认恢复</button> : null}</div> : null}
+
+        <AlgorithmOverview algorithm={account.algorithm} />
 
         <section className="grid grid-cols-[1.15fr_1fr_1fr_1fr] border-b border-border max-lg:grid-cols-2">
           <div className={`relative min-w-0 overflow-hidden border-r border-border px-4 py-3.5 max-lg:border-b ${selectedDailyPerformance == null || selectedDailyPerformance.amount === 0 ? '' : selectedDailyPerformance.amount > 0 ? 'bg-bull/[0.045]' : 'bg-bear/[0.045]'}`}>

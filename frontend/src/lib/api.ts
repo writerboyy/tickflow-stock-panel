@@ -2253,7 +2253,18 @@ export interface PaperAccount {
     max_drawdown_pct?: number
   }
   positions?: Record<string, number>
-  config?: { initial_capital?: number; benchmark_symbol?: string }
+  config?: {
+    initial_capital?: number
+    benchmark_symbol?: string
+    fill_policy?: 'close' | 'next_open'
+    settlement?: 't0' | 't1'
+    slippage_bps?: number
+  }
+  algorithm?: {
+    summary: string
+    steps: Array<{ title: string; detail: string }>
+    runtime: string[]
+  }
   account?: {
     cash: number
     positions: Record<string, number>

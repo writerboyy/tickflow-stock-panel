@@ -125,6 +125,44 @@ def test_create_paper_account_defaults_quote_strategy_to_websocket(tmp_path):
     assert response.json()["market_mode"] == "websocket"
 
 
+def test_paper_account_detail_includes_algorithm_profile(tmp_path):
+    strategy = FreeStrategyStore(tmp_path).save(
+        "strong",
+        "强者恒强",
+        '"""强者恒强。"""\nSTRATEGY_KIND = "strong_momentum"\n',
+        {"timeframe": "1m", "asset_type": "stock"},
+    )
+    PaperAccountStore(tmp_path).save({
+        "id": "paper-strong",
+        "name": "强者恒强",
+        "strategy_id": strategy["id"],
+        "status": "paused",
+        "market_mode": "websocket",
+        "execution_mode": "quote",
+        "scheduled_times": ["09:30:16"],
+        "config": {
+            "initial_capital": 100_000,
+            "fill_policy": "close",
+            "settlement": "t1",
+            "slippage_bps": 10,
+        },
+        "risk_config": {
+            "max_symbol_exposure_pct": 1,
+            "daily_loss_pct": 0.1,
+            "max_drawdown_pct": 0.3,
+        },
+    })
+    app = FastAPI()
+    app.state.datastore = SimpleNamespace(data_dir=tmp_path)
+    app.include_router(router)
+
+    response = TestClient(app).get("/api/free-strategies/paper/accounts/paper-strong")
+
+    assert response.status_code == 200
+    assert "集合竞价" in response.json()["algorithm"]["summary"]
+    assert response.json()["algorithm"]["runtime"][0] == "按 WebSocket 实时报价事件推进策略"
+
+
 def test_managed_strong_momentum_migration_replaces_only_known_old_source(tmp_path, monkeypatch):
     from hashlib import sha256
 
