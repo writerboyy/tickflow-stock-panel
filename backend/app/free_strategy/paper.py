@@ -1629,14 +1629,6 @@ def _fill_event_id(fill: Any) -> str:
     return f"fill:{sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
-def _log_event_id(item: dict[str, Any]) -> str:
-    raw = ":".join(
-        str(item.get(key) or "")
-        for key in ("timestamp", "level", "source", "message")
-    )
-    return f"log:{sha256(raw.encode('utf-8')).hexdigest()[:24]}"
-
-
 def _persist_engine_state(
     store: PaperAccountStore,
     account_id: str,
@@ -1748,14 +1740,7 @@ def _append_strategy_logs(
     account_id: str,
     logs: list[dict[str, Any]],
 ) -> None:
-    for item in logs:
-        if item.get("source") != "strategy":
-            continue
-        store.append_event_once(account_id, {
-            "id": _log_event_id(item),
-            "type": "log",
-            **item,
-        })
+    store.append_strategy_logs(account_id, logs)
 
 
 def _append_five_fortunes_decision(

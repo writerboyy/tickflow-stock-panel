@@ -102,6 +102,20 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "max_drawdown_pct": 17.5,
         "execution_mode": "full_bar",
         "scheduled_times": [],
+        "logs": [
+            {
+                "timestamp": "2026-07-24T15:00:00",
+                "level": "INFO",
+                "message": "原版策略日志",
+                "source": "strategy",
+            },
+            {
+                "timestamp": "2026-07-24T15:00:00",
+                "level": "INFO",
+                "message": "框架日志",
+                "source": "engine",
+            },
+        ],
         "daily_equity_curve": [
             {"date": "2025-07-20", "timestamp": "2025-07-20T15:00:00",
              "equity": 90_000, "cash": 90_000, "strategy_nav": 0.9,
@@ -142,6 +156,10 @@ def test_continue_account_inherits_state_but_not_historical_orders(tmp_path):
         "positions": {"X": 10.0},
         "avg_cost": {"X": 9.0},
     }]
+    logs = [event for event in store.events("paper") if event.get("type") == "log"]
+    assert len(logs) == 1
+    assert logs[0]["message"] == "原版策略日志"
+    assert logs[0]["source"] == "strategy"
     assert list((store._path("paper") / "backups").glob("state-*.json"))
 
 

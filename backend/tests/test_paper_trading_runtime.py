@@ -455,7 +455,7 @@ def test_paper_persists_only_strategy_owned_logs(tmp_path):
     store = PaperAccountStore(tmp_path)
     store.save({"id": "paper", "status": "running"})
 
-    _append_strategy_logs(store, "paper", [
+    logs = [
         {
             "timestamp": "2026-08-05T09:30:00",
             "level": "INFO",
@@ -468,7 +468,9 @@ def test_paper_persists_only_strategy_owned_logs(tmp_path):
             "message": "框架固定日志",
             "source": "engine",
         },
-    ])
+    ]
+    _append_strategy_logs(store, "paper", logs)
+    _append_strategy_logs(store, "paper", logs)
 
     events = store.events("paper")
     assert len(events) == 1

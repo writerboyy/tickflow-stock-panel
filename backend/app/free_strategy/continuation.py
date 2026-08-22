@@ -298,4 +298,5 @@ def continue_account_from_backtest(
     })
     saved = store.save(state)
     store.replace_equity_curve(account_id, equity_rows)
+    store.append_strategy_logs(account_id, list(result.get("logs") or []))
     return saved
