@@ -83,11 +83,7 @@ def before_trading_start(context):
 
 def _raw(bar, field):
     value = getattr(bar, f"raw_{field}", None)
-    if value is None:
-        value = getattr(bar, field, None)
-    if value is None:
-        value = getattr(bar, "last_price", None)
-    return float(value)
+    return float(value if value is not None else getattr(bar, field))
 
 
 def _max_positions(equity):
@@ -309,25 +305,25 @@ def _entry_candidates(context, state, *, force=False):
 
 
 def _entry_callback(context):
-    bars = context.current_bars()
-    _on_market(context, bars, bars)
+    _on_market(context)
     _entry_candidates(context, _state(context), force=True)
 
 
-def _on_market(context, updates, bars):
+def _on_market(context):
     state = _state(context)
     _sync_positions(context, state)
-    _update_session_prices(state, updates)
+    bars = context.current_bars()
+    _update_session_prices(state, bars)
     _exit_positions(context, state, bars)
 
 
 def on_quote(context, quotes):
-    _on_market(context, quotes, context.current_bars())
+    _on_market(context)
 
 
 def on_bar(context, bars):
     # Historical second-level bars use the same state transition as live Quote events.
-    _on_market(context, bars, context.current_bars())
+    _on_market(context)
 
 
 def after_trading_end(context):
