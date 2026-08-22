@@ -2631,7 +2631,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
 
             tick_health_report = require_tick_data(
                 repo,
-                symbols,
+                dynamic_cache.all_symbols if dynamic_cache is not None else symbols,
                 start,
                 end,
                 expected_dates=trading_dates,
@@ -2674,13 +2674,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
         first_bar: datetime | None = None
         last_bar: datetime | None = None
         symbols_seen: set[str] = set()
+        candidate_symbols_by_date: dict[str, list[str]] = {}
         # Dynamic PIT pools bootstrap the engine with static candidates so the
         # first session can resolve instruments.  Those symbols are not actual
         # replay requirements when the current-day auction gate is waiting for
-        # data; only the benchmark and candidates observed during replay are.
+        # data; the complete candidate union remains the strategy universe.
         requested_symbols = (
-            [config.benchmark_symbol]
-            if dynamic_cache is not None and config.benchmark_symbol
+            list(dynamic_cache.all_symbols)
+            if dynamic_cache is not None
             else list(symbols)
         )
         trading_days = 0
@@ -2711,7 +2712,14 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     symbol for symbol, quantity in engine.account.positions.items()
                     if float(quantity) > 0
                 ]
+                candidate_symbols_by_date[trading_day.isoformat()] = [
+                    str(symbol) for symbol in engine.universe
+                    if str(symbol) != config.benchmark_symbol
+                ]
                 session_symbols = list(dict.fromkeys([*engine.universe, *held_symbols]))
+                for symbol in session_symbols:
+                    if symbol != config.benchmark_symbol and symbol not in requested_symbols:
+                        requested_symbols.append(symbol)
                 rows = list(_read_rows(
                     repo,
                     session_symbols,
@@ -3072,6 +3080,7 @@ def execute_backtest(payload: dict[str, Any], output: Any, callback_deadline: An
                     "enabled": True,
                     "candidate_symbols": len(strong_momentum_cache.all_symbols),
                     "mode": "pit_d1_strong_stock_dynamic_universe",
+                    "candidate_symbols_by_date": candidate_symbols_by_date,
                 }
                 if strong_momentum_cache is not None else {"enabled": False}
             ),

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from datetime import date, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -59,6 +58,8 @@ def _with_candidate_features(frame: pl.DataFrame) -> pl.DataFrame:
         pl.col("_limit_up").alias("limit_price"),
         (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(2).over("symbol") - 1)
         .alias("previous_change"),
+        (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(4).over("symbol") - 1)
+        .alias("previous_ret3"),
         (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(6).over("symbol") - 1)
         .alias("previous_ret5"),
         (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(21).over("symbol") - 1)
@@ -80,6 +81,30 @@ def _with_candidate_features(frame: pl.DataFrame) -> pl.DataFrame:
             & (pl.col("volume").shift(1).over("symbol") < pl.col("volume").shift(2).over("symbol"))
             & (pl.col("volume").shift(2).over("symbol") < pl.col("volume").shift(3).over("symbol"))
         ).fill_null(False).alias("previous_shrink_rise_3d"),
+    )
+
+
+def _filter_source_candidates(frame: pl.DataFrame) -> pl.DataFrame:
+    """Apply the source strategy's board-specific static filters."""
+    gem = (
+        pl.col("symbol").str.starts_with("300")
+        | pl.col("symbol").str.starts_with("301")
+        | pl.col("symbol").str.starts_with("302")
+    )
+    return frame.with_columns(gem.alias("_is_gem")).filter(
+        pl.when(pl.col("_is_gem"))
+        .then(pl.col("previous_ret3") <= 0.72)
+        .otherwise(pl.col("previous_ret5") <= 0.60)
+        & (pl.col("previous_ret20") < 0.95)
+        & pl.when(pl.col("_is_gem"))
+        .then(pl.col("previous_amplitude") < 0.20)
+        .otherwise(pl.col("previous_amplitude") < 0.16)
+        & pl.when(pl.col("_is_gem"))
+        .then(pl.col("previous_turnover_rate") < 28.0)
+        .otherwise(pl.col("previous_turnover_rate") < 24.0)
+        & (pl.col("previous_turnover_rate") >= 2.0)
+        & (pl.col("recent_limit_down_count") == 0)
+        & ~pl.col("previous_shrink_rise_3d")
     )
 
 
@@ -177,25 +202,6 @@ class StrongMomentumSnapshotCache:
             if row.get("symbol")
         }, []
 
-    def _minute_available_symbols(self, trading_day: date) -> set[str] | None:
-        path = (
-            Path(self.repo.store.data_dir)
-            / "kline_minute"
-            / "_coverage"
-            / f"date={trading_day.isoformat()}.json"
-        )
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"分钟K覆盖文件损坏: {path}") from exc
-        return {
-            str(row.get("symbol"))
-            for row in payload.get("groups", [])
-            if row.get("symbol") and int(row.get("bars") or 0) > 0
-        }
-
     def _tail_gains(self, symbols: list[str], trading_day: date) -> dict[str, float]:
         if not symbols:
             return {}
@@ -253,7 +259,9 @@ class StrongMomentumSnapshotCache:
         if instruments.is_empty() or not {"symbol", "name"}.issubset(instruments.columns):
             raise ValueError("强者恒强快照缺少股票标的目录")
         instruments = instruments.filter(
-            pl.col("symbol").str.contains(r"^(60\d{4}\.SH|00[01]\d{3}\.SZ)$")
+            pl.col("symbol").str.contains(
+                r"^(60\d{4}\.SH|00[01]\d{3}\.SZ|30[012]\d{3}\.SZ)$"
+            )
         )
         columns = [
             "symbol", "date", "open", "high", "low", "close", "volume", "amount",
@@ -276,20 +284,12 @@ class StrongMomentumSnapshotCache:
             market_days[index]: market_days[index - 1]
             for index in range(1, len(market_days))
         }
-        frame = _with_candidate_features(
-            self._eligible_rows(daily.sort(["symbol", "date"]), instruments)
-        ).filter(
-            (pl.col("date") >= self.start)
-            & (pl.col("date") <= self.end)
-            & pl.col("eligible")
-            & pl.col("previous_change").is_not_null()
-            & (pl.col("previous_ret5") <= 0.60)
-            & (pl.col("previous_ret20") < 0.95)
-            & (pl.col("previous_amplitude") < 0.16)
-            & (pl.col("previous_turnover_rate") >= 2.0)
-            & (pl.col("previous_turnover_rate") < 24.0)
-            & (pl.col("recent_limit_down_count") == 0)
-            & ~pl.col("previous_shrink_rise_3d")
+        frame = _filter_source_candidates(
+            _with_candidate_features(
+                self._eligible_rows(daily.sort(["symbol", "date"]), instruments)
+            ).filter(
+                (pl.col("date") >= self.start) & (pl.col("date") <= self.end) & pl.col("eligible")
+            )
         )
 
         for key, rows in frame.partition_by("date", as_dict=True).items():
@@ -297,11 +297,10 @@ class StrongMomentumSnapshotCache:
             strict = rows.filter(pl.col("previous_change") >= 0.06)
             selected = strict if not strict.is_empty() else rows.filter(pl.col("previous_change") >= 0.05)
             selection_mode = "strict" if not strict.is_empty() else "fallback"
-            minute_symbols = self._minute_available_symbols(day)
-            raw_rows = [
-                row for row in selected.iter_rows(named=True)
-                if minute_symbols is None or str(row["symbol"]) in minute_symbols
-            ]
+            # Candidate membership comes from the source rules only.  Market-data
+            # coverage is checked by the backtest/readiness path and must not
+            # silently change the strategy's selected symbols.
+            raw_rows = list(selected.iter_rows(named=True))
             as_of = previous_market_day.get(day)
             tail_gains = self._tail_gains(
                 [str(row["symbol"]) for row in raw_rows],
@@ -311,7 +310,12 @@ class StrongMomentumSnapshotCache:
             for row in raw_rows:
                 symbol = str(row["symbol"])
                 tail_gain = tail_gains.get(symbol)
-                if tail_gain is not None and tail_gain > 0.05:
+                tail_threshold = (
+                    0.08
+                    if str(row["symbol"]).startswith(("300", "301", "302"))
+                    else 0.05
+                )
+                if tail_gain is not None and tail_gain > tail_threshold:
                     continue
                 volume_growth = float(row.get("previous_volume_growth") or 0)
                 candidates.append({

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import polars as pl
 
 from app.free_strategy.bars import Bar
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote
 from app.free_strategy.strong_momentum import _passes_intraday_gate
-from app.free_strategy.strong_momentum_snapshot import _with_candidate_features
+from app.free_strategy.strong_momentum_snapshot import (
+    StrongMomentumSnapshotCache,
+    _filter_source_candidates,
+    _with_candidate_features,
+)
 from app.free_strategy.templates import TEMPLATES
 
 
@@ -153,6 +158,90 @@ def test_candidate_features_shift_all_selection_inputs_to_d1():
         "recent_limit_down_count",
     ):
         assert modified[field] == original[field]
+
+
+def test_source_candidate_filters_use_gem_thresholds():
+    frame = pl.DataFrame({
+        "symbol": ["600001.SH", "300001.SZ"],
+        "previous_change": [0.08, 0.08],
+        "previous_ret3": [0.70, 0.70],
+        "previous_ret5": [0.70, 0.70],
+        "previous_ret20": [0.30, 0.30],
+        "previous_amplitude": [0.18, 0.18],
+        "previous_turnover_rate": [27.0, 27.0],
+        "recent_limit_down_count": [0, 0],
+        "previous_shrink_rise_3d": [False, False],
+    })
+
+    selected = _filter_source_candidates(frame)
+
+    assert selected["symbol"].to_list() == ["300001.SZ"]
+
+
+def test_source_candidate_filters_leave_five_percent_fallback_available():
+    frame = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "previous_change": [0.055],
+        "previous_ret3": [0.10],
+        "previous_ret5": [0.10],
+        "previous_ret20": [0.30],
+        "previous_amplitude": [0.10],
+        "previous_turnover_rate": [5.0],
+        "recent_limit_down_count": [0],
+        "previous_shrink_rise_3d": [False],
+    })
+
+    assert _filter_source_candidates(frame)["symbol"].to_list() == ["600001.SH"]
+
+
+def test_snapshot_does_not_drop_candidates_for_minute_coverage(tmp_path):
+    target = date(2026, 8, 20)
+    dates = [target - timedelta(days=offset) for offset in range(21, -1, -1)]
+    closes = [10.0] * len(dates)
+    closes[-2] = 10.8
+    daily = pl.DataFrame({
+        "symbol": ["600001.SH"] * len(dates),
+        "date": dates,
+        "open": closes,
+        "high": [value * 1.02 for value in closes],
+        "low": [value * 0.98 for value in closes],
+        "close": closes,
+        "volume": [1_000.0] * len(dates),
+        "amount": [10_000.0] * len(dates),
+        "raw_close": closes,
+        "raw_high": [value * 1.02 for value in closes],
+        "raw_low": [value * 0.98 for value in closes],
+        "turnover_rate": [5.0] * len(dates),
+    })
+
+    class Repo:
+        store = SimpleNamespace(data_dir=tmp_path)
+
+        def get_instruments_asset(self, _asset_type):
+            return pl.DataFrame({
+                "symbol": ["600001.SH"],
+                "name": ["测试股票"],
+                "listing_date": [date(2020, 1, 1)],
+            })
+
+        def get_daily_asset_batch(self, *_args):
+            return daily
+
+        def get_minute_range(self, *_args, **_kwargs):
+            return pl.DataFrame()
+
+    coverage = tmp_path / "kline_minute" / "_coverage"
+    coverage.mkdir(parents=True)
+    (coverage / f"date={target.isoformat()}.json").write_text(
+        '{"groups": []}',
+        encoding="utf-8",
+    )
+
+    cache = StrongMomentumSnapshotCache(
+        Repo(), target, target, {"lookback_days": 30, "require_auction": False},
+    )
+
+    assert [row["symbol"] for row in cache.snapshot(target)["candidates"]] == ["600001.SH"]
 
 
 def test_entry_fills_at_first_supported_morning_minute_and_never_at_close():
