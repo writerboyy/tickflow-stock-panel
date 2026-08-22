@@ -6,6 +6,8 @@ import {
   AlertTriangle,
   Bell,
   BookOpen,
+  Check,
+  Copy,
   ArrowDownRight,
   ArrowUpRight,
   CirclePause,
@@ -37,6 +39,7 @@ import { pushAlertToast } from '@/components/AlertToast'
 import { useECharts } from './backtest/charts/useECharts'
 import { useChartTheme } from '@/lib/theme'
 import { formatInstrumentLabel } from '@/lib/format'
+import { copyText } from '@/lib/clipboard'
 
 const INPUT = 'w-full rounded-input border border-border bg-surface px-2.5 py-1.5 text-xs text-foreground focus:border-accent focus:outline-none'
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -98,25 +101,84 @@ function syncClass(account: PaperAccount) {
   return 'text-muted'
 }
 
+function algorithmMarkdown(account: PaperAccount) {
+  const algorithm = account.algorithm
+  if (!algorithm) return ''
+  const lines = [
+    `# ${account.name} - 算法说明`,
+    '',
+    algorithm.summary,
+  ]
+  if (algorithm.inputs?.length) {
+    lines.push('', '## 数据输入', ...algorithm.inputs.map(item => `- ${item}`))
+  }
+  lines.push('', '## 执行流程')
+  algorithm.steps.forEach((step, index) => {
+    lines.push('', `${index + 1}. ${step.title}`, `   ${step.detail}`)
+  })
+  if (algorithm.parameters?.length) {
+    lines.push('', '## 关键参数', ...algorithm.parameters.map(item => `- ${item}`))
+  }
+  if (algorithm.pseudocode?.length) {
+    lines.push('', '## 复现伪代码', '```text', ...algorithm.pseudocode, '```')
+  }
+  if (algorithm.runtime.length) {
+    lines.push('', '## 当前模拟运行配置', ...algorithm.runtime.map(item => `- ${item}`))
+  }
+  return lines.join('\n')
+}
+
 function AlgorithmDialog({ account, onClose }: { account: PaperAccount; onClose: () => void }) {
   const algorithm = account.algorithm
+  const [copied, setCopied] = useState(false)
   if (!algorithm) return null
+
+  const handleCopy = async () => {
+    const copiedOk = await copyText(algorithmMarkdown(account))
+    if (!copiedOk) {
+      toast('复制失败，请手动选择文本', 'error')
+      return
+    }
+    setCopied(true)
+    toast('完整算法说明已复制', 'success')
+    window.setTimeout(() => setCopied(false), 1600)
+  }
+
   return <Modal labelledBy="paper-algorithm-title" onClose={onClose} panelClassName="flex max-h-[82vh] w-[94vw] max-w-3xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
     <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
       <BookOpen className="h-4 w-4 shrink-0 text-accent" />
       <h2 id="paper-algorithm-title" className="min-w-0 flex-1 truncate text-sm font-semibold">{account.name} · 算法说明</h2>
+      <button type="button" onClick={handleCopy} className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded border border-border px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground">
+        {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+        {copied ? '已复制' : '复制完整说明'}
+      </button>
       <button type="button" title="关闭" onClick={onClose} className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-elevated hover:text-foreground"><X className="h-4 w-4" /></button>
     </div>
-    <div className="min-h-0 overflow-y-auto px-4 py-4">
+    <div className="min-h-0 select-text overflow-y-auto px-4 py-4">
       <p className="text-xs leading-5 text-secondary">{algorithm.summary}</p>
-      <ol className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 max-md:grid-cols-1">
+      {algorithm.inputs?.length ? <section className="mt-4 border-t border-border pt-3">
+        <h3 className="text-[11px] font-semibold text-secondary">数据输入</h3>
+        <ul className="mt-2 space-y-1.5 text-[11px] leading-5 text-muted">{algorithm.inputs.map(item => <li key={item} className="grid grid-cols-[10px_minmax(0,1fr)] gap-1.5"><span className="text-accent">·</span><span>{item}</span></li>)}</ul>
+      </section> : null}
+      <section className="mt-4 border-t border-border pt-3">
+        <h3 className="text-[11px] font-semibold text-secondary">执行流程</h3>
+      <ol className="mt-3 space-y-4">
         {algorithm.steps.map((step, index) => <li key={`${step.title}-${index}`} className="grid grid-cols-[28px_minmax(0,1fr)] gap-2 border-l border-border pl-2">
           <span className="font-mono text-[10px] text-accent">{String(index + 1).padStart(2, '0')}</span>
           <div className="min-w-0"><div className="text-xs font-medium">{step.title}</div><div className="mt-1 text-[11px] leading-5 text-muted">{step.detail}</div></div>
         </li>)}
       </ol>
+      </section>
+      {algorithm.parameters?.length ? <section className="mt-4 border-t border-border pt-3">
+        <h3 className="text-[11px] font-semibold text-secondary">关键参数</h3>
+        <ul className="mt-2 space-y-1.5 text-[11px] leading-5 text-muted">{algorithm.parameters.map(item => <li key={item} className="grid grid-cols-[10px_minmax(0,1fr)] gap-1.5"><span className="text-accent">·</span><span>{item}</span></li>)}</ul>
+      </section> : null}
+      {algorithm.pseudocode?.length ? <section className="mt-4 border-t border-border pt-3">
+        <h3 className="text-[11px] font-semibold text-secondary">复现伪代码</h3>
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap border-l-2 border-accent/50 bg-elevated/50 px-3 py-2 font-mono text-[10px] leading-5 text-secondary">{algorithm.pseudocode.join('\n')}</pre>
+      </section> : null}
       {algorithm.runtime.length ? <div className="mt-4 border-t border-border pt-3">
-        <div className="text-[11px] font-medium text-secondary">当前模拟运行方式</div>
+        <div className="text-[11px] font-semibold text-secondary">当前模拟运行配置</div>
         <div className="mt-2 space-y-1 text-[11px] leading-5 text-muted">{algorithm.runtime.map(item => <div key={item}>· {item}</div>)}</div>
       </div> : null}
     </div>

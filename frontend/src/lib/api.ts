@@ -2262,7 +2262,10 @@ export interface PaperAccount {
   }
   algorithm?: {
     summary: string
+    inputs?: string[]
     steps: Array<{ title: string; detail: string }>
+    parameters?: string[]
+    pseudocode?: string[]
     runtime: string[]
   }
   account?: {
