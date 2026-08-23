@@ -30,11 +30,6 @@ def default_config() -> dict[str, Any]:
             "exit_sustain_seconds": 30,
             "first_board_lookback_days": 10,
             "blacklist_after_breaks": 3,
-            "notifications": {
-                "touched": True,
-                "broken": True,
-                "resealed": True,
-            },
         },
         "selected": [],
         "board_pool": [],
@@ -67,6 +62,8 @@ class LimitBoardStore:
                 raise RuntimeError("打板专区配置格式无效，已拒绝覆盖")
             result["revision"] = int(raw.get("revision") or 0)
             result["settings"].update(raw.get("settings") or {})
+            # 旧版的打板通知开关已废弃，公共提醒统一由监控规则控制。
+            result["settings"].pop("notifications", None)
             result["selected"] = [
                 item for item in (raw.get("selected") or [])
                 if isinstance(item, dict) and item.get("symbol")

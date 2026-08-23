@@ -15,7 +15,7 @@ import polars as pl
 
 from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
-from app.services import alert_store, premium_gene, rps_rotation
+from app.services import premium_gene, rps_rotation
 from app.services.limit_board_scoring import (
     intraday_flow_detail,
     premium_gene_detail,
@@ -221,22 +221,8 @@ class LimitBoardService:
         self._last_error: str | None = None
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self.quote_service.add_fetch_listener(self._on_market_fetch)
-        self._refresh_symbol_consumer()
-        try:
-            self.quote_service.acquire_temporary_polling(self._refresh_interval_seconds())
-            self._polling_lease = True
-        except ValueError as exc:
-            self._last_error = str(exc)
-        hub = self._hub()
-        if hub is not None:
-            hub.add_depth_listener(self.enqueue_depth)
-        self._thread = threading.Thread(target=self._worker, name="limit-board", daemon=True)
-        self._thread.start()
-        self._on_market_fetch()
+        """保留旧调用兼容性；短线猎手不再启动专用监听器。"""
+        logger.info("limit board dedicated listeners are disabled")
 
     def stop(self) -> None:
         self.quote_service.remove_fetch_listener(self._on_market_fetch)
@@ -2205,19 +2191,10 @@ class LimitBoardService:
             "reasons": [reason],
         }
         event["event_identity"] = self.store.event_identity(event)
-        enrich = getattr(self.quote_service, "enrich_external_alerts", None)
-        if callable(enrich):
-            enrich([event])
         if not self.store.append_event_once(event):
             return
-        alert_store.append(self.store.root.parents[1], event)
-        enabled = bool(config["settings"].get("notifications", {}).get(event_type, True))
-        if enabled:
-            publish = getattr(self.quote_service, "publish_external_alerts", None)
-            if callable(publish):
-                publish([event])
-            else:
-                self.quote_service.push_alerts([event])
+        # 打板状态只属于短线猎手自己的时间线。监控中心的公共告警必须由
+        # MonitorRuleEngine 规则命中后统一写入 alerts.jsonl 和推送。
 
     def _persist_runtime(self, runtime: dict[str, Any]) -> None:
         stored = self.store.load_runtime()
@@ -3225,21 +3202,6 @@ class LimitBoardService:
                 "first_board_enabled": first_board_enabled,
             },
         }
-
-    def update_notifications(
-        self, notifications: dict[str, Any], revision: int,
-    ) -> dict[str, Any]:
-        values = {
-            key: bool(notifications[key])
-            for key in ("touched", "broken", "resealed")
-        }
-
-        def update(config: dict[str, Any]) -> None:
-            config["settings"]["notifications"] = values
-
-        saved = self.store.update(revision, update)
-        self._notify_updated()
-        return saved
 
     def update_advanced_settings(
         self, settings: dict[str, Any], revision: int,

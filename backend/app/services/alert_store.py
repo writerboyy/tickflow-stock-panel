@@ -26,6 +26,12 @@ MAX_RECORDS = 5000
 # 每隔多少次写入触发一次清理 (避免每次写都 prune)
 PRUNE_EVERY = 20
 
+# 监控中心的公共告警只能来自 MonitorRuleEngine。
+# position_risk、limit_board 等领域服务保留各自的事件存储/时间线，不能混入公共监控记录。
+MONITOR_RULE_SOURCES = frozenset({
+    "strategy", "signal", "price", "market", "ladder", "sector",
+})
+
 _lock = threading.Lock()
 _write_count = 0
 
@@ -64,6 +70,12 @@ def append_many(data_dir: Path, events: list[dict]) -> None:
         if _write_count >= PRUNE_EVERY:
             _write_count = 0
             _prune_locked(p)
+
+
+def is_monitor_rule_event(event: dict) -> bool:
+    """判断事件是否属于监控规则引擎可写入监控中心的来源。"""
+    rule_id = str(event.get("rule_id") or "").strip()
+    return bool(rule_id) and event.get("source") in MONITOR_RULE_SOURCES
 
 
 def list_recent(
@@ -108,6 +120,19 @@ def list_recent(
     return out[:limit]
 
 
+def list_monitor_events(
+    data_dir: Path,
+    days: int = MAX_DAYS,
+    limit: int = MAX_RECORDS,
+    source: str | None = None,
+    type: str | None = None,
+) -> list[dict]:
+    """读取监控规则引擎产生的记录，供公共监控中心使用。"""
+    events = list_recent(data_dir, days=days, limit=MAX_RECORDS, source=source, type=type)
+    filtered = [event for event in events if is_monitor_rule_event(event)]
+    return filtered[:limit]
+
+
 def clear(data_dir: Path) -> int:
     """清空全部记录,返回清除的条数。"""
     with _lock:
@@ -122,6 +147,41 @@ def clear(data_dir: Path) -> int:
             pass
         p.write_text("", encoding="utf-8")
         return count
+
+
+def clear_monitor(data_dir: Path) -> int:
+    """清空监控规则记录，保留其它领域服务的独立事件。"""
+    with _lock:
+        p = _path(data_dir)
+        if not p.exists():
+            return 0
+        kept: list[dict] = []
+        cleared = 0
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if is_monitor_rule_event(event):
+                        cleared += 1
+                    else:
+                        kept.append(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store clear_monitor read failed: %s", exc)
+            return 0
+        try:
+            with p.open("w", encoding="utf-8") as f:
+                for event in kept:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store clear_monitor write failed: %s", exc)
+            return 0
+        return cleared
 
 
 def delete_one(data_dir: Path, ts: int) -> bool:
@@ -161,6 +221,43 @@ def delete_one(data_dir: Path, ts: int) -> bool:
                     f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.warning("alert_store delete_one write failed: %s", e)
+            return False
+        return True
+
+
+def delete_monitor_one(data_dir: Path, ts: int) -> bool:
+    """删除指定时间戳的监控规则记录，不触碰其它领域事件。"""
+    with _lock:
+        p = _path(data_dir)
+        if not p.exists():
+            return False
+        kept: list[dict] = []
+        deleted = False
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except Exception:
+                        continue
+                    if not deleted and event.get("ts") == ts and is_monitor_rule_event(event):
+                        deleted = True
+                        continue
+                    kept.append(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store delete_monitor_one read failed: %s", exc)
+            return False
+        if not deleted:
+            return False
+        try:
+            with p.open("w", encoding="utf-8") as f:
+                for event in kept:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("alert_store delete_monitor_one write failed: %s", exc)
             return False
         return True
 
@@ -226,6 +323,29 @@ def count(data_dir: Path) -> int:
             return sum(1 for line in f if line.strip())
     except Exception:
         return 0
+
+
+def count_monitor(data_dir: Path) -> int:
+    """返回监控规则记录总数。"""
+    p = _path(data_dir)
+    if not p.exists():
+        return 0
+    try:
+        with _lock, p.open("r", encoding="utf-8") as f:
+            return sum(
+                1
+                for line in f
+                if line.strip() and _is_monitor_json_line(line)
+            )
+    except Exception:
+        return 0
+
+
+def _is_monitor_json_line(line: str) -> bool:
+    try:
+        return is_monitor_rule_event(json.loads(line))
+    except Exception:
+        return False
 
 
 def _prune_locked(p: Path) -> None:

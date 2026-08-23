@@ -19,6 +19,7 @@ const _statusListeners = new Set<() => void>()
 const FAILS_BEFORE_TOAST = 3
 // 指数退避上限
 const BACKOFF_CAP_MS = 60_000
+const MONITOR_RULE_SOURCES = new Set(['strategy', 'signal', 'price', 'market', 'ladder', 'sector'])
 
 function _emitStatus() {
   _statusListeners.forEach((fn) => fn())
@@ -82,14 +83,9 @@ export function useQuoteStream(
   pagesRef.current = sseRefreshPages
 
   const handleAlerts = useCallback((alerts: StrategyAlertEvent[]) => {
-    // depth 系统接管通知: 单独处理, 不走 strategy 回调
-    const depthAlerts = alerts.filter(a => a.source === 'depth')
-    const strategyAlerts = alerts.filter(a => a.source !== 'depth')
-
-    // depth 通知直接 toast(防刷屏: 后端已在状态切换时才推)
-    for (const a of depthAlerts.slice(0, 1)) {
-      toast(a.message, 'success')
-    }
+    const strategyAlerts = alerts.filter(
+      alert => MONITOR_RULE_SOURCES.has(alert.source) && Boolean(alert.rule_id),
+    )
 
     // 监控告警: 用专用 AlertToast (整批只响一声, 每条都弹, 受 maxVisible 上限保护)
     if (strategyAlerts.length > 0) {

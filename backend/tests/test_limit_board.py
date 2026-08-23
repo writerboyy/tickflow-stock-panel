@@ -193,7 +193,18 @@ def quote(price=11.0, limit=11.0):
     }
 
 
-def test_first_touch_emits_once_and_records_source(tmp_path, monkeypatch):
+def test_start_does_not_register_dedicated_listeners(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+
+    service.start()
+
+    assert service._thread is None
+    assert service._polling_lease is False
+    assert service._ws_registered is False
+    assert quotes.consumers == {}
+
+
+def test_first_touch_records_only_private_board_event(tmp_path, monkeypatch):
     service, quotes, config = make_service(tmp_path)
     monkeypatch.setattr(
         "app.services.limit_board_service.cn_now",
@@ -205,9 +216,10 @@ def test_first_touch_emits_once_and_records_source(tmp_path, monkeypatch):
     service._evaluate_quotes({"600000.SH": quote()}, runtime, config)
 
     assert runtime["symbols"]["600000.SH"]["status"] == "touched"
-    assert len(quotes.events) == 1
-    assert quotes.events[0]["type"] == "touched"
-    assert quotes.events[0]["concept"] == "银行;金融科技"
+    assert quotes.events == []
+    events = service.store.events("2026-08-13")
+    assert len(events) == 1
+    assert events[0]["type"] == "touched"
 
 
 def test_first_touch_is_deduplicated_after_runtime_state_is_trimmed(tmp_path, monkeypatch):
@@ -229,7 +241,7 @@ def test_first_touch_is_deduplicated_after_runtime_state_is_trimmed(tmp_path, mo
     events = service.store.events("2026-08-13")
     assert len(events) == 1
     assert events[0]["trigger_at"] == "2026-08-13T10:03:20.150+08:00"
-    assert len(quotes.events) == 1
+    assert quotes.events == []
 
 
 def test_event_store_keeps_real_break_cycles_and_collapses_legacy_duplicates(tmp_path):
@@ -289,8 +301,10 @@ def test_full_market_quote_prefers_authoritative_instrument_name(tmp_path, monke
     }])
 
     assert service._quotes["600000.SH"]["name"] == "浦发银行"
-    assert quotes.events[0]["name"] == "浦发银行"
-    assert quotes.events[0]["message"] == "浦发银行：涨停"
+    events = service.store.events("2026-08-13")
+    assert events[0]["name"] == "浦发银行"
+    assert events[0]["message"] == "浦发银行：涨停"
+    assert quotes.events == []
 
 
 @pytest.mark.skip(reason="短线猎手已改为开盘啦 socket 行情，不再订阅 TickFlow")
@@ -2150,7 +2164,12 @@ def test_fourth_break_adds_symbol_to_daily_blacklist(tmp_path):
     assert state["break_count"] == 4
     assert state["status"] == "blacklisted"
     assert runtime["blacklist"] == ["600000.SH"]
-    assert "第 4 次炸板" in quotes.events[-1]["reasons"][0]
+    fourth_break = next(
+        event for event in service.store.events(runtime["trading_date"])
+        if event["break_count"] == 4
+    )
+    assert "第 4 次炸板" in fourth_break["reasons"][0]
+    assert quotes.events == []
 
 
 def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
@@ -3016,14 +3035,14 @@ def test_legacy_selected_api_remains_compatible(tmp_path):
     assert view["candidate_pool"][0]["source"] == "manual"
 
 
-def test_limit_board_api_updates_notification_settings(tmp_path):
+def test_limit_board_api_rejects_legacy_notification_settings(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     app = FastAPI()
     app.state.limit_board_service = service
     app.include_router(router)
     client = TestClient(app)
 
-    updated = client.put(
+    rejected = client.put(
         "/api/limit-board/settings/notifications",
         json={
             "revision": 0,
@@ -3035,18 +3054,8 @@ def test_limit_board_api_updates_notification_settings(tmp_path):
         },
     )
 
-    assert updated.status_code == 200
-    assert updated.json()["config"]["revision"] == 1
-    assert updated.json()["config"]["settings"]["notifications"] == {
-        "touched": False,
-        "broken": True,
-        "resealed": False,
-    }
-    assert service.store.load_config()["settings"]["notifications"] == {
-        "touched": False,
-        "broken": True,
-        "resealed": False,
-    }
+    assert rejected.status_code == 404
+    assert "notifications" not in service.store.load_config()["settings"]
 
 
 def test_limit_board_quote_api_limits_batch_size(tmp_path):

@@ -25,17 +25,6 @@ class PoolUpdate(BaseModel):
     order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
 
 
-class NotificationSettings(BaseModel):
-    touched: bool
-    broken: bool
-    resealed: bool
-
-
-class NotificationSettingsWrite(BaseModel):
-    revision: int = Field(ge=0)
-    notifications: NotificationSettings
-
-
 class AdvancedSettings(BaseModel):
     sweep_price_levels: int = Field(ge=1, le=10)
     queue_wait_seconds: int = Field(default=0, ge=0, le=300)
@@ -103,17 +92,6 @@ async def sector_constituents(
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
-
-
-@router.put("/settings/notifications")
-def update_notifications(payload: NotificationSettingsWrite, request: Request):
-    try:
-        config = _service(request).update_notifications(
-            payload.notifications.model_dump(), payload.revision,
-        )
-    except RevisionConflict as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"ok": True, "config": config}
 
 
 @router.put("/settings/advanced")

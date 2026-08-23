@@ -1557,7 +1557,6 @@ export interface LimitBoardView {
     exit_sustain_seconds: number
     first_board_lookback_days: number
     blacklist_after_breaks: number
-    notifications: { touched: boolean; broken: boolean; resealed: boolean }
   }
   first_board: LimitBoardRow[]
   rebound_board: LimitBoardRow[]
@@ -2165,6 +2164,7 @@ export interface MonitorExtFieldItem {
 export interface StrategyAlertEvent {
   source: 'strategy' | 'depth' | 'large_order' | string
   type: string
+  rule_id?: string
   strategy_id?: string
   symbol?: string
   name?: string | null
@@ -2907,13 +2907,8 @@ export const api = {
       method: 'POST', body: JSON.stringify({ symbols }),
       quiet,
     }),
-  limitBoardNotificationsUpdate: (
-    notifications: LimitBoardView['settings']['notifications'], revision: number,
-  ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/notifications', {
-    method: 'PUT', body: JSON.stringify({ notifications, revision }),
-  }),
   limitBoardAdvancedSettingsUpdate: (
-    settings: Omit<LimitBoardView['settings'], 'notifications'>, revision: number,
+    settings: LimitBoardView['settings'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {
     method: 'PUT', body: JSON.stringify({ settings, revision }),
   }),
@@ -4057,10 +4052,6 @@ export const api = {
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),
-
-  /** 生成演示触发记录 (Dev 页用) */
-  alertSeed: (count = 12, recent = true) =>
-    request<{ ok: boolean; generated: number }>(`/api/alerts/seed?count=${count}&recent=${recent}`, { method: 'POST' }),
 
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>

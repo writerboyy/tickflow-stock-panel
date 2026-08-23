@@ -712,23 +712,10 @@ class DepthService:
     # ================================================================
 
     def _notify_takeover(self, n_stocks: int, user_interval: float, actual_interval: float) -> None:
-        """系统接管通知: 通过 quote_service 广播到所有 SSE 订阅者。"""
-        if not self._app_state:
-            return
-        qs = getattr(self._app_state, "quote_service", None)
-        if not qs:
-            return
+        """记录系统接管状态，不绕过监控规则发送公共提醒。"""
         msg = (f"五档轮询: 当前涨跌停 {n_stocks} 只, 您设置的 {user_interval:.0f} 秒间隔会超限, "
                f"系统已自动调整为 {actual_interval:.0f} 秒")
-        alert = {
-            "source": "depth",
-            "type": "takeover",
-            "message": msg,
-        }
-        try:
-            qs.push_alerts([alert])
-        except Exception as e:  # noqa: BLE001
-            logger.debug("depth 接管通知推送失败: %s", e)
+        logger.warning(msg)
 
     def _notify_depth_updated(self, count: int) -> None:
         """修正完成通知: set quote_service._depth_update_event, SSE 推 depth_updated 刷新连板梯队。"""

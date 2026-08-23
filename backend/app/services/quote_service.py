@@ -1117,7 +1117,22 @@ class QuoteService:
             sub.push_alerts(alerts)
 
     def push_alerts(self, alerts: list[dict]) -> None:
-        self._broadcast_alerts(alerts)
+        """推送当前已启用规则的公共监控事件。"""
+        allowed = self._active_monitor_alerts(alerts)
+        if allowed:
+            self._broadcast_alerts(allowed)
+
+    def _active_monitor_alerts(self, alerts: list[dict]) -> list[dict]:
+        from app.services.alert_store import is_monitor_rule_event
+
+        engine = getattr(getattr(self, "_app_state", None), "monitor_engine", None)
+        rules = getattr(engine, "rules", {}) if engine is not None else {}
+        active_rule_ids = set(rules) if isinstance(rules, dict) else set()
+        return [
+            event for event in alerts
+            if is_monitor_rule_event(event)
+            and str(event.get("rule_id") or "") in active_rule_ids
+        ]
 
     def enrich_external_alerts(self, alerts: list[dict]) -> None:
         """为外部服务生成的告警补全监控中心配置的概念和行业。"""
@@ -1155,12 +1170,14 @@ class QuoteService:
         return " ".join(parts)
 
     def publish_external_alerts(self, alerts: list[dict]) -> None:
-        """发布已由外部服务持久化的告警，并复用系统/IM通知通道。"""
+        """发布外部领域事件的专属通知；公共监控流只接受规则引擎事件。"""
         if not alerts:
             return
-        self.enrich_external_alerts(alerts)
-        self._broadcast_alerts(alerts)
-        self._maybe_send_system_notifications(alerts)
+        monitor_alerts = self._active_monitor_alerts(alerts)
+        if monitor_alerts:
+            self.enrich_external_alerts(monitor_alerts)
+            self._broadcast_alerts(monitor_alerts)
+            self._maybe_send_system_notifications(monitor_alerts)
         try:
             from app.services import preferences, webhook_adapter
 
@@ -1168,10 +1185,10 @@ class QuoteService:
             wecom_url = preferences.get_wecom_webhook_url()
             feishu_secret = preferences.get_feishu_webhook_secret()
             for event in alerts:
+                if event.get("source") == "limit_board":
+                    continue
                 title = (
-                    "TickFlow · 打板专区"
-                    if event.get("source") == "limit_board"
-                    else "TickFlow · 持仓风控"
+                    "TickFlow · 持仓风控"
                 )
                 body = self._format_alert_notification_body(event)
                 if feishu_url:
