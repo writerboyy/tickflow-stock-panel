@@ -155,6 +155,11 @@ function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
   }
 }
 
+function isRuleEnabled(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
+  const config = effectiveRule(portfolio, symbol, ruleId)
+  return 'active' in config ? config.active === true : config.enabled === true
+}
+
 function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
   const field = POSITION_RISK_RULE_FIELDS[ruleId]?.find(item => item.key === fieldKey)
   if (!field) return `${fieldKey} —`
@@ -168,21 +173,26 @@ function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
 }
 
 function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
+  const takeProfitLines = [
+    isRuleEnabled(portfolio, symbol, 'take_profit') ? riskFieldText(portfolio, symbol, 'take_profit', 'threshold') : null,
+    isRuleEnabled(portfolio, symbol, 'trailing_drawdown') ? riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain') : null,
+    isRuleEnabled(portfolio, symbol, 'take_profit_ladder')
+      ? `分批 ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'first_r')} / ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'second_r')}`
+      : null,
+  ].filter((line): line is string => line !== null)
   const modules: Array<{ tab: RiskModuleTab; label: string; lines: string[] }> = [
     {
       tab: 'take_profit', label: '止盈',
-      lines: [
-        riskFieldText(portfolio, symbol, 'take_profit', 'threshold'),
-        riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain'),
-        `分批 ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'first_r')} / ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'second_r')}`,
-      ],
+      lines: takeProfitLines.length ? takeProfitLines : ['未启用'],
     },
     {
       tab: 'stop_loss', label: '止损',
-      lines: [
-        riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
-        riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
-      ],
+      lines: isRuleEnabled(portfolio, symbol, 'stop_loss')
+        ? [
+            riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
+            riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
+          ]
+        : ['未启用'],
     },
   ]
   return (
