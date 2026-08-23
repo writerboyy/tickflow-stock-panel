@@ -175,7 +175,6 @@ function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
 function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
   const takeProfitLines = [
     isRuleEnabled(portfolio, symbol, 'take_profit') ? riskFieldText(portfolio, symbol, 'take_profit', 'threshold') : null,
-    isRuleEnabled(portfolio, symbol, 'trailing_drawdown') ? riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain') : null,
     isRuleEnabled(portfolio, symbol, 'take_profit_ladder')
       ? `分批 ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'first_r')} / ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'second_r')}`
       : null,
