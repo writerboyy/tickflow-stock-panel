@@ -93,6 +93,28 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
             "VerSion": "5.22.0.2",
         },
     ),
+    "market_sentiment_history": (
+        "GET",
+        "apphis.longhuvip.com",
+        {
+            "a": "ChangeStatistics",
+            "st": "100",
+            "apiv": "w44",
+            "c": "HisHomeDingPan",
+            "Index": "0",
+        },
+    ),
+    "market_sentiment_realtime": (
+        "GET",
+        "apphwhq.longhuvip.com",
+        {
+            "a": "ChangeStatistics",
+            "st": "1",
+            "apiv": "w44",
+            "c": "HomeDingPan",
+            "Index": "0",
+        },
+    ),
     "limit_up_ladder": (
         "POST",
         "apphwhq.longhuvip.com",

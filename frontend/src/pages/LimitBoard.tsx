@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import * as echarts from 'echarts'
 import {
   Ban,
   Bell,
@@ -37,10 +38,12 @@ import {
   type LimitBoardRow,
   type LimitBoardSectorConstituent,
   type LimitBoardSectorStrengthRow,
+  type LimitBoardSentimentPoint,
   type LimitBoardView,
   type MarketHeatItem,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { useChartTheme } from '@/lib/theme'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
@@ -120,6 +123,107 @@ function percentValue(value: number | null | undefined): string {
 
 function plainPercentValue(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value) ? '--' : `${value.toFixed(2)}%`
+}
+
+function mergeSentimentHistory(
+  history: LimitBoardSentimentPoint[] | undefined,
+  realtime: LimitBoardSentimentPoint | undefined,
+): LimitBoardSentimentPoint[] {
+  const byDate = new Map((history ?? []).map(point => [point.as_of, point]))
+  if (realtime?.as_of) byDate.set(realtime.as_of, realtime)
+  return [...byDate.values()].sort((left, right) => left.as_of.localeCompare(right.as_of))
+}
+
+function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] }) {
+  const chartRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
+  const option = useMemo<echarts.EChartsOption>(() => {
+    const dates = points.map(point => point.as_of)
+    return {
+      animation: false,
+      backgroundColor: 'transparent',
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: chartTheme.tooltipBg,
+        borderColor: chartTheme.tooltipBorder,
+        textStyle: { color: chartTheme.tooltipText, fontSize: 11 },
+        valueFormatter: value => value == null ? '--' : String(value),
+      },
+      legend: {
+        top: 0,
+        left: 0,
+        itemWidth: 12,
+        itemHeight: 8,
+        textStyle: { color: chartTheme.text, fontSize: 10 },
+        data: ['情绪强度', '涨停家数'],
+      },
+      grid: { left: 26, right: 22, top: 22, bottom: 32 },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        boundaryGap: false,
+        axisLabel: { color: chartTheme.text, fontSize: 8, hideOverlap: true, formatter: (value: string) => value.slice(5) },
+        axisLine: { lineStyle: { color: chartTheme.border } },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          name: '强度',
+          min: 0,
+          max: 100,
+          axisLabel: { color: chartTheme.text, fontSize: 9 },
+          nameTextStyle: { color: chartTheme.text, fontSize: 9 },
+          splitLine: { lineStyle: { color: chartTheme.grid } },
+        },
+        {
+          type: 'value',
+          min: 0,
+          axisLabel: { show: false },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        {
+          name: '涨停家数',
+          type: 'bar',
+          data: points.map(point => point.limit_up_count ?? null),
+          barMaxWidth: 8,
+          itemStyle: { color: '#22c55e', opacity: 0.45 },
+          yAxisIndex: 1,
+        },
+        {
+          name: '情绪强度',
+          type: 'line',
+          data: points.map(point => point.emotion_strength ?? null),
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 4,
+          lineStyle: { color: '#f97316', width: 1.5 },
+          itemStyle: { color: '#f97316' },
+          yAxisIndex: 0,
+        },
+      ],
+      dataZoom: [
+        { type: 'inside', start: Math.max(0, 100 - (30 / Math.max(points.length, 30)) * 100), end: 100 },
+        { type: 'slider', bottom: 2, height: 12, borderColor: chartTheme.border, fillerColor: chartTheme.zoomFill, textStyle: { color: chartTheme.text, fontSize: 8 } },
+      ],
+    }
+  }, [chartTheme, points])
+
+  useEffect(() => {
+    if (!chartRef.current) return
+    const chart = echarts.init(chartRef.current, undefined, { renderer: 'canvas' })
+    chart.setOption(option, { notMerge: true })
+    const onResize = () => chart.resize()
+    window.addEventListener('resize', onResize)
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.dispose()
+    }
+  }, [option])
+
+  if (points.length === 0) return <div className="grid h-32 place-items-center text-[11px] text-muted">暂无情绪历史</div>
+  return <div ref={chartRef} className="h-28 w-full" aria-label="开盘啦情绪强度历史折线图" />
 }
 
 function moneyYi(value: number | null | undefined): string {
@@ -1185,8 +1289,20 @@ export function LimitBoard() {
   ]), [view.data?.candidate_pool, view.data?.opportunity_pool, view.data?.board_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
   const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateAdvanced.isPending
-  if (view.isError || !view.data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const data = view.data
+  const sentimentHistory = useMemo(() => mergeSentimentHistory(
+    data?.market_sentiment?.emotion_history,
+    data?.market_sentiment?.emotion_strength == null || !data.market_sentiment.as_of
+      ? undefined
+      : {
+          as_of: data.market_sentiment.as_of,
+          emotion_strength: data.market_sentiment.emotion_strength,
+          limit_up_count: data.market_sentiment.emotion_limit_up_count,
+          max_consecutive: data.market_sentiment.emotion_max_consecutive,
+          pullback_count: data.market_sentiment.emotion_pullback_count,
+        },
+  ), [data?.market_sentiment])
+  if (view.isError || !data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
   const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'pool' ? data.board_pool : []
   const tableMode: TableMode = tab === 'pool' ? 'pool' : 'candidate'
@@ -1197,14 +1313,20 @@ export function LimitBoard() {
       ? '独立机会分排序：强势确认、评分上升速度、日内分时和成交空间；只显示仍有成交空间的实时标的'
     : `前 10 板块强势股统一打分，自动候选只取 Top 30${data.settings.main_board_only ? ' · 仅沪深主板' : ''}；手工标的不受限制`
   const sentimentPanel = <section className="border-b border-border px-4 py-3 sm:px-5">
-    <div className="grid min-w-[720px] grid-cols-5 divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
+    <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(280px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
       {[
         ['今日破板率', data.market_sentiment ? plainPercentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
         ['昨日涨停今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
         ['昨日连板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
         ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
-        ['开盘啦情绪 / 连板高度', `${data.market_sentiment?.market_evaluation || '--'} / ${data.market_sentiment?.max_consecutive ?? '--'}板`, 'text-accent'],
       ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
+      <div className="min-w-0 px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="truncate text-[10px] text-muted">市场情绪</div>
+          <div className="shrink-0 truncate text-xs text-accent">{data.market_sentiment?.market_evaluation || '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</div>
+        </div>
+        <SentimentHistoryChart points={sentimentHistory} />
+      </div>
     </div>
     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
       {data.market_sentiment ? <span>{data.market_sentiment.state === 'live' ? '开盘啦实时情绪数据' : data.market_sentiment.state === 'stale' ? `${data.market_sentiment.as_of ?? '--'} 开盘啦收盘数据` : '开盘啦实时情绪数据暂不可用'}</span> : <span>开盘啦实时情绪数据暂不可用</span>}

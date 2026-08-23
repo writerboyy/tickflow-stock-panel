@@ -28,6 +28,7 @@ from app.plugins.kaipanla.parsers import (
     parse_large_order_statistics,
     parse_limit_up_expression,
     parse_limit_up_ladder_height,
+    parse_market_sentiment_statistics,
     parse_rise_fall_analysis,
     parse_limitup,
     parse_northbound_sector,
@@ -135,6 +136,8 @@ class KaipanlaCollector:
         self._locks: dict[str, asyncio.Lock] = {}
         self._sentiment_lock = threading.Lock()
         self._market_sentiment: dict | None = None
+        self._market_sentiment_history_date: date | None = None
+        self._market_sentiment_history: list[dict[str, Any]] = []
         self._sector_strength_lock = threading.Lock()
         self._sector_strength: dict | None = None
         self._sector_constituents_lock = threading.Lock()
@@ -846,6 +849,8 @@ class KaipanlaCollector:
         ladder: dict[str, Any] = {}
         rise_fall: dict[str, Any] | None = None
         expression: dict[str, Any] | None = None
+        sentiment_history: list[dict[str, Any]] = []
+        sentiment_realtime: dict[str, Any] | None = None
         async with self._client_factory() as client:
             try:
                 rise_fall = parse_rise_fall_analysis(
@@ -854,7 +859,34 @@ class KaipanlaCollector:
             except Exception:  # noqa: BLE001
                 logger.debug("涨跌停数量/破板率接口暂不可用", exc_info=True)
 
-            as_of = (rise_fall or {}).get("as_of") or trade_date.isoformat()
+            with self._sentiment_lock:
+                history_cached = self._market_sentiment_history_date == trade_date
+                if history_cached:
+                    sentiment_history = [dict(row) for row in self._market_sentiment_history]
+            if not history_cached:
+                try:
+                    sentiment_history = parse_market_sentiment_statistics(
+                        await client.request("market_sentiment_history"),
+                    )
+                    with self._sentiment_lock:
+                        self._market_sentiment_history_date = trade_date
+                        self._market_sentiment_history = [dict(row) for row in sentiment_history]
+                except Exception:  # noqa: BLE001
+                    logger.debug("情绪强度历史接口暂不可用", exc_info=True)
+
+            try:
+                realtime_rows = parse_market_sentiment_statistics(
+                    await client.request("market_sentiment_realtime"),
+                )
+                sentiment_realtime = realtime_rows[0] if realtime_rows else None
+            except Exception:  # noqa: BLE001
+                logger.debug("情绪强度实时接口暂不可用", exc_info=True)
+
+            as_of = (
+                (rise_fall or {}).get("as_of")
+                or (sentiment_realtime or {}).get("as_of")
+                or trade_date.isoformat()
+            )
 
             try:
                 expression = parse_limit_up_expression(
@@ -882,9 +914,19 @@ class KaipanlaCollector:
                 yesterday_broken_change_pct=expression.get("yesterday_broken_change_pct"),
                 market_evaluation=expression.get("market_evaluation"),
             )
+        if sentiment_history:
+            selected["emotion_history"] = sentiment_history
+        if sentiment_realtime:
+            selected.update(
+                emotion_strength=sentiment_realtime.get("emotion_strength"),
+                emotion_limit_up_count=sentiment_realtime.get("limit_up_count"),
+                emotion_pullback_count=sentiment_realtime.get("pullback_count"),
+                emotion_max_consecutive=sentiment_realtime.get("max_consecutive"),
+            )
 
         as_of = (
             (rise_fall or {}).get("as_of")
+            or (sentiment_realtime or {}).get("as_of")
             or (expression or {}).get("as_of")
             or ladder.get("as_of")
             or trade_date.isoformat()

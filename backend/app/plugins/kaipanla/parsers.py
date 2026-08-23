@@ -719,6 +719,27 @@ def parse_rise_fall_analysis(payload: dict) -> dict:
     }
 
 
+def parse_market_sentiment_statistics(payload: dict) -> list[dict]:
+    """Parse ChangeStatistics history or its single current snapshot."""
+    result: list[dict] = []
+    for index, row in enumerate(_rows(payload, "info")):
+        if not isinstance(row, dict):
+            raise ResponseShapeError(f"info[{index}] 不是对象")
+        trade_date = parse_trade_date(row.get("Day"))
+        if trade_date is None:
+            raise ResponseShapeError(f"info[{index}].Day 缺失")
+        result.append(
+            {
+                "as_of": trade_date.isoformat(),
+                "emotion_strength": _int(row.get("strong"), f"info[{index}].strong"),
+                "limit_up_count": _int(row.get("ztjs"), f"info[{index}].ztjs"),
+                "max_consecutive": _int(row.get("lbgd"), f"info[{index}].lbgd"),
+                "pullback_count": _int(row.get("df_num"), f"info[{index}].df_num"),
+            },
+        )
+    return result
+
+
 def parse_limit_up_ladder_height(payload: dict) -> dict:
     rows = _rows(payload, "List")
     heights: list[int] = []

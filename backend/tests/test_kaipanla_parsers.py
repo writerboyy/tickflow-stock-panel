@@ -21,6 +21,7 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_list,
     parse_limit_up_expression,
     parse_limit_up_ladder_height,
+    parse_market_sentiment_statistics,
     parse_limitup,
     parse_premium_gene,
     parse_northbound_sector,
@@ -243,6 +244,34 @@ def test_rise_fall_analysis_parser_maps_broken_rate_from_fifth_value():
         "market_broken_rate_pct": 25.0,
         "market_broken_count": 18,
     }
+
+
+def test_market_sentiment_statistics_parser_maps_history_fields():
+    rows = parse_market_sentiment_statistics(
+        {
+            "info": [
+                {"strong": "48", "ztjs": "54", "lbgd": "3", "Day": "2026-08-21", "df_num": "10"},
+                {"strong": "64", "ztjs": "79", "lbgd": "4", "Day": "2026-08-20", "df_num": "8"},
+            ],
+        },
+    )
+
+    assert rows == [
+        {
+            "as_of": "2026-08-21",
+            "emotion_strength": 48,
+            "limit_up_count": 54,
+            "max_consecutive": 3,
+            "pullback_count": 10,
+        },
+        {
+            "as_of": "2026-08-20",
+            "emotion_strength": 64,
+            "limit_up_count": 79,
+            "max_consecutive": 4,
+            "pullback_count": 8,
+        },
+    ]
 
 
 def test_limit_up_ladder_parser_ignores_special_zero_level():

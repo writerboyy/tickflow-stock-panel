@@ -1490,6 +1490,14 @@ export interface LimitBoardEvent {
   order_timeline?: LimitBoardOrderTimeline
 }
 
+export interface LimitBoardSentimentPoint {
+  as_of: string
+  emotion_strength?: number | null
+  limit_up_count?: number | null
+  max_consecutive?: number | null
+  pullback_count?: number | null
+}
+
 export interface LimitBoardView {
   revision: number
   settings: {
@@ -1525,6 +1533,11 @@ export interface LimitBoardView {
     yesterday_broken_change_pct?: number | null
     market_evaluation?: string | null
     max_consecutive?: number | null
+    emotion_strength?: number | null
+    emotion_limit_up_count?: number | null
+    emotion_pullback_count?: number | null
+    emotion_max_consecutive?: number | null
+    emotion_history?: LimitBoardSentimentPoint[]
   } | null
   sector_strength: LimitBoardSectorStrengthSnapshot | null
   events: LimitBoardEvent[]
