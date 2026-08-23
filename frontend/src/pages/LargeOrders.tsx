@@ -1,6 +1,5 @@
-import { useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ChevronDown,
@@ -33,6 +32,8 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignalText } from '@/lib/signals'
+
+const StockAnalysis = lazy(() => import('./StockAnalysis').then(module => ({ default: module.StockAnalysis })))
 
 type Tab = 'positions' | 'events'
 
@@ -207,18 +208,28 @@ function reportTime(report: AiStockReport) {
   return value.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-function StockAnalysisStatus({ row, report, loading }: { row: PositionRiskPosition; report?: AiStockReport; loading: boolean }) {
-  const navigate = useNavigate()
+function StockAnalysisStatus({ row, report, loading, onOpen }: { row: PositionRiskPosition; report?: AiStockReport; loading: boolean; onOpen: () => void }) {
   if (loading) return <span className="text-[10px] text-muted">分析状态加载中…</span>
-  const handleClick = () => navigate(`/stock-analysis?symbol=${encodeURIComponent(row.symbol)}&name=${encodeURIComponent(row.name)}`)
   return (
-    <button type="button" onClick={handleClick} className="group flex min-w-[112px] items-center gap-1.5 text-left hover:text-accent" title="打开完整个股分析页面">
+    <button type="button" onClick={onOpen} className="group flex min-w-[112px] items-center gap-1.5 text-left hover:text-accent" title="在侧边栏打开完整个股分析页面" aria-label={`打开${row.name}完整个股分析`}>
       <LineChart className="h-3.5 w-3.5 shrink-0 text-accent/80 group-hover:text-accent" />
       <span className="min-w-0">
         <span className={cn('block text-[11px]', report ? 'text-secondary' : 'text-warning')}>{report ? '打开完整分析' : '暂无分析 · 查看'}</span>
         {report && <span className="block text-[10px] text-muted">{reportTime(report)}</span>}
       </span>
     </button>
+  )
+}
+
+function StockAnalysisDrawer({ symbol, name, onClose }: { symbol: string; name: string; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/35" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+      <aside role="dialog" aria-label={`${name}完整个股分析`} className="h-full w-full max-w-[1180px] overflow-y-auto border-l border-border bg-background shadow-2xl">
+        <Suspense fallback={<div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>}>
+          <StockAnalysis embedded initialSymbol={symbol} initialName={name} onClose={onClose} />
+        </Suspense>
+      </aside>
+    </div>
   )
 }
 
@@ -563,6 +574,7 @@ export function LargeOrders() {
   const [tradePreset, setTradePreset] = useState<QmtTradePreset | null>(null)
   const [tradeRiskContext, setTradeRiskContext] = useState<QmtRiskTradeContext | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
+  const [analysisPanel, setAnalysisPanel] = useState<{ symbol: string; name: string } | null>(null)
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
@@ -696,7 +708,7 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div><div className={cn('text-[10px]', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
-                <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} /></td>
+                <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>
                 <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
                 <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
               </tr>)}
@@ -707,7 +719,7 @@ export function LargeOrders() {
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <div className="min-w-0">
               <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div></button>
-              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></div>
+              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></div>
             </div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
@@ -754,6 +766,7 @@ export function LargeOrders() {
       {selected && <PositionInspector row={selected} options={options.data} onClose={() => setSelected(null)} />}
       {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} riskContext={tradeRiskContext} onClose={() => { setTradeRow(null); setTradePreset(null); setTradeRiskContext(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
+      {analysisPanel && <StockAnalysisDrawer symbol={analysisPanel.symbol} name={analysisPanel.name} onClose={() => setAnalysisPanel(null)} />}
     </div>
   )
 }

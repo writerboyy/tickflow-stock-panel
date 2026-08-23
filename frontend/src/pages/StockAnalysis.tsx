@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
+import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle, X } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
@@ -26,10 +26,17 @@ import {
  *  - AI 分析输出客观技术状态与风险提示(非买卖建议、非财务质量评级)
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
-export function StockAnalysis() {
+interface StockAnalysisProps {
+  embedded?: boolean
+  initialSymbol?: string
+  initialName?: string
+  onClose?: () => void
+}
+
+export function StockAnalysis({ embedded = false, initialSymbol = '', initialName = '', onClose }: StockAnalysisProps = {}) {
   const [searchParams] = useSearchParams()
-  const routeSymbol = (searchParams.get('symbol') ?? '').trim().toUpperCase()
-  const routeName = searchParams.get('name') ?? ''
+  const routeSymbol = (initialSymbol || searchParams.get('symbol') || '').trim().toUpperCase()
+  const routeName = initialName || searchParams.get('name') || ''
   const [symbol, setSymbol] = useState<string>(routeSymbol)
   const [name, setName] = useState<string>(routeName)
   const [checking, setChecking] = useState(false)
@@ -38,7 +45,7 @@ export function StockAnalysis() {
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
 
-  // 从持仓风控等页面跳转时，直接加载指定标的的完整分析看板。
+  // 嵌入持仓风控侧边栏时，直接加载指定标的的完整分析看板。
   useEffect(() => {
     if (!routeSymbol) return
     setSymbol(routeSymbol)
@@ -99,11 +106,12 @@ export function StockAnalysis() {
         right={
           <div className="flex items-center gap-2">
             <LastStockChip stock={lastStock} onSelect={onSelect} />
+            {embedded && <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭完整个股分析"><X className="h-4 w-4" /></button>}
           </div>
         }
       />
 
-      <div className="w-full px-8 py-6 space-y-6">
+      <div className={`w-full space-y-6 ${embedded ? 'px-4 py-5 sm:px-5' : 'px-8 py-6'}`}>
         {/* 搜索栏 */}
         <div className="flex items-center gap-3">
           <div className="w-72">
