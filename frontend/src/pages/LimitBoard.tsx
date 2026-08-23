@@ -187,7 +187,7 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
           name: '涨停家数',
           type: 'bar',
           data: points.map(point => point.limit_up_count ?? null),
-          barMaxWidth: 8,
+          barMaxWidth: 4,
           itemStyle: { color: '#22c55e', opacity: 0.45 },
           yAxisIndex: 1,
         },
