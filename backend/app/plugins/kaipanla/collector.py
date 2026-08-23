@@ -28,7 +28,6 @@ from app.plugins.kaipanla.parsers import (
     parse_large_order_statistics,
     parse_limit_up_expression,
     parse_limit_up_ladder_height,
-    parse_market_performance,
     parse_rise_fall_analysis,
     parse_limitup,
     parse_northbound_sector,
@@ -847,8 +846,6 @@ class KaipanlaCollector:
         ladder: dict[str, Any] = {}
         rise_fall: dict[str, Any] | None = None
         expression: dict[str, Any] | None = None
-        performances: dict[str, dict[str, Any]] = {}
-        performance_ids = ("801900", "801902", "801903")
         async with self._client_factory() as client:
             try:
                 rise_fall = parse_rise_fall_analysis(
@@ -857,40 +854,7 @@ class KaipanlaCollector:
             except Exception:  # noqa: BLE001
                 logger.debug("涨跌停数量/破板率接口暂不可用", exc_info=True)
 
-            performance_payloads = await asyncio.gather(
-                *(
-                    client.request("market_performance", {"PlateID": plate_id})
-                    for plate_id in performance_ids
-                ),
-                return_exceptions=True,
-            )
-            for plate_id, payload in zip(performance_ids, performance_payloads, strict=True):
-                if isinstance(payload, Exception):
-                    logger.debug(
-                        "市场表现接口 %s 暂不可用 (%s)",
-                        plate_id,
-                        type(payload).__name__,
-                    )
-                    continue
-                try:
-                    parsed = parse_market_performance(payload, plate_id)
-                except Exception:  # noqa: BLE001
-                    logger.debug("市场表现接口 %s 返回结构无效", plate_id, exc_info=True)
-                    continue
-                performances[plate_id] = parsed
-
-            as_of = (
-                (rise_fall or {}).get("as_of")
-                or next(
-                    (
-                        value.get("as_of")
-                        for value in performances.values()
-                        if value.get("as_of")
-                    ),
-                    None,
-                )
-                or trade_date.isoformat()
-            )
+            as_of = (rise_fall or {}).get("as_of") or trade_date.isoformat()
 
             try:
                 expression = parse_limit_up_expression(
@@ -911,26 +875,16 @@ class KaipanlaCollector:
                 market_broken_rate_pct=rise_fall.get("market_broken_rate_pct"),
                 market_broken_count=rise_fall.get("market_broken_count"),
             )
-        for plate_id, field in (
-            ("801900", "yesterday_limitup_change_pct"),
-            ("801902", "yesterday_consecutive_change_pct"),
-            ("801903", "yesterday_broken_change_pct"),
-        ):
-            if plate_id in performances:
-                selected[field] = performances[plate_id].get("change_pct")
         if expression:
-            selected["market_evaluation"] = expression.get("market_evaluation")
+            selected.update(
+                yesterday_limitup_change_pct=expression.get("yesterday_limitup_change_pct"),
+                yesterday_consecutive_change_pct=expression.get("yesterday_consecutive_change_pct"),
+                yesterday_broken_change_pct=expression.get("yesterday_broken_change_pct"),
+                market_evaluation=expression.get("market_evaluation"),
+            )
 
         as_of = (
             (rise_fall or {}).get("as_of")
-            or next(
-                (
-                    value.get("as_of")
-                    for value in performances.values()
-                    if value.get("as_of")
-                ),
-                None,
-            )
             or (expression or {}).get("as_of")
             or ladder.get("as_of")
             or trade_date.isoformat()

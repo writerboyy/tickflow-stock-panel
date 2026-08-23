@@ -21,7 +21,6 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_list,
     parse_limit_up_expression,
     parse_limit_up_ladder_height,
-    parse_market_performance,
     parse_limitup,
     parse_premium_gene,
     parse_northbound_sector,
@@ -243,19 +242,6 @@ def test_rise_fall_analysis_parser_maps_broken_rate_from_fifth_value():
         "previously_limit_down_count": 8,
         "market_broken_rate_pct": 25.0,
         "market_broken_count": 18,
-    }
-
-
-def test_market_performance_parser_uses_list_four_for_index_performance():
-    row = parse_market_performance(
-        {"Date": "2026-08-21", "List": ["--", -361, 3640163228, 0, -7.16, 0, 0, 0]},
-        "801902",
-    )
-
-    assert row == {
-        "as_of": "2026-08-21",
-        "plate_id": "801902",
-        "change_pct": -7.16,
     }
 
 

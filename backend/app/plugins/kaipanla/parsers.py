@@ -719,19 +719,6 @@ def parse_rise_fall_analysis(payload: dict) -> dict:
     }
 
 
-def parse_market_performance(payload: dict, plate_id: str) -> dict:
-    """Parse List[4] from a documented yesterday-performance index."""
-    values = _rows(payload, "List")
-    if len(values) < 5:
-        raise ResponseShapeError("List 至少需要 5 列")
-    trade_date = parse_trade_date(payload.get("Date"))
-    return {
-        "as_of": trade_date.isoformat() if trade_date else None,
-        "plate_id": str(plate_id),
-        "change_pct": _float(values[4], "List[4]"),
-    }
-
-
 def parse_limit_up_ladder_height(payload: dict) -> dict:
     rows = _rows(payload, "List")
     heights: list[int] = []
