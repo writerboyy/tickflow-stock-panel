@@ -98,11 +98,6 @@ const STOP_LOSS_RULE_GROUPS = [
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
-const INTRADAY_RULE_TAB: Array<['take_profit' | 'stop_loss' | 't_trading', string]> = [
-  ['take_profit', '止盈'],
-  ['stop_loss', '止损'],
-  ['t_trading', '做 T'],
-]
 const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
 type RiskModuleTab = 'take_profit' | 'stop_loss' | 't_trading'
 
@@ -162,23 +157,6 @@ function effectiveRuleEnabled(ruleId: string, config: Record<string, any>) {
   return SHORT_TERM_RULES.has(ruleId) ? config.active === true : config.enabled !== false
 }
 
-function hasRuleOverride(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[]) {
-  const rules = portfolio.overrides[symbol]?.rules ?? {}
-  return ruleIds.some(ruleId => Object.keys(rules[ruleId] ?? {}).length > 0)
-}
-
-function hasSignalOverride(portfolio: PositionRiskPortfolio, symbol: string, group: string, signalIds?: readonly string[]) {
-  const values = portfolio.overrides[symbol]?.signals?.[group] ?? {}
-  if (!signalIds) return Object.keys(values).length > 0
-  return signalIds.some(signalId => Object.keys(values[signalId] ?? {}).length > 0)
-}
-
-function moduleSource(portfolio: PositionRiskPortfolio, symbol: string, ruleIds: readonly string[], signalGroups: readonly string[] = []) {
-  const covered = hasRuleOverride(portfolio, symbol, ruleIds)
-    || signalGroups.some(group => hasSignalOverride(portfolio, symbol, group))
-  return covered ? '已覆盖' : '默认'
-}
-
 function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
   const field = POSITION_RISK_RULE_FIELDS[ruleId]?.find(item => item.key === fieldKey)
   if (!field) return `${fieldKey} —`
@@ -191,17 +169,15 @@ function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
   return `${field.label} ${value}${field.suffix}`
 }
 
-function RiskSettingsSummary({ portfolio, symbol, options, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions; onOpen: (tab: RiskModuleTab) => void }) {
+function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
   const takeProfitEnabled = TAKE_PROFIT_RULES.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId)))
   const stopLossEnabled = STOP_LOSS_RULE_GROUPS.some(([, rules]) => rules.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))))
   const tTradingEnabled = effectiveRuleEnabled('t_trading', effectiveRule(portfolio, symbol, 't_trading'))
-  const intradaySignalIds = options?.builtin_signals.filter(signal => signal.group === 'intraday').map(signal => signal.id) ?? []
-  const tTradingSource = hasRuleOverride(portfolio, symbol, ['t_trading']) || hasSignalOverride(portfolio, symbol, 'builtin', intradaySignalIds) ? '已覆盖' : '默认'
   const stopLossRules = STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules)
   const activeStopLossCount = stopLossRules.filter(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))).length
-  const modules: Array<{ tab: RiskModuleTab; label: string; source: string; enabled: boolean; lines: string[] }> = [
+  const modules: Array<{ tab: RiskModuleTab; label: string; enabled: boolean; lines: string[] }> = [
     {
-      tab: 'take_profit', label: '止盈', source: moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), enabled: takeProfitEnabled,
+      tab: 'take_profit', label: '止盈', enabled: takeProfitEnabled,
       lines: [
         riskFieldText(portfolio, symbol, 'take_profit', 'threshold'),
         riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain'),
@@ -209,7 +185,7 @@ function RiskSettingsSummary({ portfolio, symbol, options, onOpen }: { portfolio
       ],
     },
     {
-      tab: 'stop_loss', label: '止损', source: moduleSource(portfolio, symbol, stopLossRules, ['builtin', 'custom', 'monitor_rules']), enabled: stopLossEnabled,
+      tab: 'stop_loss', label: '止损', enabled: stopLossEnabled,
       lines: [
         riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
         riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
@@ -217,7 +193,7 @@ function RiskSettingsSummary({ portfolio, symbol, options, onOpen }: { portfolio
       ],
     },
     {
-      tab: 't_trading', label: '做 T', source: tTradingSource, enabled: tTradingEnabled,
+      tab: 't_trading', label: '做 T', enabled: tTradingEnabled,
       lines: [
         `${riskFieldText(portfolio, symbol, 't_trading', 'buy_pct')} / ${riskFieldText(portfolio, symbol, 't_trading', 'sell_pct')}`,
         riskFieldText(portfolio, symbol, 't_trading', 'min_expected_return'),
@@ -228,9 +204,8 @@ function RiskSettingsSummary({ portfolio, symbol, options, onOpen }: { portfolio
   return (
     <div className="grid w-full min-w-0 grid-cols-3 gap-1.5 text-[10px] leading-4">
       {modules.map(module => (
-        <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}${module.source}，${module.enabled ? '已启用' : '未启用'}`}>
+        <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}${module.enabled ? '已启用' : '未启用'}`}>
           <span className="flex items-center justify-between gap-1"><span className="truncate text-secondary">{module.label}</span><span className={cn('shrink-0 text-[9px]', module.enabled ? 'text-foreground' : 'text-muted')}>{module.enabled ? '启用' : '关闭'}</span></span>
-          <span className={cn('mt-1 block truncate text-[9px]', module.source === '已覆盖' ? 'text-accent' : 'text-muted')}>{module.source}</span>
           {module.lines.map((line, index) => <span key={`${module.tab}-${index}`} className="block truncate text-[9px] text-secondary">{line}</span>)}
         </button>
       ))}
@@ -278,7 +253,7 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
 function PositionInspector({ row, options, initialTab, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; initialTab: RiskModuleTab; onClose: () => void }) {
   const portfolioQuery = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio })
   const queryClient = useQueryClient()
-  const [activeRuleTab, setActiveRuleTab] = useState<RiskModuleTab>(initialTab)
+  const activeRuleTab = initialTab
   const [expandedRule, setExpandedRule] = useState<string | null>(null)
   const [showAdvancedRules, setShowAdvancedRules] = useState(false)
   const portfolio = portfolioQuery.data
@@ -367,7 +342,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     const inherited = SHORT_TERM_RULES.has(ruleId) ? portfolio?.template.rules[ruleId]?.active === true : portfolio?.template.rules[ruleId]?.enabled !== false
     const explicit = SHORT_TERM_RULES.has(ruleId) ? override.rules?.[ruleId]?.active : override.rules?.[ruleId]?.enabled
     const enabled = explicit ?? inherited
-    const hasOverride = Object.keys(override.rules?.[ruleId] ?? {}).length > 0
     const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
       ? LARGE_ORDER_FIELDS
       : POSITION_RISK_RULE_FIELDS[ruleId] ?? []
@@ -379,8 +353,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', expanded ? '' : '-rotate-90')} />
             <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
           </button>
-          <span className="shrink-0 bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{hasOverride ? '已覆盖' : '默认'}</span>
-          <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`监控${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
+          <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>启用</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`启用${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
           {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
         </div>
         {expanded && fields.length > 0 && (
@@ -441,7 +414,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
           const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
           const available = signal.available !== false
           const directionReadonly = storageGroup === 'builtin'
-          const hasOverride = Object.keys(override.signals?.[storageGroup]?.[signal.id] ?? {}).length > 0
           const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
           const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
           const explicitDirection = directionReadonly ? undefined : override.signals?.[storageGroup]?.[signal.id]?.direction
@@ -453,8 +425,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
               <div className="flex min-h-7 items-center justify-between gap-3">
                 <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
                 <span className="flex shrink-0 items-center gap-2">
-                  <span className="text-[10px] text-muted">{hasOverride ? '已覆盖' : '默认'}</span>
-                  <input type="checkbox" checked={available && (explicit ?? inherited)} disabled={mutation.isPending || !available} onChange={event => setSignal(storageGroup, signal, event.target.checked)} aria-label={`监控${signal.label}`} />
+                  <input type="checkbox" checked={available && (explicit ?? inherited)} disabled={mutation.isPending || !available} onChange={event => setSignal(storageGroup, signal, event.target.checked)} aria-label={`启用${signal.label}`} />
                   <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
                 </span>
               </div>
@@ -500,25 +471,12 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
 
-          <details open className="mt-4 border-y border-border">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-xs text-secondary">
-              <span className="flex items-center gap-2"><ChevronDown className="h-3.5 w-3.5" />高级规则与参数</span>
-              <span className="text-[10px] text-muted">需要调整规则时展开</span>
-            </summary>
-            <div className="pb-3">
-          <nav className="flex border-b border-border" aria-label="单股风控模块">
-            {INTRADAY_RULE_TAB.map(([id, label]) => (
-              <button key={id} type="button" onClick={() => { setActiveRuleTab(id); setExpandedRule(null) }} className={cn('h-9 flex-1 border-b-2 text-xs', activeRuleTab === id ? 'border-accent text-foreground' : 'border-transparent text-muted hover:text-foreground')}>
-                {label}
-              </button>
-            ))}
-          </nav>
+          <div className="mt-4">
 
           {activeRuleTab === 'take_profit' && (
             <section className="mt-4">
               <div className="mb-2 flex items-end justify-between gap-3">
                 <div><h3 className="text-xs font-semibold text-secondary">止盈规则</h3><p className="mt-1 text-[10px] text-muted">固定目标和盈利后高点回撤分别判断。</p></div>
-                <span className="text-[10px] text-muted">{portfolio && hasRuleOverride(portfolio, row.symbol, TAKE_PROFIT_RULES) ? '本股覆盖' : '继承模板'}</span>
               </div>
               <div className="divide-y divide-border border-y border-border">{renderRuleRows(TAKE_PROFIT_RULES)}</div>
             </section>
@@ -529,7 +487,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
               <section>
                 <div className="mb-2 flex items-end justify-between gap-3">
                   <div><h3 className="text-xs font-semibold text-secondary">市场上下文门控</h3><p className="mt-1 text-[10px] text-muted">可覆盖相关性、板块弱化和个股跑输阈值。</p></div>
-                  <span className="text-[10px] text-muted">{portfolio && hasRuleOverride(portfolio, row.symbol, ['market_context']) ? '本股覆盖' : '继承模板'}</span>
                 </div>
                 <div className="divide-y divide-border border-y border-border">{renderRuleRows(['market_context'])}</div>
               </section>
@@ -541,7 +498,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
               ))}
               <button type="button" onClick={() => setShowAdvancedRules(value => !value)} className="flex h-9 w-full items-center justify-between border-y border-border px-1 text-left text-xs text-secondary hover:text-foreground" aria-expanded={showAdvancedRules}>
                 <span className="flex items-center gap-2"><ChevronDown className={cn('h-3.5 w-3.5 transition-transform', showAdvancedRules ? '' : '-rotate-90')} />高级风控与信号</span>
-                <span className="text-[10px] text-muted">账户、资金、系统信号和监控中心</span>
+                <span className="text-[10px] text-muted">账户、资金和系统信号</span>
               </button>
               {showAdvancedRules && (
                 <div className="space-y-5">
@@ -551,7 +508,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                   </section>
                   {renderSignalGroups(signalGroups.filter(([title]) => title !== '分时信号'))}
                   <section>
-                    <h3 className="mb-2 text-xs font-semibold text-secondary">已有监控规则</h3>
+                    <h3 className="mb-2 text-xs font-semibold text-secondary">已有风控规则</h3>
                     <div className="divide-y divide-border border-y border-border">
                       {options?.monitor_rules.length ? options.monitor_rules.map(rule => {
                         const explicit = override.signals?.monitor_rules?.[rule.id]?.action_pct
@@ -569,7 +526,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                             </span>
                           </div>
                         )
-                      }) : <p className="py-2 text-xs text-muted">暂无监控中心规则</p>}
+                      }) : <p className="py-2 text-xs text-muted">暂无风控规则</p>}
                     </div>
                   </section>
                 </div>
@@ -587,12 +544,10 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
               <div>{renderSignalGroups(signalGroups.filter(([title]) => title === '分时信号'))}</div>
             </section>
           )}
-            </div>
-          </details>
+          </div>
         </div>
-        <div className="flex items-center justify-between border-t border-border px-4 py-3">
-          <span className="text-[11px] text-muted">{Object.keys(override).length ? '存在单股覆盖' : '全部继承全局模板'}</span>
-          <button type="button" disabled={mutation.isPending || !Object.keys(override).length} onClick={() => mutation.mutate({})} className="h-8 rounded-btn border border-border px-3 text-xs disabled:opacity-40">恢复继承</button>
+        <div className="flex justify-end border-t border-border px-4 py-3">
+          <button type="button" disabled={mutation.isPending || !Object.keys(override).length} onClick={() => mutation.mutate({})} className="h-8 rounded-btn border border-border px-3 text-xs disabled:opacity-40">清除本股覆盖</button>
         </div>
       </aside>
     </div>
@@ -746,7 +701,7 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div><div className={cn('text-[10px]', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
                 <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>
-                <td className="w-[330px] max-w-[330px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} onOpen={tab => openRiskSettings(row, tab)} /></td>
+                <td className="w-[330px] max-w-[330px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></td>
                 <td className="px-3 py-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></td>
               </tr>)}
             </tbody>
@@ -756,7 +711,7 @@ export function LargeOrders() {
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <div className="min-w-0">
               <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div></button>
-              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
+              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
             </div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
