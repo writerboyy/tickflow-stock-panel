@@ -2031,6 +2031,27 @@ def test_board_pool_auto_trade_uses_configured_amount_per_board(tmp_path):
     assert result["estimated_amount"] == 9900.0
 
 
+def test_board_pool_auto_trade_defaults_to_one_lot(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service._order_executor.shutdown(wait=False, cancel_futures=True)
+    service._order_executor = ImmediateExecutor()
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    service._maybe_auto_trade("600000.SH", quote(), {}, config)
+
+    assert len(qmt.orders) == 1
+    assert qmt.orders[0]["allocation_mode"] == "lot"
+    assert qmt.orders[0]["volume"] == 100
+    result = service._order_results.get_nowait()
+    assert result["allocation_mode"] == "lot"
+    assert result["volume"] == 100
+
+
 def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
