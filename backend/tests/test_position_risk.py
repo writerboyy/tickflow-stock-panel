@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import sqlite3
 import time
@@ -1038,6 +1038,38 @@ class _FeatureQuotes(_Quotes):
             }
             for symbol in symbols
         }
+
+
+def test_feature_snapshot_reads_latest_trading_day_intraday_data_on_weekend(tmp_path: Path):
+    class HistoricalRepo(_Repo):
+        def get_enriched_latest(self):
+            return self.rows, date(2026, 8, 21)
+
+    class TrackingFeatureQuotes(_FeatureQuotes):
+        def __init__(self):
+            self.feature_times = []
+
+        def get_intraday_features(self, symbols, *, asset_type="stock", now=None):
+            self.feature_times.append(now)
+            return super().get_intraday_features(symbols, asset_type=asset_type, now=now)
+
+    quotes = TrackingFeatureQuotes()
+    service = PositionRiskService(
+        tmp_path, HistoricalRepo(), quotes, SimpleNamespace(paper_supervisor=None),
+    )
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+    }, 0)
+    service._preload_history({"600036.SH"})
+
+    features = service.feature_snapshot(
+        {"600036.SH"}, datetime(2026, 8, 23, 10, 0),
+    )
+
+    assert quotes.feature_times == [datetime(2026, 8, 21, 15, 0)]
+    assert features["600036.SH"]["data_as_of"] == "2026-08-21"
+    assert features["600036.SH"]["data_status"] == "historical"
 
 
 def test_preview_rejects_negative_asset_gap_and_confirm_does_not_trade(tmp_path: Path):
