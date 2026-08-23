@@ -98,7 +98,6 @@ const STOP_LOSS_RULE_GROUPS = [
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
-const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
 type RiskModuleTab = 'take_profit' | 'stop_loss' | 't_trading'
 
 const RULE_LABELS: Record<string, string> = {
@@ -153,10 +152,6 @@ function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
   }
 }
 
-function effectiveRuleEnabled(ruleId: string, config: Record<string, any>) {
-  return SHORT_TERM_RULES.has(ruleId) ? config.active === true : config.enabled !== false
-}
-
 function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
   const field = POSITION_RISK_RULE_FIELDS[ruleId]?.find(item => item.key === fieldKey)
   if (!field) return `${fieldKey} —`
@@ -170,14 +165,9 @@ function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
 }
 
 function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
-  const takeProfitEnabled = TAKE_PROFIT_RULES.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId)))
-  const stopLossEnabled = STOP_LOSS_RULE_GROUPS.some(([, rules]) => rules.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))))
-  const tTradingEnabled = effectiveRuleEnabled('t_trading', effectiveRule(portfolio, symbol, 't_trading'))
-  const stopLossRules = STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules)
-  const activeStopLossCount = stopLossRules.filter(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))).length
-  const modules: Array<{ tab: RiskModuleTab; label: string; enabled: boolean; lines: string[] }> = [
+  const modules: Array<{ tab: RiskModuleTab; label: string; lines: string[] }> = [
     {
-      tab: 'take_profit', label: '止盈', enabled: takeProfitEnabled,
+      tab: 'take_profit', label: '止盈',
       lines: [
         riskFieldText(portfolio, symbol, 'take_profit', 'threshold'),
         riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain'),
@@ -185,15 +175,14 @@ function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: Positio
       ],
     },
     {
-      tab: 'stop_loss', label: '止损', enabled: stopLossEnabled,
+      tab: 'stop_loss', label: '止损',
       lines: [
         riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
         riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
-        `规则 ${activeStopLossCount}/${stopLossRules.length} 项启用`,
       ],
     },
     {
-      tab: 't_trading', label: '做 T', enabled: tTradingEnabled,
+      tab: 't_trading', label: '做 T',
       lines: [
         `${riskFieldText(portfolio, symbol, 't_trading', 'buy_pct')} / ${riskFieldText(portfolio, symbol, 't_trading', 'sell_pct')}`,
         riskFieldText(portfolio, symbol, 't_trading', 'min_expected_return'),
@@ -204,8 +193,8 @@ function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: Positio
   return (
     <div className="grid w-full min-w-0 grid-cols-3 gap-1.5 text-[10px] leading-4">
       {modules.map(module => (
-        <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}${module.enabled ? '已启用' : '未启用'}`}>
-          <span className="flex items-center justify-between gap-1"><span className="truncate text-secondary">{module.label}</span><span className={cn('shrink-0 text-[9px]', module.enabled ? 'text-foreground' : 'text-muted')}>{module.enabled ? '启用' : '关闭'}</span></span>
+        <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}参数`}>
+          <span className="block truncate text-secondary">{module.label}</span>
           {module.lines.map((line, index) => <span key={`${module.tab}-${index}`} className="block truncate text-[9px] text-secondary">{line}</span>)}
         </button>
       ))}
@@ -262,13 +251,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     mutationFn: (next: Record<string, any>) => api.positionRiskUpdateOverride(row.symbol, portfolio!.revision, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRisk }),
   })
-  const setRule = (ruleId: string, enabled: boolean) => {
-    const key = SHORT_TERM_RULES.has(ruleId) ? 'active' : 'enabled'
-    mutation.mutate({
-      ...override,
-      rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [key]: enabled } },
-    })
-  }
   const setRuleValue = (ruleId: string, key: string, value: number) => {
     mutation.mutate({
       ...override,
@@ -279,27 +261,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     mutation.mutate({
       ...override,
       rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), notify } },
-    })
-  }
-  const setSignal = (
-    group: 'builtin' | 'custom',
-    signal: { id: string; label: string; direction: string },
-    enabled: boolean,
-  ) => {
-    mutation.mutate({
-      ...override,
-      signals: {
-        ...(override.signals ?? {}),
-        [group]: {
-          ...(override.signals?.[group] ?? {}),
-          [signal.id]: {
-            ...(override.signals?.[group]?.[signal.id] ?? {}),
-            enabled,
-            direction: override.signals?.[group]?.[signal.id]?.direction ?? signal.direction,
-            label: override.signals?.[group]?.[signal.id]?.label ?? signal.label,
-          },
-        },
-      },
     })
   }
   const setSignalValue = (group: 'builtin' | 'custom' | 'monitor_rules', signalId: string, key: string, value: string | number | boolean | null) => {
@@ -339,9 +300,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
   ]
   const renderRuleRows = (rules: readonly string[]) => rules.map(ruleId => {
     const evidenceOnly = ['large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance'].includes(ruleId)
-    const inherited = SHORT_TERM_RULES.has(ruleId) ? portfolio?.template.rules[ruleId]?.active === true : portfolio?.template.rules[ruleId]?.enabled !== false
-    const explicit = SHORT_TERM_RULES.has(ruleId) ? override.rules?.[ruleId]?.active : override.rules?.[ruleId]?.enabled
-    const enabled = explicit ?? inherited
     const fields = ruleId === 'large_buy' || ruleId === 'large_sell'
       ? LARGE_ORDER_FIELDS
       : POSITION_RISK_RULE_FIELDS[ruleId] ?? []
@@ -353,7 +311,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', expanded ? '' : '-rotate-90')} />
             <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
           </button>
-          <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>启用</span><input type="checkbox" checked={enabled} disabled={mutation.isPending} onChange={event => setRule(ruleId, event.target.checked)} aria-label={`启用${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
           {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
         </div>
         {expanded && fields.length > 0 && (
@@ -369,7 +326,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                     {field.type === 'select' ? (
                       <select
                         value={String(override.rules?.[ruleId]?.[field.key] ?? portfolio?.template.rules[ruleId]?.[field.key] ?? field.options?.[0]?.[0] ?? '')}
-                        disabled={mutation.isPending || !enabled}
+                        disabled={mutation.isPending}
                         onChange={event => mutation.mutate({
                           ...override,
                           rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [field.key]: event.target.value } },
@@ -386,7 +343,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                         max={field.max}
                         step={field.step}
                         defaultValue={displayValue}
-                        disabled={mutation.isPending || !enabled}
+                        disabled={mutation.isPending}
                         onBlur={event => {
                           const next = Number(event.target.value)
                           const stored = field.percent ? next / 100 : next
@@ -410,8 +367,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
       <h3 className="mb-2 text-xs font-semibold text-secondary">{title}</h3>
       <div className="divide-y divide-border border-y border-border">
         {signals.length ? signals.map(signal => {
-          const explicit = override.signals?.[storageGroup]?.[signal.id]?.enabled
-          const inherited = portfolio?.template.signals[storageGroup]?.[signal.id]?.enabled !== false
           const available = signal.available !== false
           const directionReadonly = storageGroup === 'builtin'
           const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
@@ -425,7 +380,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
               <div className="flex min-h-7 items-center justify-between gap-3">
                 <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
                 <span className="flex shrink-0 items-center gap-2">
-                  <input type="checkbox" checked={available && (explicit ?? inherited)} disabled={mutation.isPending || !available} onChange={event => setSignal(storageGroup, signal, event.target.checked)} aria-label={`启用${signal.label}`} />
                   <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
                 </span>
               </div>
