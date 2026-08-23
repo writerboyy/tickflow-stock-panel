@@ -845,7 +845,18 @@ class PositionRiskService:
         selected = {symbol for symbol in selected if symbol}
         self._preload_history_if_missing()
         current_time = (now or cn_now()).replace(tzinfo=None)
-        features = self._intraday_features(selected, current_time)
+        feature_time = current_time
+        historical_dates = []
+        for symbol in selected:
+            raw_date = str(self._history_as_of.get(symbol) or "")[:10]
+            try:
+                historical_dates.append(datetime.fromisoformat(raw_date).date())
+            except ValueError:
+                continue
+        latest_data_date = max(historical_dates, default=None)
+        if latest_data_date is not None and latest_data_date < current_time.date():
+            feature_time = datetime.combine(latest_data_date, clock_time(15, 0))
+        features = self._intraday_features(selected, feature_time)
         self._refresh_contexts(portfolio, selected, features, current_time)
         result: dict[str, dict[str, Any]] = {}
         positions = {str(item.get("symbol")): item for item in portfolio.get("positions", [])}

@@ -488,7 +488,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             const feature = featuresQuery.data?.features[row.symbol]
             const dataDate = feature?.data_as_of ?? feature?.daily?.as_of?.slice(0, 10) ?? feature?.context?.data_as_of ?? null
             const historicalData = feature?.data_status === 'historical'
-            const featureState = feature?.fresh ? '数据新鲜' : historicalData ? '上一交易日数据' : feature?.reason || '等待闭合分钟数据'
+            const featureState = historicalData ? '上一交易日分时数据' : feature?.fresh ? '数据新鲜' : feature?.reason || '等待闭合分钟数据'
             const decision = feature?.decision
             const qualityEntries = decision
               ? QUALITY_SOURCE_ORDER.map(source => [source, decision.data_quality[source]] as const).filter(([, block]) => Boolean(block))
