@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { AlertTriangle, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -11,7 +11,11 @@ export type QmtTradeInstrument = {
   symbol: string
   name?: string
   price?: number | null
+  limitUp?: number | null
+  limitDown?: number | null
 }
+
+type QmtTradePriceType = 'LIMIT' | 'LATEST' | 'LIMIT_UP' | 'LIMIT_DOWN'
 
 export type QmtAllocationMode = 'quarter' | 'third' | 'half' | 'fixed'
 
@@ -76,8 +80,24 @@ function qmtOrderStatus(value?: string) {
   return value ? QMT_ORDER_STATUS[value] ?? `状态 ${value}` : '状态未知'
 }
 
+function qmtOrderCanCancel(value?: string) {
+  return ['48', '49', '50', '55'].includes(String(value ?? '').trim())
+}
+
+function qmtOrderCancelPending(value?: string) {
+  return ['51', '52'].includes(String(value ?? '').trim())
+}
+
 function defaultPrice(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? String(value) : ''
+}
+
+function finitePrice(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null
+}
+
+function priceOptionLabel(label: string, value: number | null): string {
+  return value == null ? label : `${label}（${value.toFixed(3)}）`
 }
 
 function initialAllocationValue(instrument: QmtTradeInstrument, preset?: QmtTradePreset | null) {
@@ -106,14 +126,26 @@ export function QmtTradePanel({
     enabled: Boolean(qmt.data?.configured),
     refetchInterval: 15_000,
   })
+  const priceLimits = useQuery({
+    queryKey: QK.positionRiskQmtPriceLimit(instrument.symbol),
+    queryFn: () => api.klineMinute(instrument.symbol),
+    enabled: Boolean(instrument.symbol),
+    staleTime: 30_000,
+    retry: false,
+  })
   const [tradeAction, setTradeAction] = useState<'BUY' | 'SELL'>(preset?.action ?? 'SELL')
   const [tradePrice, setTradePrice] = useState(defaultPrice(preset?.price ?? instrument.price))
-  const [tradePriceType, setTradePriceType] = useState<'LIMIT' | 'LATEST'>('LIMIT')
+  const [tradePriceType, setTradePriceType] = useState<QmtTradePriceType>('LIMIT')
   const [allocationMode, setAllocationMode] = useState<QmtAllocationMode>(preset?.allocationMode ?? 'quarter')
   const [allocationValue, setAllocationValue] = useState(initialAllocationValue(instrument, preset))
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const limitPrice = Number(tradePrice)
-  const referencePrice = tradePriceType === 'LIMIT' ? limitPrice : Number(instrument.price)
+  const limitUp = finitePrice(priceLimits.data?.price_limit?.limit_up ?? instrument.limitUp)
+  const limitDown = finitePrice(priceLimits.data?.price_limit?.limit_down ?? instrument.limitDown)
+  const quickPrice = tradePriceType === 'LIMIT_UP' ? limitUp : tradePriceType === 'LIMIT_DOWN' ? limitDown : null
+  const limitPrice = quickPrice ?? Number(tradePrice)
+  const referencePrice = tradePriceType === 'LATEST' ? Number(instrument.price) : limitPrice
+  const backendPriceType = tradePriceType === 'LATEST' ? 'LATEST' : 'LIMIT'
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
   const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
   const previewRequestMode = allocationMode === 'fixed' ? 'fixed' : 'quarter'
@@ -121,8 +153,8 @@ export function QmtTradePanel({
   const previewPayload = {
     action: tradeAction,
     symbol: instrument.symbol,
-    price: tradePriceType === 'LIMIT' ? limitPrice : null,
-    price_type: tradePriceType,
+    price: backendPriceType === 'LIMIT' ? referencePrice : null,
+    price_type: backendPriceType,
     reference_price: validReferencePrice ? referencePrice : null,
     allocation_mode: allocationMode,
     allocation_value: allocationMode === 'fixed' ? allocationValue : null,
@@ -131,7 +163,7 @@ export function QmtTradePanel({
     queryKey: QK.positionRiskQmtPreview(
       instrument.symbol,
       tradeAction,
-      tradePriceType,
+      backendPriceType,
       validReferencePrice ? referencePrice : null,
       previewRequestMode,
       previewRequestValue,
@@ -163,6 +195,14 @@ export function QmtTradePanel({
   }, [allocationMode, basePreview])
   const tradeVolume = serverPreview?.volume ?? 0
   const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
+  const actionLabel = tradeAction === 'BUY' ? '买入' : '卖出'
+  const priceLabel = tradePriceType === 'LATEST'
+    ? `最新价（参考 ${referencePrice.toFixed(3)}）`
+    : tradePriceType === 'LIMIT_UP'
+      ? `涨停价 ${referencePrice.toFixed(3)}`
+      : tradePriceType === 'LIMIT_DOWN'
+        ? `跌停价 ${referencePrice.toFixed(3)}`
+        : `限价 ${limitPrice.toFixed(3)}`
   const tradeReady = qmt.data?.trade_enabled === true && qmt.data.state === 'ready'
   const canSubmit = tradeReady && tradeVolume >= 100 && validReferencePrice && validAllocation && !preview.isFetching
   const instrumentOrders = useMemo(
@@ -213,10 +253,13 @@ export function QmtTradePanel({
       toast(qmt.data?.reason || 'QMT 未就绪，无法发送委托')
       return
     }
-    const actionLabel = tradeAction === 'BUY' ? '买入' : '卖出'
-    const priceLabel = tradePriceType === 'LATEST' ? `最新价（参考 ${referencePrice.toFixed(3)}）` : `限价 ${limitPrice.toFixed(3)}`
-    if (!window.confirm(`确认${actionLabel} ${instrument.name || instrument.symbol} ${tradeVolume} 股，预计 ${MONEY.format(actualAmount)} 元（${priceLabel}）？该操作将发送至真实 QMT 账户。`)) return
-    tradeMutation.mutate()
+    setConfirmOpen(true)
+  }
+
+  const choosePriceType = (value: QmtTradePriceType) => {
+    setTradePriceType(value)
+    if (value === 'LIMIT_UP' && limitUp != null) setTradePrice(defaultPrice(limitUp))
+    if (value === 'LIMIT_DOWN' && limitDown != null) setTradePrice(defaultPrice(limitDown))
   }
 
   const readiness = qmt.isLoading
@@ -227,7 +270,7 @@ export function QmtTradePanel({
 
   return (
     <Modal
-      onClose={onClose}
+      onClose={() => { if (confirmOpen) setConfirmOpen(false); else onClose() }}
       ariaLabel="QMT 手动交易"
       overlayClassName="fixed inset-0 z-50 flex justify-end bg-black/35"
       panelClassName="flex h-full w-full max-w-md flex-col border-l border-border bg-surface shadow-xl"
@@ -242,8 +285,8 @@ export function QmtTradePanel({
           <div className="mt-2 grid grid-cols-2 gap-2 text-[10px] text-muted">
             <label>方向<select value={tradeAction} disabled={Boolean(riskContext)} onChange={event => setTradeAction(event.target.value as 'BUY' | 'SELL')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px] disabled:opacity-60"><option value="BUY">买入</option><option value="SELL">卖出</option></select></label>
             <label>金额方式<select value={allocationMode} onChange={event => setAllocationMode(event.target.value as QmtAllocationMode)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]">{QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{allocationLabel(tradeAction, option.value)}</option>)}</select></label>
-            <label>价格方式<select value={tradePriceType} onChange={event => setTradePriceType(event.target.value as 'LIMIT' | 'LATEST')} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="LIMIT">限价</option><option value="LATEST">最新价</option></select></label>
-            <label className={tradePriceType === 'LATEST' ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={tradePrice} disabled={tradePriceType === 'LATEST'} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
+            <label>价格方式<select value={tradePriceType} onChange={event => choosePriceType(event.target.value as QmtTradePriceType)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[11px]"><option value="LIMIT">手动限价</option><option value="LATEST">最新价</option><option value="LIMIT_UP" disabled={limitUp == null}>{priceOptionLabel('涨停价', limitUp)}</option><option value="LIMIT_DOWN" disabled={limitDown == null}>{priceOptionLabel('跌停价', limitDown)}</option></select></label>
+            <label className={tradePriceType === 'LATEST' || quickPrice != null ? 'opacity-50' : ''}>限价<input type="number" min="0.001" step="0.001" value={quickPrice != null ? defaultPrice(quickPrice) : tradePrice} disabled={tradePriceType === 'LATEST' || quickPrice != null} onChange={event => setTradePrice(event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px] disabled:cursor-not-allowed" /></label>
             {allocationMode === 'fixed' ? <label className="col-span-2">固定金额<input type="number" min="100" step="100" value={allocationValue} onChange={event => setAllocationValue(Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 font-mono text-[11px]" /></label> : null}
           </div>
 
@@ -258,6 +301,7 @@ export function QmtTradePanel({
             </div>
           </div>
           {serverPreview?.capped ? <p className="mt-2 text-[10px] text-muted">目标金额已按可用资金或持仓，以及 100 股整手向下调整。</p> : null}
+          {(tradePriceType === 'LIMIT_UP' || tradePriceType === 'LIMIT_DOWN') && quickPrice == null ? <p className="mt-2 text-[10px] text-warning">当日{tradePriceType === 'LIMIT_UP' ? '涨停' : '跌停'}价暂不可用，请改用手动限价。</p> : null}
           {preview.isError ? <p className="mt-2 text-[10px] text-warning">{preview.error instanceof Error ? preview.error.message : '委托金额暂时无法计算'}</p> : null}
           <button type="button" disabled={!canSubmit || tradeMutation.isPending} onClick={submit} className={cn('mt-3 h-8 w-full rounded-btn text-xs text-white disabled:cursor-not-allowed disabled:opacity-40', tradeAction === 'BUY' ? 'bg-bull' : 'bg-bear')}>
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}
@@ -268,10 +312,46 @@ export function QmtTradePanel({
         {instrumentOrders.length ? <section className="border-b border-border py-3">
           <h3 className="mb-2 text-xs font-semibold text-secondary">当前委托</h3>
           <div className="space-y-1">
-            {instrumentOrders.map(order => <div key={order.order_sys_id} className="flex items-center justify-between gap-2 text-[10px] text-muted"><span><span className={order.action === 'SELL' ? 'text-bear' : 'text-bull'}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '--'}</span> · {qmtOrderStatus(order.status)}</span><button type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate(order.order_sys_id!)} className="h-6 rounded border border-border px-2 hover:bg-elevated disabled:opacity-40">撤单</button></div>)}
+            {instrumentOrders.map(order => <div key={order.order_sys_id} className="flex items-center justify-between gap-2 text-[10px] text-muted"><span><span className={order.action === 'SELL' ? 'text-bear' : 'text-bull'}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '--'}</span> · {qmtOrderStatus(order.status)}</span>{qmtOrderCancelPending(order.status) ? <span className="text-warning">撤单中</span> : qmtOrderCanCancel(order.status) ? <button type="button" disabled={cancelMutation.isPending} onClick={() => cancelMutation.mutate(order.order_sys_id!)} className="h-6 rounded border border-border px-2 hover:bg-elevated disabled:opacity-40">撤单</button> : null}</div>)}
           </div>
         </section> : null}
       </div>
+      {confirmOpen ? <Modal
+        onClose={() => { if (!tradeMutation.isPending) setConfirmOpen(false) }}
+        labelledBy="qmt-trade-confirm-title"
+        closeOnBackdrop={!tradeMutation.isPending}
+        overlayClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm"
+        panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface shadow-xl"
+      >
+        <div className="flex items-start gap-3 border-b border-border px-4 py-4">
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-btn bg-warning/10 text-warning">
+            <AlertTriangle className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 id="qmt-trade-confirm-title" className="text-sm font-semibold">确认发送真实委托</h2>
+            <p className="mt-1 text-[11px] leading-4 text-muted">该操作将发送至真实 QMT 账户，请确认以下委托参数。</p>
+          </div>
+          <button type="button" disabled={tradeMutation.isPending} onClick={() => setConfirmOpen(false)} className="ml-auto grid h-7 w-7 shrink-0 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground disabled:opacity-40" aria-label="取消真实委托确认">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 px-4 py-4 text-xs">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+            <div><div className="text-[10px] text-muted">标的</div><div className="mt-1 font-medium text-foreground">{instrument.name || instrument.symbol}<span className="ml-2 font-mono text-[10px] text-muted">{instrument.symbol}</span></div></div>
+            <div><div className="text-[10px] text-muted">方向</div><div className={cn('mt-1 font-medium', tradeAction === 'BUY' ? 'text-bull' : 'text-bear')}>{actionLabel}</div></div>
+            <div><div className="text-[10px] text-muted">委托数量</div><div className="mt-1 font-mono text-foreground">{tradeVolume.toLocaleString()} 股</div></div>
+            <div><div className="text-[10px] text-muted">预计金额</div><div className="mt-1 font-mono text-foreground">{MONEY.format(actualAmount)} 元</div></div>
+            <div className="col-span-2"><div className="text-[10px] text-muted">价格</div><div className="mt-1 font-mono text-foreground">{priceLabel}</div></div>
+          </div>
+          <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">真实交易已开启。成交、排队和撤单结果以 QMT 与券商回报为准。</div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+          <button type="button" disabled={tradeMutation.isPending} onClick={() => setConfirmOpen(false)} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated hover:text-foreground disabled:opacity-40">取消</button>
+          <button type="button" disabled={tradeMutation.isPending} onClick={() => { setConfirmOpen(false); tradeMutation.mutate() }} className={cn('h-8 rounded-btn px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-50', tradeAction === 'BUY' ? 'bg-bull hover:bg-bull/90' : 'bg-bear hover:bg-bear/90')}>
+            {tradeMutation.isPending ? '提交中...' : `确认发送${tradeAction === 'BUY' ? '买入' : '卖出'}`}
+          </button>
+        </div>
+      </Modal> : null}
     </Modal>
   )
 }

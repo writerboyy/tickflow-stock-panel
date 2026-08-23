@@ -27,6 +27,7 @@ import {
   type PositionRiskPosition,
   type PositionRiskPortfolio,
   type PositionRiskStatus,
+  type QmtOrder,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
@@ -84,6 +85,12 @@ const QMT_ORDER_STATUS: Record<string, string> = {
 
 function qmtOrderStatus(value?: string) {
   return value ? QMT_ORDER_STATUS[value] ?? `状态 ${value}` : '状态未知'
+}
+
+function qmtOrderReason(order: QmtOrder): string | null {
+  const value = [order.error, order.status_msg, order.status_message, order.message, order.reason]
+    .find(item => typeof item === 'string' && item.trim())
+  return typeof value === 'string' ? value.trim() : null
 }
 
 function qmtOrderPrice(value: unknown, priceType?: string) {
@@ -682,7 +689,7 @@ export function LargeOrders() {
                 <td className={cn('px-3 py-2 font-mono font-medium', order.action === 'SELL' ? 'text-bear' : 'text-bull')}>{order.action === 'SELL' ? '卖出' : '买入'} {order.volume ?? '—'}</td>
                 <td className="px-3 py-2 font-mono">{qmtOrderPrice(order.price, order.price_type)}</td>
                 <td className="px-3 py-2">{qmtOrderStatus(order.status)}</td>
-                <td className="px-3 py-2"><span className="block truncate" title={order.order_sys_id ? `委托号 ${order.order_sys_id}` : undefined}>{order.order_sys_id ? `委托号 ${order.order_sys_id}` : order.status === 'unknown' ? '请在 QMT 核对，禁止原单重发' : '等待云端委托号'}</span></td>
+                <td className="px-3 py-2"><span className="block truncate" title={qmtOrderReason(order) ?? (order.order_sys_id ? `委托号 ${order.order_sys_id}` : undefined)}>{qmtOrderReason(order) ?? (order.order_sys_id ? `委托号 ${order.order_sys_id}` : order.status === 'unknown' ? '请在 QMT 核对，禁止原单重发' : '等待云端委托号')}</span></td>
               </tr>)}
             </tbody>
           </table>

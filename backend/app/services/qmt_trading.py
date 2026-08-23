@@ -38,6 +38,15 @@ _BROKER_ORDER_TIME_FIELDS = (
     "entrust_datetime",
     "order_timestamp",
 )
+_QMT_CANCELABLE_ORDER_STATUSES = frozenset({"48", "49", "50", "55"})
+_QMT_CANCEL_PENDING_ORDER_STATUSES = frozenset({"51", "52"})
+_QMT_TERMINAL_ORDER_STATUS_LABELS = {
+    "53": "部撤",
+    "54": "已撤",
+    "56": "已成",
+    "57": "废单",
+    "rejected": "已拒绝",
+}
 
 
 def _now() -> str:
@@ -466,12 +475,59 @@ class QmtTradingService:
             value.get("order_sys_id") or value.get("order_sysid") or value.get("order_id") or "",
         ) or None
         value["user_order_id"] = str(value.get("user_order_id") or value.get("remark") or "") or None
+        if not value.get("error"):
+            for field in ("status_msg", "status_message", "message", "reason", "msg"):
+                message = str(value.get(field) or "").strip()
+                if message:
+                    value["error"] = message
+                    break
         broker_at, broker_raw, broker_field = _broker_time(value, anchor or value.get("created_at"))
         if broker_raw is not None:
             value["broker_order_at"] = broker_at
             value["broker_order_time_raw"] = broker_raw
             value["broker_order_time_field"] = broker_field
         return value
+
+    @staticmethod
+    def _submit_result(response: Any) -> dict[str, Any] | None:
+        """Accept the batch result shapes used by different QMT bridge builds."""
+        candidates: Any = response
+        if isinstance(candidates, dict):
+            if any(key in candidates for key in ("success", "accepted", "explicit_failure")):
+                return candidates
+            for key in ("orders", "results", "items", "data"):
+                if key in candidates:
+                    candidates = candidates[key]
+                    break
+        if isinstance(candidates, dict):
+            for key in ("order", "result"):
+                nested = candidates.get(key)
+                if isinstance(nested, dict):
+                    return nested
+            return None
+        if not isinstance(candidates, list):
+            return None
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            for key in ("order", "result"):
+                nested = item.get(key)
+                if isinstance(nested, dict):
+                    return nested
+            return item
+        return None
+
+    def _remote_order_for_submission(self, idempotency_key: str, order_tag: str) -> dict[str, Any] | None:
+        try:
+            remote_orders = self._query_remote_orders()
+        except Exception:
+            return None
+        identifiers = {value for value in (idempotency_key, order_tag) if value}
+        for order in remote_orders:
+            order_identifiers = self._remote_order_identifiers(order)
+            if identifiers & order_identifiers:
+                return order
+        return None
 
     @staticmethod
     def _remote_order_identifiers(order: dict[str, Any]) -> set[str]:
@@ -517,6 +573,8 @@ class QmtTradingService:
             merged = dict(current)
             merged.update({key: value for key, value in remote.items() if value is not None})
             merged["idempotency_key"] = current["idempotency_key"]
+            if remote.get("order_sys_id") and not remote.get("error"):
+                merged["error"] = None
             merged["updated_at"] = _now()
             self._remember_order(merged)
             matched_keys.add(str(current["idempotency_key"]))
@@ -836,17 +894,34 @@ class QmtTradingService:
                 row.update(status="unknown", updated_at=_now(), error=str(exc))
                 self._remember_order(row)
                 raise
-            result = response[0] if isinstance(response, list) and response and isinstance(response[0], dict) else None
+            result = self._submit_result(response)
             qmt_response_at = _now()
             if result is None:
+                remote = self._remote_order_for_submission(idempotency_key, order_tag)
+                if remote is not None:
+                    row.update({
+                        key: value for key, value in remote.items()
+                        if value is not None
+                    })
+                    row.update(
+                        idempotency_key=idempotency_key,
+                        strategy_name=str(row.get("strategy_name") or strategy_name),
+                        status=str(remote.get("status") or "accepted_pending"),
+                        error=None,
+                        qmt_response_at=qmt_response_at,
+                        qmt_accepted_at=qmt_response_at,
+                        updated_at=qmt_response_at,
+                    )
+                    self._remember_order(row)
+                    return row
                 row.update(
                     status="unknown",
                     qmt_response_at=qmt_response_at,
                     updated_at=qmt_response_at,
-                    error="QMT 委托响应格式无效",
+                    error="QMT 未返回可识别的委托结果；请在 QMT 委托列表核对",
                 )
                 self._remember_order(row)
-                raise QmtRpcError("QMT 委托响应格式无效；该幂等键不会自动重发")
+                raise QmtRpcError("QMT 未返回可识别的委托结果；请在 QMT 委托列表核对，该幂等键不会自动重发")
             if not result.get("success") or not result.get("accepted"):
                 uncertain = not bool(result.get("explicit_failure"))
                 row.update(
@@ -889,5 +964,23 @@ class QmtTradingService:
         if not order_sys_id:
             raise ValueError("缺少 QMT 委托号，无法撤单")
         self.client.probe()
+        remote_order = next(
+            (
+                order
+                for order in self._query_remote_orders()
+                if str(order.get("order_sys_id") or "").strip() == order_sys_id
+            ),
+            None,
+        )
+        if remote_order is None:
+            raise QmtRpcError(f"QMT 委托列表未找到 {order_sys_id}，已阻止撤单，请先刷新委托状态")
+        status = str(remote_order.get("status") or "").strip().lower()
+        if status in _QMT_CANCEL_PENDING_ORDER_STATUSES:
+            raise QmtRpcError("撤单请求处理中，请等待 QMT 更新委托状态")
+        if status in _QMT_TERMINAL_ORDER_STATUS_LABELS:
+            label = _QMT_TERMINAL_ORDER_STATUS_LABELS[status]
+            raise QmtRpcError(f"委托当前状态为“{label}”，无需重复撤单")
+        if status not in _QMT_CANCELABLE_ORDER_STATUSES:
+            raise QmtRpcError("QMT 委托状态未知，已阻止撤单，请在 QMT 核对")
         result = self.client.call("cancel_order", {"order_sys_id": order_sys_id, "account_id": self.client.account_id})
         return {"order_sys_id": order_sys_id, "status": "cancel_requested", "result": result}

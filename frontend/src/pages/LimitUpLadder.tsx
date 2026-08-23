@@ -266,20 +266,38 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   // Pro+ 用户正常设置; 免费用户保存按钮禁用 + 显示升级提示。
   return (
     <div className="relative group w-full">
-      {/* 监控设置按钮 (右上角): 不能嵌在卡片 button 内 */}
-      <button
-        onClick={e => {
-          e.stopPropagation()
-          setMenuAnchor(e.currentTarget.getBoundingClientRect())
-          setShowMonitorMenu(v => !v)
-        }}
-        title={monitored ? '封单监控已开启' : '开启封单监控'}
-        className={`absolute top-1 right-1 z-20 p-0.5 rounded transition-opacity cursor-pointer ${
-          monitored ? 'opacity-100 text-amber-400' : 'opacity-0 group-hover:opacity-70 text-muted hover:!opacity-100'
-        }`}
-      >
-        {monitored ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
-      </button>
+      {/* 卡片操作按钮 (右上角): 不能嵌在卡片 button 内 */}
+      <div className="absolute top-1 right-1 z-20 flex items-center gap-1">
+        <button
+          onClick={e => {
+            e.stopPropagation()
+            setMenuAnchor(e.currentTarget.getBoundingClientRect())
+            setShowMonitorMenu(v => !v)
+          }}
+          title={monitored ? '封单监控已开启' : '开启封单监控'}
+          aria-label={monitored ? '封单监控已开启' : '开启封单监控'}
+          className={`p-0.5 rounded transition-opacity cursor-pointer ${
+            monitored ? 'opacity-100 text-amber-400' : 'opacity-0 group-hover:opacity-70 text-muted hover:!opacity-100'
+          }`}
+        >
+          {monitored ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
+        </button>
+        {direction === 'up' ? (
+          <button
+            type="button"
+            disabled={inPool || poolBusy || !poolAvailable}
+            title={inPool ? '已在打板池' : poolBusy ? '加入中' : poolAvailable ? '加入打板池' : '打板池配置尚未加载'}
+            aria-label={inPool ? '已在打板池' : poolBusy ? '加入打板池' : '加入打板池'}
+            onClick={event => {
+              event.stopPropagation()
+              onAddToPool()
+            }}
+            className={`inline-flex h-5 w-5 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${inPool ? 'text-bear' : 'text-muted hover:bg-accent/10 hover:text-accent'}`}
+          >
+            {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
+          </button>
+        ) : null}
+      </div>
       {/* 监控菜单 */}
       {showMonitorMenu && menuAnchor && (
         <MonitorMenu
@@ -314,7 +332,7 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
       }}
     >
       {/* 名称行 */}
-      <div className="flex items-center gap-1.5 w-full min-w-0 pr-4">
+      <div className="flex items-center gap-1.5 w-full min-w-0 pr-12">
         <span className={`${style.nameCls} font-medium truncate`}>{stock.name}</span>
         {stock.is_one_word && (
           <span className={`shrink-0 rounded-sm border px-1 py-px text-[9px] font-medium leading-none ${
@@ -389,21 +407,6 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
           )}
         </div>
       )}
-      {direction === 'up' ? (
-        <button
-          type="button"
-          disabled={inPool || poolBusy || !poolAvailable}
-          title={inPool ? '已在打板池' : poolAvailable ? '加入打板池' : '打板池配置尚未加载'}
-          onClick={event => {
-            event.stopPropagation()
-            onAddToPool()
-          }}
-          className={`mt-0.5 inline-flex h-6 items-center gap-1 rounded border px-2 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/50 hover:bg-accent/10 hover:text-accent'}`}
-        >
-          {inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}
-          {inPool ? '已加入' : poolBusy ? '加入中' : '打板'}
-        </button>
-      ) : null}
     </div>
     </div>
   )

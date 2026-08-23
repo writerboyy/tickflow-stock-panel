@@ -831,6 +831,59 @@ def test_qmt_submit_uses_buy_preflight_and_returns_after_acceptance(tmp_path: Pa
     assert calls == ["get_asset", "submit_orders_batch"]
 
 
+def test_qmt_submit_accepts_wrapped_batch_result(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+
+    def fake_call(method, _params):
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "submit_orders_batch":
+            return {"results": [{"success": True, "accepted": True, "order_sys_id": "wrapped-1"}]}
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "wrapped-request-1", "action": "BUY", "symbol": "600036.SH",
+        "volume": 100, "price": 35, "price_type": "LIMIT",
+    })
+
+    assert result["status"] == "accepted_pending"
+    assert result["order_sys_id"] == "wrapped-1"
+
+
+def test_qmt_submit_reconciles_remote_order_when_batch_response_shape_is_invalid(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "submit_orders_batch":
+            return {"unexpected": "shape"}
+        if method == "query_orders":
+            return [{
+                "stock_code": "600036.SH",
+                "status": "50",
+                "order_sys_id": "remote-1",
+                "remark": "position_risk:remote-shape-request",
+            }]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "remote-shape-request", "action": "BUY", "symbol": "600036.SH",
+        "volume": 100, "price": 35, "price_type": "LIMIT",
+    })
+
+    assert result["status"] == "50"
+    assert result["order_sys_id"] == "remote-1"
+    assert result["error"] is None
+    assert calls == ["get_asset", "submit_orders_batch", "query_orders"]
+
+
 def test_qmt_submit_preserves_limit_board_order_source(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True
@@ -924,6 +977,102 @@ def test_qmt_remote_order_sync_adds_broker_time_to_local_order(tmp_path: Path):
     assert saved["status"] == "queued"
     assert saved["broker_order_at"] == "2026-08-18T10:05:00.000+08:00"
     assert saved["broker_order_time_raw"] == 100500
+
+
+def test_qmt_remote_order_sync_clears_stale_local_error_and_keeps_broker_reason(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service._remember_order({
+        "idempotency_key": "request-with-stale-error",
+        "strategy_name": "position_risk",
+        "order_sys_id": "remote-2",
+        "user_order_id": "position_risk:request-with-stale-error",
+        "status": "unknown",
+        "error": "QMT 委托响应格式无效",
+        "created_at": "2026-08-18T02:03:20.150+00:00",
+        "updated_at": "2026-08-18T02:03:20.150+00:00",
+    })
+    service._merge_remote_orders([{
+        "order_sys_id": "remote-2",
+        "user_order_id": "position_risk:request-with-stale-error",
+        "status": "50",
+    }])
+    saved = service.get_orders({"request-with-stale-error"})["request-with-stale-error"]
+    assert saved["status"] == "50"
+    assert saved["error"] is None
+
+    service._merge_remote_orders([{
+        "order_sys_id": "remote-2",
+        "user_order_id": "position_risk:request-with-stale-error",
+        "status": "57",
+        "status_msg": "资金冻结不足",
+    }])
+    saved = service.get_orders({"request-with-stale-error"})["request-with-stale-error"]
+    assert saved["error"] == "资金冻结不足"
+
+
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        ("54", "已撤"),
+        ("56", "已成"),
+        ("57", "废单"),
+    ],
+)
+def test_qmt_cancel_order_rejects_terminal_remote_status(tmp_path: Path, status: str, message: str):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    service.client.probe = lambda: {}
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "query_orders":
+            return [{"order_sys_id": "terminal-1", "status": status}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    with pytest.raises(QmtRpcError, match=message):
+        service.cancel_order({"order_sys_id": "terminal-1"})
+    assert calls == ["query_orders"]
+
+
+def test_qmt_cancel_order_rejects_cancel_pending_remote_status(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    service.client.probe = lambda: {}
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "query_orders":
+            return [{"order_sys_id": "pending-cancel-1", "status": "51"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    with pytest.raises(QmtRpcError, match="处理中"):
+        service.cancel_order({"order_sys_id": "pending-cancel-1"})
+    assert calls == ["query_orders"]
+
+
+def test_qmt_cancel_order_checks_remote_status_before_request(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    service.client.probe = lambda: {}
+    calls = []
+
+    def fake_call(method, params):
+        calls.append(method)
+        if method == "query_orders":
+            return [{"order_sys_id": "active-1", "status": "50"}]
+        if method == "cancel_order":
+            assert params["order_sys_id"] == "active-1"
+            return {"accepted": True}
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.cancel_order({"order_sys_id": "active-1"})
+    assert result["status"] == "cancel_requested"
+    assert calls == ["query_orders", "cancel_order"]
 
 
 def test_qmt_submit_uses_sell_preflight(tmp_path: Path):

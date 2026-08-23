@@ -1458,7 +1458,7 @@ export function LimitBoard() {
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
       {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
       {candidateAlgorithmOpen ? <CandidateAlgorithmDialog onClose={() => setCandidateAlgorithmOpen(false)} /> : null}
-      {tradeRow ? <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.last_price }} preset={{ action: 'BUY' }} onClose={() => setTradeRow(null)} /> : null}
+      {tradeRow ? <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.last_price, limitUp: tradeRow.limit_up }} preset={{ action: 'BUY' }} onClose={() => setTradeRow(null)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )
