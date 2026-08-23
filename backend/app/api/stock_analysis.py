@@ -178,9 +178,23 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
 
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
+    position_service = getattr(request.app.state, "position_risk_service", None)
+    holding = None
+    if position_service is not None:
+        portfolio = position_service.store.load()
+        requested_symbol = req.symbol.strip().upper()
+        holding = next(
+            (dict(row) for row in portfolio.get("positions", [])
+             if str(row.get("symbol") or "").strip().upper() == requested_symbol),
+            None,
+        )
 
     async def stream_gen():
-        async for chunk in analyze_stock_stream(repo, data_dir, req.symbol, req.focus):
+        if holding is None:
+            stream = analyze_stock_stream(repo, data_dir, req.symbol, req.focus)
+        else:
+            stream = analyze_stock_stream(repo, data_dir, req.symbol, req.focus, holding=holding)
+        async for chunk in stream:
             yield chunk + "\n"
 
     return StreamingResponse(

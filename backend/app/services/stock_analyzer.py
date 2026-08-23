@@ -199,6 +199,7 @@ def _build_user_prompt(
     symbol: str,
     focus: str,
     asset_type: str = "stock",
+    holding: dict | None = None,
 ) -> str:
     """构建用户消息:标的 + 价位摘要 + 技术指标 JSON + 财务摘要 + 关注点。
 
@@ -214,6 +215,15 @@ def _build_user_prompt(
         json.dumps(kline_tail, ensure_ascii=False),
         "```",
     ]
+
+    if holding:
+        parts.extend([
+            "",
+            "以下是持仓风控中的当前持仓快照(JSON)。这是用户已持有的标的，分析时请明确区分持仓事实与行情判断，不要再声称该标的没有持仓数据:",
+            "```json",
+            json.dumps(holding, ensure_ascii=False),
+            "```",
+        ])
 
     has_fin = any(fins.values())
     if has_fin:
@@ -274,6 +284,7 @@ async def analyze_stock_stream(
     data_dir: Path,
     symbol: str,
     focus: str = "",
+    holding: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式个股分析:yield 出每个 NDJSON 事件。
 
@@ -314,7 +325,7 @@ async def analyze_stock_stream(
 
         kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
         user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus,
-                                         asset_type=repo.resolve_asset_type(symbol))
+                                         asset_type=repo.resolve_asset_type(symbol), holding=holding)
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
