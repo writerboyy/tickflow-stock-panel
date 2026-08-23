@@ -486,7 +486,9 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
 
           {(() => {
             const feature = featuresQuery.data?.features[row.symbol]
-            const featureState = feature?.fresh ? '数据新鲜' : feature?.reason || '等待闭合分钟数据'
+            const dataDate = feature?.data_as_of ?? feature?.daily?.as_of?.slice(0, 10) ?? feature?.context?.data_as_of ?? null
+            const historicalData = feature?.data_status === 'historical'
+            const featureState = feature?.fresh ? '数据新鲜' : historicalData ? '上一交易日数据' : feature?.reason || '等待闭合分钟数据'
             const decision = feature?.decision
             const qualityEntries = decision
               ? QUALITY_SOURCE_ORDER.map(source => [source, decision.data_quality[source]] as const).filter(([, block]) => Boolean(block))
@@ -495,6 +497,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             const contextReady = Boolean(feature?.context && feature.context.state !== 'unavailable')
             return (
               <section className="mt-3 border-y border-border bg-elevated/30 px-3 py-2 text-[10px]">
+                {historicalData && <div className="mb-2 border-b border-border/70 pb-2 text-warning">当前非交易日，以下数据截至 {dataDate || '上一交易日'}</div>}
                 {decision && (
                   <div className="border-b border-border/70 pb-3">
                     <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -530,7 +533,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                   {(feature?.t_trade_count ?? 0) > 0 && <span className="text-muted">今日做T <b className="font-mono text-foreground">{feature?.t_trade_count} 次</b></span>}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
-                  {feature?.as_of && <span>更新于 {new Date(feature.as_of).toLocaleTimeString('zh-CN')}</span>}
+                  {historicalData && dataDate ? <span>数据截至 {dataDate}</span> : feature?.as_of && <span>更新于 {new Date(feature.as_of).toLocaleTimeString('zh-CN')}</span>}
                   {feature?.session_vwap != null && <span>VWAP <b className="font-mono text-foreground">{price(feature.session_vwap)}</b></span>}
                   {feature?.ema9_1m != null && feature?.ema20_1m != null && <span>EMA9/20 <b className="font-mono text-foreground">{price(feature.ema9_1m)}/{price(feature.ema20_1m)}</b></span>}
                   {feature?.atr14_5m != null && <span>ATR5m <b className="font-mono text-foreground">{price(feature.atr14_5m)}</b></span>}
@@ -539,6 +542,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
                 {contextReady && <div className="mt-2 border-t border-border/70 pt-2">
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                     <span className={cn('font-medium', contextStateClass(feature?.context?.state))}>市场上下文 {contextStateLabel(feature?.context?.state)}</span>
+                    {feature?.context?.data_as_of && <span className="text-muted">数据截至 {feature.context.data_as_of}</span>}
                     <span className="text-muted">大盘 <b className="text-foreground">{feature?.context?.market_state || '数据不足'}</b></span>
                     <span className="text-muted">情绪周期 <b className="text-foreground">{feature?.context?.emotion_phase || '数据不足'}</b></span>
                     <span className="text-muted">{contextDimensionLabel(feature?.context)}</span>

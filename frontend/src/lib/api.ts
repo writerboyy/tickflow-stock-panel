@@ -1073,6 +1073,9 @@ export interface PositionRiskFeatureSnapshot {
   reason: string
   source: string | null
   as_of: string | null
+  data_as_of?: string | null
+  data_status?: 'current' | 'historical' | 'unavailable' | string
+  data_reason?: string | null
   age_seconds?: number | null
   bars_1m?: number
   bars_5m?: number
@@ -1146,6 +1149,9 @@ export interface PositionRiskContext {
   gate_open?: boolean
   missing?: string[]
   as_of?: string | null
+  data_as_of?: string | null
+  data_status?: 'current' | 'historical' | 'unavailable' | string
+  data_reason?: string | null
   market_state?: string | null
   emotion_phase?: string | null
   sector_kind?: 'concept' | 'industry' | string | null

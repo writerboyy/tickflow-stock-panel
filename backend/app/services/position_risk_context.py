@@ -126,7 +126,7 @@ class PositionRiskContextService:
         self.quote_service = quote_service
         self.app_state = app_state
         self._lock = threading.RLock()
-        self._overview_cache: tuple[float, dict[str, Any]] | None = None
+        self._overview_cache: tuple[float, str, dict[str, Any]] | None = None
         self._emotion_cache: tuple[float, list[float]] | None = None
         self._rotation_cache: dict[tuple[str, int | None, str], dict[str, Any]] = {}
         self._correlation_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -156,22 +156,43 @@ class PositionRiskContextService:
                         "amount": amount,
                     }
 
-    def _overview(self) -> dict[str, Any]:
+    def _data_date(self, fallback: date | None = None) -> date | None:
+        try:
+            _frame, data_date = self.quote_service.get_enriched_today()
+            if data_date is not None:
+                return data_date
+        except Exception:  # noqa: BLE001
+            logger.debug("持仓风控行情截至日读取失败", exc_info=True)
+        try:
+            data_date = self.repo.enriched_latest_date()
+            if data_date is not None:
+                return data_date
+        except Exception:  # noqa: BLE001
+            logger.debug("持仓风控 enriched 截至日读取失败", exc_info=True)
+        return fallback
+
+    def _overview(self, as_of: date | None = None) -> dict[str, Any]:
         now_mono = time.monotonic()
+        cache_key = as_of.isoformat() if as_of else "live"
         with self._lock:
-            if self._overview_cache and now_mono - self._overview_cache[0] < 60:
-                return self._overview_cache[1]
+            if (
+                self._overview_cache
+                and self._overview_cache[1] == cache_key
+                and now_mono - self._overview_cache[0] < 60
+            ):
+                return self._overview_cache[2]
         try:
             value = build_market_overview(
                 self.repo,
                 self.quote_service,
                 getattr(self.app_state, "depth_service", None),
+                as_of=as_of,
             )
         except Exception:  # noqa: BLE001
             logger.warning("持仓风控大盘上下文计算失败", exc_info=True)
             value = {}
         with self._lock:
-            self._overview_cache = (now_mono, value)
+            self._overview_cache = (now_mono, cache_key, value)
         return value
 
     def _rotation(self, kind: str, level: int | None, today: date) -> dict[str, Any]:
@@ -225,21 +246,29 @@ class PositionRiskContextService:
             self._emotion_cache = (now_mono, result)
         return result
 
-    def _current_snapshots(self, targets: list[dict[str, Any]], now: datetime) -> dict[str, dict[str, Any]]:
+    def _current_snapshots(
+        self,
+        targets: list[dict[str, Any]],
+        now: datetime,
+        data_date: date | None,
+    ) -> dict[str, dict[str, Any]]:
         sector_service = getattr(self.app_state, "sector_monitor_service", None)
         if sector_service is None or not targets:
             return {}
         stock_df, stock_date = self.quote_service.get_enriched_today()
         index_df = self.quote_service.get_index_quotes()
-        if stock_date != now.date() or stock_df is None or stock_df.is_empty():
+        if data_date is None or stock_date != data_date or stock_df is None or stock_df.is_empty():
             return {}
+        snapshot_at = now.timestamp()
+        if data_date < now.date():
+            snapshot_at = datetime.combine(data_date, clock_time(15, 0)).timestamp()
         try:
             return sector_service.build_snapshots(
                 stock_df,
                 index_df,
                 targets,
                 set(),
-                now=now.timestamp(),
+                now=snapshot_at,
             )
         except Exception:  # noqa: BLE001
             logger.warning("持仓风控板块快照计算失败", exc_info=True)
@@ -254,7 +283,7 @@ class PositionRiskContextService:
         self,
         candidates: list[dict[str, Any]],
         snapshots: dict[str, dict[str, Any]],
-        now: datetime,
+        data_date: date,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[float], float | None]:
         ranked: list[tuple[float, dict[str, Any], dict[str, Any], list[float], float | None]] = []
         for target in candidates:
@@ -263,8 +292,8 @@ class PositionRiskContextService:
                 continue
             kind = str(target.get("kind") or "")
             level = 2 if kind == "industry" else None
-            rotation = self._rotation(kind, level, now.date())
-            values, yesterday = _rotation_values(rotation, self._target_rotation_name(target), now.date())
+            rotation = self._rotation(kind, level, data_date)
+            values, yesterday = _rotation_values(rotation, self._target_rotation_name(target), data_date)
             if len(values) < 5 or yesterday is None:
                 continue
             ranked.append((sum(values) / len(values), target, snapshot, values, yesterday))
@@ -325,8 +354,12 @@ class PositionRiskContextService:
         configs: dict[str, dict[str, Any]],
         now: datetime,
     ) -> dict[str, dict[str, Any]]:
-        overview = self._overview()
-        overview_current = str(overview.get("as_of") or "") == now.date().isoformat()
+        data_date = self._data_date(now.date())
+        historical = bool(data_date and data_date < now.date())
+        overview = self._overview(data_date if historical else None)
+        overview_date = str(overview.get("as_of") or "")[:10]
+        effective_date = data_date or (date.fromisoformat(overview_date) if overview_date else None)
+        overview_current = effective_date is not None and overview_date == effective_date.isoformat()
         breadth = overview.get("breadth") or {}
         market_available = bool(
             overview_current
@@ -350,25 +383,25 @@ class PositionRiskContextService:
                 }
                 for target in [*concepts, *industries]:
                     target_map[str(target.get("key") or "")] = target
-        snapshots = self._current_snapshots(list(target_map.values()), now)
+        snapshots = self._current_snapshots(list(target_map.values()), now, effective_date)
         results: dict[str, dict[str, Any]] = {}
         for symbol in symbols:
             feature = features.get(symbol) or {}
             config = configs.get(symbol) or {}
             candidates = candidates_by_symbol.get(symbol) or {}
             target, sector, five_days, yesterday = self._select_target(
-                candidates.get("concept", []), snapshots, now,
+                candidates.get("concept", []), snapshots, effective_date or now.date(),
             )
             if target is None:
                 target, sector, five_days, yesterday = self._select_target(
-                    candidates.get("industry", []), snapshots, now,
+                    candidates.get("industry", []), snapshots, effective_date or now.date(),
                 )
             leader = (sector or {}).get("leader") or {}
             correlations = self._correlations(
                 symbol,
                 target,
                 str(leader.get("symbol") or "") or None,
-                now.date(),
+                effective_date or now.date(),
             ) if target else {"sector": None, "leader": None, "samples": 0, "leader_samples": 0}
             auction = dict(feature.get("auction") or {})
             with self._lock:
@@ -438,6 +471,9 @@ class PositionRiskContextService:
                 "gate_open": state in {"supportive", "neutral"},
                 "missing": missing,
                 "as_of": now.isoformat(),
+                "data_as_of": effective_date.isoformat() if effective_date else None,
+                "data_status": "historical" if historical else "current" if effective_date == now.date() else "unavailable",
+                "data_reason": "当前非交易日，显示上个交易日数据" if historical else None,
                 "market_state": market_label,
                 "emotion_phase": phase,
                 "sector_kind": target.get("kind") if target else None,

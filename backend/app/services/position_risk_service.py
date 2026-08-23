@@ -890,6 +890,22 @@ class PositionRiskService:
                     "emotion_phase": "数据不足",
                 }),
             })
+            data_as_of = (
+                str(item.get("context", {}).get("data_as_of") or "")[:10]
+                or str(self._history_as_of.get(symbol) or "")[:10]
+                or str(item.get("as_of") or "")[:10]
+                or None
+            )
+            item["data_as_of"] = data_as_of
+            item["data_status"] = (
+                "historical" if data_as_of and data_as_of < current_time.date().isoformat()
+                else "current" if data_as_of == current_time.date().isoformat()
+                else "unavailable"
+            )
+            item["data_reason"] = (
+                "当前非交易日，显示上个交易日数据"
+                if item["data_status"] == "historical" else None
+            )
             item["decision"] = build_position_decision(
                 item,
                 position={

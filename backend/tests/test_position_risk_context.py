@@ -226,3 +226,64 @@ def test_context_falls_back_to_industry_when_all_concepts_are_invalid(monkeypatc
     )["HOLD"]
     assert context["sector_kind"] == "industry"
     assert context["sector_name"] == "电子 / 计算机"
+
+
+def test_context_uses_previous_trading_day_on_non_trading_day(monkeypatch, tmp_path: Path):
+    class WeekendQuotes(_Quotes):
+        def get_enriched_today(self):
+            frame, _ = super().get_enriched_today()
+            return frame, date(2026, 8, 21)
+
+    service = PositionRiskContextService(
+        _Repo(tmp_path),
+        WeekendQuotes(),
+        SimpleNamespace(sector_monitor_service=_SectorService(), depth_service=None),
+    )
+    overview_calls = []
+    monkeypatch.setattr(
+        "app.services.position_risk_context.build_market_overview",
+        lambda *_args, **kwargs: (
+            overview_calls.append(kwargs.get("as_of"))
+            or {
+                "as_of": "2026-08-21",
+                "indices": [{"symbol": "000001.SH"}],
+                "breadth": {"total": 5000},
+                "emotion": {"score": 60, "label": "偏暖"},
+            }
+        ),
+    )
+    rotation = {
+        "dates": ["2026-08-21", "2026-08-20", "2026-08-19", "2026-08-18", "2026-08-17"],
+        "columns": {
+            day: [["人工智能", value]]
+            for day, value in zip(
+                ["2026-08-21", "2026-08-20", "2026-08-19", "2026-08-18", "2026-08-17"],
+                [0.03, 0.02, 0.01, 0.01, -0.01],
+                strict=True,
+            )
+        },
+    }
+    monkeypatch.setattr(
+        "app.services.position_risk_context.rps_rotation.build_rps_rotation",
+        lambda *_args, **_kwargs: rotation,
+    )
+    monkeypatch.setattr(
+        "app.services.position_risk_context.regime_builder.load_regime_history",
+        lambda *_args, **_kwargs: pl.DataFrame(),
+    )
+    feature = {
+        "auction": {"available": True, "price": 10.0, "volume": 1000},
+        "opening_five_minute": {"available": True, "volume": 10_000},
+        "relative_volume": 1.2,
+        "buy_ratio": 0.60,
+        "sell_ratio": 0.40,
+        "flow_samples": 10,
+    }
+    context = service.build(
+        {"HOLD"}, {"HOLD": feature}, {"HOLD": {"change_pct": 0.02}}, {"HOLD": {}},
+        datetime(2026, 8, 23, 10, 0),
+    )["HOLD"]
+    assert overview_calls == [date(2026, 8, 21)]
+    assert context["data_as_of"] == "2026-08-21"
+    assert context["data_status"] == "historical"
+    assert context["state"] == "supportive"
