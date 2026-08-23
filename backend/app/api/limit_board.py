@@ -17,12 +17,22 @@ class SelectedWrite(BaseModel):
 
 class PoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
+    allocation_mode: str = Field(default="global", pattern="^(global|lot|fixed|volume)$")
+    allocation_value: float | None = Field(default=None, gt=0)
+
+
+class BuyPoolWrite(SelectedWrite):
+    source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
+    allocation_mode: str = Field(default="lot", pattern="^(lot|fixed|volume)$")
+    allocation_value: float | None = Field(default=None, gt=0)
 
 
 class PoolUpdate(BaseModel):
     revision: int = Field(ge=0)
     auto_trade: bool
     order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
+    allocation_mode: str | None = Field(default=None, pattern="^(global|lot|fixed|volume)$")
+    allocation_value: float | None = Field(default=None, gt=0)
 
 
 class AdvancedSettings(BaseModel):
@@ -145,11 +155,19 @@ def remove_candidate(symbol: str, revision: int, request: Request):
 @router.post("/pool")
 def add_pool(payload: PoolWrite, request: Request):
     try:
-        config = _service(request).add_pool(payload.symbol, payload.source, payload.revision)
+        config = _service(request).add_pool(
+            payload.symbol,
+            payload.source,
+            payload.revision,
+            payload.allocation_mode,
+            payload.allocation_value,
+        )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     return {"ok": True, "config": config}
 
 
@@ -161,6 +179,8 @@ def update_pool(symbol: str, payload: PoolUpdate, request: Request):
             payload.auto_trade,
             payload.order_mode,
             payload.revision,
+            payload.allocation_mode,
+            payload.allocation_value,
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -173,6 +193,34 @@ def update_pool(symbol: str, payload: PoolUpdate, request: Request):
 def remove_pool(symbol: str, revision: int, request: Request):
     try:
         config = _service(request).remove_pool(symbol, revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.post("/buy-pool")
+def add_buy_pool(payload: BuyPoolWrite, request: Request):
+    try:
+        result = _service(request).add_buy_pool(
+            payload.symbol,
+            payload.source,
+            payload.revision,
+            payload.allocation_mode,
+            payload.allocation_value,
+        )
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.delete("/buy-pool/{symbol}")
+def remove_buy_pool(symbol: str, revision: int, request: Request):
+    try:
+        config = _service(request).remove_buy_pool(symbol, revision)
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"ok": True, "config": config}

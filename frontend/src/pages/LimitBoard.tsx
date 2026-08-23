@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
+  AlertTriangle,
   Ban,
   Bell,
   Check,
@@ -18,7 +19,9 @@ import {
   Radio,
   RefreshCw,
   Search,
+  Settings2,
   ShieldAlert,
+  ShoppingCart,
   SlidersHorizontal,
   Trash2,
   WalletCards,
@@ -48,9 +51,16 @@ import { useChartTheme } from '@/lib/theme'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'events'
-type TableMode = 'candidate' | 'pool'
+type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'buy_pool' | 'pool' | 'events'
+type TableMode = 'candidate' | 'buy_pool' | 'pool'
 type AdvancedSettings = LimitBoardView['settings']
+type PoolAllocationMode = 'global' | 'lot' | 'fixed' | 'volume'
+type AllocationDialogState = {
+  row: LimitBoardRow
+  kind: 'buy' | 'board' | 'edit'
+  initialMode: PoolAllocationMode
+  initialValue?: number | null
+}
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   watching: { label: '观察中', tone: 'text-muted' },
@@ -255,6 +265,114 @@ function financialTone(value: number | null | undefined): string {
   return value > 0 ? 'text-bull' : 'text-bear'
 }
 
+function moneyValue(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value)
+    ? '--'
+    : `${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`
+}
+
+function poolAllocationLabel(mode: PoolAllocationMode): string {
+  if (mode === 'global') return '跟随高级设置'
+  if (mode === 'lot') return '一手（100 股）'
+  if (mode === 'fixed') return '固定金额'
+  return '固定数量'
+}
+
+function LimitBoardAllocationDialog({
+  row,
+  kind,
+  initialMode,
+  initialValue,
+  globalMode,
+  globalValue,
+  pending,
+  onClose,
+  onConfirm,
+}: {
+  row: LimitBoardRow
+  kind: 'buy' | 'board' | 'edit'
+  initialMode: PoolAllocationMode
+  initialValue?: number | null
+  globalMode: AdvancedSettings['order_allocation_mode']
+  globalValue: number
+  pending: boolean
+  onClose: () => void
+  onConfirm: (mode: PoolAllocationMode, value?: number) => void
+}) {
+  const [mode, setMode] = useState<PoolAllocationMode>(kind === 'buy' && initialMode === 'global' ? 'lot' : initialMode)
+  const [value, setValue] = useState<number>(initialValue ?? (kind === 'buy' ? 0 : globalValue))
+  const price = row.last_price ?? row.order_price ?? null
+  const usesGlobal = mode === 'global'
+  const globalUsesFixedAmount = globalMode === 'fixed' && globalValue > 0
+  const estimatedVolume = price != null && price > 0
+    ? mode === 'volume'
+      ? Math.floor(Math.max(0, value) / 100) * 100
+      : mode === 'fixed' || (usesGlobal && globalUsesFixedAmount)
+        ? Math.floor(Math.max(0, usesGlobal ? globalValue : value) / price / 100) * 100
+        : mode === 'lot' || (usesGlobal && globalMode === 'fixed')
+          ? 100
+          : 0
+    : 0
+  const estimatedAmount = price != null && estimatedVolume > 0 ? price * estimatedVolume : null
+  const globalEstimate = usesGlobal && globalMode !== 'fixed' ? '按全局资金计算' : null
+  const validValue = usesGlobal || (Number.isFinite(value) && value > 0)
+  const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
+  const canConfirm = Boolean(
+    validValue
+    && validVolume
+    && (kind !== 'buy' || (price != null && price > 0 && estimatedVolume >= 100))
+    && (kind === 'buy' || usesGlobal || price == null || price <= 0 || estimatedVolume >= 100),
+  )
+  const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
+
+  return <Modal
+    labelledBy="limit-board-allocation-title"
+    onClose={() => { if (!pending) onClose() }}
+    closeOnBackdrop={!pending}
+    panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface shadow-xl"
+  >
+    <div className="flex items-start gap-3 border-b border-border px-4 py-4">
+      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-btn bg-warning/10 text-warning"><AlertTriangle className="h-4 w-4" /></div>
+      <div className="min-w-0">
+        <h2 id="limit-board-allocation-title" className="text-sm font-semibold">{title}</h2>
+        <p className="mt-1 text-[11px] leading-4 text-muted">{row.name || row.symbol}<span className="ml-2 font-mono text-[10px]">{row.symbol}</span></p>
+      </div>
+      <button type="button" disabled={pending} onClick={onClose} className="ml-auto grid h-7 w-7 shrink-0 place-items-center rounded-btn text-muted hover:bg-elevated disabled:opacity-40" aria-label="关闭金额设置"><X className="h-4 w-4" /></button>
+    </div>
+    <div className="space-y-3 px-4 py-4 text-xs">
+      <div className="grid grid-cols-2 gap-3">
+        <div><div className="text-[10px] text-muted">当前限价参考</div><div className="mt-1 font-mono text-foreground">{price == null ? '--' : price.toFixed(3)}</div></div>
+        <div><div className="text-[10px] text-muted">预计委托金额</div><div className="mt-1 font-mono text-foreground">{globalEstimate ?? moneyValue(estimatedAmount)}</div></div>
+      </div>
+      <label className="block text-[10px] text-muted">交易数量/金额方式
+        <select value={mode} disabled={pending} onChange={event => setMode(event.target.value as PoolAllocationMode)} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
+          {kind !== 'buy' ? <option value="global">{poolAllocationLabel('global')}</option> : null}
+          <option value="lot">{poolAllocationLabel('lot')}</option>
+          <option value="fixed">{poolAllocationLabel('fixed')}</option>
+          <option value="volume">{poolAllocationLabel('volume')}</option>
+        </select>
+      </label>
+      {mode === 'fixed' ? <label className="block text-[10px] text-muted">确认金额
+        <input type="number" min={100} step={100} value={value} disabled={pending} onChange={event => setValue(Number(event.target.value))} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50" />
+      </label> : null}
+      {mode === 'volume' ? <label className="block text-[10px] text-muted">确认数量（股）
+        <input type="number" min={100} step={100} value={value || ''} disabled={pending} onChange={event => setValue(Number(event.target.value))} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50" />
+      </label> : null}
+      <div className="grid grid-cols-2 gap-3 border-y border-border py-3 text-[10px]">
+        <div><span className="text-muted">委托数量</span><div className="mt-1 font-mono text-foreground">{globalEstimate ?? (estimatedVolume > 0 ? `${estimatedVolume.toLocaleString('zh-CN')} 股` : '--')}</div></div>
+        <div><span className="text-muted">配置方式</span><div className="mt-1 text-foreground">{poolAllocationLabel(mode)}</div></div>
+      </div>
+      {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : <div className="text-[10px] leading-4 text-muted">这里只保存该股票的交易数量/金额配置；打板池仍按临板、扫板或排板规则触发委托。</div>}
+    </div>
+    <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+      <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>
+      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, usesGlobal ? undefined : value)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+        {pending ? '提交中…' : kind === 'buy' ? '确认买入并挂单' : kind === 'edit' ? '保存设置' : '确认加入打板池'}
+      </button>
+    </div>
+  </Modal>
+}
+
 const LEADERSHIP = {
   leader: '龙头',
   front: '前排',
@@ -265,12 +383,15 @@ interface RowProps {
   row: LimitBoardRow
   mode: TableMode
   inPool: boolean
+  inBuyPool: boolean
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
   queueConfirmSnapshots: number
   onOpen: () => void
   onAddPool: () => void
+  onAddBuyPool: () => void
+  onEditAllocation: () => void
   onRemoveCandidate: () => void
   onToggleAuto: (enabled: boolean) => void
   onChangeOrderMode: (mode: 'sweep' | 'queue') => void
@@ -282,12 +403,15 @@ function Row({
   row,
   mode,
   inPool,
+  inBuyPool,
   busy,
   sweepPriceLevels,
   queueWaitSeconds,
   queueConfirmSnapshots,
   onOpen,
   onAddPool,
+  onAddBuyPool,
+  onEditAllocation,
   onRemoveCandidate,
   onToggleAuto,
   onChangeOrderMode,
@@ -313,6 +437,29 @@ function Row({
     : row.auto_order_status
     ? ORDER_STATUS[row.auto_order_status] || { label: row.auto_order_status, tone: 'text-muted' }
     : { label: '等待涨停', tone: 'text-muted' }
+  const buyOrderStatus = row.order_status
+    ? ORDER_STATUS[row.order_status] || { label: row.order_status, tone: 'text-muted' }
+    : { label: '未读取', tone: 'text-muted' }
+
+  if (mode === 'buy_pool') {
+    return <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
+      <td className="sticky left-0 z-30 w-[128px] min-w-[128px] max-w-[128px] overflow-hidden bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
+        <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
+          <div className="truncate font-medium">{row.name || row.symbol}</div>
+          <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
+        </button>
+      </td>
+      <td className="w-[150px] px-2"><div className="truncate text-[10px] text-secondary">{themes(row.concept).slice(0, 2).join('、') || '--'}</div><div className="mt-0.5 text-[9px] text-muted">{row.source === 'rebound_board' ? '反包来源' : row.source === 'first_board' ? '首板来源' : '手工来源'}</div></td>
+      <td className="px-2 font-mono tabular-nums">{row.order_price?.toFixed(3) ?? row.last_price?.toFixed(3) ?? '--'}</td>
+      <td className="px-2 font-mono tabular-nums">{row.order_volume ? `${row.order_volume.toLocaleString('zh-CN')} 股` : '--'}</td>
+      <td className="px-2 font-mono tabular-nums">{moneyValue(row.order_amount)}</td>
+      <td className={`px-2 font-medium ${buyOrderStatus.tone}`} title={row.order_error || undefined}>{buyOrderStatus.label}</td>
+      <td className="px-2"><span className={row.ws_active ? 'text-bear' : 'text-muted'}>{row.ws_active ? 'WS' : '未接入'}</span></td>
+      <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
+        <button type="button" title="移出买入池；不会自动撤销已发委托" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 items-center gap-1 rounded-btn border border-border px-2 text-secondary hover:border-danger/40 hover:text-danger disabled:opacity-40"><Trash2 className="h-3.5 w-3.5" />移除</button>
+      </td>
+    </tr>
+  }
 
   return (
     <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
@@ -396,6 +543,7 @@ function Row({
                 />
                 {row.auto_trade ? '已开启' : '已关闭'}
               </label>
+              <button type="button" title="设置该股票的交易数量或金额" disabled={busy} onClick={onEditAllocation} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-elevated hover:text-accent disabled:opacity-40"><Settings2 className="h-3.5 w-3.5" /></button>
               <button type="button" title="移出打板池" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -406,6 +554,7 @@ function Row({
         <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 group-hover:bg-elevated">
           <div className="flex items-center justify-end gap-1">
             {mode === 'candidate' ? <button type="button" title="打开 QMT 手动交易" disabled={busy} onClick={onTrade} className="inline-flex h-7 items-center gap-1 rounded-btn border border-border px-2 text-secondary hover:border-warning/50 hover:text-warning disabled:opacity-60"><WalletCards className="h-3.5 w-3.5" />交易</button> : null}
+            {mode === 'candidate' ? <button type="button" title={inBuyPool ? '已在买入池' : '加入买入池并立即限价挂单'} disabled={inBuyPool || busy} onClick={onAddBuyPool} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-60`}>{inBuyPool ? <Check className="h-3.5 w-3.5" /> : <ShoppingCart className="h-3.5 w-3.5" />}{inBuyPool ? '已买入' : '买入'}</button> : null}
             <button
               type="button"
               title={inPool ? '已在打板池' : '加入打板池'}
@@ -430,12 +579,15 @@ interface TableProps {
   rows: LimitBoardRow[]
   mode: TableMode
   poolSymbols: Set<string>
+  buyPoolSymbols: Set<string>
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
   queueConfirmSnapshots: number
   onOpen: (row: LimitBoardRow) => void
   onAddPool: (row: LimitBoardRow) => void
+  onAddBuyPool: (row: LimitBoardRow) => void
+  onEditAllocation: (row: LimitBoardRow) => void
   onRemoveCandidate: (row: LimitBoardRow) => void
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onChangeOrderMode: (row: LimitBoardRow, mode: 'sweep' | 'queue') => void
@@ -448,14 +600,15 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1000px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1160px]' : mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             <th className="w-[160px] px-2">题材</th>
             {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">评分</th><th className="w-[118px] min-w-[118px] whitespace-nowrap px-2">行情</th><th className="w-[292px] min-w-[292px] px-2">评分依据</th></> : null}
-            {mode !== 'candidate' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
-            <th className={`sticky right-0 z-40 border-l border-border bg-surface px-2 text-right ${mode === 'pool' ? 'w-[220px]' : 'w-[172px]'}`}>操作</th>
+            {mode === 'buy_pool' ? <><th className="px-2">限价</th><th className="px-2">数量</th><th className="px-2">金额</th><th className="px-2">委托状态</th><th className="px-2">行情</th></> : null}
+            {mode === 'pool' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
+            <th className={`sticky right-0 z-40 border-l border-border bg-surface px-2 text-right ${mode === 'pool' ? 'w-[250px]' : 'w-[172px]'}`}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -465,12 +618,15 @@ function Table(props: TableProps) {
               row={row}
               mode={mode}
               inPool={props.poolSymbols.has(row.symbol)}
+              inBuyPool={props.buyPoolSymbols.has(row.symbol)}
               busy={props.busy}
               sweepPriceLevels={props.sweepPriceLevels}
               queueWaitSeconds={props.queueWaitSeconds}
               queueConfirmSnapshots={props.queueConfirmSnapshots}
               onOpen={() => props.onOpen(row)}
               onAddPool={() => props.onAddPool(row)}
+              onAddBuyPool={() => props.onAddBuyPool(row)}
+              onEditAllocation={() => props.onEditAllocation(row)}
               onRemoveCandidate={() => props.onRemoveCandidate(row)}
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onChangeOrderMode={mode => props.onChangeOrderMode(row, mode)}
@@ -1228,6 +1384,7 @@ export function LimitBoard() {
   const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
   const [tradeRow, setTradeRow] = useState<LimitBoardRow | null>(null)
+  const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const view = useQuery({
     queryKey: QK.limitBoard,
     queryFn: api.limitBoard,
@@ -1274,19 +1431,27 @@ export function LimitBoard() {
     onSuccess: () => { setSearch(''); refresh() },
   })
   const addPool = useMutation({
-    mutationFn: ({ row, source }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual' }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0),
-    onSuccess: refresh,
+    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
+    onSuccess: () => { setAllocationDialog(null); refresh() },
+  })
+  const addBuyPool = useMutation({
+    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'lot' | 'fixed' | 'volume'; allocationValue?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
+    onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const removeCandidate = useMutation({
     mutationFn: (row: LimitBoardRow) => api.limitBoardCandidateRemove(row.symbol, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
   const updatePool = useMutation({
-    mutationFn: ({ row, enabled, orderMode }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue' }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0),
-    onSuccess: refresh,
+    mutationFn: ({ row, enabled, orderMode, allocationMode, allocationValue }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue'; allocationMode?: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0, allocationMode, allocationValue),
+    onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const removePool = useMutation({
     mutationFn: (row: LimitBoardRow) => api.limitBoardPoolRemove(row.symbol, view.data?.revision ?? 0),
+    onSuccess: refresh,
+  })
+  const removeBuyPool = useMutation({
+    mutationFn: (row: LimitBoardRow) => api.limitBoardBuyPoolRemove(row.symbol, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
   const updateAdvanced = useMutation({
@@ -1300,13 +1465,15 @@ export function LimitBoard() {
   })
 
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
+  const buyPoolSymbols = useMemo(() => new Set((view.data?.buy_pool ?? []).map(row => row.symbol)), [view.data?.buy_pool])
   const candidateSymbols = useMemo(() => new Set([
     ...(view.data?.candidate_pool ?? []).map(row => row.symbol),
     ...(view.data?.opportunity_pool ?? []).map(row => row.symbol),
     ...(view.data?.board_pool ?? []).map(row => row.symbol),
-  ]), [view.data?.candidate_pool, view.data?.opportunity_pool, view.data?.board_pool])
+    ...(view.data?.buy_pool ?? []).map(row => row.symbol),
+  ]), [view.data?.candidate_pool, view.data?.opportunity_pool, view.data?.board_pool, view.data?.buy_pool])
   const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || addPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || updateAdvanced.isPending
+  const busy = add.isPending || addPool.isPending || addBuyPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || updateAdvanced.isPending
   const data = view.data
   const sentimentHistory = useMemo(() => mergeSentimentHistory(
     data?.market_sentiment?.emotion_history,
@@ -1322,13 +1489,15 @@ export function LimitBoard() {
   ), [data?.market_sentiment])
   if (view.isError || !data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
-  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'pool' ? data.board_pool : []
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : 'candidate'
-  const tableTitle = tab === 'candidate' ? '备选池' : tab === 'opportunity' ? '可交易机会' : '实盘打板池'
+  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'buy_pool' ? 'buy_pool' : 'candidate'
+  const tableTitle = tab === 'candidate' ? '备选池' : tab === 'opportunity' ? '可交易机会' : tab === 'buy_pool' ? '买入池' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
     : tab === 'opportunity'
       ? '独立机会分排序：强势确认、评分上升速度、日内分时和成交空间；只显示仍有成交空间的实时标的'
+      : tab === 'buy_pool'
+        ? '加入后立即按当前 TickFlow 价格发送限价买入委托；移出买入池不会自动撤销已发委托'
     : `前 10 板块强势股统一打分，自动候选只取 Top 30${data.settings.main_board_only ? ' · 仅沪深主板' : ''}；手工标的不受限制`
   const sentimentPanel = <>
     <section className="border-b border-border px-4 py-3 sm:px-5">
@@ -1382,8 +1551,8 @@ export function LimitBoard() {
       <PageHeader
         title="短线猎手"
         titleExtra={<div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
-          <span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-secondary"><Radio className="h-3 w-3 text-accent" />打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>
-          <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '打板池已接入 WS' : '备选池仅实时轮询'}</span>
+          <span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-secondary"><Radio className="h-3 w-3 text-accent" />买入/打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>
+          <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '买入池与打板池已接入 WS' : '买入池与打板池未接入 WS'}</span>
           <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
           {!runtime.first_board_enabled ? <span className="max-w-[520px] truncate text-warning" title={`强势股打分暂不可用：${runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}`}>
             强势股打分暂不可用：{runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}
@@ -1398,6 +1567,7 @@ export function LimitBoard() {
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['opportunity', '机会榜', data.opportunity_pool.length, Zap],
+          ['buy_pool', '买入池', data.buy_pool.length, ShoppingCart],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
@@ -1421,21 +1591,34 @@ export function LimitBoard() {
               rows={rows}
               mode={tableMode}
               poolSymbols={poolSymbols}
+              buyPoolSymbols={buyPoolSymbols}
               busy={busy}
               sweepPriceLevels={data.settings.sweep_price_levels}
               queueWaitSeconds={data.settings.queue_wait_seconds}
               queueConfirmSnapshots={data.settings.queue_confirm_snapshots}
               onOpen={setPreview}
-              onAddPool={row => addPool.mutate({
+              onAddPool={row => setAllocationDialog({
                 row,
-                source: row.source === 'manual' || row.source === 'selected'
-                  ? 'manual'
-                  : row.source === 'rebound_board' ? 'rebound_board' : 'first_board',
+                kind: 'board',
+                initialMode: row.allocation_mode ?? 'global',
+                initialValue: row.allocation_value,
+              })}
+              onAddBuyPool={row => setAllocationDialog({
+                row,
+                kind: 'buy',
+                initialMode: row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot',
+                initialValue: row.allocation_value,
+              })}
+              onEditAllocation={row => setAllocationDialog({
+                row,
+                kind: 'edit',
+                initialMode: row.allocation_mode ?? 'global',
+                initialValue: row.allocation_value,
               })}
               onRemoveCandidate={row => removeCandidate.mutate(row)}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
               onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
-              onRemovePool={row => removePool.mutate(row)}
+              onRemovePool={row => tableMode === 'buy_pool' ? removeBuyPool.mutate(row) : removePool.mutate(row)}
               onTrade={setTradeRow}
             />
           </section>
@@ -1458,6 +1641,44 @@ export function LimitBoard() {
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
       {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
       {candidateAlgorithmOpen ? <CandidateAlgorithmDialog onClose={() => setCandidateAlgorithmOpen(false)} /> : null}
+      {allocationDialog ? <LimitBoardAllocationDialog
+        key={`${allocationDialog.kind}:${allocationDialog.row.symbol}`}
+        row={allocationDialog.row}
+        kind={allocationDialog.kind}
+        initialMode={allocationDialog.initialMode}
+        initialValue={allocationDialog.initialValue}
+        globalMode={data.settings.order_allocation_mode}
+        globalValue={data.settings.order_amount_per_board}
+        pending={addPool.isPending || addBuyPool.isPending || updatePool.isPending}
+        onClose={() => setAllocationDialog(null)}
+        onConfirm={(allocationMode, allocationValue) => {
+          const row = allocationDialog.row
+          const source = row.source === 'manual' || row.source === 'selected'
+            ? 'manual'
+            : row.source === 'rebound_board' ? 'rebound_board' : 'first_board'
+          if (allocationDialog.kind === 'buy') {
+            if (allocationMode === 'global') return
+            addBuyPool.mutate({
+              row,
+              source,
+              allocationMode: allocationMode as 'lot' | 'fixed' | 'volume',
+              allocationValue,
+            })
+            return
+          }
+          if (allocationDialog.kind === 'board') {
+            addPool.mutate({ row, source, allocationMode, allocationValue })
+            return
+          }
+          updatePool.mutate({
+            row,
+            enabled: row.auto_trade === true,
+            orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep',
+            allocationMode,
+            allocationValue,
+          })
+        }}
+      /> : null}
       {tradeRow ? <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.last_price, limitUp: tradeRow.limit_up }} preset={{ action: 'BUY' }} onClose={() => setTradeRow(null)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>

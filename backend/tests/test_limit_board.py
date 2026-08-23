@@ -147,6 +147,24 @@ class FakeQmt:
         self.orders.append(order)
         return {**order, "status": "accepted_pending", "order_sys_id": "qmt-1"}
 
+    @staticmethod
+    def preview_order(request):
+        price = float(request["price"])
+        mode = request.get("allocation_mode")
+        if mode == "lot":
+            volume = 100
+        elif mode == "fixed":
+            volume = int(float(request.get("allocation_value") or 0) / price / 100) * 100
+        else:
+            volume = 100
+        return {
+            "volume": volume,
+            "actual_amount": round(price * volume, 2),
+            "target_amount": round(price * volume, 2),
+            "capped": False,
+            "reason": "金额不足一手" if volume < 100 else None,
+        }
+
 
 class ImmediateExecutor:
     @staticmethod
@@ -193,15 +211,15 @@ def quote(price=11.0, limit=11.0):
     }
 
 
-def test_start_does_not_register_dedicated_listeners(tmp_path):
+def test_start_registers_limit_board_consumer(tmp_path):
     service, quotes, _config = make_service(tmp_path)
 
     service.start()
-
-    assert service._thread is None
-    assert service._polling_lease is False
-    assert service._ws_registered is False
-    assert quotes.consumers == {}
+    try:
+        assert service._thread is not None
+        assert quotes.consumers["limit_board"] == set()
+    finally:
+        service.stop()
 
 
 def test_first_touch_records_only_private_board_event(tmp_path, monkeypatch):
@@ -1735,8 +1753,7 @@ def test_manual_candidate_add_clears_same_day_exclusion(tmp_path, monkeypatch):
     assert [row["symbol"] for row in service.view()["candidate_pool"]] == ["600000.SH"]
 
 
-@pytest.mark.skip(reason="开盘啦 socket 不提供五档盘口，短线猎手不再注册 TickFlow WS")
-def test_candidate_pool_does_not_consume_websocket_capacity(tmp_path, monkeypatch):
+def test_board_and_buy_pool_symbols_share_websocket_capacity(tmp_path, monkeypatch):
     class FakeHub:
         def __init__(self):
             self.registered = set()
@@ -1776,11 +1793,56 @@ def test_candidate_pool_does_not_consume_websocket_capacity(tmp_path, monkeypatc
         },
     }
     config["board_pool"] = [{"symbol": "600001.SH", "auto_trade": True}]
+    config["buy_pool"] = [{"symbol": "600000.SH", "allocation_mode": "lot"}]
 
     service._sync_websocket(service._runtime_for_today(), config)
 
-    assert service._ws_symbols == {"600001.SH"}
-    assert hub.registered == {"600001.SH"}
+    assert service._ws_symbols == {"600000.SH", "600001.SH"}
+    assert hub.registered == {"600000.SH", "600001.SH"}
+
+
+def test_pool_add_fails_closed_when_websocket_capacity_is_exhausted(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.app_state.paper_supervisor = SimpleNamespace(
+        hub=SimpleNamespace(websocket_available=lambda *, exclude: 0),
+    )
+
+    with pytest.raises(RuntimeError, match="超过可用 WebSocket 容量"):
+        service.add_pool("600000.SH", "first_board", 0)
+
+    assert service.store.load_config()["board_pool"] == []
+
+
+def test_started_service_blocks_auto_trade_without_pool_websocket(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    service.app_state.paper_supervisor = SimpleNamespace(hub=object())
+    service._started = True
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "WebSocket" in state["auto_order_error"]
+
+
+def test_buy_pool_quote_survives_automatic_preselection():
+    updates = {
+        "600000.SH": {
+            "symbol": "600000.SH",
+            "source_modes": ["buy_pool"],
+        },
+    }
+
+    retained = LimitBoardService._preselect_automatic_updates(updates)
+
+    assert set(retained) == {"600000.SH"}
 
 
 def test_add_pool_enables_auto_trade_by_default(tmp_path):
@@ -1790,6 +1852,73 @@ def test_add_pool_enables_auto_trade_by_default(tmp_path):
 
     assert saved["board_pool"][0]["auto_trade"] is True
     assert saved["board_pool"][0]["order_mode"] == "sweep"
+
+
+def test_board_pool_persists_per_stock_fixed_amount(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+
+    saved = service.add_pool(
+        "600000.SH", "first_board", 0, "fixed", 10_000,
+    )
+
+    assert saved["board_pool"][0]["allocation_mode"] == "fixed"
+    assert saved["board_pool"][0]["allocation_value"] == 10_000
+
+
+def test_board_pool_updates_per_stock_fixed_volume(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.add_pool("600000.SH", "first_board", 0)
+
+    saved = service.update_pool(
+        "600000.SH", True, "queue", 1, "volume", 300,
+    )
+
+    member = saved["board_pool"][0]
+    assert member["order_mode"] == "queue"
+    assert member["allocation_mode"] == "volume"
+    assert member["allocation_value"] == 300
+
+
+def test_buy_pool_submits_current_price_one_lot_and_persists_order(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, quotes, _config = make_service(tmp_path, qmt)
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    quotes.latest_quotes = [{
+        **quote(price=10.5, limit=11.0),
+        "timestamp": now.isoformat(),
+    }]
+
+    result = service.add_buy_pool("600000.SH", "first_board", 0)
+
+    assert result["order"]["status"] == "accepted_pending"
+    assert qmt.orders[0]["allocation_mode"] == "lot"
+    assert qmt.orders[0]["price"] == 10.5
+    assert qmt.orders[0]["volume"] == 100
+    saved = service.store.load_config()
+    assert saved["buy_pool"][0]["order_price"] == 10.5
+    assert saved["buy_pool"][0]["order_volume"] == 100
+    assert service._runtime_for_today()["buy_orders"]["600000.SH"]["order_status"] == "accepted_pending"
+
+
+def test_buy_pool_supports_fixed_amount_and_fixed_volume(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+
+    fixed_qmt = FakeQmt()
+    fixed_service, fixed_quotes, _config = make_service(tmp_path / "fixed", fixed_qmt)
+    fixed_quotes.latest_quotes = [{**quote(price=10.5, limit=11.0), "timestamp": now.isoformat()}]
+    fixed_service.add_buy_pool("600000.SH", "manual", 0, "fixed", 1_200)
+    assert fixed_qmt.orders[0]["volume"] == 100
+
+    volume_qmt = FakeQmt()
+    volume_service, volume_quotes, _config = make_service(tmp_path / "volume", volume_qmt)
+    volume_quotes.latest_quotes = [{**quote(price=10.5, limit=11.0), "timestamp": now.isoformat()}]
+    volume_service.add_buy_pool("600000.SH", "manual", 0, "volume", 300)
+    assert volume_qmt.orders[0]["volume"] == 300
+    assert volume_qmt.orders[0]["price"] == 10.5
 
 
 def test_default_config_preserves_current_sweep_and_queue_triggers():
@@ -3049,6 +3178,40 @@ def test_legacy_selected_api_remains_compatible(tmp_path):
     view = client.get("/api/limit-board").json()
     assert view["candidate_pool"][0]["symbol"] == "600000.SH"
     assert view["candidate_pool"][0]["source"] == "manual"
+
+
+def test_limit_board_buy_pool_api_submits_and_removes_order(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, quotes, _config = make_service(tmp_path, qmt)
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    quotes.latest_quotes = [{**quote(price=10.5, limit=11.0), "timestamp": now.isoformat()}]
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    added = client.post(
+        "/api/limit-board/buy-pool",
+        json={
+            "symbol": "600000.SH",
+            "source": "first_board",
+            "revision": 0,
+            "allocation_mode": "lot",
+        },
+    )
+
+    assert added.status_code == 200
+    assert added.json()["order"]["status"] == "accepted_pending"
+    assert added.json()["config"]["revision"] == 1
+    assert client.get("/api/limit-board").json()["buy_pool"][0]["order_volume"] == 100
+
+    removed = client.delete("/api/limit-board/buy-pool/600000.SH?revision=1")
+
+    assert removed.status_code == 200
+    assert removed.json()["config"]["buy_pool"] == []
+    assert service._runtime_for_today()["buy_orders"] == {}
 
 
 def test_limit_board_api_rejects_legacy_notification_settings(tmp_path):

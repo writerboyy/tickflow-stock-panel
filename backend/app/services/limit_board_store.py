@@ -33,6 +33,7 @@ def default_config() -> dict[str, Any]:
         },
         "selected": [],
         "board_pool": [],
+        "buy_pool": [],
     }
 
 
@@ -70,6 +71,10 @@ class LimitBoardStore:
             ]
             result["board_pool"] = [
                 item for item in (raw.get("board_pool") or [])
+                if isinstance(item, dict) and item.get("symbol")
+            ]
+            result["buy_pool"] = [
+                item for item in (raw.get("buy_pool") or [])
                 if isinstance(item, dict) and item.get("symbol")
             ]
             return result

@@ -1210,13 +1210,24 @@ export interface LimitBoardRow {
   source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
   order_mode?: 'sweep' | 'queue'
+  allocation_mode?: 'global' | 'lot' | 'fixed' | 'volume'
+  allocation_value?: number | null
+  order_price?: number | null
+  order_volume?: number | null
+  order_amount?: number | null
+  order_idempotency_key?: string | null
+  order_status?: string | null
+  order_sys_id?: string | null
+  order_error?: string | null
+  order_at?: string | null
+  order_updated_at?: string | null
   auto_order_key?: string
   auto_order_status?: string
   auto_order_sys_id?: string | null
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
-  auto_order_allocation_mode?: 'quarter' | 'third' | 'half' | 'fixed' | 'lot'
+  auto_order_allocation_mode?: 'quarter' | 'third' | 'half' | 'fixed' | 'lot' | 'volume'
   auto_order_allocation_value?: number | null
   auto_order_volume?: number | null
   auto_order_amount?: number | null
@@ -1521,6 +1532,7 @@ export interface LimitBoardView {
   candidate_pool: LimitBoardRow[]
   opportunity_pool: LimitBoardRow[]
   board_pool: LimitBoardRow[]
+  buy_pool: LimitBoardRow[]
   blacklist: string[]
   market_sentiment: {
     provider: 'kaipanla'
@@ -1588,6 +1600,20 @@ export interface LimitBoardConfig {
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     auto_trade: boolean
     order_mode?: 'sweep' | 'queue'
+    allocation_mode?: 'global' | 'lot' | 'fixed' | 'volume'
+    allocation_value?: number
+    added_at?: string
+  }>
+  buy_pool: Array<{
+    symbol: string
+    name?: string
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
+    allocation_mode: 'lot' | 'fixed' | 'volume'
+    allocation_value?: number
+    order_price?: number
+    order_volume?: number
+    order_amount?: number
+    order_idempotency_key?: string
     added_at?: string
   }>
 }
@@ -2877,17 +2903,32 @@ export const api = {
       `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
-  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number) =>
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode = 'global', allocationValue?: number | null) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
-      method: 'POST', body: JSON.stringify({ symbol, source, revision }),
+      method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
     }),
-  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number) =>
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
-      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision }),
+      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
     }),
   limitBoardPoolRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(
       `/api/limit-board/pool/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
+  limitBoardBuyPoolAdd: (
+    symbol: string,
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual',
+    revision: number,
+    allocationMode: 'lot' | 'fixed' | 'volume' = 'lot',
+    allocationValue?: number | null,
+  ) => request<{ ok: boolean; config: LimitBoardConfig; order: QmtOrder }>('/api/limit-board/buy-pool', {
+    method: 'POST',
+    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
+  }),
+  limitBoardBuyPoolRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/buy-pool/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),

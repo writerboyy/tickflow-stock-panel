@@ -51,6 +51,7 @@ _ENTRY_MIN_LIMIT_GAP_PCT = 0.005
 _ENTRY_MAX_LIMIT_GAP_PCT = 0.03
 _ENTRY_QUOTE_FRESH_SECONDS = 10.0
 _ENTRY_SCORE_RISING_DELTA = 0.05
+_POOL_ALLOCATION_MODES = frozenset({"global", "lot", "fixed", "volume"})
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
@@ -177,6 +178,7 @@ class LimitBoardService:
         self._order_slots = threading.BoundedSemaphore(4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._started = False
         self._polling_lease = False
         self._ws_registered = False
         self._ws_symbols: set[str] = set()
@@ -220,12 +222,42 @@ class LimitBoardService:
         self._last_error: str | None = None
 
     def start(self) -> None:
-        """保留旧调用兼容性；短线猎手不再启动专用监听器。"""
-        logger.info("limit board dedicated listeners are disabled")
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        add_fetch_listener = getattr(self.quote_service, "add_fetch_listener", None)
+        if callable(add_fetch_listener):
+            add_fetch_listener(self._on_market_fetch)
+        self._refresh_symbol_consumer()
+        acquire_polling = getattr(self.quote_service, "acquire_temporary_polling", None)
+        get_min_interval = getattr(self.quote_service, "get_min_interval", None)
+        if callable(acquire_polling):
+            try:
+                interval = max(1.0, float(get_min_interval())) if callable(get_min_interval) else 3.0
+                acquire_polling(interval)
+                self._polling_lease = True
+            except ValueError as exc:
+                self._last_error = str(exc)
+        hub = self._hub()
+        if hub is not None:
+            hub.add_depth_listener(self.enqueue_depth)
+            # Pool symbols must be subscribed before the first quote arrives;
+            # relying on a later market callback leaves a configured pool idle
+            # when the provider has no initial snapshot.
+            self._sync_websocket(self._runtime_for_today(), self.store.load_config())
+        self._thread = threading.Thread(target=self._worker, name="limit-board", daemon=True)
+        self._started = True
+        self._thread.start()
+        self._on_market_fetch()
 
     def stop(self) -> None:
-        self.quote_service.remove_fetch_listener(self._on_market_fetch)
-        self.quote_service.remove_symbol_consumer(_ACCOUNT_ID)
+        self._started = False
+        remove_fetch_listener = getattr(self.quote_service, "remove_fetch_listener", None)
+        if callable(remove_fetch_listener):
+            remove_fetch_listener(self._on_market_fetch)
+        remove_symbol_consumer = getattr(self.quote_service, "remove_symbol_consumer", None)
+        if callable(remove_symbol_consumer):
+            remove_symbol_consumer(_ACCOUNT_ID)
         hub = self._hub()
         if hub is not None:
             hub.remove_depth_listener(self.enqueue_depth)
@@ -236,8 +268,9 @@ class LimitBoardService:
                     logger.debug("打板专区移除 WS 订阅失败", exc_info=True)
         self._ws_registered = False
         self._ws_symbols.clear()
-        if self._polling_lease:
-            self.quote_service.release_temporary_polling()
+        release_polling = getattr(self.quote_service, "release_temporary_polling", None)
+        if self._polling_lease and callable(release_polling):
+            release_polling()
             self._polling_lease = False
         self._stop.set()
         self._enqueue({"type": "stop"})
@@ -1235,7 +1268,7 @@ class LimitBoardService:
         self._refresh_history(config)
         symbols = {
             str(item["symbol"]).strip().upper()
-            for key in ("selected", "board_pool")
+            for key in ("selected", "board_pool", "buy_pool")
             for item in config[key]
         }
         if self._market_mode() == "full_market":
@@ -1311,6 +1344,7 @@ class LimitBoardService:
                 "symbols": {},
                 "blacklist": [],
                 "candidate_excluded": [],
+                "buy_orders": {},
             }
             self.store.save_runtime(runtime)
             self._depth.clear()
@@ -1454,7 +1488,7 @@ class LimitBoardService:
         retained = {
             symbol
             for symbol, quote in updates.items()
-            if {"selected", "board_pool"} & set(quote.get("source_modes") or [])
+            if {"selected", "board_pool", "buy_pool"} & set(quote.get("source_modes") or [])
         }
         by_sector: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for symbol, quote in updates.items():
@@ -1524,6 +1558,7 @@ class LimitBoardService:
         runtime = self._runtime_for_today()
         selected = {str(item["symbol"]).strip().upper() for item in config["selected"]}
         board_pool = {str(item["symbol"]).strip().upper() for item in config["board_pool"]}
+        buy_pool = {str(item["symbol"]).strip().upper() for item in config.get("buy_pool", [])}
         now = cn_now()
         automatic_candidates = (
             self._automatic_candidate_symbols(now.date()) if full_market else set()
@@ -1540,6 +1575,8 @@ class LimitBoardService:
                 modes.add("selected")
             if symbol in board_pool:
                 modes.add("board_pool")
+            if symbol in buy_pool:
+                modes.add("buy_pool")
             if symbol in automatic_candidates and symbol not in excluded:
                 if symbol in self._first_board_eligible:
                     modes.add("first_board")
@@ -1571,6 +1608,8 @@ class LimitBoardService:
             source_modes = []
             if symbol in board_pool:
                 source_modes.append("board_pool")
+            if symbol in buy_pool:
+                source_modes.append("buy_pool")
             if symbol in selected:
                 source_modes.append("selected")
             if symbol in automatic_candidates and symbol not in excluded:
@@ -1612,9 +1651,9 @@ class LimitBoardService:
         with self._lock:
             self._quotes.update(updates)
         self._evaluate_quotes(updates, runtime, config)
-        rows, selected_rows, board_rows = self._view_collections(runtime, config)
+        rows, selected_rows, board_rows, buy_rows = self._view_collections(runtime, config)
         candidates = self._candidate_rows_for_runtime(
-            runtime, rows, selected_rows, board_rows,
+            runtime, rows, selected_rows, board_rows, buy_rows,
         )
         scoring_rows = {
             str(item.get("symbol") or "").strip().upper(): item
@@ -1927,12 +1966,20 @@ class LimitBoardService:
                 qmt_status.get("reason") or "QMT 实盘交易未就绪",
             )
             return
+        if self._started and (
+            self._hub() is None
+            or not self._ws_registered
+            or symbol not in self._ws_symbols
+        ):
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = "标的未接入共享 TickFlow WebSocket，已阻止自动委托"
+            return
         if not self._order_slots.acquire(blocking=False):
             state["auto_order_status"] = "blocked"
             state["auto_order_error"] = "自动委托队列已满"
             return
         allocation_mode, allocation_value, allocation_error = self._auto_order_allocation(
-            float(quote["limit_up"]), config,
+            float(quote["limit_up"]), config, member,
         )
         if allocation_error:
             self._order_slots.release()
@@ -1973,12 +2020,26 @@ class LimitBoardService:
 
     @staticmethod
     def _auto_order_allocation(
-        limit_up: float, config: dict[str, Any],
+        limit_up: float,
+        config: dict[str, Any],
+        member: dict[str, Any] | None = None,
     ) -> tuple[str, float | None, str | None]:
-        mode = str(config["settings"].get("order_allocation_mode") or "fixed").strip().lower()
-        amount = _finite(config["settings"].get("order_amount_per_board", 0))
-        if mode not in {"quarter", "third", "half", "fixed"}:
+        member_mode = str((member or {}).get("allocation_mode") or "global").strip().lower()
+        if member_mode not in {"", "global"}:
+            mode = member_mode
+            amount = _finite((member or {}).get("allocation_value"))
+        else:
+            mode = str(config["settings"].get("order_allocation_mode") or "fixed").strip().lower()
+            amount = _finite(config["settings"].get("order_amount_per_board", 0))
+        if mode not in {"quarter", "third", "half", "fixed", "lot", "volume"}:
             return "fixed", None, "单板资金分配方式无效"
+        if mode == "lot":
+            return mode, None, None
+        if mode == "volume":
+            volume = int(amount or 0)
+            if volume < 100 or volume % 100:
+                return mode, amount, "固定数量必须是 100 股的整数倍"
+            return mode, float(volume), None
         if amount is None or amount < 0:
             return mode, None, "单板下单资金配置无效"
         if mode != "fixed":
@@ -2007,18 +2068,22 @@ class LimitBoardService:
         try:
             if qmt is None:
                 raise RuntimeError("QMT 交易网关未初始化")
-            order = qmt.submit_order({
+            request: dict[str, Any] = {
                 "idempotency_key": key,
                 "strategy_name": "limit_board",
                 "action": "BUY",
                 "symbol": symbol,
                 "price": limit_up,
                 "price_type": "LIMIT",
-                "allocation_mode": allocation_mode,
-                "allocation_value": allocation_value,
                 "trigger_at": trigger_at,
                 "system_order_at": system_order_at,
-            })
+            }
+            if allocation_mode == "volume":
+                request["volume"] = int(allocation_value or 0)
+            else:
+                request["allocation_mode"] = allocation_mode
+                request["allocation_value"] = allocation_value
+            order = qmt.submit_order(request)
             result = {
                 "symbol": symbol,
                 "key": key,
@@ -2086,69 +2151,35 @@ class LimitBoardService:
         self._notify_updated()
 
     def _sync_websocket(self, runtime: dict[str, Any], config: dict[str, Any]) -> None:
-        # The shortline workspace now uses Kaipanla constituent snapshots only.
-        # They have no verifiable per-tick timestamp or five-level order book.
-        hub = self._hub()
-        if hub is not None and self._ws_registered:
-            try:
-                hub.unregister(_ACCOUNT_ID)
-            except Exception:  # noqa: BLE001
-                logger.debug("打板专区移除 WS 订阅失败", exc_info=True)
-        self._ws_registered = False
-        self._ws_symbols.clear()
-        return
-
         hub = self._hub()
         if hub is None:
             self._last_error = "共享 WebSocket Hub 不可用"
             return
-        blacklist = set(runtime.get("blacklist") or [])
-        near = float(config["settings"].get("near_limit_pct", 0.02))
-        exit_gap = float(config["settings"].get("exit_limit_pct", 0.03))
-        exit_sustain = float(config["settings"].get("exit_sustain_seconds", 30))
-        now = cn_now()
-        states = runtime.setdefault("symbols", {})
-        retained: set[str] = set()
-        for symbol in self._ws_symbols:
-            quote = self._quotes.get(symbol)
-            state = states.setdefault(symbol, {})
-            if (
-                quote is None
-                or symbol in blacklist
-                or "board_pool" not in quote.get("source_modes", [])
-            ):
-                state.pop("ws_exit_since", None)
-                continue
-            if float(quote.get("limit_gap_pct") or 1) <= exit_gap:
-                state.pop("ws_exit_since", None)
-                retained.add(symbol)
-                continue
-            exit_since = _quote_time(state.get("ws_exit_since"))
-            if exit_since is None:
-                state["ws_exit_since"] = now.isoformat()
-                retained.add(symbol)
-            elif (now - exit_since).total_seconds() < exit_sustain:
-                retained.add(symbol)
-        candidates = [
-            quote for symbol, quote in self._quotes.items()
-            if symbol not in blacklist
-            and "board_pool" in quote.get("source_modes", [])
-            and (float(quote.get("limit_gap_pct") or 1) <= near or symbol in retained)
-        ]
-        candidates.sort(key=lambda item: (
-            0 if "board_pool" in item.get("source_modes", []) else
-            1 if "selected" in item.get("source_modes", []) else 2,
-            float(item.get("limit_gap_pct") or 1),
-            -float(item.get("amount") or 0),
-        ))
-        available = hub.websocket_available(exclude=_ACCOUNT_ID)
-        desired = {str(item["symbol"]) for item in candidates[:available]}
+        desired = {
+            str(item.get("symbol") or "").strip().upper()
+            for key in ("board_pool", "buy_pool")
+            for item in config.get(key, [])
+            if str(item.get("symbol") or "").strip()
+        }
+        available_getter = getattr(hub, "websocket_available", None)
+        available = int(available_getter(exclude=_ACCOUNT_ID)) if callable(available_getter) else len(desired)
+        if len(desired) > available:
+            if self._ws_registered:
+                try:
+                    hub.unregister(_ACCOUNT_ID)
+                except Exception:  # noqa: BLE001
+                    logger.debug("打板专区移除超限 WS 订阅失败", exc_info=True)
+            self._ws_registered = False
+            self._ws_symbols.clear()
+            self._last_error = f"买入池和打板池共 {len(desired)} 只，超过可用 WebSocket 容量 {available} 只"
+            return
         try:
             if not desired:
                 if self._ws_registered:
                     hub.unregister(_ACCOUNT_ID)
                 self._ws_registered = False
                 self._ws_symbols.clear()
+                self._last_error = None
                 return
             if self._ws_registered:
                 hub.update_symbols(_ACCOUNT_ID, desired)
@@ -2159,6 +2190,37 @@ class LimitBoardService:
             self._last_error = None
         except (ValueError, RuntimeError) as exc:
             self._last_error = str(exc)
+
+    def _pool_websocket_capacity_error(
+        self,
+        config: dict[str, Any],
+        additional_symbols: set[str] | None = None,
+    ) -> str | None:
+        """Return a fail-closed capacity error before a pool mutation or order."""
+        hub = self._hub()
+        if hub is None:
+            return "共享 WebSocket Hub 不可用" if self._started else None
+        available_getter = getattr(hub, "websocket_available", None)
+        if not callable(available_getter):
+            return None
+        try:
+            available = max(0, int(available_getter(exclude=_ACCOUNT_ID)))
+        except Exception:  # noqa: BLE001
+            return "无法确认共享 WebSocket 容量，已阻止池内操作"
+        desired = {
+            str(item.get("symbol") or "").strip().upper()
+            for key in ("board_pool", "buy_pool")
+            for item in config.get(key, [])
+            if str(item.get("symbol") or "").strip()
+        }
+        desired.update({
+            str(symbol).strip().upper()
+            for symbol in additional_symbols or set()
+            if str(symbol).strip()
+        })
+        if len(desired) > available:
+            return f"买入池和打板池共 {len(desired)} 只，超过可用 WebSocket 容量 {available} 只"
+        return None
 
     def _emit(
         self, event_type: str, quote: dict[str, Any], state: dict[str, Any], config: dict[str, Any], reason: str,
@@ -2218,7 +2280,7 @@ class LimitBoardService:
         config = self.store.load_config()
         symbols = {
             str(item.get("symbol") or "").strip().upper()
-            for key in ("selected", "board_pool")
+            for key in ("selected", "board_pool", "buy_pool")
             for item in config.get(key, [])
             if str(item.get("symbol") or "").strip()
         }
@@ -2424,7 +2486,12 @@ class LimitBoardService:
 
     def _view_collections(
         self, runtime: dict[str, Any], config: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
         runtime_by_symbol = runtime.get("symbols", {})
         rows = []
         for symbol, state in runtime_by_symbol.items():
@@ -2463,7 +2530,20 @@ class LimitBoardService:
             row["name"] = self._resolve_name(symbol, row.get("name"))
             if not is_risk_warning_name(row["name"]):
                 board_pool.append(row)
-        return rows, selected, board_pool
+        buy_pool = []
+        buy_orders = runtime.get("buy_orders") or {}
+        for item in config.get("buy_pool", []):
+            symbol = str(item["symbol"]).strip().upper()
+            row = {
+                **item,
+                **runtime_by_symbol.get(symbol, {}),
+                **(buy_orders.get(symbol) or {}),
+                "ws_active": symbol in self._ws_symbols,
+            }
+            row["name"] = self._resolve_name(symbol, row.get("name"))
+            if not is_risk_warning_name(row["name"]):
+                buy_pool.append(row)
+        return rows, selected, board_pool, buy_pool
 
     def _candidate_rows_for_runtime(
         self,
@@ -2471,6 +2551,7 @@ class LimitBoardService:
         rows: list[dict[str, Any]],
         selected: list[dict[str, Any]],
         board_pool: list[dict[str, Any]],
+        buy_pool: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         excluded = {
             str(symbol).strip().upper()
@@ -2480,12 +2561,23 @@ class LimitBoardService:
             item for item in rows
             if str(item.get("symbol") or "").strip().upper() not in excluded
         ]
+        pool_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in [*board_pool, *buy_pool]
+        }
+        eligible = [
+            item for item in eligible
+            if str(item.get("symbol") or "").strip().upper() not in pool_symbols
+        ]
         return self._candidate_pool(
             [item for item in eligible if "first_board" in item.get("source_modes", [])],
             [item for item in eligible if "rebound_board" in item.get("source_modes", [])],
             [
                 item for item in selected
-                if str(item.get("symbol") or "").strip().upper() not in excluded
+                if (
+                    str(item.get("symbol") or "").strip().upper() not in excluded
+                    and str(item.get("symbol") or "").strip().upper() not in pool_symbols
+                )
             ],
             board_pool,
         )
@@ -3035,9 +3127,9 @@ class LimitBoardService:
         config = self.store.load_config()
         runtime = self._runtime_for_today()
         self._refresh_sector_candidate_universe(cn_today())
-        rows, selected, board_pool = self._view_collections(runtime, config)
+        rows, selected, board_pool, buy_pool = self._view_collections(runtime, config)
         candidates = self._candidate_rows_for_runtime(
-            runtime, rows, selected, board_pool,
+            runtime, rows, selected, board_pool, buy_pool,
         )
         scoring_rows = {
             str(item.get("symbol") or "").strip().upper(): item
@@ -3111,7 +3203,7 @@ class LimitBoardService:
                     event["order_timeline"] = self._order_timeline(order)
             events.append(event)
         self._enrich_concepts([
-            *rows, *selected, *board_pool, *candidate_pool,
+            *rows, *selected, *board_pool, *buy_pool, *candidate_pool,
             *opportunity_pool, *first_board, *rebound_board, *events,
         ])
         hub = self._hub()
@@ -3149,6 +3241,7 @@ class LimitBoardService:
             "candidate_pool": candidate_pool,
             "opportunity_pool": opportunity_pool,
             "board_pool": board_pool,
+            "buy_pool": buy_pool,
             "blacklist": [
                 symbol for symbol in runtime.get("blacklist", [])
                 if not is_risk_warning_name(self._resolve_name(str(symbol).strip().upper()))
@@ -3285,23 +3378,157 @@ class LimitBoardService:
         self._notify_updated()
         return saved
 
-    def add_pool(self, symbol: str, source: str, revision: int) -> dict[str, Any]:
+    @staticmethod
+    def _pool_allocation(
+        mode: str | None,
+        value: float | None,
+        *,
+        default: str,
+    ) -> tuple[str, float | None]:
+        cleaned_mode = str(mode or default).strip().lower()
+        if cleaned_mode not in _POOL_ALLOCATION_MODES:
+            raise ValueError("交易数量/金额方式无效")
+        if cleaned_mode in {"global", "lot"}:
+            if value is not None:
+                raise ValueError("一手或跟随全局设置时不应填写金额")
+            return cleaned_mode, None
+        if value is None or not float(value) > 0:
+            raise ValueError("固定金额或固定数量必须大于 0")
+        if cleaned_mode == "volume":
+            integer_value = int(value)
+            if integer_value != value or integer_value < 100 or integer_value % 100:
+                raise ValueError("固定数量必须是 100 股的整数倍")
+            return cleaned_mode, float(integer_value)
+        return cleaned_mode, float(value)
+
+    def _pool_quote(self, symbol: str) -> dict[str, Any]:
+        payload = self._fresh_tickflow_quotes({symbol})
+        raw = (payload.get("quotes") or {}).get(symbol)
+        if not isinstance(raw, dict):
+            with self._lock:
+                raw = dict(self._quotes.get(symbol) or {})
+        price = _finite(raw.get("last_price", raw.get("close"))) if isinstance(raw, dict) else None
+        quote_at = _quote_time(raw.get("timestamp")) if isinstance(raw, dict) else None
+        now = cn_now()
+        now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
+        if (
+            not isinstance(raw, dict)
+            or price is None
+            or price <= 0
+            or quote_at is None
+            or quote_at.date() != now_aware.date()
+            or (now_aware - quote_at).total_seconds() > _DEPTH_FRESH_SECONDS
+        ):
+            raise ValueError("缺少 30 秒内的 TickFlow 实时行情，无法立即挂单")
+        return {
+            **raw,
+            "symbol": symbol,
+            "last_price": price,
+            "timestamp": quote_at.isoformat(),
+        }
+
+    def _qmt_ready(self) -> Any:
+        qmt = self._qmt()
+        status = qmt.status() if qmt is not None else {}
+        if not (
+            qmt is not None
+            and status.get("configured")
+            and status.get("state") == "ready"
+            and status.get("trade_enabled")
+        ):
+            raise ValueError(str(status.get("reason") or "QMT 实盘交易未就绪"))
+        return qmt
+
+    def _buy_order_preview(
+        self,
+        qmt: Any,
+        symbol: str,
+        price: float,
+        allocation_mode: str,
+        allocation_value: float | None,
+    ) -> dict[str, Any]:
+        if allocation_mode == "volume":
+            volume = int(allocation_value or 0)
+            if volume < 100 or volume % 100:
+                raise ValueError("固定数量必须是 100 股的整数倍")
+            return {
+                "volume": volume,
+                "actual_amount": round(price * volume, 2),
+                "target_amount": round(price * volume, 2),
+                "capped": False,
+            }
+        preview_getter = getattr(qmt, "preview_order", None)
+        if not callable(preview_getter):
+            if allocation_mode == "lot":
+                return {
+                    "volume": 100,
+                    "actual_amount": round(price * 100, 2),
+                    "target_amount": round(price * 100, 2),
+                    "capped": False,
+                }
+            raise RuntimeError("QMT 不支持金额预览，无法确认买入金额")
+        preview = preview_getter({
+            "action": "BUY",
+            "symbol": symbol,
+            "price": price,
+            "price_type": "LIMIT",
+            "reference_price": price,
+            "allocation_mode": allocation_mode,
+            "allocation_value": allocation_value,
+        })
+        volume = int(preview.get("volume") or 0)
+        if volume < 100:
+            raise ValueError(str(preview.get("reason") or "金额不足一手"))
+        return {
+            "volume": volume,
+            "actual_amount": round(float(preview.get("actual_amount") or price * volume), 2),
+            "target_amount": round(float(preview.get("target_amount") or price * volume), 2),
+            "capped": bool(preview.get("capped")),
+        }
+
+    def add_pool(
+        self,
+        symbol: str,
+        source: str,
+        revision: int,
+        allocation_mode: str = "global",
+        allocation_value: float | None = None,
+    ) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)
+        allocation_mode, allocation_value = self._pool_allocation(
+            allocation_mode,
+            allocation_value,
+            default="global",
+        )
+        capacity_error = self._pool_websocket_capacity_error(
+            self.store.load_config(), {cleaned},
+        )
+        if capacity_error:
+            raise RuntimeError(capacity_error)
 
         def update(value: dict[str, Any]) -> None:
             if any(str(item.get("symbol")) == cleaned for item in value["board_pool"]):
                 return
-            value["board_pool"].append({
+            if any(str(item.get("symbol")) == cleaned for item in value.get("buy_pool", [])):
+                raise ValueError("该股票已在买入池中")
+            entry = {
                 "symbol": cleaned,
                 "name": name,
                 "source": source,
                 "auto_trade": True,
                 "order_mode": "sweep",
+                "allocation_mode": allocation_mode,
                 "added_at": cn_now().isoformat(),
+            }
+            if allocation_value is not None:
+                entry["allocation_value"] = allocation_value
+            value["board_pool"].append({
+                **entry,
             })
 
         saved = self.store.update(revision, update)
         self._refresh_symbol_consumer()
+        self._sync_websocket(self._runtime_for_today(), saved)
         self._on_market_fetch()
         self._notify_updated()
         return saved
@@ -3312,6 +3539,8 @@ class LimitBoardService:
         auto_trade: bool,
         order_mode: str,
         revision: int,
+        allocation_mode: str | None = None,
+        allocation_value: float | None = None,
     ) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
         cleaned_mode = str(order_mode or "").strip().lower()
@@ -3327,8 +3556,154 @@ class LimitBoardService:
                 raise ValueError("打板池中不存在该股票")
             member["auto_trade"] = bool(auto_trade)
             member["order_mode"] = cleaned_mode
+            if allocation_mode is not None:
+                mode, normalized_value = self._pool_allocation(
+                    allocation_mode,
+                    allocation_value,
+                    default="global",
+                )
+                member["allocation_mode"] = mode
+                if normalized_value is None:
+                    member.pop("allocation_value", None)
+                else:
+                    member["allocation_value"] = normalized_value
 
         saved = self.store.update(revision, update)
+        self._on_market_fetch()
+        self._notify_updated()
+        return saved
+
+    def add_buy_pool(
+        self,
+        symbol: str,
+        source: str,
+        revision: int,
+        allocation_mode: str = "lot",
+        allocation_value: float | None = None,
+    ) -> dict[str, Any]:
+        cleaned, name = self._validated_stock(symbol)
+        allocation_mode, allocation_value = self._pool_allocation(
+            allocation_mode,
+            allocation_value,
+            default="lot",
+        )
+        capacity_error = self._pool_websocket_capacity_error(
+            self.store.load_config(), {cleaned},
+        )
+        if capacity_error:
+            raise RuntimeError(capacity_error)
+        quote = self._pool_quote(cleaned)
+        price = float(quote["last_price"])
+        qmt = self._qmt_ready()
+        preview = self._buy_order_preview(
+            qmt,
+            cleaned,
+            price,
+            allocation_mode,
+            allocation_value,
+        )
+        idempotency_key = f"limit-buy-{cn_today().strftime('%Y%m%d')}-{cleaned}"
+
+        def update(value: dict[str, Any]) -> None:
+            if any(str(item.get("symbol")) == cleaned for item in value.get("buy_pool", [])):
+                raise ValueError("该股票已在买入池中")
+            if any(str(item.get("symbol")) == cleaned for item in value["board_pool"]):
+                raise ValueError("该股票已在打板池中")
+            entry = {
+                "symbol": cleaned,
+                "name": name,
+                "source": source,
+                "allocation_mode": allocation_mode,
+                "order_price": price,
+                "order_volume": preview["volume"],
+                "order_amount": preview["actual_amount"],
+                "order_idempotency_key": idempotency_key,
+                "added_at": cn_now().isoformat(),
+            }
+            if allocation_value is not None:
+                entry["allocation_value"] = allocation_value
+            value.setdefault("buy_pool", []).append(entry)
+
+        saved = self.store.update(revision, update)
+        runtime = self._runtime_for_today()
+        buy_orders = runtime.setdefault("buy_orders", {})
+        buy_orders[cleaned] = {
+            "order_status": "submitting",
+            "order_idempotency_key": idempotency_key,
+            "order_price": price,
+            "order_volume": preview["volume"],
+            "order_amount": preview["actual_amount"],
+            "order_error": None,
+            "order_at": cn_now().isoformat(timespec="milliseconds"),
+        }
+        self._persist_runtime(runtime)
+        try:
+            request: dict[str, Any] = {
+                "idempotency_key": idempotency_key,
+                "strategy_name": "limit_board",
+                "action": "BUY",
+                "symbol": cleaned,
+                "price": price,
+                "price_type": "LIMIT",
+                "trigger_at": cn_now().isoformat(timespec="milliseconds"),
+                "system_order_at": cn_now().isoformat(timespec="milliseconds"),
+            }
+            if allocation_mode == "volume":
+                request["volume"] = int(allocation_value or 0)
+            else:
+                request["allocation_mode"] = allocation_mode
+                request["allocation_value"] = allocation_value
+            order = qmt.submit_order(request)
+            result = {
+                "status": str(order.get("status") or "unknown"),
+                "order_sys_id": order.get("order_sys_id"),
+                "error": order.get("error"),
+                "volume": order.get("volume") or preview["volume"],
+                "estimated_amount": order.get("estimated_amount") or preview["actual_amount"],
+                "qmt_submit_at": order.get("qmt_submit_at"),
+                "qmt_accepted_at": order.get("qmt_accepted_at"),
+                "broker_order_at": order.get("broker_order_at"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "status": "blocked" if isinstance(exc, ValueError) else "unknown",
+                "order_sys_id": None,
+                "error": str(exc),
+                "volume": preview["volume"],
+                "estimated_amount": preview["actual_amount"],
+            }
+        buy_orders[cleaned].update({
+            "order_status": result["status"],
+            "order_sys_id": result.get("order_sys_id"),
+            "order_error": result.get("error"),
+            "order_volume": result.get("volume") or preview["volume"],
+            "order_amount": result.get("estimated_amount") or preview["actual_amount"],
+            "order_updated_at": cn_now().isoformat(timespec="milliseconds"),
+            "order_qmt_submit_at": result.get("qmt_submit_at"),
+            "order_qmt_accepted_at": result.get("qmt_accepted_at"),
+            "order_broker_at": result.get("broker_order_at"),
+        })
+        self._persist_runtime(runtime)
+        self._refresh_symbol_consumer()
+        self._sync_websocket(runtime, saved)
+        self._on_market_fetch()
+        self._notify_updated()
+        return {"config": saved, "order": {"symbol": cleaned, **result}}
+
+    def remove_buy_pool(self, symbol: str, revision: int) -> dict[str, Any]:
+        cleaned = str(symbol).strip().upper()
+        saved = self.store.update(
+            revision,
+            lambda value: value.__setitem__(
+                "buy_pool",
+                [item for item in value.get("buy_pool", []) if str(item.get("symbol")) != cleaned],
+            ),
+        )
+        runtime = self._runtime_for_today()
+        runtime.setdefault("buy_orders", {}).pop(cleaned, None)
+        self._persist_runtime(runtime)
+        self._refresh_symbol_consumer()
+        self._sync_websocket(runtime, saved)
         self._on_market_fetch()
         self._notify_updated()
         return saved
@@ -3342,6 +3717,7 @@ class LimitBoardService:
                 [item for item in value["board_pool"] if str(item.get("symbol")) != cleaned],
             ),
         )
+        self._sync_websocket(self._runtime_for_today(), saved)
         self._refresh_symbol_consumer()
         self._notify_updated()
         return saved

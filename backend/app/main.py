@@ -391,10 +391,7 @@ async def lifespan(app: FastAPI):
 
         limit_board_service = LimitBoardService(store.data_dir, repo, qs, app.state)
         app.state.limit_board_service = limit_board_service
-        # 短线猎手不再注册独立行情/盘口监听器。公共提醒统一由
-        # MonitorRuleEngine 评估并受监控中心规则控制；这里仅保留 API 所需的
-        # 工作区服务对象，避免启动后台监听和直接产生公共告警。
-        logger.info("limit board workspace loaded without dedicated listeners")
+        limit_board_service.start()
     except Exception as e:  # noqa: BLE001
         logger.warning("limit board service not started: %s", e)
         app.state.limit_board_service = None
