@@ -291,12 +291,17 @@ async def test_scheduled_0925_consumes_prepared_four_mode_targets(tmp_path, monk
 
 
 @pytest.mark.asyncio
-async def test_market_sentiment_snapshot_uses_live_expression_and_matching_ladder(
+async def test_market_sentiment_snapshot_uses_separate_sentiment_endpoints(
     tmp_path, monkeypatch,
 ):
     _configured(monkeypatch)
     calls = []
     responses = {
+        "rise_fall_analysis": {"info": [[52, 5, 5, 1, 23.17, 18, "2026-05-15"]]},
+        "market_performance": lambda params: {
+            "Date": "2026-05-15",
+            "List": ["--", 0, 0, 0, {"801900": 1.17, "801902": 4.01, "801903": 1.35}[params["PlateID"]], 0, 0, 0],
+        },
         "limit_up_expression": {"info": [52, 5, 5, 1, 13.5, 38, 11, 23.17, -0.09, -0.41, -2.04, "分化"]},
         "limit_up_ladder": {"Date": "2026-05-15", "List": [{"Tip": 0}, {"Tip": 4}]},
     }
@@ -307,38 +312,68 @@ async def test_market_sentiment_snapshot_uses_live_expression_and_matching_ladde
 
     assert snapshot["state"] == "live"
     assert snapshot["market_broken_rate_pct"] == 23.17
+    assert snapshot["yesterday_limitup_change_pct"] == 1.17
+    assert snapshot["yesterday_consecutive_change_pct"] == 4.01
+    assert snapshot["yesterday_broken_change_pct"] == 1.35
+    assert snapshot["market_evaluation"] == "分化"
     assert snapshot["max_consecutive"] == 4
-    assert calls == [
-        ("limit_up_expression", {"Day": "2026-05-15"}),
-        ("limit_up_ladder", {}),
-    ]
+    assert calls[0] == ("rise_fall_analysis", {})
+    assert {
+        params["PlateID"]
+        for endpoint, params in calls
+        if endpoint == "market_performance"
+    } == {"801900", "801902", "801903"}
+    assert ("limit_up_expression", {"Day": "2026-05-15"}) in calls
+    assert ("limit_up_ladder", {}) in calls
 
 
 @pytest.mark.asyncio
-async def test_market_sentiment_snapshot_does_not_substitute_completed_day_data(
+async def test_market_sentiment_snapshot_keeps_available_values_when_one_endpoint_fails(
     tmp_path, monkeypatch,
 ):
     _configured(monkeypatch)
     calls = []
     responses = {
-        "limit_up_expression": lambda params: (
-            {"info": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, "旧数据"]}
-            if params["Day"] == "2026-05-14"
-            else RuntimeError("当天尚未生成")
+        "rise_fall_analysis": RuntimeError("实时接口暂不可用"),
+        "market_performance": lambda params: (
+            {"Date": "2026-05-14", "List": ["--", 0, 0, 0, 1.2, 0, 0, 0]}
+            if params["PlateID"] == "801900"
+            else RuntimeError("单项接口暂不可用")
         ),
+        "limit_up_expression": RuntimeError("情绪文本暂不可用"),
         "limit_up_ladder": {"Date": "2026-05-13", "List": [{"Tip": 6}]},
     }
     collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
 
+    assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 1
+    snapshot = collector.market_sentiment_snapshot()
+    assert snapshot["state"] == "stale"
+    assert snapshot["as_of"] == "2026-05-14"
+    assert snapshot["yesterday_limitup_change_pct"] == 1.2
+    assert "market_broken_rate_pct" not in snapshot
+    assert snapshot["max_consecutive"] is None
+
+
+@pytest.mark.asyncio
+async def test_market_sentiment_snapshot_is_unavailable_when_all_endpoints_fail(
+    tmp_path, monkeypatch,
+):
+    _configured(monkeypatch)
+    responses = {
+        "rise_fall_analysis": RuntimeError("实时接口暂不可用"),
+        "market_performance": RuntimeError("表现接口暂不可用"),
+        "limit_up_expression": RuntimeError("情绪接口暂不可用"),
+        "limit_up_ladder": RuntimeError("高度接口暂不可用"),
+    }
+    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
+
     assert await collector.refresh_market_sentiment(date(2026, 5, 15)) == 0
     snapshot = collector.market_sentiment_snapshot()
+    assert snapshot is not None
+    assert snapshot["provider"] == "kaipanla"
     assert snapshot["state"] == "unavailable"
     assert snapshot["as_of"] == "2026-05-15"
     assert snapshot["max_consecutive"] is None
-    assert calls == [
-        ("limit_up_expression", {"Day": "2026-05-15"}),
-        ("limit_up_ladder", {}),
-    ]
 
 
 @pytest.mark.asyncio

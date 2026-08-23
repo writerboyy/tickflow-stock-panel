@@ -697,6 +697,41 @@ def parse_limit_up_expression(payload: dict, trade_date: date) -> dict:
     }
 
 
+def parse_rise_fall_analysis(payload: dict) -> dict:
+    """Parse the live limit-up, limit-down and broken-board snapshot."""
+    rows = _rows(payload, "info")
+    if len(rows) != 1:
+        raise ResponseShapeError("info 必须恰好包含 1 行")
+    row = rows[0]
+    if not isinstance(row, list) or len(row) != 7:
+        raise ResponseShapeError("info[0] 必须恰好包含 7 列")
+    trade_date = parse_trade_date(row[6])
+    if trade_date is None:
+        raise ResponseShapeError("info[0].trade_date 缺失")
+    return {
+        "as_of": trade_date.isoformat(),
+        "limit_up_count": _int(row[0], "info[0][0]"),
+        "limit_down_count": _int(row[1], "info[0][1]"),
+        "natural_limit_up_count": _int(row[2], "info[0][2]"),
+        "previously_limit_down_count": _int(row[3], "info[0][3]"),
+        "market_broken_rate_pct": _float(row[4], "info[0][4]"),
+        "market_broken_count": _int(row[5], "info[0][5]"),
+    }
+
+
+def parse_market_performance(payload: dict, plate_id: str) -> dict:
+    """Parse List[4] from a documented yesterday-performance index."""
+    values = _rows(payload, "List")
+    if len(values) < 5:
+        raise ResponseShapeError("List 至少需要 5 列")
+    trade_date = parse_trade_date(payload.get("Date"))
+    return {
+        "as_of": trade_date.isoformat() if trade_date else None,
+        "plate_id": str(plate_id),
+        "change_pct": _float(values[4], "List[4]"),
+    }
+
+
 def parse_limit_up_ladder_height(payload: dict) -> dict:
     rows = _rows(payload, "List")
     heights: list[int] = []

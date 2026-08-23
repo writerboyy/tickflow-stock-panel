@@ -83,6 +83,27 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
             "c": "HisHomeDingPan",
         },
     ),
+    "rise_fall_analysis": (
+        "GET",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "RiseFallAnalysis",
+            "c": "HomeDingPan",
+            "apiv": "w43",
+            "VerSion": "5.22.0.2",
+        },
+    ),
+    "market_performance": (
+        "GET",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "GetPlate_Info_QJ",
+            "c": "ZhiShuRanking",
+            "apiv": "w42",
+            "VerSion": "5.21.0.2",
+            "Date": "",
+        },
+    ),
     "limit_up_ladder": (
         "POST",
         "apphwhq.longhuvip.com",

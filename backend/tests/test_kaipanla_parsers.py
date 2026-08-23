@@ -21,12 +21,14 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_list,
     parse_limit_up_expression,
     parse_limit_up_ladder_height,
+    parse_market_performance,
     parse_limitup,
     parse_premium_gene,
     parse_northbound_sector,
     parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
+    parse_rise_fall_analysis,
     parse_sector_constituents,
     parse_sector_strength,
     parse_shareholder_changes,
@@ -226,6 +228,35 @@ def test_limit_up_expression_parser_maps_kaipanla_sentiment_fields():
     assert row["market_broken_rate_pct"] == 23.1707
     assert row["yesterday_consecutive_change_pct"] == -0.416
     assert row["market_evaluation"] == "题材存在炒作机会"
+
+
+def test_rise_fall_analysis_parser_maps_broken_rate_from_fifth_value():
+    row = parse_rise_fall_analysis(
+        {"info": [[54, 13, 51, 8, 25, 18, "2026-08-21"]]},
+    )
+
+    assert row == {
+        "as_of": "2026-08-21",
+        "limit_up_count": 54,
+        "limit_down_count": 13,
+        "natural_limit_up_count": 51,
+        "previously_limit_down_count": 8,
+        "market_broken_rate_pct": 25.0,
+        "market_broken_count": 18,
+    }
+
+
+def test_market_performance_parser_uses_list_four_for_index_performance():
+    row = parse_market_performance(
+        {"Date": "2026-08-21", "List": ["--", -361, 3640163228, 0, -7.16, 0, 0, 0]},
+        "801902",
+    )
+
+    assert row == {
+        "as_of": "2026-08-21",
+        "plate_id": "801902",
+        "change_pct": -7.16,
+    }
 
 
 def test_limit_up_ladder_parser_ignores_special_zero_level():
