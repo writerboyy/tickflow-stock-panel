@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import {
   AlertTriangle,
   ChevronDown,
@@ -32,7 +33,6 @@ import {
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignalText } from '@/lib/signals'
-import { openHistoryReportData, startAnalysis } from '@/lib/stockAnalysisStore'
 
 type Tab = 'positions' | 'events'
 
@@ -208,20 +208,14 @@ function reportTime(report: AiStockReport) {
 }
 
 function StockAnalysisStatus({ row, report, loading }: { row: PositionRiskPosition; report?: AiStockReport; loading: boolean }) {
+  const navigate = useNavigate()
   if (loading) return <span className="text-[10px] text-muted">分析状态加载中…</span>
-  const handleClick = async () => {
-    if (report) {
-      openHistoryReportData(report)
-      return
-    }
-    const result = await startAnalysis(row.symbol, row.name)
-    if (result.error) toast(result.error, 'error')
-  }
+  const handleClick = () => navigate(`/stock-analysis?symbol=${encodeURIComponent(row.symbol)}&name=${encodeURIComponent(row.name)}`)
   return (
-    <button type="button" onClick={handleClick} className="group flex min-w-[112px] items-center gap-1.5 text-left hover:text-accent" title={report ? '打开最新个股分析报告' : '打开个股分析并生成报告'}>
+    <button type="button" onClick={handleClick} className="group flex min-w-[112px] items-center gap-1.5 text-left hover:text-accent" title="打开完整个股分析页面">
       <LineChart className="h-3.5 w-3.5 shrink-0 text-accent/80 group-hover:text-accent" />
       <span className="min-w-0">
-        <span className={cn('block text-[11px]', report ? 'text-secondary' : 'text-warning')}>{report ? '最新分析' : '暂无分析 · 生成'}</span>
+        <span className={cn('block text-[11px]', report ? 'text-secondary' : 'text-warning')}>{report ? '打开完整分析' : '暂无分析 · 查看'}</span>
         {report && <span className="block text-[10px] text-muted">{reportTime(report)}</span>}
       </span>
     </button>

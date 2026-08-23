@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
@@ -26,13 +27,26 @@ import {
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
 export function StockAnalysis() {
-  const [symbol, setSymbol] = useState<string>('')
-  const [name, setName] = useState<string>('')
+  const [searchParams] = useSearchParams()
+  const routeSymbol = (searchParams.get('symbol') ?? '').trim().toUpperCase()
+  const routeName = searchParams.get('name') ?? ''
+  const [symbol, setSymbol] = useState<string>(routeSymbol)
+  const [name, setName] = useState<string>(routeName)
   const [checking, setChecking] = useState(false)
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
+
+  // 从持仓风控等页面跳转时，直接加载指定标的的完整分析看板。
+  useEffect(() => {
+    if (!routeSymbol) return
+    setSymbol(routeSymbol)
+    setName(routeName)
+    setConfirmReport(null)
+    setShowPriceAlerts(false)
+    rememberStock(routeSymbol, routeName)
+  }, [routeName, routeSymbol, rememberStock])
 
   // 进入页面立即加载历史报告(供右侧常驻列表)。store 内部有 historyLoaded 去重, 重复调用安全。
   useEffect(() => { loadHistory() }, [])
