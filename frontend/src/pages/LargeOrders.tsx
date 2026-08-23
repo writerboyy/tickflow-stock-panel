@@ -224,7 +224,7 @@ function StockAnalysisStatus({ row, report, loading, onOpen }: { row: PositionRi
 function StockAnalysisDrawer({ symbol, name, onClose }: { symbol: string; name: string; onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/35" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <aside role="dialog" aria-label={`${name}完整个股分析`} className="h-full w-full max-w-[1180px] overflow-y-auto border-l border-border bg-background shadow-2xl">
+      <aside role="dialog" aria-label={`${name}完整个股分析`} className="h-full w-full max-w-[1180px] overflow-y-auto border-l border-border bg-base shadow-2xl">
         <Suspense fallback={<div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>}>
           <StockAnalysis embedded initialSymbol={symbol} initialName={name} onClose={onClose} />
         </Suspense>
