@@ -104,6 +104,7 @@ const INTRADAY_RULE_TAB: Array<['take_profit' | 'stop_loss' | 't_trading', strin
   ['t_trading', '做 T'],
 ]
 const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
+type RiskModuleTab = 'take_profit' | 'stop_loss' | 't_trading'
 
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
@@ -178,25 +179,60 @@ function moduleSource(portfolio: PositionRiskPortfolio, symbol: string, ruleIds:
   return covered ? '已覆盖' : '默认'
 }
 
-function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions }) {
+function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
+  const field = POSITION_RISK_RULE_FIELDS[ruleId]?.find(item => item.key === fieldKey)
+  if (!field) return `${fieldKey} —`
+  const config = effectiveRule(portfolio, symbol, ruleId)
+  const raw = config[fieldKey] ?? field.defaultValue
+  const numeric = Number(raw)
+  if (!Number.isFinite(numeric)) return `${field.label} —`
+  const display = field.percent ? numeric * 100 : numeric
+  const value = Number.isInteger(display) ? String(display) : display.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+  return `${field.label} ${value}${field.suffix}`
+}
+
+function RiskSettingsSummary({ portfolio, symbol, options, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; options?: PositionRiskOptions; onOpen: (tab: RiskModuleTab) => void }) {
   const takeProfitEnabled = TAKE_PROFIT_RULES.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId)))
   const stopLossEnabled = STOP_LOSS_RULE_GROUPS.some(([, rules]) => rules.some(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))))
   const tTradingEnabled = effectiveRuleEnabled('t_trading', effectiveRule(portfolio, symbol, 't_trading'))
   const intradaySignalIds = options?.builtin_signals.filter(signal => signal.group === 'intraday').map(signal => signal.id) ?? []
   const tTradingSource = hasRuleOverride(portfolio, symbol, ['t_trading']) || hasSignalOverride(portfolio, symbol, 'builtin', intradaySignalIds) ? '已覆盖' : '默认'
-  const status = (enabled: boolean) => enabled ? '已启用' : '未启用'
+  const stopLossRules = STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules)
+  const activeStopLossCount = stopLossRules.filter(ruleId => effectiveRuleEnabled(ruleId, effectiveRule(portfolio, symbol, ruleId))).length
+  const modules: Array<{ tab: RiskModuleTab; label: string; source: string; enabled: boolean; lines: string[] }> = [
+    {
+      tab: 'take_profit', label: '止盈', source: moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), enabled: takeProfitEnabled,
+      lines: [
+        riskFieldText(portfolio, symbol, 'take_profit', 'threshold'),
+        riskFieldText(portfolio, symbol, 'trailing_drawdown', 'activation_gain'),
+        `分批 ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'first_r')} / ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'second_r')}`,
+      ],
+    },
+    {
+      tab: 'stop_loss', label: '止损', source: moduleSource(portfolio, symbol, stopLossRules, ['builtin', 'custom', 'monitor_rules']), enabled: stopLossEnabled,
+      lines: [
+        riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
+        riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
+        `规则 ${activeStopLossCount}/${stopLossRules.length} 项启用`,
+      ],
+    },
+    {
+      tab: 't_trading', label: '做 T', source: tTradingSource, enabled: tTradingEnabled,
+      lines: [
+        `${riskFieldText(portfolio, symbol, 't_trading', 'buy_pct')} / ${riskFieldText(portfolio, symbol, 't_trading', 'sell_pct')}`,
+        riskFieldText(portfolio, symbol, 't_trading', 'min_expected_return'),
+        `${riskFieldText(portfolio, symbol, 't_trading', 'cooldown_minutes')} / ${riskFieldText(portfolio, symbol, 't_trading', 'max_daily_trades')}`,
+      ],
+    },
+  ]
   return (
-    <div className="w-full min-w-0 space-y-1 text-[10px] leading-4">
-      {[
-        ['止盈', moduleSource(portfolio, symbol, TAKE_PROFIT_RULES), status(takeProfitEnabled)],
-        ['止损', moduleSource(portfolio, symbol, STOP_LOSS_RULE_GROUPS.flatMap(([, rules]) => rules), ['builtin', 'custom', 'monitor_rules']), status(stopLossEnabled)],
-        ['做 T', tTradingSource, status(tTradingEnabled)],
-      ].map(([label, source, value]) => (
-        <div key={label} className="grid grid-cols-[24px_30px_minmax(0,1fr)] items-baseline gap-1">
-          <span className="text-secondary">{label}</span>
-          <span className={cn('text-[9px]', source === '已覆盖' ? 'text-accent' : 'text-muted')}>{source}</span>
-          <span className={cn('min-w-0 whitespace-nowrap', value === '未启用' ? 'text-muted' : 'text-foreground')} title={`${label}${source}，${value}，点击设置查看详细参数`}>{value}</span>
-        </div>
+    <div className="grid w-full min-w-0 grid-cols-3 gap-1.5 text-[10px] leading-4">
+      {modules.map(module => (
+        <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}${module.source}，${module.enabled ? '已启用' : '未启用'}`}>
+          <span className="flex items-center justify-between gap-1"><span className="truncate text-secondary">{module.label}</span><span className={cn('shrink-0 text-[9px]', module.enabled ? 'text-foreground' : 'text-muted')}>{module.enabled ? '启用' : '关闭'}</span></span>
+          <span className={cn('mt-1 block truncate text-[9px]', module.source === '已覆盖' ? 'text-accent' : 'text-muted')}>{module.source}</span>
+          {module.lines.map((line, index) => <span key={`${module.tab}-${index}`} className="block truncate text-[9px] text-secondary">{line}</span>)}
+        </button>
       ))}
     </div>
   )
@@ -239,10 +275,10 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
   return <span className={cn('h-2 w-2 rounded-full', active ? 'bg-bear' : warning ? 'bg-warning' : 'bg-muted')} />
 }
 
-function PositionInspector({ row, options, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; onClose: () => void }) {
+function PositionInspector({ row, options, initialTab, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; initialTab: RiskModuleTab; onClose: () => void }) {
   const portfolioQuery = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio })
   const queryClient = useQueryClient()
-  const [activeRuleTab, setActiveRuleTab] = useState<'take_profit' | 'stop_loss' | 't_trading'>('stop_loss')
+  const [activeRuleTab, setActiveRuleTab] = useState<RiskModuleTab>(initialTab)
   const [expandedRule, setExpandedRule] = useState<string | null>(null)
   const [showAdvancedRules, setShowAdvancedRules] = useState(false)
   const portfolio = portfolioQuery.data
@@ -464,7 +500,7 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
 
-          <details className="mt-4 border-y border-border">
+          <details open className="mt-4 border-y border-border">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-xs text-secondary">
               <span className="flex items-center gap-2"><ChevronDown className="h-3.5 w-3.5" />高级规则与参数</span>
               <span className="text-[10px] text-muted">需要调整规则时展开</span>
@@ -569,12 +605,13 @@ export function LargeOrders() {
   const [positionSort, setPositionSort] = useState<'asc' | 'desc' | null>(null)
   const [importOpen, setImportOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
-  const [selected, setSelected] = useState<PositionRiskPosition | null>(null)
+  const [selected, setSelected] = useState<{ row: PositionRiskPosition; tab: RiskModuleTab } | null>(null)
   const [tradeRow, setTradeRow] = useState<PositionRiskPosition | null>(null)
   const [tradePreset, setTradePreset] = useState<QmtTradePreset | null>(null)
   const [tradeRiskContext, setTradeRiskContext] = useState<QmtRiskTradeContext | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
   const [analysisPanel, setAnalysisPanel] = useState<{ symbol: string; name: string } | null>(null)
+  const openRiskSettings = (row: PositionRiskPosition, tab: RiskModuleTab) => setSelected({ row, tab })
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
@@ -698,7 +735,7 @@ export function LargeOrders() {
 
       {tab === 'positions' && (rows.length ? <>
           <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[1160px] text-xs">
+          <table className="w-full min-w-[1300px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
               {['证券', '数量 / 可用', '成本 / 现价 / 持仓盈亏', '仓位', '最新分析', '风控设置', '操作'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
@@ -709,8 +746,8 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div><div className={cn('text-[10px]', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
                 <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>
-                <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
-                <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
+                <td className="w-[330px] max-w-[330px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} onOpen={tab => openRiskSettings(row, tab)} /></td>
+                <td className="px-3 py-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></td>
               </tr>)}
             </tbody>
           </table>
@@ -719,9 +756,9 @@ export function LargeOrders() {
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
             <div className="min-w-0">
               <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div></button>
-              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></div>
+              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
             </div>
-            <div className="flex items-center gap-2"><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
+            <div className="flex items-center gap-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
         </div>
       </> : <EmptyState icon={ShieldCheck} title={data.positions.length ? '没有符合搜索的持仓' : '尚未导入持仓'} hint={data.positions.length ? '调整搜索条件' : '使用顶部“图片导入”上传同花顺手机持仓截图'} />)}
@@ -763,7 +800,7 @@ export function LargeOrders() {
 
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
       <PositionRiskRulesDialog open={rulesOpen} portfolio={data} options={options.data} onClose={() => setRulesOpen(false)} />
-      {selected && <PositionInspector row={selected} options={options.data} onClose={() => setSelected(null)} />}
+      {selected && <PositionInspector key={`${selected.row.symbol}-${selected.tab}`} row={selected.row} options={options.data} initialTab={selected.tab} onClose={() => setSelected(null)} />}
       {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} riskContext={tradeRiskContext} onClose={() => { setTradeRow(null); setTradePreset(null); setTradeRiskContext(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
       {analysisPanel && <StockAnalysisDrawer symbol={analysisPanel.symbol} name={analysisPanel.name} onClose={() => setAnalysisPanel(null)} />}
