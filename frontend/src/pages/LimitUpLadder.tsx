@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle } from 'lucide-react'
+import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle, Check, Crosshair } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type LimitLadderTier, type LimitLadderStock, type MonitorRule } from '@/lib/api'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -220,7 +220,7 @@ function useSealedDegrade(asOf: string, latestDate: string | undefined, sealedRe
 
 // ===== 单只股票卡片 =====
 
-const StockCard = React.memo(function StockCard({ stock, extFields, direction, sealMode, monitored, monitorRule, onMonitorChange, hasDepth, onClick, onDimensionClick }: {
+const StockCard = React.memo(function StockCard({ stock, extFields, direction, sealMode, monitored, monitorRule, onMonitorChange, hasDepth, onClick, onDimensionClick, inPool, poolBusy, poolAvailable, onAddToPool }: {
   stock: LimitLadderStock
   extFields: ExtFieldConfig
   direction: Direction
@@ -231,6 +231,10 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   hasDepth: boolean
   onClick: (symbol: string, name?: string) => void
   onDimensionClick: (kind: DimensionKind, value: string, sourceField?: string) => void
+  inPool: boolean
+  poolBusy: boolean
+  poolAvailable: boolean
+  onAddToPool: () => void
 }) {
   const [showMonitorMenu, setShowMonitorMenu] = useState(false)
   const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null)
@@ -385,6 +389,21 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
           )}
         </div>
       )}
+      {direction === 'up' ? (
+        <button
+          type="button"
+          disabled={inPool || poolBusy || !poolAvailable}
+          title={inPool ? '已在打板池' : poolAvailable ? '加入打板池' : '打板池配置尚未加载'}
+          onClick={event => {
+            event.stopPropagation()
+            onAddToPool()
+          }}
+          className={`mt-0.5 inline-flex h-6 items-center gap-1 rounded border px-2 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/50 hover:bg-accent/10 hover:text-accent'}`}
+        >
+          {inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}
+          {inPool ? '已加入' : poolBusy ? '加入中' : '打板'}
+        </button>
+      ) : null}
     </div>
     </div>
   )
@@ -938,7 +957,7 @@ function TagStats({ title, tiers, extFields, fieldKey, color, selectedTag, onSel
 
 // ===== 梯队分组 =====
 
-function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth }: {
+function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth, poolSymbols, poolBusy, poolAvailable, onAddToPool }: {
   tier: LimitLadderTier
   defaultOpen: boolean
   extFields: ExtFieldConfig
@@ -954,6 +973,10 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
   ladderRules: Map<string, MonitorRule>
   onMonitorChange: () => void
   hasDepth: boolean
+  poolSymbols: Set<string>
+  poolBusy: boolean
+  poolAvailable: boolean
+  onAddToPool: (stock: LimitLadderStock) => void
 }) {
   const isDarkTheme = useTheme() === 'dark'
   const [open, setOpen] = useState(defaultOpen)
@@ -1143,6 +1166,10 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
                   hasDepth={hasDepth}
                   onClick={onStockClick}
                   onDimensionClick={onDimensionClick}
+                  inPool={poolSymbols.has(s.symbol)}
+                  poolBusy={poolBusy}
+                  poolAvailable={poolAvailable}
+                  onAddToPool={() => onAddToPool(s)}
                 />
               ))}
             </div>
@@ -1446,6 +1473,7 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 // ===== 主页面 =====
 
 export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNode } = {}) {
+  const queryClient = useQueryClient()
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
@@ -1454,6 +1482,27 @@ export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNo
   const [showExtConfig, setShowExtConfig] = useState(false)
   const [showConcept, setShowConcept] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).concept)
   const [showIndustry, setShowIndustry] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).industry)
+
+  const limitBoardView = useQuery({
+    queryKey: QK.limitBoard,
+    queryFn: api.limitBoard,
+    staleTime: 5_000,
+    placeholderData: previous => previous,
+  })
+  const addToPool = useMutation({
+    mutationFn: (stock: LimitLadderStock) => {
+      const revision = limitBoardView.data?.revision
+      if (revision == null) throw new Error('打板池配置尚未加载')
+      return api.limitBoardPoolAdd(stock.symbol, 'manual', revision)
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: QK.limitBoard })
+    },
+  })
+  const poolSymbols = useMemo(
+    () => new Set((limitBoardView.data?.board_pool ?? []).map(row => row.symbol)),
+    [limitBoardView.data?.board_pool],
+  )
 
   // 连板梯队封单监控规则 (type=ladder): {symbol → rule} 映射
   const { data: monitorRulesData, refetch: refetchMonitorRules } = useQuery({
@@ -1762,6 +1811,10 @@ export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNo
             ladderRules={ladderRules}
             onMonitorChange={refetchMonitorRules}
             hasDepth={sealedDegrade.hasDepth}
+            poolSymbols={poolSymbols}
+            poolBusy={addToPool.isPending}
+            poolAvailable={limitBoardView.data != null}
+            onAddToPool={stock => addToPool.mutate(stock)}
           />
         ))}
       </div>

@@ -10,6 +10,7 @@ import {
   Crosshair,
   Flame,
   Layers3,
+  LineChart,
   ListFilter,
   PanelRightClose,
   PanelRightOpen,
@@ -134,7 +135,7 @@ function mergeSentimentHistory(
   return [...byDate.values()].sort((left, right) => left.as_of.localeCompare(right.as_of))
 }
 
-function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] }) {
+function SentimentHistoryChart({ points, className = 'h-36' }: { points: LimitBoardSentimentPoint[]; className?: string }) {
   const chartRef = useRef<HTMLDivElement>(null)
   const chartTheme = useChartTheme()
   const option = useMemo<echarts.EChartsOption>(() => {
@@ -150,8 +151,8 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
         valueFormatter: value => value == null ? '--' : String(value),
       },
       grid: [
-        { left: 26, right: 22, top: 4, height: '48%' },
-        { left: 26, right: 22, top: '61%', bottom: 32 },
+        { left: 26, right: 22, top: 4, height: '70%' },
+        { left: 26, right: 22, top: '84%', bottom: 32 },
       ],
       xAxis: [
         {
@@ -210,6 +211,13 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
           symbolSize: 5,
           lineStyle: { color: '#f97316', width: 2.5 },
           itemStyle: { color: '#f97316' },
+          markLine: {
+            symbol: ['none', 'none'],
+            silent: true,
+            label: { show: false },
+            lineStyle: { color: chartTheme.accent, width: 1.5, type: 'solid', opacity: 0.9 },
+            data: [{ yAxis: 25 }, { yAxis: 75 }],
+          },
         },
       ],
       dataZoom: [
@@ -231,8 +239,8 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
     }
   }, [option])
 
-  if (points.length === 0) return <div className="grid h-32 place-items-center text-[11px] text-muted">暂无情绪历史</div>
-  return <div ref={chartRef} className="h-36 w-full" aria-label="开盘啦情绪强度历史折线图" />
+  if (points.length === 0) return <div className={`grid ${className} place-items-center text-[11px] text-muted`}>暂无情绪历史</div>
+  return <div ref={chartRef} className={`${className} w-full`} aria-label="开盘啦情绪强度历史折线图" />
 }
 
 function moneyYi(value: number | null | undefined): string {
@@ -1218,6 +1226,7 @@ export function LimitBoard() {
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
+  const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
   const [tradeRow, setTradeRow] = useState<LimitBoardRow | null>(null)
   const view = useQuery({
     queryKey: QK.limitBoard,
@@ -1321,22 +1330,26 @@ export function LimitBoard() {
     : tab === 'opportunity'
       ? '独立机会分排序：强势确认、评分上升速度、日内分时和成交空间；只显示仍有成交空间的实时标的'
     : `前 10 板块强势股统一打分，自动候选只取 Top 30${data.settings.main_board_only ? ' · 仅沪深主板' : ''}；手工标的不受限制`
-  const sentimentPanel = <section className="border-b border-border px-4 py-3 sm:px-5">
-    <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(280px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
+  const sentimentPanel = <>
+    <section className="border-b border-border px-4 py-3 sm:px-5">
+      <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(220px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
       {[
         ['今日破板率', data.market_sentiment ? plainPercentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
         ['昨日涨停今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
         ['昨日连板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
         ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
       ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
-      <div className="min-w-0 px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[9px]">
-          <span className="shrink-0 text-muted">市场情绪</span>
-          <span className="inline-flex shrink-0 items-center gap-1 text-secondary"><span className="h-1.5 w-1.5 rounded-full bg-orange-500" aria-hidden="true" />情绪强度</span>
-          <span className="inline-flex shrink-0 items-center gap-1 text-secondary"><span className="h-2 w-2 rounded-sm bg-green-500/70" aria-hidden="true" />涨停家数</span>
-          <span className="ml-auto min-w-0 truncate text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
-        </div>
-        <SentimentHistoryChart points={sentimentHistory} />
+      <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+        <span className="min-w-0 truncate text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
+        <button
+          type="button"
+          onClick={() => setSentimentChartOpen(true)}
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-accent"
+          aria-label="查看情绪历史图表"
+          title="查看情绪历史图表"
+        >
+          <LineChart className="h-3.5 w-3.5" />
+        </button>
       </div>
     </div>
     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
@@ -1345,7 +1358,25 @@ export function LimitBoard() {
       <span className={runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'}>{runtime.sentiment_guard.reason}</span>
     </div>
     {runtime.sentiment_guard.blocked ? <div className="mt-2 flex items-center gap-2 rounded-btn border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"><ShieldAlert className="h-3.5 w-3.5" />自动打板已停止</div> : null}
-  </section>
+    </section>
+    {sentimentChartOpen ? <Modal labelledBy="limit-board-sentiment-title" onClose={() => setSentimentChartOpen(false)} panelClassName="flex max-h-[90vh] w-[94vw] max-w-4xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div>
+          <h2 id="limit-board-sentiment-title" className="text-sm font-semibold">市场情绪历史</h2>
+          <p className="mt-0.5 text-[10px] text-muted">情绪强度与涨停家数</p>
+        </div>
+        <button type="button" onClick={() => setSentimentChartOpen(false)} className="grid h-7 w-7 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭情绪历史图表"><X className="h-4 w-4" /></button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4">
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted">
+          <span className="font-mono text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
+          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-orange-500" aria-hidden="true" />情绪强度</span>
+          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-green-500/70" aria-hidden="true" />涨停家数</span>
+        </div>
+        <SentimentHistoryChart points={sentimentHistory} className="h-[min(74vh,620px)] min-h-[320px]" />
+      </div>
+    </Modal> : null}
+  </>
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
