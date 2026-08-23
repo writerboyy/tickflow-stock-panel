@@ -29,6 +29,7 @@ function sameHolding(a: PositionRiskOcrRow, b: PositionRiskOcrRow) {
     && a.available === b.available
     && a.cost_price === b.cost_price
     && a.current_price === b.current_price
+    && (a.entry_date ?? null) === (b.entry_date ?? null)
 }
 
 /** 重叠行数值一致时去重；数值冲突时保留全部候选并要求人工选择。 */
@@ -272,6 +273,7 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
                       <th className="px-2 py-2 text-right">可用</th>
                       <th className="px-2 py-2 text-right">成本价</th>
                       <th className="px-2 py-2 text-right">截图现价</th>
+                      <th className="px-2 py-2 text-left">建仓日</th>
                       <th className="px-2 py-2 text-left">核对</th>
                     </tr>
                   </thead>
@@ -291,6 +293,15 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
                             />
                           </td>
                         ))}
+                        <td className="px-2 py-2">
+                          <input
+                            type="date"
+                            value={row.entry_date ?? ''}
+                            onChange={event => updateRow(index, { entry_date: event.target.value || null })}
+                            className="h-7 w-32 rounded border border-border bg-transparent px-2 text-[11px]"
+                            aria-label={`${row.name || row.symbol || row.code}建仓日`}
+                          />
+                        </td>
                         <td className="px-2 py-2">
                           {row.alternatives?.length ? (
                             <select
@@ -314,7 +325,7 @@ export function PositionRiskImportDialog({ open, portfolio, onClose }: Props) {
                         </td>
                       </tr>
                     ))}
-                    {!rows.length && <tr><td colSpan={7} className="px-3 py-10 text-center text-muted">选择截图后在这里校正识别结果</td></tr>}
+                    {!rows.length && <tr><td colSpan={8} className="px-3 py-10 text-center text-muted">选择截图后在这里校正识别结果</td></tr>}
                   </tbody>
                 </table>
               </div>

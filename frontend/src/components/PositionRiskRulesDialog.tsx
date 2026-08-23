@@ -16,7 +16,9 @@ interface Props {
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利后高点回撤',
-  t_trading: '做T',
+  intraday_peak_pullback: '盘中冲高回落', next_day_gap_down: '次日跳空低开',
+  next_day_gap_up_take_profit: '次日高开止盈', opening_range_failure: '开盘区间失败',
+  t_plus_one_exit: 'T+1 强制退出',
   ma5_breakdown: '跌破 MA5', ma10_breakdown: '跌破 MA10', ma20_breakdown: '跌破 MA20',
   five_minute_drawdown: '5 分钟高点回撤', vwap_breakdown: '分时均价负偏离超限',
   broken_limit_up: '涨停炸板', resealed_limit_up: '涨停回封',
@@ -35,6 +37,7 @@ const RULE_LABELS: Record<string, string> = {
 const INDEPENDENT_RULE_GROUPS = [
   ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['波动与时间保护', ['atr_protection', 'time_stop']],
+  ['隔日短线保护', ['intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit', 'opening_range_failure', 't_plus_one_exit']],
   ['涨跌停', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
   ['账户总控', ['daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption']],
 ] as const
@@ -45,8 +48,12 @@ const FUND_EVIDENCE = [
   ['orderbook_imbalance', '盘口失衡', '五档卖盘持续明显强于买盘'],
 ] as const
 
-type DialogTab = 'take_profit' | 'stop_loss' | 't_trading'
-const SHORT_TERM_RULES = new Set(['take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop'])
+type DialogTab = 'take_profit' | 'stop_loss'
+const SHORT_TERM_RULES = new Set([
+  'take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop',
+  'intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit',
+  'opening_range_failure', 't_plus_one_exit',
+])
 
 export type PositionRiskRuleField = {
   key: string
@@ -72,34 +79,63 @@ export const LARGE_ORDER_FIELDS: PositionRiskRuleField[] = [
 
 export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> = {
   stop_loss: [
+    { key: 'mode', label: '止损模式', suffix: '', min: 0, step: 1, type: 'select', options: [['fixed', '固定百分比'], ['atr', 'ATR 波动率'], ['max_fixed_atr', '固定与 ATR 取更严格']] },
     { key: 'threshold', label: '亏损阈值', suffix: '%', min: -100, max: 0, step: 1, percent: true, defaultValue: -0.10 },
+    { key: 'atr_multiple', label: 'ATR14 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 1.5 },
+    { key: 'fees_buffer', label: '费用滑点缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
   take_profit: [
     { key: 'threshold', label: '目标收益率', suffix: '%', min: 0, max: 500, step: 1, percent: true, defaultValue: 0.10 },
+    { key: 'fees_buffer', label: '费用滑点缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
     { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
   take_profit_ladder: [
     { key: 'first_r', label: '第一阶段 R', suffix: 'R', min: 0.1, step: 0.1, defaultValue: 1 },
     { key: 'first_action_pct', label: '第一阶段减仓', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 30 },
-    { key: 'second_r', label: '第二阶段 R', suffix: 'R', min: 0.2, step: 0.1, defaultValue: 2 },
+    { key: 'second_r', label: '第二阶段 R', suffix: 'R', min: 0.2, step: 0.1, defaultValue: 1.5 },
     { key: 'second_action_pct', label: '第二阶段减仓', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 30 },
     { key: 'runner_pct', label: '剩余仓位', suffix: '%', min: 0, max: 100, step: 10, defaultValue: 40 },
     { key: 'fees_buffer', label: '成本保护缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
-    { key: 'runner_atr_multiple', label: '剩余 ATR 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 2 },
-  ],
-  t_trading: [
-    { key: 'buy_pct', label: '买入比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 10 },
-    { key: 'sell_pct', label: '卖出比例', suffix: '%', min: 0, max: 100, step: 5, defaultValue: 25 },
-    { key: 'confirm_bars', label: '确认根数', suffix: '根', min: 1, max: 10, step: 1, defaultValue: 2 },
-    { key: 'cooldown_minutes', label: '冷却时间', suffix: '分', min: 0, step: 1, defaultValue: 10 },
-    { key: 'min_expected_return', label: '最低预期收益', suffix: '%', min: 0, max: 100, step: 0.1, percent: true, defaultValue: 0.005 },
-    { key: 'max_daily_trades', label: '每日最多次数', suffix: '次', min: 0, max: 50, step: 1, defaultValue: 3 },
+    { key: 'break_even_r', label: '保本启动 R', suffix: 'R', min: 0.1, step: 0.1, defaultValue: 1 },
+    { key: 'lock_profit_r', label: '锁定收益 R', suffix: 'R', min: 0, step: 0.1, defaultValue: 0.5 },
+    { key: 'runner_atr_multiple', label: '剩余 ATR 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 1.5 },
   ],
   trailing_drawdown: [
     { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.05 },
     { key: 'threshold', label: '高点回撤', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.08 },
     { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  intraday_peak_pullback: [
+    { key: 'activation_gain', label: '启动盈利', suffix: '%', min: 0, max: 100, step: 1, percent: true, defaultValue: 0.05 },
+    { key: 'threshold', label: '高点回撤', suffix: '%', min: 0, max: 100, step: 0.5, percent: true, defaultValue: 0.03 },
+    { key: 'confirm_seconds', label: '确认时间', suffix: '秒', min: 0, max: 300, step: 1, defaultValue: 5 },
+    { key: 'cooldown_seconds', label: '冷却时间', suffix: '秒', min: 0, step: 30, defaultValue: 300 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  next_day_gap_down: [
+    { key: 'threshold', label: '跳空低开阈值', suffix: '%', min: -20, max: 0, step: 0.5, percent: true, defaultValue: -0.03 },
+    { key: 'confirm_minutes', label: '确认分钟', suffix: '分', min: 1, max: 5, step: 1, defaultValue: 1 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  next_day_gap_up_take_profit: [
+    { key: 'threshold', label: '目标收益', suffix: '%', min: 0, max: 100, step: 0.5, percent: true, defaultValue: 0.04 },
+    { key: 'fees_buffer', label: '费用滑点缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
+    { key: 'confirm_minutes', label: '确认分钟', suffix: '分', min: 1, max: 5, step: 1, defaultValue: 1 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  opening_range_failure: [
+    { key: 'window_minutes', label: '开盘区间', suffix: '分', min: 5, max: 15, step: 5, defaultValue: 5 },
+    { key: 'reference', label: '失败基准', suffix: '', min: 0, step: 1, type: 'select', options: [['opening_range_low', '开盘区间低点'], ['vwap', 'VWAP']] },
+    { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
+    { key: 'confirm_bars', label: '确认根数', suffix: '根', min: 1, max: 5, step: 1, defaultValue: 1 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 50 },
+  ],
+  t_plus_one_exit: [
+    { key: 'max_holding_days', label: '最长持仓', suffix: '交易日', min: 1, max: 20, step: 1, defaultValue: 1 },
+    { key: 'close_before_minutes', label: '收盘前退出', suffix: '分', min: 0, max: 120, step: 5, defaultValue: 15 },
+    { key: 'min_gain', label: '最低收益', suffix: '%', min: -100, max: 100, step: 0.5, percent: true, defaultValue: -1 },
+    { key: 'action_pct', label: '执行比例', suffix: '%', min: 0, max: 100, step: 25, defaultValue: 100 },
   ],
   ma5_breakdown: [
     { key: 'buffer', label: '跌破缓冲', suffix: '%', min: 0, max: 20, step: 0.1, percent: true, defaultValue: 0.002 },
@@ -259,6 +295,30 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
     }))
   }
 
+  const toggleRuleAutoExecute = (ruleId: string, auto_execute: boolean) => {
+    setTemplate(previous => ({
+      ...previous,
+      rules: {
+        ...previous.rules,
+        [ruleId]: { ...(previous.rules[ruleId] ?? options?.rules[ruleId] ?? {}), auto_execute },
+      },
+    }))
+  }
+
+  const applyOvernightPreset = () => {
+    const conservative: Record<string, Record<string, any>> = {
+      stop_loss: { enabled: true, mode: 'max_fixed_atr', threshold: -0.06, atr_multiple: 1.5, fees_buffer: 0.002, action_pct: 100, auto_execute: false },
+      take_profit_ladder: { enabled: true, active: true, first_r: 1, first_action_pct: 30, second_r: 1.5, second_action_pct: 30, runner_pct: 40, break_even_r: 1, lock_profit_r: 0.5, runner_atr_multiple: 1.5, fees_buffer: 0.002, auto_execute: false },
+      intraday_peak_pullback: { enabled: true, active: true, activation_gain: 0.05, threshold: 0.03, confirm_seconds: 5, cooldown_seconds: 300, action_pct: 50, auto_execute: false },
+      next_day_gap_down: { enabled: true, active: true, threshold: -0.03, confirm_minutes: 1, action_pct: 50, auto_execute: false },
+      next_day_gap_up_take_profit: { enabled: true, active: true, threshold: 0.04, confirm_minutes: 1, fees_buffer: 0.002, action_pct: 50, auto_execute: false },
+      opening_range_failure: { enabled: true, active: true, window_minutes: 5, reference: 'opening_range_low', buffer: 0.002, confirm_bars: 1, action_pct: 50, auto_execute: false },
+      t_plus_one_exit: { enabled: true, active: true, max_holding_days: 1, close_before_minutes: 15, min_gain: -1, action_pct: 100, auto_execute: false },
+    }
+    setTemplate(previous => ({ ...previous, rules: { ...previous.rules, ...conservative } }))
+    toast('已写入隔日短线保守参数，自动委托保持关闭', 'success')
+  }
+
   const updateRuleValue = (ruleId: string, key: string, value: number | boolean | string) => {
     setTemplate(previous => ({
       ...previous,
@@ -353,7 +413,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
   const actionLabel = (ruleId: string) => {
     const config = ruleConfig(ruleId)
     if (ruleId === 'symbol_concentration') return `降至 ${Number(config.target_pct ?? 30)}%`
-    if (ruleId === 'take_profit_ladder') return `1R ${Number(config.first_action_pct ?? 30)}% / 2R ${Number(config.second_action_pct ?? 30)}%`
+    if (ruleId === 'take_profit_ladder') return `${Number(config.first_r ?? 1)}R ${Number(config.first_action_pct ?? 30)}% / ${Number(config.second_r ?? 1.5)}R ${Number(config.second_action_pct ?? 30)}%`
     return Number(config.action_pct ?? 0) > 0 ? `执行 ${config.action_pct}%` : '只提醒'
   }
 
@@ -367,11 +427,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
   const pressureAdvancedFields = (POSITION_RISK_RULE_FIELDS.fund_flow_pressure ?? []).filter(field => [
     'recovery_seconds', 'cooldown_seconds', 'recovery_sell_ratio', 'recovery_imbalance',
   ].includes(field.key))
-  const tabs: Array<[DialogTab, string]> = [
-    ['take_profit', '止盈'],
-    ['stop_loss', '止损'],
-    ['t_trading', '做 T'],
-  ]
+  const tabs: Array<[DialogTab, string]> = [['take_profit', '止盈'], ['stop_loss', '止损']]
   return (
     <Modal
       onClose={onClose}
@@ -383,7 +439,10 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
           <h2 id="position-risk-rules-title" className="text-sm font-semibold">全局风控模板</h2>
           <p className="mt-0.5 truncate text-[11px] text-muted">仅影响持仓风控；公共信号和监控中心原规则保持不变</p>
         </div>
-        <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={applyOvernightPreset} className="h-8 border border-accent/50 px-2 text-[11px] text-accent hover:bg-accent/10">隔日短线预设</button>
+          <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
+        </div>
       </div>
       <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border px-4" aria-label="风控模板分类">
         {tabs.map(([id, label]) => (
@@ -421,56 +480,12 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                         else toggleRule(ruleId, event.target.checked)
                       }} /><span>启用</span></label>
                       <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(ruleId, event.target.checked)} /><span>通知</span></label>
+                      {'auto_execute' in config && <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.auto_execute === true} onChange={event => toggleRuleAutoExecute(ruleId, event.target.checked)} /><span>自动委托</span></label>}
                     </div>
                     {expanded && <div className="mt-3 pl-5">{renderFields(ruleId, POSITION_RISK_RULE_FIELDS[ruleId])}</div>}
                   </div>
                 )
               })}
-            </div>
-          </section>
-        )}
-
-        {activeTab === 't_trading' && (
-          <section className="mx-auto max-w-4xl">
-            <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <h3 className="text-sm font-semibold">做 T</h3>
-                <p className="mt-1 text-[11px] text-muted">复用分时价格/均价和 0 轴穿越信号，生成触发记录，不会自动下单。</p>
-              </div>
-              <div className="flex items-center gap-3 text-[11px] text-muted">
-                <span className={options?.capabilities.intraday.available ? 'text-bull' : 'text-warning'}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
-                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={ruleConfig('t_trading').enabled !== false} onChange={event => toggleRule('t_trading', event.target.checked)} /><span>启用</span></label>
-                <label className="flex cursor-pointer items-center gap-1.5"><input type="checkbox" checked={ruleConfig('t_trading').notify === true} onChange={event => toggleRuleNotify('t_trading', event.target.checked)} /><span>通知</span></label>
-              </div>
-            </div>
-            <div className="border-y border-border py-3">
-              {renderFields('t_trading', POSITION_RISK_RULE_FIELDS.t_trading, 'sm:grid-cols-2')}
-              <p className="mt-2 text-[10px] text-muted">卖出按可用持仓比例，买入按当前持仓市值比例计算；数量统一向下取整到 100 股/份，并受可用资金限制。</p>
-            </div>
-            <div className="mt-6">
-              <div className="mb-2 flex items-end justify-between gap-3">
-                <div>
-                  <h4 className="text-xs font-semibold">分时穿越信号</h4>
-                  <p className="mt-1 text-[10px] text-muted">入场和出场信号分别记录买入或卖出动作；每次边沿只记录一条。</p>
-                </div>
-                <span className="text-[10px] text-muted">方向由系统定义</span>
-              </div>
-              <div className="divide-y divide-border border-y border-border">
-                {(options?.builtin_signals ?? []).filter(signal => signal.group === 'intraday').map(signal => {
-                  const saved = template.signals.builtin[signal.id]
-                  const enabled = saved?.enabled !== false
-                  return (
-                    <div key={signal.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
-                      <span className="min-w-0 truncate">{signal.label}</span>
-                      <span className="flex shrink-0 items-center gap-3">
-                        <span className="bg-elevated px-1.5 py-0.5 text-[10px] text-muted">{signal.direction === 'entry' ? '买入' : '卖出'}</span>
-                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={enabled} disabled={!options?.capabilities.intraday.available || ruleConfig('t_trading').enabled === false} onChange={event => toggleSignal('builtin', signal.id, event.target.checked, signal.direction, signal.label)} /><span>启用</span></label>
-                        <label className="flex cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={saved?.notify === true} disabled={!options?.capabilities.intraday.available || ruleConfig('t_trading').enabled === false} onChange={event => updateSignal('builtin', signal.id, { notify: event.target.checked })} aria-label={`通知${signal.label}`} /><span>通知</span></label>
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
             </div>
           </section>
         )}
@@ -485,7 +500,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h3 className="text-xs font-semibold text-secondary">市场上下文门控</h3>
-                  <p className="mt-1 text-[10px] text-muted">普通止盈、止损和做 T 必须同时具备大盘、板块、集合竞价、开盘量能和资金流数据；硬止损与跌停仍独立保护。</p>
+                  <p className="mt-1 text-[10px] text-muted">普通止盈和止损需同时具备大盘、板块、集合竞价、开盘量能和资金流数据；硬止损与跌停仍独立保护。</p>
                 </div>
                 <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted"><input type="checkbox" checked={ruleConfig('market_context').enabled !== false} onChange={event => toggleRule('market_context', event.target.checked)} /><span>启用</span></label>
               </div>
@@ -512,6 +527,7 @@ export function PositionRiskRulesDialog({ open, portfolio, options, onClose }: P
                               else toggleRule(id, event.target.checked)
                             }} /><span>监控</span></label>
                             <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.notify === true} onChange={event => toggleRuleNotify(id, event.target.checked)} /><span>通知</span></label>
+                            {'auto_execute' in config && <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[10px] text-muted"><input type="checkbox" checked={config.auto_execute === true} onChange={event => toggleRuleAutoExecute(id, event.target.checked)} /><span>自动委托</span></label>}
                           </div>
                           {expanded && POSITION_RISK_RULE_FIELDS[id] && (
                             <div className="mt-3 pl-5">{renderFields(id, POSITION_RISK_RULE_FIELDS[id])}</div>

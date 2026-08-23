@@ -909,8 +909,14 @@ export interface PositionRiskEvent {
   emotion_phase?: string | null
   action_eligible?: boolean
   stage?: string | null
+  risk_stage?: string | null
+  initial_r?: number | null
   r_multiple?: number | null
   effective_stop_price?: number | null
+  holding_day?: number | null
+  auto_order_status?: string | null
+  auto_order_idempotency_key?: string | null
+  auto_order_error?: string | null
   feature_snapshot_at?: string | null
   timeline_origin?: 'position_risk' | 'monitor_rule' | string
 }
@@ -923,6 +929,13 @@ export interface PositionRiskPosition {
   cost_price: number
   import_price: number | null
   price_source: string | null
+  entry_date?: string | null
+  opened_at?: string | null
+  holding_day?: number | null
+  risk_stage?: string | null
+  initial_r?: number | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
   price: number | null
   market_value: number | null
   profit_loss: number | null
@@ -1017,6 +1030,7 @@ export interface PositionRiskOcrRow {
   code: string
   symbol: string | null
   name: string | null
+  entry_date?: string | null
   quantity: number | null
   available: number | null
   cost_price: number | null

@@ -277,6 +277,28 @@ class QmtZmqRpcClient:
         trades = self.call("query_trades", {"account_id": self.account_id, "strategy_name": ""})
         if not isinstance(asset, dict) or not isinstance(positions, dict):
             raise QmtRpcError("QMT 账户或持仓响应格式无效")
+        entry_dates: dict[str, str] = {}
+        if isinstance(trades, list):
+            for trade in trades:
+                if not isinstance(trade, dict):
+                    continue
+                action = str(
+                    trade.get("action") or trade.get("direction")
+                    or trade.get("entrust_bs") or trade.get("trade_type") or ""
+                ).strip().upper()
+                if action not in {"BUY", "B", "买入", "买", "1"}:
+                    continue
+                symbol = str(trade.get("stock_code") or trade.get("symbol") or "").strip().upper()
+                raw_time = (
+                    trade.get("trade_time") or trade.get("traded_at")
+                    or trade.get("成交时间") or trade.get("time")
+                )
+                parsed = _parse_broker_time(raw_time, _now()) if raw_time not in (None, "") else None
+                if not symbol or not parsed:
+                    continue
+                trade_date = parsed[:10]
+                if trade_date > entry_dates.get(symbol, ""):
+                    entry_dates[symbol] = trade_date
         normalized_positions = []
         for code, item in positions.items():
             if not isinstance(item, dict):
@@ -302,6 +324,7 @@ class QmtZmqRpcClient:
                 "available": available,
                 "cost_price": cost,
                 "asset_type": "etf" if symbol.startswith(("15", "16", "50", "51", "56", "58")) else "stock",
+                "entry_date": entry_dates.get(symbol),
             })
         return {
             "account_id": self.account_id,

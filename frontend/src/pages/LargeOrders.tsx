@@ -65,6 +65,8 @@ function compactRuntimeReason(reason: unknown): string {
 
 const QMT_ORDER_STATUS: Record<string, string> = {
   submitting: '提交中',
+  blocked: '未提交（门禁）',
+  error: '提交异常',
   unknown: '状态待人工核对',
   rejected: '已拒绝',
   accepted_pending: '已受理待回查',
@@ -95,15 +97,16 @@ const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown', 'take_profit_ladd
 const STOP_LOSS_RULE_GROUPS = [
   ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['波动与时间保护', ['atr_protection', 'time_stop']],
+  ['隔日短线保护', ['intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit', 'opening_range_failure', 't_plus_one_exit']],
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
-type RiskModuleTab = 'take_profit' | 'stop_loss' | 't_trading'
+type RiskModuleTab = 'take_profit' | 'stop_loss'
 
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利回撤', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
-  t_trading: '做 T',
+  intraday_peak_pullback: '盘中冲高回落', next_day_gap_down: '次日跳空低开', next_day_gap_up_take_profit: '次日高开止盈', opening_range_failure: '开盘区间失败', t_plus_one_exit: 'T+1 强制退出',
   five_minute_drawdown: '5 分钟回撤', vwap_breakdown: '分时均价负偏离超限', broken_limit_up: '炸板', resealed_limit_up: '回封',
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
@@ -181,17 +184,9 @@ function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: Positio
         riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
       ],
     },
-    {
-      tab: 't_trading', label: '做 T',
-      lines: [
-        `${riskFieldText(portfolio, symbol, 't_trading', 'buy_pct')} / ${riskFieldText(portfolio, symbol, 't_trading', 'sell_pct')}`,
-        riskFieldText(portfolio, symbol, 't_trading', 'min_expected_return'),
-        `${riskFieldText(portfolio, symbol, 't_trading', 'cooldown_minutes')} / ${riskFieldText(portfolio, symbol, 't_trading', 'max_daily_trades')}`,
-      ],
-    },
   ]
   return (
-    <div className="grid w-full min-w-0 grid-cols-3 gap-1.5 text-[10px] leading-4">
+    <div className="grid w-full min-w-0 grid-cols-2 gap-1.5 text-[10px] leading-4">
       {modules.map(module => (
         <button key={module.tab} type="button" onClick={() => onOpen(module.tab)} className="min-h-[82px] min-w-0 rounded border border-border px-1.5 py-1 text-left hover:border-accent/50 hover:bg-elevated" title={`${module.label}参数`}>
           <span className="block truncate text-secondary">{module.label}</span>
@@ -263,6 +258,12 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
       rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), notify } },
     })
   }
+  const setRuleAutoExecute = (ruleId: string, auto_execute: boolean) => {
+    mutation.mutate({
+      ...override,
+      rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), auto_execute } },
+    })
+  }
   const setSignalValue = (group: 'builtin' | 'custom' | 'monitor_rules', signalId: string, key: string, value: string | number | boolean | null) => {
     const groupValues = { ...(override.signals?.[group] ?? {}) }
     const signalValues = { ...(groupValues[signalId] ?? {}) }
@@ -295,7 +296,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     ['入场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'entry'), 'builtin'],
     ['出场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'exit'), 'builtin'],
     ['双向信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'both'), 'builtin'],
-    ['分时信号', (options?.builtin_signals ?? []).filter(signal => signal.group === 'intraday'), 'builtin'],
     ['自定义信号', options?.custom_signals ?? [], 'custom'],
   ]
   const renderRuleRows = (rules: readonly string[]) => rules.map(ruleId => {
@@ -312,6 +312,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
           </button>
           {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
+          {((override.rules?.[ruleId]?.auto_execute ?? portfolio?.template.rules[ruleId]?.auto_execute) !== undefined) && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>自动委托</span><input type="checkbox" checked={(override.rules?.[ruleId]?.auto_execute ?? portfolio?.template.rules[ruleId]?.auto_execute) === true} disabled={mutation.isPending} onChange={event => setRuleAutoExecute(ruleId, event.target.checked)} /></label>}
         </div>
         {expanded && fields.length > 0 && (
           <div className="mt-2 grid grid-cols-2 gap-2 pl-5">
@@ -390,16 +391,12 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                     <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                   </select>
                 </label>
-                {title === '分时信号' ? (
-                  <div className="text-[10px] text-muted"><span>执行比例</span><span className="mt-1 flex h-7 items-center border border-border bg-elevated px-2">由做T模块控制</span></div>
-                ) : (
-                  <label className="text-[10px] text-muted">执行比例
-                    <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
-                      <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
-                      <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
-                    </select>
-                  </label>
-                )}
+                <label className="text-[10px] text-muted">执行比例
+                  <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
+                    <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
+                    <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
+                  </select>
+                </label>
               </div>
             </div>
           )
@@ -418,19 +415,12 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
           <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <div className="grid grid-cols-5 gap-px border-y border-border bg-border text-xs">
-            {[
-              ['仓位', pct(row.weight)],
-              ['MA5', price(row.ma5)], ['MA10', price(row.ma10)], ['MA20', price(row.ma20)],
-            ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
-          </div>
-
           <div className="mt-4">
 
           {activeRuleTab === 'take_profit' && (
             <section className="mt-4">
               <div className="mb-2 flex items-end justify-between gap-3">
-                <div><h3 className="text-xs font-semibold text-secondary">止盈规则</h3><p className="mt-1 text-[10px] text-muted">固定目标和盈利后高点回撤分别判断。</p></div>
+                <div><h3 className="text-xs font-semibold text-secondary">止盈规则</h3><p className="mt-1 text-[10px] text-muted">阶段 {row.risk_stage ?? 'initial'} · {row.r_multiple == null ? 'R 未计算' : `${row.r_multiple.toFixed(2)}R`} · 有效保护价 {price(row.effective_stop_price)}</p></div>
               </div>
               <div className="divide-y divide-border border-y border-border">{renderRuleRows(TAKE_PROFIT_RULES)}</div>
             </section>
@@ -438,6 +428,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
 
           {activeRuleTab === 'stop_loss' && (
             <div className="mt-4 space-y-5">
+              <div className="border-y border-border px-1 py-2 text-[10px] text-muted">初始 1R {row.initial_r == null ? '数据不足' : price(row.initial_r)} · 持仓第 {row.holding_day == null ? '未知' : row.holding_day} 个交易日 · 有效保护价 {price(row.effective_stop_price)}</div>
               <section>
                 <div className="mb-2 flex items-end justify-between gap-3">
                   <div><h3 className="text-xs font-semibold text-secondary">市场上下文门控</h3><p className="mt-1 text-[10px] text-muted">可覆盖相关性、板块弱化和个股跑输阈值。</p></div>
@@ -460,7 +451,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                     <h3 className="mb-2 text-xs font-semibold text-secondary">账户与资金</h3>
                     <div className="divide-y divide-border border-y border-border">{renderRuleRows(ADVANCED_RULES)}</div>
                   </section>
-                  {renderSignalGroups(signalGroups.filter(([title]) => title !== '分时信号'))}
+                  {renderSignalGroups(signalGroups)}
                   <section>
                     <h3 className="mb-2 text-xs font-semibold text-secondary">已有风控规则</h3>
                     <div className="divide-y divide-border border-y border-border">
@@ -488,16 +479,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             </div>
           )}
 
-          {activeRuleTab === 't_trading' && (
-            <section className="mt-4 space-y-5">
-              <div className="flex flex-col gap-2 border-y border-border py-3 sm:flex-row sm:items-start sm:justify-between">
-                <div><h3 className="text-xs font-semibold text-secondary">做 T 参数</h3><p className="mt-1 text-[10px] text-muted">入场和出场信号生成触发记录；委托仍需手动确认。</p></div>
-                <span className={cn('text-[10px]', options?.capabilities.intraday.available ? 'text-bull' : 'text-warning')}>{options?.capabilities.intraday.available ? `分时可用 · 最多 ${options.capabilities.intraday.max_symbols} 只` : options?.capabilities.intraday.reason || '分时不可用'}</span>
-              </div>
-              <div className="divide-y divide-border border-y border-border">{renderRuleRows(['t_trading'])}</div>
-              <div>{renderSignalGroups(signalGroups.filter(([title]) => title === '分时信号'))}</div>
-            </section>
-          )}
           </div>
         </div>
         <div className="flex justify-end border-t border-border px-4 py-3">
@@ -676,8 +657,8 @@ export function LargeOrders() {
         {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.fingerprint ?? event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_220px] sm:px-5">
           <time className="font-mono text-muted"><span className="block">{new Date(event.ts).toLocaleString('zh-CN')}</span>{(event.occurrence_count ?? 1) > 1 && event.first_ts ? <span className="mt-0.5 block text-[10px]">首次 {new Date(event.first_ts).toLocaleTimeString('zh-CN')}</span> : null}</time>
           {event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}
-          <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? `做T${event.trade_action === 'BUY' ? '买入' : event.trade_action === 'SELL' ? '卖出' : ''}` : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span></span>
-          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return <button type="button" onClick={() => openTradeForEvent(event, event.action_eligible === true)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title={event.action_eligible ? '打开统一交易面板并保留风控确认' : '打开手动下单面板'}>{event.action_eligible ? '确认委托' : '手动下单'}</button> })() : null}</span>
+                  <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? '历史分时规则（已停用）' : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span></span>
+          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.auto_order_status && event.auto_order_status !== 'disabled' && <span className="text-[10px] text-muted">自动委托 {qmtOrderStatus(event.auto_order_status)}</span>}{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return <button type="button" onClick={() => openTradeForEvent(event, event.action_eligible === true)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title={event.action_eligible ? '打开统一交易面板并保留风控确认' : '打开手动下单面板'}>{event.action_eligible ? '确认委托' : '手动下单'}</button> })() : null}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 

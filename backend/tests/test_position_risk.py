@@ -943,6 +943,23 @@ def test_qmt_snapshot_rejects_available_above_volume():
         client.snapshot()
 
 
+def test_qmt_snapshot_derives_latest_buy_entry_date():
+    client = QmtZmqRpcClient(_qmt_settings())
+    responses = iter([
+        {"account_id": "account-1"},
+        {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
+        {"600036.SH": {"stock_code": "600036.SH", "volume": 100, "available": 100, "cost": 10}},
+        [],
+        [
+            {"stock_code": "600036.SH", "action": "BUY", "trade_time": "2026-08-20 10:00:00"},
+            {"stock_code": "600036.SH", "action": "BUY", "trade_time": "2026-08-21 10:00:00"},
+        ],
+    ])
+    client.call = lambda _method, _params=None: next(responses)
+    snapshot = client.snapshot()
+    assert snapshot["positions"][0]["entry_date"] == "2026-08-21"
+
+
 class _Repo:
     def __init__(self) -> None:
         self.rows = pl.DataFrame({
@@ -1188,6 +1205,159 @@ def test_position_rule_uses_private_threshold_and_action(tmp_path: Path):
     assert stop["action_pct"] == 25
 
 
+def test_atr_initial_stop_and_r_use_actual_protection_price(tmp_path: Path):
+    alert_store._write_count = 0
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
+        "template": {"rules": {"stop_loss": {"enabled": True, "mode": "atr", "atr_multiple": 2.0}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    service._history["600036.SH"]["atr_14"] = 1.5
+    portfolio = service.store.load()
+    service._evaluate_position(
+        portfolio, portfolio["positions"][0],
+        {"symbol": "600036.SH", "last_price": 36.9, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+    )
+    runtime = service.store.get_runtime("position:600036.SH")
+    assert runtime["initial_stop_price"] == pytest.approx(37.0)
+    assert runtime["initial_r"] == pytest.approx(3.0)
+    assert runtime["r_multiple"] == pytest.approx(-1.0333333333)
+    alert_store._write_count = 0
+
+
+def test_effective_protection_price_only_moves_up(tmp_path: Path):
+    alert_store._write_count = 0
+    service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    features = {"available": True, "fresh": True, "as_of": "2026-08-07T10:00:00", "atr14_5m": 0.2, "session_bars": []}
+    service._evaluate_position(portfolio, position, {"last_price": 11, "timestamp": "2026-08-07T10:00:00"}, datetime(2026, 8, 7, 10, 0), intraday_features=features)
+    first = service.store.get_runtime("position:600036.SH")["effective_stop_price"]
+    service._evaluate_position(portfolio, position, {"last_price": 10.4, "timestamp": "2026-08-07T10:01:00"}, datetime(2026, 8, 7, 10, 1), intraday_features=features)
+    assert service.store.get_runtime("position:600036.SH")["effective_stop_price"] >= first
+    alert_store._write_count = 0
+
+
+def test_t_plus_one_requires_entry_date_and_uses_trading_day(tmp_path: Path):
+    alert_store._write_count = 0
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10, "entry_date": "2026-08-21"}],
+        "template": {"rules": {"t_plus_one_exit": {"enabled": True, "active": True, "close_before_minutes": 15}}},
+    }, 0)
+    portfolio = service.store.load()
+    service._evaluate_position(
+        portfolio, portfolio["positions"][0],
+        {"last_price": 10, "timestamp": "2026-08-24T14:46:00"}, datetime(2026, 8, 24, 14, 46),
+    )
+    event = _position_events(service, "t_plus_one_exit")
+    assert event and event[0]["holding_day"] == 1
+
+    service2 = PositionRiskService(tmp_path / "missing", _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service2.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"t_plus_one_exit": {"enabled": True, "active": True}}},
+    }, 0)
+    portfolio2 = service2.store.load()
+    service2._evaluate_position(portfolio2, portfolio2["positions"][0], {"last_price": 9, "timestamp": "2026-08-24T14:46:00"}, datetime(2026, 8, 24, 14, 46))
+    insufficient = _position_events(service2, "t_plus_one_exit")
+    assert insufficient and insufficient[0]["action_pct"] == 0 and insufficient[0]["risk_stage"] == "data_insufficient"
+    alert_store._write_count = 0
+
+
+def test_auto_sell_is_blocked_on_entry_day_or_without_entry_date(tmp_path: Path):
+    class FakeQmt:
+        trade_enabled = True
+
+        def __init__(self):
+            self.calls = []
+
+        def submit_order(self, payload):
+            self.calls.append(payload)
+            return {"status": "accepted_pending"}
+
+    qmt = FakeQmt()
+    service = PositionRiskService(
+        tmp_path,
+        _Repo(),
+        _Quotes(),
+        SimpleNamespace(qmt_trading_service=qmt),
+    )
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 1000,
+            "available": 1000, "cost_price": 10, "entry_date": "2026-08-24",
+        }],
+        "template": {"rules": {"stop_loss": {"enabled": True, "auto_execute": True}}},
+    }, 0)
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    service._latest_quotes["600036.SH"] = {
+        "last_price": 9, "timestamp": "2026-08-24T10:00:00",
+    }
+
+    status = service._submit_auto_order(
+        portfolio, position, "stop_loss", 100, True, "entry-day", datetime(2026, 8, 24, 10, 0),
+    )
+
+    assert status[0] == "blocked"
+    assert "买入日" in (status[2] or "")
+    assert qmt.calls == []
+
+    position.pop("entry_date")
+    status = service._submit_auto_order(
+        portfolio, position, "stop_loss", 100, True, "unknown-entry", datetime(2026, 8, 25, 10, 0),
+    )
+    assert status[0] == "blocked"
+    assert "entry_date" in (status[2] or "")
+    assert qmt.calls == []
+
+
+def test_t_plus_one_uses_repository_trading_dates(tmp_path: Path):
+    class CalendarRepo(_Repo):
+        def get_daily_asset(self, _asset_type, _symbol, _start, _end, columns=None):
+            return pl.DataFrame({"date": [date(2026, 10, 2)]}).select(columns or ["date"])
+
+    service = PositionRiskService(tmp_path, CalendarRepo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service._asset_types["600036.SH"] = "stock"
+    assert service._holding_days_for_position(
+        "600036.SH", date(2026, 9, 30), date(2026, 10, 2), True,
+    ) == 1
+
+
+def test_ladder_effective_protection_triggers_after_break_even(tmp_path: Path):
+    alert_store._write_count = 0
+    service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    features = {"available": True, "fresh": True, "as_of": "2026-08-07T10:00:00", "atr14_5m": 0.2, "session_bars": []}
+    service._evaluate_position(portfolio, position, {"last_price": 11, "timestamp": "2026-08-07T10:00:00"}, datetime(2026, 8, 7, 10, 0), intraday_features=features)
+    service._evaluate_position(portfolio, position, {"last_price": 10.02, "timestamp": "2026-08-07T10:01:00"}, datetime(2026, 8, 7, 10, 1), intraday_features=features)
+    events = _position_events(service, "take_profit_runner")
+    assert len(events) == 1
+    assert events[0]["risk_stage"] == "tp_1"
+    assert events[0]["action_pct"] == 70
+    alert_store._write_count = 0
+
+
 def test_take_profit_uses_private_threshold_and_action(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
@@ -1210,7 +1380,33 @@ def test_take_profit_uses_private_threshold_and_action(tmp_path: Path):
     assert take_profit["action_pct"] == 50
 
 
-def test_t_trade_signal_records_manual_buy_action(tmp_path: Path):
+def test_take_profit_includes_fees_buffer(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
+        "template": {"rules": {"take_profit": {"enabled": True, "threshold": 0.10, "fees_buffer": 0.002}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 11.01, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+    )
+    assert not _position_events(service, "take_profit")
+
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 11.03, "timestamp": "2026-08-07T10:01:00"},
+        datetime(2026, 8, 7, 10, 1),
+    )
+    assert _position_events(service, "take_profit")
+
+
+def test_t_trade_signal_listener_is_disabled(tmp_path: Path):
     service = PositionRiskService(tmp_path, _Repo(), _FeatureQuotes(), SimpleNamespace(paper_supervisor=None))
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
@@ -1235,9 +1431,7 @@ def test_t_trade_signal_records_manual_buy_action(tmp_path: Path):
         features,
     )
 
-    event = _position_events(service, "t:signal_intraday_avg_cross_up")[0]
-    assert event["trade_action"] == "BUY"
-    assert event["price"] == 10
+    assert not _position_events(service, "t:signal_intraday_avg_cross_up")
 
 
 def test_t_trade_signal_fails_closed_without_fresh_features(tmp_path: Path):
