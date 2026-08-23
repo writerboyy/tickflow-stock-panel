@@ -21,7 +21,7 @@ from app.market_time import cn_now
 from app.services import alert_store
 from app.services.position_risk_context import PositionRiskContextService
 from app.services.position_risk_decision import build_position_decision
-from app.services.position_risk_store import PositionRiskStore
+from app.services.position_risk_store import PositionRiskStore, default_rule_options
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
 
 _ACCOUNT_ID = "position-risk"
@@ -73,6 +73,7 @@ _SIGNAL_LABELS = {
 }
 _SIGNAL_TOKEN = re.compile(r"(?<![A-Za-z0-9_])(?:signal|csg)[._][A-Za-z0-9_]+")
 logger = logging.getLogger(__name__)
+_RULE_DEFAULTS = default_rule_options()["rules"]
 
 
 def position_risk_signal_label(signal_id: str, custom_labels: dict[str, str] | None = None) -> str:
@@ -116,8 +117,8 @@ def _trade_pct(config: dict[str, Any], key: str, default: int) -> int:
 
 
 def _advanced_rule_enabled(config: dict[str, Any]) -> bool:
-    """新短线规则以 active 作为显式确认开关，旧配置合并后默认保持关闭。"""
-    return config.get("enabled", True) is not False and config.get("active", False) is True
+    """短线规则必须由当前个股显式启用，并确认 active。"""
+    return config.get("enabled") is True and config.get("active") is True
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -232,9 +233,6 @@ class PositionRiskService:
             for value in (self.store.get_runtime("severe_event_fingerprints", []) or [])
             if value
         }
-        self._quote_interruption_recovery_started_at = _finite(
-            self.store.get_runtime("quote_interruption_recovery_started_at"),
-        )
         if not self.store.get_runtime("risk_event_noise_guard_v1", False):
             self._severe_events.clear()
             self._severe_event_date = ""
@@ -644,9 +642,14 @@ class PositionRiskService:
         return max(0.0, (current - point).total_seconds())
 
     def _rule_config(self, portfolio: dict[str, Any], symbol: str, rule_id: str) -> dict[str, Any]:
-        result = deepcopy(portfolio["template"]["rules"].get(rule_id) or {})
         override = (portfolio.get("overrides") or {}).get(symbol) or {}
-        result.update((override.get("rules") or {}).get(rule_id) or {})
+        configured = (override.get("rules") or {}).get(rule_id)
+        if not isinstance(configured, dict):
+            return {}
+        result = deepcopy(_RULE_DEFAULTS.get(rule_id) or {})
+        result.pop("enabled", None)
+        result.pop("active", None)
+        result.update(configured)
         return result
 
     def _holding_days_for_position(
@@ -708,12 +711,9 @@ class PositionRiskService:
         group: str,
         signal_id: str,
     ) -> dict[str, Any]:
-        template_signals = portfolio["template"].get("signals", {})
-        result = deepcopy((template_signals.get(group) or {}).get(signal_id) or {})
         override = (portfolio.get("overrides") or {}).get(symbol) or {}
         override_signals = override.get("signals") or {}
-        result.update(((override_signals.get(group) or {}).get(signal_id)) or {})
-        return result
+        return deepcopy(((override_signals.get(group) or {}).get(signal_id)) or {})
 
     def _set_rule(
         self,
@@ -1150,7 +1150,7 @@ class PositionRiskService:
             if initial_stop_price and cost and stop_was_active else initial_stop_price
         )
         stop_active = bool(
-            stop_cfg.get("enabled", True)
+            stop_cfg.get("enabled") is True
             and stop_limit is not None
             and price <= stop_limit
         )
@@ -1249,7 +1249,7 @@ class PositionRiskService:
         effective_take_threshold = take_threshold + take_fees_buffer
         take_action = _action_pct(take_cfg, 100)
         take_active = bool(
-            take_cfg.get("enabled", False)
+            take_cfg.get("enabled") is True
             and stop_return is not None
             and stop_return >= effective_take_threshold
         )
@@ -1271,7 +1271,7 @@ class PositionRiskService:
         trailing_threshold = trailing_threshold if trailing_threshold is not None else 0.08
         trailing_action = _action_pct(trailing_cfg, 50)
         trailing_active = bool(
-            trailing_cfg.get("enabled", True) and cost and high / cost - 1 >= activation_gain
+            trailing_cfg.get("enabled") is True and cost and high / cost - 1 >= activation_gain
             and price / high - 1 <= -trailing_threshold
         )
         if self._set_rule(symbol, "trailing_drawdown", trailing_active, now):
@@ -1537,7 +1537,7 @@ class PositionRiskService:
             configured_action = _action_pct(cfg, action)
             ma = _finite(history.get(f"ma{days}"))
             below = bool(
-                cfg.get("enabled", True)
+                cfg.get("enabled") is True
                 and adjusted_price
                 and ma
                 and adjusted_price <= ma * (1 - (buffer if buffer is not None else 0.002))
@@ -1557,7 +1557,7 @@ class PositionRiskService:
         limit_down = _finite(quote.get("limit_down"))
         limit_down_action = _action_pct(limit_down_cfg, 100)
         at_limit_down = bool(
-            limit_down_cfg.get("enabled", True)
+            limit_down_cfg.get("enabled") is True
             and limit_down
             and price <= limit_down + 0.001
         )
@@ -1569,7 +1569,7 @@ class PositionRiskService:
         sealed_action = _action_pct(sealed_cfg, 0)
         if self._set_rule(
             symbol, "resealed_limit_up",
-            bool(sealed_cfg.get("enabled", True) and depth_state["resealed"]),
+            bool(sealed_cfg.get("enabled") is True and depth_state["resealed"]),
             now,
         ):
             self._emit(
@@ -1579,7 +1579,7 @@ class PositionRiskService:
         broken_cfg = self._rule_config(portfolio, symbol, "broken_limit_up")
         broken_action = _action_pct(broken_cfg, 50)
         if self._set_rule(
-            symbol, "broken_limit_up", bool(broken_cfg.get("enabled", True) and depth_state["broken"]), now,
+            symbol, "broken_limit_up", bool(broken_cfg.get("enabled") is True and depth_state["broken"]), now,
         ):
             self._emit(portfolio, position, "broken_limit_up", "涨停炸板", "critical", broken_action, ["连续封板状态中断"])
         shrink_80_cfg = self._rule_config(portfolio, symbol, "sealed_order_shrink_80")
@@ -1593,13 +1593,13 @@ class PositionRiskService:
         shrink_80 = bool(
             depth_state["sealed"]
             and not depth_state["broken"]
-            and shrink_80_cfg.get("enabled", True)
+            and shrink_80_cfg.get("enabled") is True
             and depth_state["shrink_ratio"] >= shrink_80_threshold
         )
         shrink_50 = bool(
             depth_state["sealed"]
             and not depth_state["broken"]
-            and shrink_50_cfg.get("enabled", True)
+            and shrink_50_cfg.get("enabled") is True
             and shrink_50_threshold <= depth_state["shrink_ratio"] < shrink_80_threshold
         )
         if self._set_rule(symbol, "sealed_order_shrink_80", shrink_80, now):
@@ -1625,7 +1625,7 @@ class PositionRiskService:
         imbalance_sustain = _finite(imbalance_cfg.get("sustain_seconds"))
         imbalance_sustain = imbalance_sustain if imbalance_sustain is not None else 10
         imbalance_below = bool(
-            imbalance_cfg.get("enabled", True)
+            imbalance_cfg.get("enabled") is True
             and depth_state["imbalance"] is not None
             and depth_state["imbalance"] < imbalance_threshold
         )
@@ -1644,11 +1644,11 @@ class PositionRiskService:
         sell_flow = self._flow_state(symbol, now, large_sell_cfg)
         flow = self._flow_state(symbol, now)
         large_sell_active = bool(
-            large_sell_cfg.get("enabled", True) and sell_flow["large_sell"]
+            large_sell_cfg.get("enabled") is True and sell_flow["large_sell"]
         )
         outflow_cfg = self._rule_config(portfolio, symbol, "continuous_outflow")
         outflow_below = bool(
-            outflow_cfg.get("enabled", True)
+            outflow_cfg.get("enabled") is True
             and flow["samples"] >= 3
             and flow["sell_ratio"] is not None
             and flow["sell_ratio"] >= float(outflow_cfg.get("direction_ratio", 0.65))
@@ -1705,7 +1705,7 @@ class PositionRiskService:
             ))
         minimum_evidence = max(2, int(_finite(pressure_cfg.get("min_evidence")) or 2))
         pressure_raw = bool(
-            pressure_cfg.get("enabled", True)
+            pressure_cfg.get("enabled") is True
             and len(evidence) >= minimum_evidence
             and price_reasons
         )
@@ -1806,7 +1806,7 @@ class PositionRiskService:
             drawdown_threshold = drawdown_threshold if drawdown_threshold is not None else 0.03
             drawdown_action = _action_pct(drawdown_cfg, 25)
             drawdown_active = bool(
-                drawdown_cfg.get("enabled", True)
+                drawdown_cfg.get("enabled") is True
                 and price / five_minute_high - 1 <= -drawdown_threshold
             )
             drawdown_suppressed = self._recovery_suppressed(runtime, "five_minute_drawdown", drawdown_active)
@@ -1822,7 +1822,7 @@ class PositionRiskService:
         vwap_sustain = vwap_sustain if vwap_sustain is not None else 30
         vwap_action = _action_pct(vwap_cfg, 25)
         vwap_below = bool(
-            vwap_cfg.get("enabled", True)
+            vwap_cfg.get("enabled") is True
             and vwap
             and price <= vwap * (1 - vwap_buffer)
         )
@@ -1879,7 +1879,7 @@ class PositionRiskService:
                 "custom" if is_custom else "builtin",
                 signal_id,
             )
-            if configured.get("enabled", True) is False:
+            if configured.get("enabled") is not True:
                 self._set_rule(symbol, f"signal:{signal_id}", False, now)
                 continue
             signal_rule_id = f"signal:{signal_id}"
@@ -2137,58 +2137,56 @@ class PositionRiskService:
         portfolio = self.store.load()
         if not portfolio["positions"]:
             return
-        config = self._rule_config(portfolio, "__portfolio__", "quote_interruption")
-        threshold = float(config.get("threshold_seconds", 30))
-        stale_symbols = []
         for position in portfolio["positions"]:
             symbol = str(position.get("symbol") or "").strip().upper()
+            config = self._rule_config(portfolio, symbol, "quote_interruption")
+            if config.get("enabled") is not True:
+                self._set_rule(symbol, "quote_interruption", False, now)
+                continue
+            threshold = float(config.get("threshold_seconds", 30))
             quote = self._latest_quotes.get(symbol) or {}
             age = self._quote_age_in_session(_timestamp(quote.get("timestamp")), now)
-            if age > threshold:
-                stale_symbols.append(symbol)
-        stale = bool(stale_symbols)
-        if stale:
-            self._mark_quote_gap(
-                f"持仓行情超过 {int(threshold)} 秒未更新，等待恢复后重新建立基线",
-                set(stale_symbols),
-            )
-        enabled = bool(config.get("enabled", True))
-        was_active = bool(
-            (self._rule_states.get("__portfolio__:quote_interruption") or {}).get("active"),
-        )
-        interruption_active = enabled and stale
-        recovery_started_at = self._quote_interruption_recovery_started_at
-        if not enabled or stale:
-            recovery_started_at = None
-        elif was_active:
-            recovery_started_at = recovery_started_at or now.timestamp()
-            interruption_active = (
-                now.timestamp() - recovery_started_at
-                < _QUOTE_INTERRUPTION_RECOVERY_SECONDS
-            )
-            if not interruption_active:
+            stale = age > threshold
+            if stale:
+                self._mark_quote_gap(
+                    f"{symbol} 行情超过 {int(threshold)} 秒未更新，等待恢复后重新建立基线",
+                    {symbol},
+                )
+            state_key = f"{symbol}:quote_interruption"
+            state = self._rule_states.get(state_key) or {}
+            was_active = bool(state.get("active"))
+            recovery_started_at = _finite(state.get("recovery_started_at"))
+            interruption_active = stale
+            if stale:
                 recovery_started_at = None
-        else:
-            recovery_started_at = None
-        if recovery_started_at != self._quote_interruption_recovery_started_at:
-            self._quote_interruption_recovery_started_at = recovery_started_at
-            self.store.set_runtime(
-                "quote_interruption_recovery_started_at", recovery_started_at,
-            )
-        if self._set_rule(
-            "__portfolio__", "quote_interruption", interruption_active,
-            now,
-        ):
-            self._emit(
-                portfolio,
-                None,
-                "quote_interruption",
-                "行情中断",
-                "critical",
-                _action_pct(config, 0),
-                [f"{', '.join(stale_symbols)} 行情超过 {int(threshold)} 秒未更新；恢复后其余盘中规则重新建立基线"],
-            )
-            self._notify_updated()
+            elif was_active:
+                recovery_started_at = recovery_started_at or now.timestamp()
+                interruption_active = (
+                    now.timestamp() - recovery_started_at
+                    < _QUOTE_INTERRUPTION_RECOVERY_SECONDS
+                )
+                if not interruption_active:
+                    recovery_started_at = None
+            else:
+                recovery_started_at = None
+            if recovery_started_at is None:
+                state.pop("recovery_started_at", None)
+            else:
+                state["recovery_started_at"] = recovery_started_at
+            self._rule_states[state_key] = state
+            self.store.set_runtime("rule_states", self._rule_states)
+            should_emit = self._set_rule(symbol, "quote_interruption", interruption_active, now)
+            if should_emit:
+                self._emit(
+                    portfolio,
+                    position,
+                    "quote_interruption",
+                    "行情中断",
+                    "critical",
+                    _action_pct(config, 0),
+                    [f"行情超过 {int(threshold)} 秒未更新；恢复后盘中规则重新建立基线"],
+                )
+                self._notify_updated()
 
     def _evaluate_account(
         self,
@@ -2231,24 +2229,31 @@ class PositionRiskService:
             ("unrealized_loss", current_equity, lambda config: unrealized / current_equity <= -abs(_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.08), "持仓总浮亏超过权益"),
             ("total_exposure", current_equity, lambda config: market_value / current_equity > (_finite(config.get("threshold")) if _finite(config.get("threshold")) is not None else 0.95), "总仓位超过"),
         ]
+        default_thresholds = {
+            "daily_equity_loss": 0.03,
+            "equity_drawdown": 0.08,
+            "unrealized_loss": 0.08,
+            "total_exposure": 0.95,
+        }
         for rule_id, denominator, condition, reason_label in checks:
-            config = self._rule_config(portfolio, "__portfolio__", rule_id)
-            active = bool(denominator and condition(config))
-            threshold = _finite(config.get("threshold"))
-            default_thresholds = {
-                "daily_equity_loss": 0.03,
-                "equity_drawdown": 0.08,
-                "unrealized_loss": 0.08,
-                "total_exposure": 0.95,
-            }
-            threshold = threshold if threshold is not None else default_thresholds[rule_id]
-            reason = f"{reason_label} {threshold:.0%}"
-            if self._set_rule(
-                "__portfolio__", rule_id, bool(config.get("enabled", True) and active),
-                evaluation_time,
-            ):
-                action = _action_pct(config, 25 if rule_id == "total_exposure" else 50)
-                self._emit(portfolio, None, rule_id, reason, "critical" if rule_id != "total_exposure" else "warn", action, [reason])
+            for position in portfolio["positions"]:
+                symbol = position["symbol"]
+                config = self._rule_config(portfolio, symbol, rule_id)
+                active = bool(config.get("enabled") is True and denominator and condition(config))
+                threshold = _finite(config.get("threshold"))
+                threshold = threshold if threshold is not None else default_thresholds[rule_id]
+                reason = f"{reason_label} {threshold:.0%}"
+                if self._set_rule(symbol, rule_id, active, evaluation_time):
+                    action = _action_pct(config, 25 if rule_id == "total_exposure" else 50)
+                    self._emit(
+                        portfolio,
+                        position,
+                        rule_id,
+                        reason,
+                        "critical" if rule_id != "total_exposure" else "warn",
+                        action,
+                        [reason],
+                    )
         for position in portfolio["positions"]:
             quote = self._latest_quotes.get(position["symbol"], {})
             price = _finite(quote.get("last_price"))
@@ -2264,7 +2269,7 @@ class PositionRiskService:
             if self._set_rule(
                 position["symbol"],
                 "symbol_concentration",
-                bool(config.get("enabled", True) and concentration),
+                bool(config.get("enabled") is True and concentration),
                 evaluation_time,
             ):
                 reduction = _action_pct(config, max(1, round((weight - target_weight) / weight * 100)))
@@ -2277,28 +2282,37 @@ class PositionRiskService:
                     reduction,
                     [f"当前单票仓位 {weight:.2%}，目标降至 {target_pct:.0f}%"],
                 )
-        cluster_config = self._rule_config(portfolio, "__portfolio__", "clustered_severe_events")
-        cluster_window = _finite(cluster_config.get("window_seconds"))
-        cluster_window = cluster_window if cluster_window is not None else 300
-        cluster_count = _finite(cluster_config.get("count"))
-        cluster_count = cluster_count if cluster_count is not None else 3
-        cutoff = evaluation_time.timestamp() - cluster_window
+        cluster_configs = [
+            (
+                position,
+                self._rule_config(portfolio, position["symbol"], "clustered_severe_events"),
+            )
+            for position in portfolio["positions"]
+        ]
+        max_cluster_window = max(
+            (_finite(config.get("window_seconds")) or 300 for _, config in cluster_configs),
+            default=300,
+        )
+        cutoff = evaluation_time.timestamp() - max_cluster_window
         while self._severe_events and self._severe_events[0] < cutoff:
             self._severe_events.popleft()
-        config = cluster_config
-        clustered = bool(config.get("enabled", True) and len(self._severe_events) >= cluster_count)
-        if self._set_rule(
-            "__portfolio__", "clustered_severe_events", clustered, evaluation_time,
-        ):
-            self._emit(
-                portfolio,
-                None,
-                "clustered_severe_events",
-                "严重事件聚集",
-                "critical",
-                _action_pct(config, 50),
-                [f"{int(cluster_window / 60)} 分钟内出现至少 {int(cluster_count)} 个严重风险事件"],
-            )
+        for position, config in cluster_configs:
+            symbol = position["symbol"]
+            cluster_window = _finite(config.get("window_seconds")) or 300
+            cluster_count = _finite(config.get("count")) or 3
+            cutoff = evaluation_time.timestamp() - cluster_window
+            event_count = sum(event_time >= cutoff for event_time in self._severe_events)
+            clustered = bool(config.get("enabled") is True and event_count >= cluster_count)
+            if self._set_rule(symbol, "clustered_severe_events", clustered, evaluation_time):
+                self._emit(
+                    portfolio,
+                    position,
+                    "clustered_severe_events",
+                    "严重事件聚集",
+                    "critical",
+                    _action_pct(config, 50),
+                    [f"{int(cluster_window / 60)} 分钟内出现至少 {int(cluster_count)} 个严重风险事件"],
+                )
 
     def _submit_auto_order(
         self,
@@ -2418,7 +2432,7 @@ class PositionRiskService:
             context_config = self._rule_config(portfolio, symbol, "market_context")
             context_enabled = (
                 self._context_service is not None
-                and context_config.get("enabled", True) is not False
+                and context_config.get("enabled") is True
             )
             if rule_id in _HARD_GUARD_RULES or not context_enabled:
                 action_eligible = action_direction in {"BUY", "SELL"}
@@ -2732,8 +2746,6 @@ class PositionRiskService:
         self._severe_event_fingerprints.clear()
         self.store.set_runtime("severe_event_date", "")
         self.store.set_runtime("severe_event_fingerprints", [])
-        self._quote_interruption_recovery_started_at = None
-        self.store.set_runtime("quote_interruption_recovery_started_at", None)
         self._recent_exit_signals.clear()
         self.store.set_runtime("recent_exit_signals", {})
         self.store.set_runtime("account", {

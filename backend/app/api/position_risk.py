@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image
-from app.services.position_risk_store import RevisionConflict
+from app.services.position_risk_store import RevisionConflict, default_rule_options
 from app.services.watchlist_ocr.runtime import OCR_LIMITER
 
 router = APIRouter(prefix="/api/position-risk", tags=["position-risk"])
@@ -23,11 +23,6 @@ class PortfolioPayload(BaseModel):
     revision: int
     account: dict[str, Any] = Field(default_factory=dict)
     positions: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class TemplatePayload(BaseModel):
-    revision: int
-    template: dict[str, Any]
 
 
 class OverridePayload(BaseModel):
@@ -145,20 +140,6 @@ def replace_portfolio(payload: PortfolioPayload, request: Request):
     except (RevisionConflict, ValueError) as exc:
         raise _map_error(exc) from exc
     return {"ok": True, "portfolio": saved, "message": "持仓快照已替换；风险高水位已重置"}
-
-
-@router.put("/template")
-def update_template(payload: TemplatePayload, request: Request):
-    service = _service(request)
-    try:
-        saved = service.store.update(
-            payload.revision,
-            lambda value: value.__setitem__("template", payload.template),
-        )
-    except RevisionConflict as exc:
-        raise _map_error(exc) from exc
-    service._notify_updated()  # noqa: SLF001
-    return {"ok": True, "portfolio": saved}
 
 
 @router.put("/overrides/{symbol}")
@@ -296,7 +277,7 @@ def get_options(request: Request):
     except Exception:  # noqa: BLE001
         custom = []
     portfolio = service.store.load()
-    configured_custom = dict(portfolio["template"].get("signals", {}).get("custom", {}))
+    configured_custom: dict[str, dict[str, Any]] = {}
     for override in (portfolio.get("overrides") or {}).values():
         for signal_id, config in ((override.get("signals") or {}).get("custom") or {}).items():
             configured_custom.setdefault(signal_id, config)
@@ -313,7 +294,7 @@ def get_options(request: Request):
     capset = getattr(request.app.state, "capabilities", None)
     websocket_limits = capset.limits(Cap.WEBSOCKET) if capset and capset.has(Cap.WEBSOCKET) else None
     return {
-        "rules": service.store.load()["template"]["rules"],
+        "rules": default_rule_options()["rules"],
         "builtin_signals": builtin,
         "custom_signals": custom,
         "monitor_rules": [{

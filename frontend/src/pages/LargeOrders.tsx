@@ -9,14 +9,13 @@ import {
   Loader2,
   RefreshCw,
   Search,
-  Settings2,
   ShieldCheck,
   X,
 } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { PositionRiskImportDialog } from '@/components/PositionRiskImportDialog'
-import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS, PositionRiskRulesDialog } from '@/components/PositionRiskRulesDialog'
+import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS } from '@/lib/positionRiskRuleFields'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toast } from '@/components/Toast'
 import { QmtTradePanel, type QmtRiskTradeContext, type QmtTradePreset } from '@/components/QmtTradePanel'
@@ -101,6 +100,11 @@ const STOP_LOSS_RULE_GROUPS = [
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
+const SHORT_TERM_RULES = new Set([
+  'take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop',
+  'intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit',
+  'opening_range_failure', 't_plus_one_exit',
+])
 type RiskModuleTab = 'take_profit' | 'stop_loss'
 
 const RULE_LABELS: Record<string, string> = {
@@ -149,15 +153,12 @@ function contextStateClass(value?: string | null) {
 }
 
 function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
-  return {
-    ...(portfolio.template.rules[ruleId] ?? {}),
-    ...(portfolio.overrides[symbol]?.rules?.[ruleId] ?? {}),
-  }
+  return portfolio.overrides[symbol]?.rules?.[ruleId] ?? {}
 }
 
 function isRuleEnabled(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
   const config = effectiveRule(portfolio, symbol, ruleId)
-  return 'active' in config ? config.active === true : config.enabled === true
+  return config.enabled === true && (!SHORT_TERM_RULES.has(ruleId) || config.active === true)
 }
 
 function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
@@ -255,6 +256,19 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     mutationFn: (next: Record<string, any>) => api.positionRiskUpdateOverride(row.symbol, portfolio!.revision, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRisk }),
   })
+  const ruleConfig = (ruleId: string) => override.rules?.[ruleId] ?? {}
+  const ruleEnabled = (ruleId: string) => {
+    const config = ruleConfig(ruleId)
+    return config.enabled === true && (!SHORT_TERM_RULES.has(ruleId) || config.active === true)
+  }
+  const setRuleEnabled = (ruleId: string, enabled: boolean) => {
+    const config = { ...ruleConfig(ruleId), enabled }
+    if (SHORT_TERM_RULES.has(ruleId)) config.active = enabled
+    mutation.mutate({
+      ...override,
+      rules: { ...(override.rules ?? {}), [ruleId]: config },
+    })
+  }
   const setRuleValue = (ruleId: string, key: string, value: number) => {
     mutation.mutate({
       ...override,
@@ -285,22 +299,6 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
       signals: { ...(override.signals ?? {}), [group]: groupValues },
     })
   }
-  const setMonitorAction = (ruleId: string, actionPct: number | null) => {
-    const monitorRules = { ...(override.signals?.monitor_rules ?? {}) }
-    if (actionPct == null) {
-      const existing = monitorRules[ruleId]
-      if (existing && 'notify' in existing) monitorRules[ruleId] = { notify: existing.notify }
-      else delete monitorRules[ruleId]
-    }
-    else monitorRules[ruleId] = { ...(monitorRules[ruleId] ?? {}), action_pct: actionPct }
-    mutation.mutate({
-      ...override,
-      signals: {
-        ...(override.signals ?? {}),
-        monitor_rules: monitorRules,
-      },
-    })
-  }
   const signalGroups: Array<[string, Array<{ id: string; label: string; direction: string; available?: boolean }>, 'builtin' | 'custom']> = [
     ['入场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'entry'), 'builtin'],
     ['出场信号', (options?.builtin_signals ?? []).filter(signal => signal.group !== 'intraday' && signal.direction === 'exit'), 'builtin'],
@@ -320,14 +318,15 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             <ChevronDown className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', expanded ? '' : '-rotate-90')} />
             <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
           </button>
-          {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify ?? (portfolio?.template.rules[ruleId]?.notify === true)} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
-          {((override.rules?.[ruleId]?.auto_execute ?? portfolio?.template.rules[ruleId]?.auto_execute) !== undefined) && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>自动委托</span><input type="checkbox" checked={(override.rules?.[ruleId]?.auto_execute ?? portfolio?.template.rules[ruleId]?.auto_execute) === true} disabled={mutation.isPending} onChange={event => setRuleAutoExecute(ruleId, event.target.checked)} /></label>}
+          <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>{evidenceOnly ? '采样' : '启用'}</span><input type="checkbox" checked={ruleEnabled(ruleId)} disabled={mutation.isPending} onChange={event => setRuleEnabled(ruleId, event.target.checked)} aria-label={`${ruleEnabled(ruleId) ? '停用' : '启用'}${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
+          {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify === true} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
+          {(override.rules?.[ruleId]?.auto_execute ?? options?.rules[ruleId]?.auto_execute) !== undefined && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>自动委托</span><input type="checkbox" checked={override.rules?.[ruleId]?.auto_execute === true} disabled={mutation.isPending} onChange={event => setRuleAutoExecute(ruleId, event.target.checked)} /></label>}
         </div>
         {expanded && fields.length > 0 && (
           <div className="mt-2 grid grid-cols-2 gap-2 pl-5">
             {fields.map(field => {
-              const inheritedValue = portfolio?.template.rules[ruleId]?.[field.key] ?? field.defaultValue ?? 0
-              const storedValue = override.rules?.[ruleId]?.[field.key] ?? inheritedValue
+              const defaultValue = options?.rules[ruleId]?.[field.key] ?? field.defaultValue ?? 0
+              const storedValue = override.rules?.[ruleId]?.[field.key] ?? defaultValue
               const displayValue = field.percent ? Number(storedValue) * 100 : Number(storedValue)
               return (
                 <label key={field.key} className="min-w-0 text-[10px] text-muted">
@@ -335,8 +334,8 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                   <span className="mt-1 flex h-7 items-center border border-border bg-surface px-2 focus-within:border-accent/50">
                     {field.type === 'select' ? (
                       <select
-                        value={String(override.rules?.[ruleId]?.[field.key] ?? portfolio?.template.rules[ruleId]?.[field.key] ?? field.options?.[0]?.[0] ?? '')}
-                        disabled={mutation.isPending}
+                        value={String(override.rules?.[ruleId]?.[field.key] ?? options?.rules[ruleId]?.[field.key] ?? field.options?.[0]?.[0] ?? '')}
+                        disabled={mutation.isPending || !ruleEnabled(ruleId)}
                         onChange={event => mutation.mutate({
                           ...override,
                           rules: { ...(override.rules ?? {}), [ruleId]: { ...(override.rules?.[ruleId] ?? {}), [field.key]: event.target.value } },
@@ -353,7 +352,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                         max={field.max}
                         step={field.step}
                         defaultValue={displayValue}
-                        disabled={mutation.isPending}
+                        disabled={mutation.isPending || !ruleEnabled(ruleId)}
                         onBlur={event => {
                           const next = Number(event.target.value)
                           const stored = field.percent ? next / 100 : next
@@ -379,30 +378,27 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
         {signals.length ? signals.map(signal => {
           const available = signal.available !== false
           const directionReadonly = storageGroup === 'builtin'
-          const inheritedDirection = directionReadonly ? signal.direction : portfolio?.template.signals[storageGroup]?.[signal.id]?.direction ?? signal.direction
-          const inheritedAction = portfolio?.template.signals[storageGroup]?.[signal.id]?.action_pct ?? (inheritedDirection === 'exit' ? 25 : 0)
-          const explicitDirection = directionReadonly ? undefined : override.signals?.[storageGroup]?.[signal.id]?.direction
-          const explicitAction = override.signals?.[storageGroup]?.[signal.id]?.action_pct
-          const explicitNotify = override.signals?.[storageGroup]?.[signal.id]?.notify
-          const inheritedNotify = portfolio?.template.signals[storageGroup]?.[signal.id]?.notify === true
+          const signalConfig = override.signals?.[storageGroup]?.[signal.id] ?? {}
+          const signalEnabled = signalConfig.enabled === true
+          const direction = signalConfig.direction ?? signal.direction
+          const action = signalConfig.action_pct ?? (direction === 'exit' ? 25 : 0)
           return (
             <div key={signal.id} className={cn('py-2 text-xs', available ? '' : 'opacity-50')}>
               <div className="flex min-h-7 items-center justify-between gap-3">
                 <span className="min-w-0 truncate">{signal.label}{available ? '' : ' · 信号不可用'}</span>
                 <span className="flex shrink-0 items-center gap-2">
-                  <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
+                  <label className="flex items-center gap-1 text-[10px] text-muted"><span>监控</span><input type="checkbox" checked={signalEnabled} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'enabled', event.target.checked)} aria-label={`${signalEnabled ? '停用' : '启用'}${signal.label}`} /></label>
+                  <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={signalConfig.notify === true} disabled={mutation.isPending || !available || !signalEnabled} onChange={event => setSignalValue(storageGroup, signal.id, 'notify', event.target.checked)} aria-label={`通知${signal.label}信号`} /></label>
                 </span>
               </div>
               <div className="mt-2 grid grid-cols-2 gap-2">
                 <label className="text-[10px] text-muted">信号方向{directionReadonly ? '（只读）' : ''}
-                  <select value={explicitDirection ?? 'inherit'} disabled={mutation.isPending || !available || directionReadonly} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value === 'inherit' ? null : event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" title={directionReadonly ? '系统信号方向由公共信号定义，只读' : undefined}>
-                    <option value="inherit">继承（{inheritedDirection === 'exit' ? '出场' : inheritedDirection === 'entry' ? '入场' : '双向'}）</option>
+                  <select value={direction} disabled={mutation.isPending || !available || !signalEnabled || directionReadonly} onChange={event => setSignalValue(storageGroup, signal.id, 'direction', event.target.value)} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px] disabled:cursor-not-allowed disabled:opacity-60" title={directionReadonly ? '系统信号方向由公共信号定义，只读' : undefined}>
                     <option value="entry">入场</option><option value="exit">出场</option><option value="both">双向</option>
                   </select>
                 </label>
                 <label className="text-[10px] text-muted">执行比例
-                  <select value={explicitAction == null ? 'inherit' : String(explicitAction)} disabled={mutation.isPending || !available} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', event.target.value === 'inherit' ? null : Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
-                    <option value="inherit">继承（{inheritedAction ? `${inheritedAction}%` : '提醒'}）</option>
+                  <select value={String(action)} disabled={mutation.isPending || !available || !signalEnabled} onChange={event => setSignalValue(storageGroup, signal.id, 'action_pct', Number(event.target.value))} className="mt-1 h-7 w-full rounded border border-border bg-surface px-2 text-[10px]">
                     <option value="0">提醒</option><option value="25">减仓 25%</option><option value="50">减仓 50%</option><option value="100">清仓</option>
                   </select>
                 </label>
@@ -465,17 +461,15 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
                     <h3 className="mb-2 text-xs font-semibold text-secondary">已有风控规则</h3>
                     <div className="divide-y divide-border border-y border-border">
                       {options?.monitor_rules.length ? options.monitor_rules.map(rule => {
-                        const explicit = override.signals?.monitor_rules?.[rule.id]?.action_pct
-                        const inherited = portfolio?.template.signals.monitor_rules[rule.id]?.action_pct ?? 0
-                        const explicitNotify = override.signals?.monitor_rules?.[rule.id]?.notify
-                        const inheritedNotify = portfolio?.template.signals.monitor_rules[rule.id]?.notify === true
+                        const monitorConfig = override.signals?.monitor_rules?.[rule.id] ?? {}
+                        const explicit = monitorConfig.action_pct
                         return (
                           <div key={rule.id} className="flex min-h-10 items-center justify-between gap-3 py-2 text-xs">
                             <span className="min-w-0 truncate">{rule.name}</span>
                             <span className="flex shrink-0 items-center gap-2">
-                              <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={explicitNotify ?? inheritedNotify} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
-                              <select value={explicit == null ? 'inherit' : String(explicit)} disabled={mutation.isPending} onChange={event => setMonitorAction(rule.id, event.target.value === 'inherit' ? null : Number(event.target.value))} className="h-7 rounded border border-border bg-surface px-2 text-[11px]" aria-label={`${rule.name}执行比例`}>
-                                <option value="inherit">继承模板（{inherited ? `${inherited}%` : '时间线'}）</option><option value="0">只进时间线</option><option value="25">执行减仓 25%</option><option value="50">执行减仓 50%</option><option value="100">执行清仓</option>
+                              <label className="flex items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={monitorConfig.notify === true} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'notify', event.target.checked)} aria-label={`通知${rule.name}信号`} /></label>
+                              <select value={explicit == null ? '0' : String(explicit)} disabled={mutation.isPending} onChange={event => setSignalValue('monitor_rules', rule.id, 'action_pct', Number(event.target.value))} className="h-7 rounded border border-border bg-surface px-2 text-[11px]" aria-label={`${rule.name}执行比例`}>
+                                <option value="0">只进时间线</option><option value="25">执行减仓 25%</option><option value="50">执行减仓 50%</option><option value="100">执行清仓</option>
                               </select>
                             </span>
                           </div>
@@ -503,7 +497,6 @@ export function LargeOrders() {
   const [search, setSearch] = useState('')
   const [positionSort, setPositionSort] = useState<'asc' | 'desc' | null>(null)
   const [importOpen, setImportOpen] = useState(false)
-  const [rulesOpen, setRulesOpen] = useState(false)
   const [selected, setSelected] = useState<{ row: PositionRiskPosition; tab: RiskModuleTab } | null>(null)
   const [tradeRow, setTradeRow] = useState<PositionRiskPosition | null>(null)
   const [tradePreset, setTradePreset] = useState<QmtTradePreset | null>(null)
@@ -597,7 +590,6 @@ export function LargeOrders() {
         right={<div className="flex min-w-max items-center gap-2">
           <button type="button" onClick={() => qmtSync.mutate()} disabled={!qmt.data?.configured || qmtSync.isPending} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white disabled:cursor-not-allowed disabled:opacity-50"><RefreshCw className={cn('h-3.5 w-3.5', qmtSync.isPending && 'animate-spin')} />同步QMT</button>
           <button type="button" onClick={() => setImportOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-3 text-xs hover:bg-elevated"><ImagePlus className="h-3.5 w-3.5" />图片导入</button>
-          <button type="button" onClick={() => setRulesOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-3 text-xs hover:bg-elevated"><Settings2 className="h-3.5 w-3.5" />规则模板</button>
           <button type="button" onClick={() => portfolio.refetch()} className="grid h-8 w-8 place-items-center rounded-btn border border-border hover:bg-elevated" title="刷新"><RefreshCw className="h-3.5 w-3.5" /></button>
         </div>}
       />
@@ -698,7 +690,6 @@ export function LargeOrders() {
       </section> : null}
 
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
-      <PositionRiskRulesDialog open={rulesOpen} portfolio={data} options={options.data} onClose={() => setRulesOpen(false)} />
       {selected && <PositionInspector key={`${selected.row.symbol}-${selected.tab}`} row={selected.row} options={options.data} initialTab={selected.tab} onClose={() => setSelected(null)} />}
       {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} riskContext={tradeRiskContext} onClose={() => { setTradeRow(null); setTradePreset(null); setTradeRiskContext(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />

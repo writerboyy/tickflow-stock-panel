@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 def _now() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def default_template() -> dict[str, Any]:
+def default_rule_options() -> dict[str, Any]:
     return {
         "rules": {
             "market_context": {
@@ -147,7 +147,6 @@ def default_portfolio() -> dict[str, Any]:
             "high_watermark": None,
         },
         "positions": [],
-        "template": default_template(),
         "overrides": {},
         "imported_at": None,
         "updated_at": None,
@@ -187,15 +186,8 @@ class PositionRiskStore:
     @staticmethod
     def _merge_defaults(value: dict[str, Any]) -> dict[str, Any]:
         result = default_portfolio()
-        result.update({key: deepcopy(item) for key, item in value.items() if key not in {"account", "template"}})
+        result.update({key: deepcopy(item) for key, item in value.items() if key not in {"account", "template", "schema_version"}})
         result["account"].update(value.get("account") or {})
-        incoming_template = value.get("template") or {}
-        for rule_id, incoming_rule in (incoming_template.get("rules") or {}).items():
-            if isinstance(incoming_rule, dict) and isinstance(result["template"]["rules"].get(rule_id), dict):
-                result["template"]["rules"][rule_id].update(incoming_rule)
-            else:
-                result["template"]["rules"][rule_id] = deepcopy(incoming_rule)
-        result["template"]["signals"].update(incoming_template.get("signals") or {})
         result["schema_version"] = SCHEMA_VERSION
         return result
 
@@ -209,7 +201,10 @@ class PositionRiskStore:
                 raise RuntimeError("持仓风控配置损坏，已拒绝覆盖") from exc
             if not isinstance(raw, dict):
                 raise RuntimeError("持仓风控配置格式无效，已拒绝覆盖")
-            return self._merge_defaults(raw)
+            normalized = self._merge_defaults(raw)
+            if raw != normalized:
+                self._write(normalized)
+            return normalized
 
     def _write(self, value: dict[str, Any]) -> None:
         temporary = self.portfolio_path.with_suffix(".tmp")

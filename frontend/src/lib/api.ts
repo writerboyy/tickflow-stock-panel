@@ -959,14 +959,6 @@ export interface PositionRiskPortfolio {
     high_watermark: number | null
   }
   positions: PositionRiskPosition[]
-  template: {
-    rules: Record<string, Record<string, any>>
-    signals: {
-      builtin: Record<string, Record<string, any>>
-      custom: Record<string, Record<string, any>>
-      monitor_rules: Record<string, Record<string, any>>
-    }
-  }
   overrides: Record<string, Record<string, any>>
   imported_at: string | null
   updated_at: string | null
@@ -2882,10 +2874,6 @@ export const api = {
   positionRiskReplace: (payload: { revision: number; account: Record<string, any>; positions: Array<Record<string, any>> }) =>
     request<{ ok: boolean; portfolio: PositionRiskPortfolio; message: string }>('/api/position-risk/portfolio', {
       method: 'PUT', body: JSON.stringify(payload),
-    }),
-  positionRiskUpdateTemplate: (revision: number, template: PositionRiskPortfolio['template']) =>
-    request<{ ok: boolean; portfolio: PositionRiskPortfolio }>('/api/position-risk/template', {
-      method: 'PUT', body: JSON.stringify({ revision, template }),
     }),
   positionRiskUpdateOverride: (symbol: string, revision: number, override: Record<string, any>) =>
     request<{ ok: boolean; portfolio: PositionRiskPortfolio }>(`/api/position-risk/overrides/${encodeURIComponent(symbol)}`, {
