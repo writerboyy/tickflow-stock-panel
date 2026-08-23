@@ -22,7 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, pit_reference, preferences as _prefs
+from app.services import index_sync, instrument_sync, kline_sync, pit_reference, preferences as _prefs, stock_reports
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -917,6 +917,99 @@ async def _run_scheduled_review(repo) -> None:
             pass
 
 
+def _run_scheduled_stock_reports(repo, app_state) -> None:
+    """盘后为当前 QMT 持仓顺序生成最新个股分析报告。"""
+    from app import secrets_store as ss
+
+    if not ss.get_ai_key():
+        logger.info("scheduled stock reports skipped: AI key not configured")
+        return
+
+    _, enriched_date = repo.get_enriched_latest()
+    if enriched_date != date.today():
+        logger.info(
+            "scheduled stock reports skipped: enriched data is not for today (%s)",
+            enriched_date,
+        )
+        return
+
+    risk_service = getattr(app_state, "position_risk_service", None)
+    if risk_service is None:
+        logger.info("scheduled stock reports skipped: position risk service unavailable")
+        return
+
+    if not risk_service.store.get_runtime("qmt_sync"):
+        logger.info("scheduled stock reports skipped: QMT has not synced holdings")
+        return
+
+    portfolio = risk_service.store.load()
+    positions = [
+        {
+            "symbol": str(row.get("symbol") or "").strip().upper(),
+            "name": str(row.get("name") or row.get("symbol") or "").strip(),
+        }
+        for row in portfolio.get("positions") or []
+        if str(row.get("symbol") or "").strip()
+    ]
+    if not positions:
+        logger.info("scheduled stock reports skipped: QMT holdings are empty")
+        return
+
+    existing = stock_reports.latest_reports(item["symbol"] for item in positions)
+    today = date.today().isoformat()
+    pending = [
+        item for item in positions
+        if str(existing.get(item["symbol"], {}).get("created_at") or "")[:10] != today
+    ]
+    if not pending:
+        logger.info("scheduled stock reports skipped: all %d holdings already reported", len(positions))
+        return
+
+    import asyncio
+    import json
+
+    from app.services.stock_analyzer import analyze_stock_stream
+
+    async def generate(item: dict[str, str]) -> tuple[dict | None, str | None]:
+        meta: dict = {}
+        content_parts: list[str] = []
+        async for raw in analyze_stock_stream(repo, repo.store.data_dir, item["symbol"]):
+            event = json.loads(raw)
+            event_type = event.get("type")
+            if event_type == "meta":
+                meta = event
+            elif event_type == "delta":
+                content_parts.append(str(event.get("content") or ""))
+            elif event_type == "error":
+                return None, str(event.get("message") or "分析失败")
+        content = "".join(content_parts).strip()
+        if not content:
+            return None, "分析未返回内容"
+        return {
+            "symbol": item["symbol"],
+            "name": item["name"],
+            "focus": "",
+            "content": content,
+            "summary": meta.get("summary", ""),
+            "close": meta.get("close"),
+            "levels": meta.get("levels"),
+        }, None
+
+    async def generate_all() -> None:
+        for item in pending:
+            try:
+                report, error = await generate(item)
+                if error:
+                    logger.warning("scheduled stock report skipped for %s: %s", item["symbol"], error)
+                    continue
+                stock_reports.save_report(report or {})
+                logger.info("scheduled stock report saved: %s", item["symbol"])
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("scheduled stock report failed for %s: %s", item["symbol"], exc)
+
+    asyncio.run(generate_all())
+
+
 async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple[str, dict]:
     """流式生成复盘, 每个事件推 SSE + 累积内容。LLM 断流时最多重试 2 次。
 
@@ -1097,6 +1190,10 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
             repo.refresh_cache()
             _trigger_financial_incremental(app_state)
+        try:
+            _run_scheduled_stock_reports(repo, app_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("scheduled stock reports failed without blocking pipeline: %s", exc)
         return result
 
     scheduler.add_job(

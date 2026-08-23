@@ -3766,6 +3766,10 @@ export const api = {
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),
+  stockAnalysisReportsLatest: (symbols: string[]) =>
+    request<{ reports: Record<string, AiStockReport> }>(
+      `/api/stock-analysis/reports/latest?symbols=${encodeURIComponent(symbols.join(','))}`,
+    ),
 
   stockAnalysisReportSave: (r: {
     symbol: string; name?: string; focus?: string; content: string

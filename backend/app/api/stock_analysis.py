@@ -7,6 +7,7 @@
   GET  /premium-gene?symbol=   近 200 个交易日溢价基因统计
   POST /analyze                AI 流式四维分析(NDJSON)
   GET  /reports                历史报告列表
+  GET  /reports/latest         指定标的最新报告
   POST /reports                保存一条报告
   DELETE /reports/{report_id}  删除一条报告
 """
@@ -208,6 +209,16 @@ class SaveReportRequest(BaseModel):
 def list_reports(request: Request):
     """获取全部历史报告(按时间降序,后端已裁剪到上限)。"""
     return {"reports": stock_reports.list_reports()}
+
+
+@router.get("/reports/latest")
+def latest_reports(
+    request: Request,
+    symbols: str = Query("", description="逗号分隔的标的代码"),
+):
+    """返回指定标的各自最新的一份报告。"""
+    requested = [item.strip() for item in symbols.split(",") if item.strip()]
+    return {"reports": stock_reports.latest_reports(requested)}
 
 
 @router.post("/reports")

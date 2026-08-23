@@ -5,6 +5,7 @@ import {
   ChevronDown,
   FileClock,
   ImagePlus,
+  LineChart,
   Loader2,
   RefreshCw,
   Search,
@@ -21,17 +22,17 @@ import { toast } from '@/components/Toast'
 import { QmtTradePanel, type QmtRiskTradeContext, type QmtTradePreset } from '@/components/QmtTradePanel'
 import {
   api,
+  type AiStockReport,
   type PositionRiskOptions,
   type PositionRiskEvent,
-  type PositionRiskContext,
   type PositionRiskPosition,
   type PositionRiskPortfolio,
-  type PositionRiskFeatureSnapshot,
   type PositionRiskStatus,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { cnSignalText } from '@/lib/signals'
+import { openHistoryReportData, startAnalysis } from '@/lib/stockAnalysisStore'
 
 type Tab = 'positions' | 'events'
 
@@ -148,58 +149,6 @@ function contextStateClass(value?: string | null) {
   return value === 'supportive' ? 'text-bull' : value === 'weakening' || value === 'divergent' ? 'text-warning' : 'text-muted'
 }
 
-function contextDimensionLabel(context?: PositionRiskContext) {
-  if (!context?.sector_name) return '板块待就绪'
-  return `${context.sector_kind === 'industry' ? '行业' : '题材'} ${context.sector_name}`
-}
-
-const DECISION_RISK_LABELS: Record<string, string> = {
-  low: '低风险', medium: '中风险', high: '高风险', unknown: '数据不足',
-}
-
-const QUALITY_STATUS_LABELS: Record<string, string> = {
-  available: '可用', partial: '部分', missing: '缺失', not_supported: '未接入',
-}
-
-const QUALITY_SOURCE_LABELS: Record<string, string> = {
-  quote: '行情', daily: '日线', technical: '技术面', fund_flow: '资金流', market_context: '市场上下文', news: '新闻面',
-}
-
-const QUALITY_SOURCE_ORDER = ['quote', 'daily', 'technical', 'fund_flow', 'market_context', 'news']
-
-const CONTEXT_MISSING_LABELS: Record<string, string> = {
-  market: '大盘',
-  sector: '板块',
-  leader: '板块龙头',
-  correlation: '相关性',
-  auction: '集合竞价',
-  opening_five_minute: '开盘 5 分钟',
-  opening_volume: '开盘量能',
-  fund_flow: '资金流',
-}
-
-const STAGE_LABELS: Record<string, string> = {
-  initial: '初始保护',
-  tp_1: '首次止盈后',
-  runner: '盈利持有',
-}
-
-function decisionRiskClass(value?: string) {
-  return value === 'high' ? 'text-danger' : value === 'medium' ? 'text-warning' : value === 'low' ? 'text-bull' : 'text-muted'
-}
-
-function decisionDisplay(feature?: PositionRiskFeatureSnapshot) {
-  const decision = feature?.decision
-  if (!decision) return '观察'
-  if (decision.event?.label) return `${decision.event.label} · 可选减仓 ${decision.event.optional_action_pct ?? 25}%`
-  return decision.action_label
-}
-
-function contextMissingLabel(values?: string[]) {
-  if (!values?.length) return ''
-  return values.map(value => CONTEXT_MISSING_LABELS[value] ?? value).join('、')
-}
-
 function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
   return {
     ...(portfolio.template.rules[ruleId] ?? {}),
@@ -252,6 +201,33 @@ function RiskSettingsSummary({ portfolio, symbol, options }: { portfolio: Positi
   )
 }
 
+function reportTime(report: AiStockReport) {
+  const value = new Date(report.created_at)
+  if (Number.isNaN(value.getTime())) return ''
+  return value.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function StockAnalysisStatus({ row, report, loading }: { row: PositionRiskPosition; report?: AiStockReport; loading: boolean }) {
+  if (loading) return <span className="text-[10px] text-muted">分析状态加载中…</span>
+  const handleClick = async () => {
+    if (report) {
+      openHistoryReportData(report)
+      return
+    }
+    const result = await startAnalysis(row.symbol, row.name)
+    if (result.error) toast(result.error, 'error')
+  }
+  return (
+    <button type="button" onClick={handleClick} className="group flex min-w-[112px] items-center gap-1.5 text-left hover:text-accent" title={report ? '打开最新个股分析报告' : '打开个股分析并生成报告'}>
+      <LineChart className="h-3.5 w-3.5 shrink-0 text-accent/80 group-hover:text-accent" />
+      <span className="min-w-0">
+        <span className={cn('block text-[11px]', report ? 'text-secondary' : 'text-warning')}>{report ? '最新分析' : '暂无分析 · 生成'}</span>
+        {report && <span className="block text-[10px] text-muted">{reportTime(report)}</span>}
+      </span>
+    </button>
+  )
+}
+
 function StatusDot({ status }: { status: PositionRiskStatus }) {
   const active = status === 'websocket'
   const warning = status === 'polling_degraded' || status === 'reconnecting'
@@ -260,7 +236,6 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
 
 function PositionInspector({ row, options, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; onClose: () => void }) {
   const portfolioQuery = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio })
-  const featuresQuery = useQuery({ queryKey: QK.positionRiskFeatures(row.symbol), queryFn: () => api.positionRiskFeatures([row.symbol]), refetchInterval: 15_000 })
   const queryClient = useQueryClient()
   const [activeRuleTab, setActiveRuleTab] = useState<'take_profit' | 'stop_loss' | 't_trading'>('stop_loss')
   const [expandedRule, setExpandedRule] = useState<string | null>(null)
@@ -484,83 +459,6 @@ function PositionInspector({ row, options, onClose }: { row: PositionRiskPositio
             ].map(([label, value]) => <div key={label} className="bg-surface px-3 py-2"><div className="text-[10px] text-muted">{label}</div><div className="mt-1 font-mono">{value}</div></div>)}
           </div>
 
-          {(() => {
-            const feature = featuresQuery.data?.features[row.symbol]
-            const dataDate = feature?.data_as_of ?? feature?.daily?.as_of?.slice(0, 10) ?? feature?.context?.data_as_of ?? null
-            const historicalData = feature?.data_status === 'historical'
-            const featureState = historicalData ? '上一交易日分时数据' : feature?.fresh ? '数据新鲜' : feature?.reason || '等待闭合分钟数据'
-            const decision = feature?.decision
-            const qualityEntries = decision
-              ? QUALITY_SOURCE_ORDER.map(source => [source, decision.data_quality[source]] as const).filter(([, block]) => Boolean(block))
-              : []
-            const availableQualityCount = qualityEntries.filter(([, block]) => block?.status === 'available').length
-            const contextReady = Boolean(feature?.context && feature.context.state !== 'unavailable')
-            return (
-              <section className="mt-3 border-y border-border bg-elevated/30 px-3 py-2 text-[10px]">
-                {historicalData && <div className="mb-2 border-b border-border/70 pb-2 text-warning">当前非交易日，以下数据截至 {dataDate || '上一交易日'}</div>}
-                {decision && (
-                  <div className="border-b border-border/70 pb-3">
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                        <span className="text-muted">综合建议</span>
-                        <b className={cn('text-sm', decisionRiskClass(decision.risk_level))}>{decisionDisplay(feature)}</b>
-                        <span className="text-muted">置信度 {Math.round(decision.confidence * 100)}%</span>
-                        <span className={decisionRiskClass(decision.risk_level)}>{DECISION_RISK_LABELS[decision.risk_level] ?? decision.risk_level}</span>
-                      </div>
-                      <span className="text-muted">委托仍需人工确认</span>
-                    </div>
-                    <p className="mt-1 leading-4 text-secondary">{decision.reason}</p>
-                    {decision.evidence.length > 0 && <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-muted">{decision.evidence.slice(0, 4).map(item => <span key={`${item.source}-${item.label}`}>{item.label}：<b className="text-foreground">{item.detail}</b></span>)}</div>}
-                    {decision.watch_conditions.length > 0 && <div className="mt-1 text-warning">关注：{decision.watch_conditions[0]}</div>}
-                    <div className="mt-2 border-t border-border/60 pt-2">
-                      <div className="flex items-center justify-between gap-2 text-muted">
-                        <span>数据状态</span>
-                        <span>{availableQualityCount}/{qualityEntries.length} 项可用</span>
-                      </div>
-                      <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
-                        {qualityEntries.map(([source, block]) => <span key={source} className="text-muted">{QUALITY_SOURCE_LABELS[source] ?? source} <b className={block.status === 'available' ? 'text-bull' : block.status === 'not_supported' ? 'text-muted' : 'text-warning'}>{QUALITY_STATUS_LABELS[block.status] ?? block.status}</b></span>)}
-                      </div>
-                      {feature?.context?.missing?.length ? <div className="mt-1 text-warning">市场环境待补齐：{contextMissingLabel(feature.context.missing)}</div> : null}
-                    </div>
-                  </div>
-                )}
-                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className={cn('font-medium', feature?.fresh ? 'text-bull' : 'text-warning')}>{feature?.fresh ? '分时数据可用' : `分时数据：${featureState}`}</span>
-                  <span className="text-muted">阶段 <b className="text-foreground">{STAGE_LABELS[feature?.stage || 'initial'] ?? feature?.stage ?? '初始保护'}</b></span>
-                  <span className="text-muted">R <b className="font-mono text-foreground">{feature?.r_multiple == null ? '—' : feature.r_multiple.toFixed(2)}</b></span>
-                  <span className="text-muted">有效保护价 <b className="font-mono text-foreground">{price(feature?.effective_stop_price)}</b></span>
-                  {((feature?.bars_1m ?? 0) > 0 || (feature?.bars_5m ?? 0) > 0) && <span className="text-muted">分钟数 <b className="font-mono text-foreground">{feature?.bars_1m ?? 0}/{feature?.bars_5m ?? 0}</b></span>}
-                  {(feature?.t_trade_count ?? 0) > 0 && <span className="text-muted">今日做T <b className="font-mono text-foreground">{feature?.t_trade_count} 次</b></span>}
-                </div>
-                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
-                  {historicalData && dataDate ? <span>数据截至 {dataDate}</span> : feature?.as_of && <span>更新于 {new Date(feature.as_of).toLocaleTimeString('zh-CN')}</span>}
-                  {feature?.session_vwap != null && <span>VWAP <b className="font-mono text-foreground">{price(feature.session_vwap)}</b></span>}
-                  {feature?.ema9_1m != null && feature?.ema20_1m != null && <span>EMA9/20 <b className="font-mono text-foreground">{price(feature.ema9_1m)}/{price(feature.ema20_1m)}</b></span>}
-                  {feature?.atr14_5m != null && <span>ATR5m <b className="font-mono text-foreground">{price(feature.atr14_5m)}</b></span>}
-                  {(feature?.previous_day_high != null || feature?.previous_day_low != null) && <span>昨高/昨低 <b className="font-mono text-foreground">{price(feature.previous_day_high)}/{price(feature.previous_day_low)}</b></span>}
-                </div>
-                {contextReady && <div className="mt-2 border-t border-border/70 pt-2">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                    <span className={cn('font-medium', contextStateClass(feature?.context?.state))}>市场上下文 {contextStateLabel(feature?.context?.state)}</span>
-                    {feature?.context?.data_as_of && <span className="text-muted">数据截至 {feature.context.data_as_of}</span>}
-                    <span className="text-muted">大盘 <b className="text-foreground">{feature?.context?.market_state || '数据不足'}</b></span>
-                    <span className="text-muted">情绪周期 <b className="text-foreground">{feature?.context?.emotion_phase || '数据不足'}</b></span>
-                    <span className="text-muted">{contextDimensionLabel(feature?.context)}</span>
-                    <span className="text-muted">板块当日 <b className="font-mono text-foreground">{pct(feature?.context?.sector_change_pct)}</b></span>
-                    <span className="text-muted">近 5 日 <b className="font-mono text-foreground">{pct(feature?.context?.sector_five_day_change_pct)}</b></span>
-                    <span className="text-muted">昨日 <b className="font-mono text-foreground">{pct(feature?.context?.sector_yesterday_change_pct)}</b></span>
-                  </div>
-                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-muted">
-                    <span>龙头 <b className="text-foreground">{feature?.context?.leader?.name || '—'}</b> <b className="font-mono text-foreground">{pct(feature?.context?.leader?.change_pct)}</b></span>
-                    <span>相关性 <b className="font-mono text-foreground">{feature?.context?.sector_correlation == null ? '—' : feature.context.sector_correlation.toFixed(2)}</b> / 龙头 <b className="font-mono text-foreground">{feature?.context?.leader_correlation == null ? '—' : feature.context.leader_correlation.toFixed(2)}</b></span>
-                    {feature?.context?.opening_five_minute?.relative_volume != null && <span>开盘量能 {feature.context.opening_five_minute.relative_volume.toFixed(2)}x</span>}
-                    {feature?.context?.opening_five_minute?.buy_ratio != null && <span>开盘买方 {(feature.context.opening_five_minute.buy_ratio * 100).toFixed(0)}%</span>}
-                  </div>
-                </div>}
-              </section>
-            )
-          })()}
-
           <details className="mt-4 border-y border-border">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 py-3 text-xs text-secondary">
               <span className="flex items-center gap-2"><ChevronDown className="h-3.5 w-3.5" />高级规则与参数</span>
@@ -675,7 +573,6 @@ export function LargeOrders() {
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
   const options = useQuery({ queryKey: QK.positionRiskOptions, queryFn: api.positionRiskOptions })
-  const features = useQuery({ queryKey: QK.positionRiskFeatures(), queryFn: () => api.positionRiskFeatures(), refetchInterval: 15_000 })
   const events = useQuery({ queryKey: QK.positionRiskEvents, queryFn: api.positionRiskEvents })
   const queryClient = useQueryClient()
   const qmtProbe = useMutation({ mutationFn: api.qmtProbe, onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt }) })
@@ -695,6 +592,16 @@ export function LargeOrders() {
     () => Object.fromEntries((options.data?.custom_signals ?? []).map(signal => [signal.id, signal.label])),
     [options.data?.custom_signals],
   )
+  const positionSymbols = useMemo(
+    () => (portfolio.data?.positions ?? []).map(row => row.symbol),
+    [portfolio.data?.positions],
+  )
+  const analysisReports = useQuery({
+    queryKey: QK.stockAnalysisLatest(positionSymbols),
+    queryFn: () => api.stockAnalysisReportsLatest(positionSymbols),
+    enabled: positionSymbols.length > 0,
+    staleTime: 30_000,
+  })
   const rows = useMemo(() => {
     const filtered = (portfolio.data?.positions ?? []).filter(row => {
       const matchesSearch = !search || row.symbol.toLowerCase().includes(search.toLowerCase()) || row.name.includes(search)
@@ -787,7 +694,7 @@ export function LargeOrders() {
           <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[1160px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本 / 现价 / 持仓盈亏', '仓位', '上下文', '风控设置', '操作', '综合建议'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
+              {['证券', '数量 / 可用', '成本 / 现价 / 持仓盈亏', '仓位', '最新分析', '风控设置', '操作'].map(label => <th key={label} className="px-3 py-2 text-left font-medium">{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -795,22 +702,19 @@ export function LargeOrders() {
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 font-mono">{price(row.cost_price)}<div className="text-[10px] text-muted">{price(row.price)}</div><div className={cn('text-[10px]', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></td>
                 <td className="px-3 py-2 font-mono">{pct(row.weight)}</td>
-                <td className="px-3 py-2">
-                  {(() => {
-                    const context = features.data?.features[row.symbol]?.context
-                    return <div className="min-w-[120px] text-[11px]"><div className={cn('font-medium', contextStateClass(context?.state))}>{contextStateLabel(context?.state)}</div><div className="truncate text-[10px] text-muted">{contextDimensionLabel(context)} · {context?.emotion_phase || '数据不足'}</div></div>
-                  })()}
-                </td>
+                <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} /></td>
                 <td className="w-[190px] max-w-[190px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></td>
                 <td className="px-3 py-2"><div className="flex items-center gap-1"><button type="button" onClick={() => setSelected(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div></td>
-                <td className="max-w-44 truncate px-3 py-2 text-muted" title={decisionDisplay(features.data?.features[row.symbol])}>{decisionDisplay(features.data?.features[row.symbol])}</td>
               </tr>)}
             </tbody>
           </table>
         </div>
         <div className="divide-y divide-border md:hidden">
           {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
-            <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div><div className="mt-1 text-[11px] text-secondary">建议 {decisionDisplay(features.data?.features[row.symbol])}</div><div className="mt-2 border-t border-border/70 pt-2"><div className={cn('mb-1 text-[11px] font-medium', contextStateClass(features.data?.features[row.symbol]?.context?.state))}>上下文 {contextStateLabel(features.data?.features[row.symbol]?.context?.state)} · {features.data?.features[row.symbol]?.context?.emotion_phase || '数据不足'}</div><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></button>
+            <div className="min-w-0">
+              <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股 · 成本 {price(row.cost_price)} · 现价 {price(row.price)} · 盈亏 <span className={row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear'}>{holdingPnl(row.profit_loss)}</span></div></button>
+              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} options={options.data} /></div></div>
+            </div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => setSelected(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="编辑单股风控" aria-label={`编辑${row.name}风控设置`}>设置</button><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
         </div>

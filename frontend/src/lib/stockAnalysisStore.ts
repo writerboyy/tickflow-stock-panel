@@ -270,3 +270,12 @@ export async function deleteReport(reportId: string): Promise<void> {
 export function openHistoryReport(reportId: string) {
   activeDialogTaskId = `history:${reportId}`; dialogMinimized = false; rebuildSnap(); emit()
 }
+
+export function openHistoryReportData(report: HistoryReport) {
+  history = [report, ...history.filter(item => item.id !== report.id)]
+  historyLoaded = true
+  activeDialogTaskId = `history:${report.id}`
+  dialogMinimized = false
+  rebuildSnap()
+  emit()
+}

@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from app.services.json_report_store import JsonReportStore
 
 MAX_REPORTS = 50
@@ -32,6 +34,19 @@ _store = JsonReportStore("ai_stock_reports.json", MAX_REPORTS, id_prefix="sar")
 def list_reports() -> list[dict]:
     """返回全部报告(按 created_at 降序)。"""
     return _store.list_reports()
+
+
+def latest_reports(symbols: Iterable[str]) -> dict[str, dict]:
+    """返回指定标的各自最新的一份报告。"""
+    requested = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+    if not requested:
+        return {}
+    latest: dict[str, dict] = {}
+    for report in _store.list_reports():
+        symbol = str(report.get("symbol") or "").strip().upper()
+        if symbol in requested and symbol not in latest:
+            latest[symbol] = report
+    return latest
 
 
 def save_report(report: dict) -> dict:
