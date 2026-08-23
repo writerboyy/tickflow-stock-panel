@@ -3,13 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Ban,
   Bell,
-  BookOpen,
   Check,
   CircleHelp,
   CircleDot,
   Crosshair,
   Flame,
-  GitBranch,
   Layers3,
   ListFilter,
   PanelRightClose,
@@ -41,13 +39,12 @@ import {
   type LimitBoardSectorStrengthRow,
   type LimitBoardView,
   type MarketHeatItem,
-  type FourModeStrategyView,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'four_mode' | 'events'
+type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'pool' | 'events'
 type TableMode = 'candidate' | 'pool'
 type AdvancedSettings = LimitBoardView['settings']
 
@@ -1099,51 +1096,6 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
   }
 }
 
-function FourModePanel({ report }: { report: FourModeStrategyView }) {
-  if (report.state === 'unavailable') {
-    return <EmptyState icon={BookOpen} title="四合一原生模式不可用" hint={report.reason} />
-  }
-  const stateLabel = report.state === 'live' ? '实时原生逻辑' : '部分可用'
-  return <div className="space-y-3">
-    <section className="rounded-btn border border-border bg-surface px-3 py-3 sm:px-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold"><BookOpen className="h-4 w-4 text-accent" />四合一 · 系统原生模式</div>
-          <div className="mt-1 text-[10px] text-muted">{report.reason}</div>
-          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[10px] text-muted">
-            <span>逻辑版本 {report.logic_version}</span>
-            <span>数据 {report.source.provider}</span>
-            {report.source.as_of ? <span>更新 {scoreTime(report.source.as_of)}</span> : null}
-            <span>候选 {report.runtime.candidate_rows} · 机会 {report.runtime.opportunity_rows}</span>
-          </div>
-        </div>
-        <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-bear/40 bg-bear/10 px-2 py-1 text-[10px] text-bear"><GitBranch className="h-3 w-3" />{stateLabel} · 只读查看</span>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">{report.source.data_paths.map(path => <span key={path} className="rounded-md border border-border px-1.5 py-1 text-[9px] text-secondary">{path}</span>)}</div>
-      {!report.runtime.history_ready ? <div className="mt-3 flex items-center gap-2 rounded-btn border border-warning/40 bg-warning/10 px-3 py-2 text-[10px] text-warning"><ShieldAlert className="h-3.5 w-3.5" />{report.runtime.history_reason || '历史候选数据尚未就绪'}</div> : null}
-    </section>
-
-    <section className="grid gap-3 xl:grid-cols-2">
-      {report.modes.map(mode => <article key={mode.id} className="rounded-btn border border-border bg-surface p-3">
-        <div className="flex items-start justify-between gap-2">
-          <div><div className="text-sm font-semibold">{mode.name}</div><div className="mt-1 text-[11px] leading-5 text-secondary">{mode.summary}</div></div>
-          <span className="rounded-md bg-elevated px-2 py-1 font-mono text-[10px] text-accent">{mode.id}</span>
-        </div>
-        <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
-          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">系统候选</div><div className="mt-1 font-mono text-sm text-accent">{mode.candidate_count}</div></div>
-          <div className="rounded-md bg-elevated/60 px-2 py-2"><div className="text-muted">可交易</div><div className="mt-1 font-mono text-sm text-bear">{mode.tradable_count}</div></div>
-        </div>
-        <div className="mt-3 border-t border-border pt-2"><div className="text-[10px] text-muted">系统逻辑</div><div className="mt-1 text-[10px] text-secondary">{mode.logic}</div></div>
-        <div className="mt-2 flex flex-wrap gap-1.5">{mode.score_components.map(item => <span key={item} className="rounded-md border border-border px-1.5 py-1 text-[9px] text-secondary">{item}</span>)}</div>
-        <div className="mt-2 flex flex-wrap gap-1.5">{mode.filters.map(item => <span key={item} className="rounded-md bg-elevated px-1.5 py-1 text-[9px] text-muted">{item}</span>)}</div>
-        <div className="mt-3 overflow-x-auto border-t border-border pt-2">
-          {mode.candidates.length ? <table className="w-full min-w-[480px] text-left text-[10px]"><thead className="text-muted"><tr><th className="px-1 py-1 font-medium">标的</th><th className="px-1 py-1 font-medium">强势/机会</th><th className="px-1 py-1 font-medium">距板</th><th className="px-1 py-1 font-medium">状态</th></tr></thead><tbody>{mode.candidates.slice(0, 8).map(row => <tr key={row.symbol} className="border-t border-border/70"><td className="px-1 py-1"><div className="font-medium">{row.name}</div><div className="font-mono text-[9px] text-muted">{row.symbol}</div></td><td className="px-1 py-1 font-mono text-secondary">{row.candidate_score?.toFixed(1) ?? '--'} / {row.entry_score?.toFixed(1) ?? '--'}</td><td className="px-1 py-1 font-mono text-secondary">{row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`}</td><td className={`px-1 py-1 ${row.tradability_state === 'tradable' ? 'text-bear' : row.tradability_state === 'limit_reached' ? 'text-warning' : 'text-muted'}`}>{row.tradability_reason || row.tradability_state}</td></tr>)}</tbody></table> : <div className="py-4 text-center text-[10px] text-muted">当前系统没有符合该模式的候选</div>}
-        </div>
-      </article>)}
-    </section>
-  </div>
-}
-
 export function LimitBoard() {
   const queryClient = useQueryClient()
   const { data: quoteStatus } = useQuoteStatus({ poll: true })
@@ -1283,7 +1235,6 @@ export function LimitBoard() {
           ['candidate', '备选池', data.candidate_pool.length, ListFilter],
           ['opportunity', '机会榜', data.opportunity_pool.length, Zap],
           ['pool', '打板池', data.board_pool.length, Crosshair],
-          ['four_mode', '四合一', data.four_mode.modes.length, BookOpen],
           ['events', '触发记录', data.events.length, Bell],
         ] as const).map(([id, label, count, Icon]) => (
           <button key={id} type="button" onClick={() => setTab(id)} className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium ${tab === id ? 'border-accent text-foreground' : 'border-transparent text-muted'}`}>
@@ -1293,7 +1244,7 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab === 'four_mode' ? <FourModePanel report={data.four_mode} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>

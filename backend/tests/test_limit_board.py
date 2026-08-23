@@ -2924,13 +2924,8 @@ def test_limit_board_api_exposes_view_and_revision_conflict(tmp_path):
     assert view.status_code == 200
     assert view.json()["revision"] == 0
     assert "opportunity_pool" in view.json()
-    assert [mode["name"] for mode in view.json()["four_mode"]["modes"]] == ["一进二", "弱转强", "趋势股", "首板"]
-    assert view.json()["four_mode"]["source"]["provider"] == "tickflow_native"
-
-    four_mode = client.get("/api/limit-board/four-mode")
-    assert four_mode.status_code == 200
-    assert four_mode.json()["execution_state"] == "read_only"
-    assert four_mode.json()["source"]["provider"] == "tickflow_native"
+    assert "four_mode" not in view.json()
+    assert not any(route.path == "/api/limit-board/four-mode" for route in router.routes)
 
     added = client.post(
         "/api/limit-board/candidate",

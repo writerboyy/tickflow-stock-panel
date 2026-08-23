@@ -70,11 +70,6 @@ def sector_strength(request: Request, captured_at: str | None = None):
         raise HTTPException(400, str(exc)) from exc
 
 
-@router.get("/four-mode")
-def four_mode(request: Request):
-    return _service(request).four_mode_view()
-
-
 @router.post("/quotes")
 def quote_snapshot(payload: QuoteSnapshotRequest, request: Request):
     return _service(request).quote_snapshot(payload.symbols)
