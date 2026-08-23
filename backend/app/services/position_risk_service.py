@@ -948,15 +948,18 @@ class PositionRiskService:
             runtime = self.store.get_runtime(f"position:{symbol}", {}) or {}
             cost = _finite(position.get("cost_price"))
             stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
-            threshold = _finite(stop_cfg.get("threshold"))
-            hard_stop = cost * (1 + threshold) if cost is not None and threshold is not None else None
-            atr_value = _finite(history.get("atr_14"))
-            atr_stop = cost - atr_value * (_finite(stop_cfg.get("atr_multiple")) or 1.5) if cost and atr_value and atr_value > 0 else None
-            mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
-            if mode == "atr":
-                hard_stop = atr_stop or hard_stop
-            elif mode == "max_fixed_atr":
-                hard_stop = max(value for value in (hard_stop, atr_stop) if value is not None) if hard_stop or atr_stop else None
+            stop_enabled = stop_cfg.get("enabled") is True
+            hard_stop = None
+            if stop_enabled:
+                threshold = _finite(stop_cfg.get("threshold"))
+                hard_stop = cost * (1 + threshold) if cost is not None and threshold is not None else None
+                atr_value = _finite(history.get("atr_14"))
+                atr_stop = cost - atr_value * (_finite(stop_cfg.get("atr_multiple")) or 1.5) if cost and atr_value and atr_value > 0 else None
+                mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
+                if mode == "atr":
+                    hard_stop = atr_stop or hard_stop
+                elif mode == "max_fixed_atr":
+                    hard_stop = max(value for value in (hard_stop, atr_stop) if value is not None) if hard_stop or atr_stop else None
             item = dict(features.get(symbol) or {
                 "symbol": symbol, "available": False, "fresh": False,
                 "reason": "分时特征不可用", "source": None, "as_of": None,
@@ -981,6 +984,7 @@ class PositionRiskService:
                 "r_multiple": runtime.get("r_multiple"),
                 "effective_stop_price": runtime.get("effective_stop_price") or hard_stop,
                 "hard_stop_price": hard_stop,
+                "hard_stop_enabled": stop_enabled,
                 "feature_snapshot_at": runtime.get("feature_snapshot_at") or item.get("as_of"),
                 "position_started_at": runtime.get("position_started_at"),
                 "t_trade_count": int((runtime.get("t_trade") or {}).get("count") or 0),
@@ -1109,23 +1113,29 @@ class PositionRiskService:
             runtime["feature_snapshot_at"] = features.get("as_of")
 
         stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
-        stop_threshold = _finite(stop_cfg.get("threshold"))
-        stop_threshold = stop_threshold if stop_threshold is not None else -0.10
+        stop_enabled = stop_cfg.get("enabled") is True
+        stop_threshold = _finite(stop_cfg.get("threshold")) if stop_enabled else None
         stop_action = _action_pct(stop_cfg, 100)
         stop_return = price / cost - 1 if cost else None
-        stop_mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
-        atr_multiple = _finite(stop_cfg.get("atr_multiple")) or 1.5
-        daily_atr = _finite((self._history.get(symbol) or {}).get("atr_14"))
-        fixed_stop_price = cost * (1 + stop_threshold) if cost and stop_threshold < 0 else None
-        atr_stop_price = cost - daily_atr * atr_multiple if cost and daily_atr and daily_atr > 0 else None
-        if stop_mode == "atr":
-            candidate_stop_price = atr_stop_price or fixed_stop_price
-        elif stop_mode == "max_fixed_atr":
-            candidate_stop_price = max(
-                value for value in (fixed_stop_price, atr_stop_price) if value is not None
-            ) if fixed_stop_price or atr_stop_price else None
+        candidate_stop_price = None
+        if stop_enabled:
+            stop_mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
+            atr_multiple = _finite(stop_cfg.get("atr_multiple")) or 1.5
+            daily_atr = _finite((self._history.get(symbol) or {}).get("atr_14"))
+            fixed_stop_price = cost * (1 + stop_threshold) if cost and stop_threshold is not None and stop_threshold < 0 else None
+            atr_stop_price = cost - daily_atr * atr_multiple if cost and daily_atr and daily_atr > 0 else None
+            if stop_mode == "atr":
+                candidate_stop_price = atr_stop_price or fixed_stop_price
+            elif stop_mode == "max_fixed_atr":
+                candidate_stop_price = max(
+                    value for value in (fixed_stop_price, atr_stop_price) if value is not None
+                ) if fixed_stop_price or atr_stop_price else None
+            else:
+                candidate_stop_price = fixed_stop_price
         else:
-            candidate_stop_price = fixed_stop_price
+            runtime["initial_stop_price"] = None
+            runtime["initial_r"] = None
+            runtime["effective_stop_price"] = None
         if candidate_stop_price and _finite(runtime.get("initial_stop_price")) is None:
             runtime["initial_stop_price"] = candidate_stop_price
             runtime["initial_r"] = max(cost - candidate_stop_price, cost * 0.0001)

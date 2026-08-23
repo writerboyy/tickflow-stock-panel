@@ -1141,6 +1141,31 @@ def test_stop_loss_uses_raw_live_price_and_has_risk_floor(tmp_path: Path):
     assert any(alert["source"] == "position_risk" for alert in quotes.alerts)
 
 
+def test_disabled_stop_loss_does_not_create_hidden_hard_stop(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 40}],
+        "template": {"rules": {"stop_loss": {"enabled": False}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+
+    service._evaluate_position(
+        portfolio,
+        position,
+        {"symbol": "600036.SH", "last_price": 35, "timestamp": "2026-08-07T10:00:00"},
+        datetime(2026, 8, 7, 10, 0),
+    )
+
+    feature = service.feature_snapshot({"600036.SH"}, datetime(2026, 8, 7, 10, 0))["600036.SH"]
+    assert feature["hard_stop_enabled"] is False
+    assert feature["hard_stop_price"] is None
+    assert not _position_events(service, "stop_loss")
+    assert service.store.get_runtime("position:600036.SH")["initial_stop_price"] is None
+
+
 def test_stop_loss_hysteresis_ignores_one_tick_threshold_noise(tmp_path: Path):
     service = PositionRiskService(
         tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None),
@@ -1234,7 +1259,10 @@ def test_effective_protection_price_only_moves_up(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
-        "template": {"rules": {"take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5}}},
+        "template": {"rules": {
+            "stop_loss": {"enabled": True},
+            "take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5},
+        }},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
@@ -1343,7 +1371,10 @@ def test_ladder_effective_protection_triggers_after_break_even(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 60_000, "total_asset": 100_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
-        "template": {"rules": {"take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5}}},
+        "template": {"rules": {
+            "stop_loss": {"enabled": True},
+            "take_profit_ladder": {"enabled": True, "active": True, "first_r": 1, "second_r": 1.5},
+        }},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()
@@ -1458,7 +1489,10 @@ def test_take_profit_ladder_persists_r_stages_and_protection(tmp_path: Path):
     service.store.replace({
         "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
         "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10}],
-        "template": {"rules": {"take_profit_ladder": {"enabled": True, "active": True, "first_action_pct": 30, "second_action_pct": 30}}},
+        "template": {"rules": {
+            "stop_loss": {"enabled": True},
+            "take_profit_ladder": {"enabled": True, "active": True, "first_action_pct": 30, "second_action_pct": 30},
+        }},
     }, 0)
     service._preload_history({"600036.SH"})
     portfolio = service.store.load()

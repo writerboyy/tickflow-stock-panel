@@ -153,7 +153,7 @@ def build_position_decision(
         return_pct = price / cost - 1
     limit_up = _finite(feature.get("limit_up")) or _finite(quote.get("limit_up"))
     limit_down = _finite(feature.get("limit_down")) or _finite(quote.get("limit_down"))
-    hard_stop = _finite(feature.get("hard_stop_price"))
+    hard_stop = _finite(feature.get("hard_stop_price")) if feature.get("hard_stop_enabled") is True else None
     hard_guard = bool(
         price is not None and (
             (hard_stop is not None and price <= hard_stop)

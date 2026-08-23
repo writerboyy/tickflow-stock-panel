@@ -1120,6 +1120,7 @@ export interface PositionRiskFeatureSnapshot {
   r_multiple?: number | null
   effective_stop_price?: number | null
   hard_stop_price?: number | null
+  hard_stop_enabled?: boolean
   feature_snapshot_at?: string | null
   position_started_at?: number | null
   t_trade_count?: number

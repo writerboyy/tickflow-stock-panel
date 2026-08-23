@@ -20,6 +20,7 @@ def _feature(**overrides):
         "flow_samples": 20,
         "orderbook_imbalance": 0.1,
         "hard_stop_price": 9.0,
+        "hard_stop_enabled": True,
         "daily": {"available": True, "reason": "日线指标已获取", "as_of": "2026-08-20"},
         "context": {
             "state": "supportive",
@@ -128,3 +129,17 @@ def test_hard_stop_can_exit_even_when_context_is_missing():
     assert decision["action"] == "exit"
     assert decision["suggested_pct"] == 100
     assert decision["risk_level"] == "high"
+
+
+def test_hard_stop_price_without_explicit_enable_does_not_force_exit():
+    decision = build_position_decision(
+        _feature(
+            last_price=8.9,
+            hard_stop_enabled=False,
+            limit_down=8.0,
+            context={"state": "unavailable", "missing": ["market", "sector"]},
+        ),
+        position={"cost_price": 10.0},
+    )
+
+    assert decision["action"] != "exit"
