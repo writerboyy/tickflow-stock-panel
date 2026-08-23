@@ -149,34 +149,41 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
         textStyle: { color: chartTheme.tooltipText, fontSize: 11 },
         valueFormatter: value => value == null ? '--' : String(value),
       },
-      legend: {
-        top: 0,
-        left: 0,
-        itemWidth: 12,
-        itemHeight: 8,
-        textStyle: { color: chartTheme.text, fontSize: 10 },
-        data: ['情绪强度', '涨停家数'],
-      },
-      grid: { left: 26, right: 22, top: 22, bottom: 32 },
-      xAxis: {
-        type: 'category',
-        data: dates,
-        boundaryGap: false,
-        axisLabel: { color: chartTheme.text, fontSize: 8, hideOverlap: true, formatter: (value: string) => value.slice(5) },
-        axisLine: { lineStyle: { color: chartTheme.border } },
-      },
+      grid: [
+        { left: 26, right: 22, top: 4, height: '48%' },
+        { left: 26, right: 22, top: '61%', bottom: 32 },
+      ],
+      xAxis: [
+        {
+          type: 'category',
+          gridIndex: 0,
+          data: dates,
+          boundaryGap: false,
+          axisLabel: { show: false },
+          axisLine: { show: false },
+          axisTick: { show: false },
+        },
+        {
+          type: 'category',
+          gridIndex: 1,
+          data: dates,
+          boundaryGap: true,
+          axisLabel: { color: chartTheme.text, fontSize: 8, hideOverlap: true, formatter: (value: string) => value.slice(5) },
+          axisLine: { lineStyle: { color: chartTheme.border } },
+        },
+      ],
       yAxis: [
         {
           type: 'value',
-          name: '强度',
+          gridIndex: 0,
           min: 0,
           max: 100,
           axisLabel: { color: chartTheme.text, fontSize: 9 },
-          nameTextStyle: { color: chartTheme.text, fontSize: 9 },
           splitLine: { lineStyle: { color: chartTheme.grid } },
         },
         {
           type: 'value',
+          gridIndex: 1,
           min: 0,
           axisLabel: { show: false },
           splitLine: { show: false },
@@ -186,26 +193,28 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
         {
           name: '涨停家数',
           type: 'bar',
+          xAxisIndex: 1,
+          yAxisIndex: 1,
           data: points.map(point => point.limit_up_count ?? null),
           barMaxWidth: 4,
           itemStyle: { color: '#22c55e', opacity: 0.45 },
-          yAxisIndex: 1,
         },
         {
           name: '情绪强度',
           type: 'line',
-          data: points.map(point => point.emotion_strength ?? null),
-          smooth: true,
-          symbol: 'circle',
-          symbolSize: 4,
-          lineStyle: { color: '#f97316', width: 1.5 },
-          itemStyle: { color: '#f97316' },
+          xAxisIndex: 0,
           yAxisIndex: 0,
+          data: points.map(point => point.emotion_strength ?? null),
+          smooth: false,
+          symbol: 'circle',
+          symbolSize: 5,
+          lineStyle: { color: '#f97316', width: 2.5 },
+          itemStyle: { color: '#f97316' },
         },
       ],
       dataZoom: [
-        { type: 'inside', start: Math.max(0, 100 - (30 / Math.max(points.length, 30)) * 100), end: 100 },
-        { type: 'slider', bottom: 2, height: 12, borderColor: chartTheme.border, fillerColor: chartTheme.zoomFill, textStyle: { color: chartTheme.text, fontSize: 8 } },
+        { type: 'inside', xAxisIndex: [0, 1], start: Math.max(0, 100 - (30 / Math.max(points.length, 30)) * 100), end: 100 },
+        { type: 'slider', xAxisIndex: [0, 1], bottom: 2, height: 12, borderColor: chartTheme.border, fillerColor: chartTheme.zoomFill, textStyle: { color: chartTheme.text, fontSize: 8 } },
       ],
     }
   }, [chartTheme, points])
@@ -223,7 +232,7 @@ function SentimentHistoryChart({ points }: { points: LimitBoardSentimentPoint[] 
   }, [option])
 
   if (points.length === 0) return <div className="grid h-32 place-items-center text-[11px] text-muted">暂无情绪历史</div>
-  return <div ref={chartRef} className="h-28 w-full" aria-label="开盘啦情绪强度历史折线图" />
+  return <div ref={chartRef} className="h-36 w-full" aria-label="开盘啦情绪强度历史折线图" />
 }
 
 function moneyYi(value: number | null | undefined): string {
@@ -1321,9 +1330,11 @@ export function LimitBoard() {
         ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
       ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
       <div className="min-w-0 px-3 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <div className="truncate text-[10px] text-muted">市场情绪</div>
-          <div className="shrink-0 truncate text-xs text-accent">{data.market_sentiment?.market_evaluation || '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</div>
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[9px]">
+          <span className="shrink-0 text-muted">市场情绪</span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-secondary"><span className="h-1.5 w-1.5 rounded-full bg-orange-500" aria-hidden="true" />情绪强度</span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-secondary"><span className="h-2 w-2 rounded-sm bg-green-500/70" aria-hidden="true" />涨停家数</span>
+          <span className="ml-auto min-w-0 truncate text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
         </div>
         <SentimentHistoryChart points={sentimentHistory} />
       </div>
