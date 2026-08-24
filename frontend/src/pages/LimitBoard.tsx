@@ -27,7 +27,8 @@ import {
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
-import { QMT_ALLOCATION_OPTIONS, type QmtAllocationMode } from '@/components/QmtTradePanel'
+import { type QmtAllocationMode } from '@/components/QmtTradePanel'
+import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 import {
@@ -57,6 +58,14 @@ type AllocationDialogState = {
   initialMode: PoolAllocationMode
   initialValue?: number | null
 }
+
+const ADVANCED_QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtAllocationMode; label: string }> = [
+  { value: 'available', label: '当前可用金额' },
+  { value: 'quarter', label: '可用金额 1/4' },
+  { value: 'third', label: '可用金额 1/3' },
+  { value: 'half', label: '可用金额 1/2' },
+  { value: 'fixed', label: '固定金额' },
+]
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   watching: { label: '观察中', tone: 'text-muted' },
@@ -310,48 +319,73 @@ function LimitBoardAllocationDialog({
   const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
   const genePassed = geneData?.passed ?? geneDetail?.passed
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
-  const previewMode = ratioMode ? mode : null
+  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'global' || mode === 'volume' ? 'available' : mode
+  const previewValue = mode === 'fixed' ? value : null
   const allocationPreview = useQuery({
-    queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode ?? 'available', null),
+    queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue),
     queryFn: () => api.qmtPreviewOrder({
       action: 'BUY',
       symbol: row.symbol,
       price,
       price_type: 'LIMIT',
       reference_price: price,
-      allocation_mode: previewMode ?? 'available',
-      allocation_value: null,
+      allocation_mode: previewMode,
+      allocation_value: previewValue,
     }, true),
-    enabled: Boolean(previewMode && qmtReady && validPrice),
+    enabled: Boolean(qmtReady && validPrice),
     retry: false,
     placeholderData: previous => previous,
   })
   const previewOrder = allocationPreview.data?.preview
   const estimatedVolume = price != null && price > 0
-    ? ratioMode
+    ? mode !== 'volume' && mode !== 'global'
       ? previewOrder?.volume ?? 0
       : mode === 'volume'
       ? Math.floor(Math.max(0, value) / 100) * 100
-      : mode === 'fixed'
-        ? Math.floor(Math.max(0, value) / price / 100) * 100
-        : mode === 'lot'
-          ? 100
-          : 0
+      : 0
     : 0
-  const estimatedAmount = ratioMode
+  const estimatedAmount = mode !== 'volume' && mode !== 'global'
     ? previewOrder?.actual_amount ?? null
     : price != null && estimatedVolume > 0 ? price * estimatedVolume : null
-  const validValue = ratioMode || (Number.isFinite(value) && value > 0)
+  const targetAmount = mode === 'volume'
+    ? estimatedAmount
+    : previewOrder?.target_amount ?? null
+  const validValue = ratioMode || mode === 'lot' || (Number.isFinite(value) && value > 0)
   const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
-  const previewReady = !ratioMode || (qmtReady && !allocationPreview.isFetching && previewOrder != null)
+  const previewRequired = kind === 'buy'
+  const previewReady = !previewRequired || (qmtReady && !allocationPreview.isFetching && previewOrder != null)
+  const allocationPreviewState = allocationPreview.isFetching
+    ? 'loading'
+    : allocationPreview.isError
+      ? 'error'
+      : previewOrder
+        ? 'ready'
+        : qmtReady
+          ? 'idle'
+          : 'unavailable'
+  const allocationPreviewMessage = allocationPreview.isError
+    ? allocationPreview.error instanceof Error ? allocationPreview.error.message : '当前可用金额暂时无法读取'
+    : !qmtReady
+      ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
+      : previewOrder?.reason
+        || (previewOrder?.capped ? '目标金额已按账户可用资金和 100 股整手向下调整。' : null)
   const canConfirm = Boolean(
     validValue
     && validVolume
     && (kind !== 'buy' || previewReady)
     && (kind !== 'buy' || (price != null && price > 0 && estimatedVolume >= 100))
-    && (kind !== 'buy' || price == null || price <= 0 || estimatedVolume >= 100 || !ratioMode),
+    && (kind !== 'buy' || price == null || price <= 0 || estimatedVolume >= 100),
   )
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
+  const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
+    { value: 'available', label: poolAllocationLabel('available') },
+    { value: 'sixth', label: poolAllocationLabel('sixth') },
+    { value: 'fifth', label: poolAllocationLabel('fifth') },
+    { value: 'quarter', label: poolAllocationLabel('quarter') },
+    { value: 'lot', label: poolAllocationLabel('lot') },
+    { value: 'fixed', label: poolAllocationLabel('fixed') },
+    { value: 'volume', label: poolAllocationLabel('volume') },
+  ]
 
   return <Modal
     labelledBy="limit-board-allocation-title"
@@ -384,36 +418,23 @@ function LimitBoardAllocationDialog({
           <span>连板率 <b className="font-mono text-foreground">{ratioPct(geneData?.consecutive_rate ?? geneDetail?.consecutive_rate, 1)}</b></span>
         </div> : premiumGeneQuery.isLoading ? <div className="text-muted">正在读取涨停基因…</div> : <div className="text-muted">暂无涨停基因数据</div>}
       </div> : null}
-      <label className="block text-[10px] text-muted">交易数量/金额方式
-        <select value={mode} disabled={pending} onChange={event => setMode(event.target.value as PoolAllocationMode)} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
-          <option value="available" disabled={!qmtReady}>当前可用金额{qmtReady ? '' : '（QMT 未就绪）'}</option>
-          <option value="sixth">{poolAllocationLabel('sixth')}</option>
-          <option value="fifth">{poolAllocationLabel('fifth')}</option>
-          <option value="quarter">{poolAllocationLabel('quarter')}</option>
-          <option value="lot">{poolAllocationLabel('lot')}</option>
-          <option value="fixed">{poolAllocationLabel('fixed')}</option>
-          <option value="volume">{poolAllocationLabel('volume')}</option>
-        </select>
-      </label>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] text-muted">快捷金额</span>
-        {[10_000, 20_000, 30_000].map(amount => <button key={amount} type="button" disabled={pending} onClick={() => { setMode('fixed'); setValue(amount) }} className="h-7 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40">{amount.toLocaleString('zh-CN')}</button>)}
-        {(['sixth', 'fifth', 'quarter'] as const).map(ratio => <button key={ratio} type="button" disabled={pending} onClick={() => setMode(ratio)} className="h-7 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40">{ratio === 'sixth' ? '1/6' : ratio === 'fifth' ? '1/5' : '1/4'}</button>)}
-        <button type="button" disabled={pending || !qmtReady} onClick={() => setMode('available')} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40">当前可用</button>
-      </div>
-      {ratioMode ? <div className="border-y border-accent/25 bg-accent/5 px-3 py-2 text-[10px] leading-4 text-secondary">
-        {previewOrder ? <span>可用资金 {moneyValue(previewOrder.basis_amount)}，按 {poolAllocationLabel(mode)} 预计委托 {moneyValue(previewOrder.actual_amount)}（{previewOrder.volume.toLocaleString('zh-CN')} 股）</span> : allocationPreview.isError ? <span className="text-warning">{allocationPreview.error instanceof Error ? allocationPreview.error.message : '当前可用金额暂时无法读取'}</span> : qmt.isLoading ? '正在读取 QMT 可用金额…' : qmtReady ? '正在计算金额和数量…' : (qmt.data?.reason || 'QMT 未就绪，买入时将无法预览金额')}
-      </div> : null}
-      {mode === 'fixed' ? <label className="block text-[10px] text-muted">确认金额
-        <input type="number" min={100} step={100} value={value} disabled={pending} onChange={event => setValue(Number(event.target.value))} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50" />
-      </label> : null}
-      {mode === 'volume' ? <label className="block text-[10px] text-muted">确认数量（股）
-        <input type="number" min={100} step={100} value={value || ''} disabled={pending} onChange={event => setValue(Number(event.target.value))} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50" />
-      </label> : null}
-      <div className="grid grid-cols-2 gap-3 border-y border-border py-3 text-[10px]">
-        <div><span className="text-muted">委托数量</span><div className="mt-1 font-mono text-foreground">{estimatedVolume > 0 ? estimatedVolume.toLocaleString('zh-CN') + ' 股' : '--'}</div></div>
-        <div><span className="text-muted">配置方式</span><div className="mt-1 text-foreground">{poolAllocationLabel(mode)}</div></div>
-      </div>
+      <QmtTradeAllocationControls
+        action="BUY"
+        mode={mode as QmtTradeAllocationMode}
+        value={value}
+        onModeChange={next => setMode(next as PoolAllocationMode)}
+        onValueChange={setValue}
+        disabled={pending}
+        options={allocationOptions}
+        disabledModes={{ available: !qmtReady }}
+        basisLabel={previewOrder?.basis_label}
+        basisAmount={previewOrder?.basis_amount}
+        targetAmount={targetAmount}
+        actualAmount={estimatedAmount}
+        volume={estimatedVolume}
+        previewState={allocationPreviewState}
+        previewMessage={allocationPreviewMessage}
+      />
       {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : <div className="text-[10px] leading-4 text-muted">这里只保存该股票的交易数量/金额配置；打板池仍按临板、扫板或排板规则触发委托。</div>}
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
@@ -1115,7 +1136,7 @@ function AdvancedSettingsDialog({
     && Number.isInteger(draft.queue_confirm_snapshots)
     && draft.queue_confirm_snapshots >= 0
     && draft.queue_confirm_snapshots <= 10
-    && QMT_ALLOCATION_OPTIONS.some(option => option.value === draft.order_allocation_mode)
+    && ADVANCED_QMT_ALLOCATION_OPTIONS.some(option => option.value === draft.order_allocation_mode)
     && Number.isFinite(draft.order_amount_per_board)
     && draft.order_amount_per_board >= 0
     && draft.order_amount_per_board <= 10000000
@@ -1158,7 +1179,7 @@ function AdvancedSettingsDialog({
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span><span className="block">自动下单资金方式</span><span className="mt-0.5 block text-[10px] text-muted">按 QMT 提交时的最新可用资金计算</span></span>
         <select value={draft.order_allocation_mode} disabled={pending} onChange={event => update('order_allocation_mode', event.target.value as QmtAllocationMode)} className="h-8 w-36 rounded-btn border border-border bg-base px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
-          {QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          {ADVANCED_QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </label>
       {draft.order_allocation_mode === 'fixed' ? <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
