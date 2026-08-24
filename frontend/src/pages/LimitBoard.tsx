@@ -13,6 +13,7 @@ import {
   Layers3,
   LineChart,
   ListFilter,
+  Loader2,
   PanelRightClose,
   PanelRightOpen,
   Plus,
@@ -1493,6 +1494,9 @@ export function LimitBoard() {
           pullback_count: data.market_sentiment.emotion_pullback_count,
         },
   ), [data?.market_sentiment])
+  if (!data && view.isLoading) {
+    return <EmptyState icon={Loader2} title="短线猎手加载中" hint="正在等待后端服务响应" />
+  }
   if (!data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
   const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
