@@ -939,10 +939,12 @@ function SectorStrengthTable({
               <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{moneyYi(row.amount)}</td>
-              <td className="px-2 py-1.5"><div className="flex justify-end gap-0.5">
+              <td className="sticky right-0 z-20 w-[60px] min-w-[60px] border-l border-border bg-surface px-1.5 py-1.5">
+                <div className="flex justify-end gap-0.5">
                 <button type="button" aria-label={`加入${row.name || row.symbol}买入池`} title="加入买入池" disabled={busy} onClick={() => onAddBuyPool(manualActionRow(row.symbol, row.name, row.last_price, row.change_pct, null))} className={`grid h-6 w-6 place-items-center rounded-btn border ${buyPoolSymbols.has(row.symbol) ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{buyPoolSymbols.has(row.symbol) ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                 <button type="button" aria-label={`加入${row.name || row.symbol}打板池`} title="加入打板池" disabled={busy} onClick={() => onAddPool(manualActionRow(row.symbol, row.name, row.last_price, row.change_pct, null))} className={`grid h-6 w-6 place-items-center rounded-btn border ${poolSymbols.has(row.symbol) ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{poolSymbols.has(row.symbol) ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
-              </div></td>
+                </div>
+              </td>
               </tr>
             })}</tbody>
           </table>
