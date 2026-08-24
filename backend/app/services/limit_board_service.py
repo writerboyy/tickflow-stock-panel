@@ -228,8 +228,16 @@ class LimitBoardService:
         self._stop.clear()
         add_fetch_listener = getattr(self.quote_service, "add_fetch_listener", None)
         if callable(add_fetch_listener):
-            add_fetch_listener(self._on_market_fetch)
-        self._refresh_symbol_consumer()
+            try:
+                add_fetch_listener(self._on_market_fetch)
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = f"行情监听初始化失败：{exc}"
+                logger.warning("打板专区行情监听初始化失败", exc_info=True)
+        try:
+            self._refresh_symbol_consumer()
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"行情标的订阅初始化失败：{exc}"
+            logger.warning("打板专区行情标的订阅初始化失败", exc_info=True)
         acquire_polling = getattr(self.quote_service, "acquire_temporary_polling", None)
         get_min_interval = getattr(self.quote_service, "get_min_interval", None)
         if callable(acquire_polling):
@@ -241,15 +249,23 @@ class LimitBoardService:
                 self._last_error = str(exc)
         hub = self._hub()
         if hub is not None:
-            hub.add_depth_listener(self.enqueue_depth)
-            # Pool symbols must be subscribed before the first quote arrives;
-            # relying on a later market callback leaves a configured pool idle
-            # when the provider has no initial snapshot.
-            self._sync_websocket(self._runtime_for_today(), self.store.load_config())
+            try:
+                hub.add_depth_listener(self.enqueue_depth)
+                # Pool symbols must be subscribed before the first quote arrives;
+                # relying on a later market callback leaves a configured pool idle
+                # when the provider has no initial snapshot.
+                self._sync_websocket(self._runtime_for_today(), self.store.load_config())
+            except Exception as exc:  # noqa: BLE001
+                self._last_error = f"实时行情订阅初始化失败：{exc}"
+                logger.warning("打板专区实时行情订阅初始化失败", exc_info=True)
         self._thread = threading.Thread(target=self._worker, name="limit-board", daemon=True)
         self._started = True
         self._thread.start()
-        self._on_market_fetch()
+        try:
+            self._on_market_fetch()
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"首次行情刷新失败：{exc}"
+            logger.warning("打板专区首次行情刷新失败", exc_info=True)
 
     def stop(self) -> None:
         self._started = False

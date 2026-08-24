@@ -222,6 +222,28 @@ def test_start_registers_limit_board_consumer(tmp_path):
         service.stop()
 
 
+def test_start_keeps_service_available_when_initial_refresh_fails(tmp_path, monkeypatch):
+    service, quotes, _config = make_service(tmp_path)
+
+    def fail_consumer():
+        raise RuntimeError("consumer unavailable")
+
+    def fail_initial_refresh():
+        raise RuntimeError("initial refresh unavailable")
+
+    monkeypatch.setattr(service, "_refresh_symbol_consumer", fail_consumer)
+    monkeypatch.setattr(service, "_on_market_fetch", fail_initial_refresh)
+
+    service.start()
+    try:
+        assert service._thread is not None
+        assert service._started is True
+        assert "首次行情刷新失败" in (service._last_error or "")
+        assert quotes.events == []
+    finally:
+        service.stop()
+
+
 def test_first_touch_records_only_private_board_event(tmp_path, monkeypatch):
     service, quotes, config = make_service(tmp_path)
     monkeypatch.setattr(

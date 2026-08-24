@@ -1388,12 +1388,18 @@ export function LimitBoard() {
   const view = useQuery({
     queryKey: QK.limitBoard,
     queryFn: api.limitBoard,
-    refetchInterval: isTradingHours
-      ? query => Math.max(
-        1,
-        query.state.data?.runtime.refresh_cycle.interval_seconds ?? 5,
-      ) * 1000
-      : false,
+    refetchOnMount: 'always',
+    retry: 5,
+    retryDelay: attemptIndex => Math.min(5_000, 1_000 * 2 ** attemptIndex),
+    refetchInterval: query => {
+      if (!query.state.data) return 5_000
+      return isTradingHours
+        ? Math.max(
+          1,
+          query.state.data.runtime.refresh_cycle.interval_seconds ?? 5,
+        ) * 1000
+        : false
+    },
     placeholderData: previous => previous,
   })
   const unifiedRefreshIntervalMs = Math.max(
@@ -1487,7 +1493,7 @@ export function LimitBoard() {
           pullback_count: data.market_sentiment.emotion_pullback_count,
         },
   ), [data?.market_sentiment])
-  if (view.isError || !data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
+  if (!data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
   const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
   const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'buy_pool' ? 'buy_pool' : 'candidate'
