@@ -15,6 +15,7 @@ from app.parquet import ENRICHED_STORAGE_SCHEMA, scan_parquet_compat
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
 from app.plugins.kaipanla.credentials import load_credentials
 from app.plugins.kaipanla.parsers import ResponseShapeError, parse_premium_gene
+from app.services.limit_board_scoring import premium_gene_detail
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,22 @@ def _empty_snapshot() -> pl.DataFrame:
 
 def _percent_to_fraction(value: float | None) -> float | None:
     return None if value is None else value / 100.0
+
+
+def _with_score(result: dict) -> dict:
+    if result.get("available") is not True:
+        return result
+    detail = premium_gene_detail(result)
+    if detail is None:
+        return result
+    return {
+        **result,
+        "score": detail["score"],
+        "max_score": detail["max_score"],
+        "passed": detail["passed"],
+        "components": detail["components"],
+        "criteria": detail["criteria"],
+    }
 
 
 async def _fetch_kaipanla(symbol: str) -> dict:
@@ -346,7 +363,7 @@ def get_for_symbol(repo, symbol: str, *, window_days: int = WINDOW_DAYS) -> dict
     result = match.row(0, named=True)
     result["available"] = True
     result["as_of"] = str(result["as_of"])
-    return result
+    return _with_score(result)
 
 
 async def get_for_symbol_async(repo, symbol: str, *, window_days: int = WINDOW_DAYS) -> dict:
@@ -371,6 +388,7 @@ async def get_for_symbol_async(repo, symbol: str, *, window_days: int = WINDOW_D
                 "window_days": window_days,
                 **live,
             }
+            result = _with_score(result)
             _live_cache[cache_key] = (now, result)
             return dict(result)
         except (KaipanlaRequestError, ResponseShapeError, OSError, ValueError) as exc:

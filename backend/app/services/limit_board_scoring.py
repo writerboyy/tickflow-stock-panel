@@ -24,17 +24,15 @@ def _linear(value: float, low: float, high: float, points: float) -> float:
     return _clamp((value - low) / (high - low)) * points
 
 
+_PREMIUM_GENE_MAX_SCORE = 10.0
+_PREMIUM_GENE_CRITERION_SCORE = _PREMIUM_GENE_MAX_SCORE / 3.0
+
+
 def premium_gene_detail(values: dict[str, Any]) -> dict[str, Any] | None:
     required = {
         "limit_up_count",
-        "premium_5_count",
-        "next_day_observation_count",
         "next_day_red_rate",
-        "first_board_attempt_count",
-        "first_board_sealed_count",
-        "first_board_seal_rate",
         "first_board_broken_rate",
-        "consecutive_rate",
     }
     if not required.issubset(values):
         return None
@@ -43,39 +41,66 @@ def premium_gene_detail(values: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     limit_count = max(0.0, numbers["limit_up_count"] or 0.0)
-    observations = max(0.0, numbers["next_day_observation_count"] or 0.0)
-    attempts = max(0.0, numbers["first_board_attempt_count"] or 0.0)
-    sealed = max(0.0, numbers["first_board_sealed_count"] or 0.0)
+    observations = max(0.0, finite(values.get("next_day_observation_count")) or 0.0)
+    attempts = max(0.0, finite(values.get("first_board_attempt_count")) or 0.0)
+    sealed = max(0.0, finite(values.get("first_board_sealed_count")) or 0.0)
+    premium_count = max(0.0, finite(values.get("premium_5_count")) or 0.0)
     premium_rate = (
-        max(0.0, numbers["premium_5_count"] or 0.0) / observations
-        if observations > 0 else 0.0
+        premium_count / observations
+        if observations > 0
+        else _clamp(finite(values.get("premium_5_rate")) or 0.0)
     )
-    observation_confidence = min(observations / 10.0, 1.0)
-    attempt_confidence = min(attempts / 10.0, 1.0)
-    sealed_confidence = min(sealed / 10.0, 1.0)
     components = {
-        "limit_frequency": min(limit_count / 12.0, 1.0) * 7.0,
-        "next_day_red": _clamp(numbers["next_day_red_rate"] or 0.0) * observation_confidence * 7.0,
-        "premium_5": _clamp(premium_rate) * observation_confidence * 5.0,
-        "first_board_seal": _clamp(numbers["first_board_seal_rate"] or 0.0) * attempt_confidence * 6.0,
-        "consecutive": _clamp(numbers["consecutive_rate"] or 0.0) * sealed_confidence * 5.0,
+        "limit_frequency": min(limit_count / 12.0, 1.0) * _PREMIUM_GENE_CRITERION_SCORE,
+        "next_day_red": _clamp(numbers["next_day_red_rate"] or 0.0) * _PREMIUM_GENE_CRITERION_SCORE,
+        "first_board_broken": (
+            1.0 - _clamp(numbers["first_board_broken_rate"] or 0.0)
+        ) * _PREMIUM_GENE_CRITERION_SCORE,
+    }
+    criteria = {
+        "limit_up_count": {
+            "value": int(limit_count),
+            "threshold": 4,
+            "operator": ">=",
+            "passed": limit_count >= 4,
+            "score": round(components["limit_frequency"], 2),
+            "max_score": round(_PREMIUM_GENE_CRITERION_SCORE, 2),
+        },
+        "next_day_red_rate": {
+            "value": numbers["next_day_red_rate"],
+            "threshold": 0.80,
+            "operator": ">=",
+            "passed": numbers["next_day_red_rate"] >= 0.80,
+            "score": round(components["next_day_red"], 2),
+            "max_score": round(_PREMIUM_GENE_CRITERION_SCORE, 2),
+        },
+        "first_board_broken_rate": {
+            "value": numbers["first_board_broken_rate"],
+            "threshold": 0.75,
+            "operator": "<=",
+            "passed": numbers["first_board_broken_rate"] <= 0.75,
+            "score": round(components["first_board_broken"], 2),
+            "max_score": round(_PREMIUM_GENE_CRITERION_SCORE, 2),
+        },
     }
     return {
         "score": round(sum(components.values()), 2),
-        "max_score": 30.0,
+        "max_score": _PREMIUM_GENE_MAX_SCORE,
+        "passed": all(item["passed"] for item in criteria.values()),
         "components": {key: round(value, 2) for key, value in components.items()},
+        "criteria": criteria,
         "as_of": str(values.get("as_of") or "") or None,
         "window_days": int(finite(values.get("window_days")) or 200),
         "limit_up_count": int(limit_count),
-        "premium_5_count": int(numbers["premium_5_count"] or 0),
+        "premium_5_count": int(premium_count),
         "next_day_observation_count": int(observations),
         "next_day_red_rate": numbers["next_day_red_rate"],
         "premium_5_rate": premium_rate,
         "first_board_attempt_count": int(attempts),
         "first_board_sealed_count": int(sealed),
-        "first_board_seal_rate": numbers["first_board_seal_rate"],
+        "first_board_seal_rate": finite(values.get("first_board_seal_rate")),
         "first_board_broken_rate": numbers["first_board_broken_rate"],
-        "consecutive_rate": numbers["consecutive_rate"],
+        "consecutive_rate": finite(values.get("consecutive_rate")),
     }
 
 

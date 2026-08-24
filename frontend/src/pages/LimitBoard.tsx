@@ -306,6 +306,9 @@ function LimitBoardAllocationDialog({
   })
   const geneDetail = row.candidate_score_detail?.premium_gene
   const geneData: PremiumGene | undefined = premiumGeneQuery.data?.available ? premiumGeneQuery.data : undefined
+  const geneScore = geneData?.score ?? geneDetail?.score
+  const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
+  const genePassed = geneData?.passed ?? geneDetail?.passed
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
   const previewMode = ratioMode ? mode : null
   const allocationPreview = useQuery({
@@ -372,7 +375,7 @@ function LimitBoardAllocationDialog({
       {kind === 'board' ? <div className="border-y border-border py-3 text-[10px]">
         <div className="mb-2 font-medium text-secondary">涨停基因</div>
         {geneData || geneDetail ? <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-          {geneDetail ? <span>评分 <b className="font-mono text-foreground">{geneDetail.score.toFixed(1)} / {geneDetail.max_score.toFixed(1)}</b></span> : null}
+          {geneScore != null ? <span className="col-span-2">综合评分 <b className="font-mono text-foreground">{geneScore.toFixed(1)} / {geneMaxScore.toFixed(1)}</b>{genePassed != null ? <em className={genePassed ? 'ml-1 not-italic text-bull' : 'ml-1 not-italic text-warning'}>{genePassed ? '达标' : '未达标'}</em> : null}</span> : null}
           <span>近{geneData?.window_days ?? geneDetail?.window_days ?? '--'}日涨停 <b className="font-mono text-foreground">{geneData?.limit_up_count ?? geneDetail?.limit_up_count ?? '--'} 次</b></span>
           <span>溢价5% <b className="font-mono text-foreground">{geneData?.premium_5_count != null ? String(geneData.premium_5_count) + ' 次' : ratioPct(geneDetail?.premium_5_rate, 1)}</b></span>
           <span>次日收红 <b className="font-mono text-foreground">{ratioPct(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate, 1)}</b></span>

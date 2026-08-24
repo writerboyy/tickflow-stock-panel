@@ -841,7 +841,7 @@ def test_valid_gene_snapshot_no_longer_blocks_sector_candidate(tmp_path, monkeyp
 
     assert service._history_ready is True
     assert service._first_board_eligible == {"600000.SH"}
-    assert "涨停基因用于 30 分个股排序" in service._history_reason
+    assert "涨停基因用于 10 分个股排序" in service._history_reason
 
 
 def test_history_retries_after_cache_warmup_without_market_event(tmp_path, monkeypatch):
@@ -1218,7 +1218,7 @@ def test_view_scores_candidate_with_sector_gene_and_technical_context(tmp_path, 
     assert row["candidate_score_detail"]["intraday_flow"]["flow_metric"] == "main_net_speed"
     assert row["candidate_score_detail"]["intraday_flow"]["capital_available"] is True
     assert row["candidate_score_detail"]["sector"]["max_score"] == 50.0
-    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 30.0
+    assert row["candidate_score_detail"]["premium_gene"]["max_score"] == 10.0
     assert row["candidate_score_detail"]["technical"]["score"] == 5.0
     assert row["candidate_score_detail"]["sector"]["is_sector_leader"] is False
     assert row["candidate_score_detail"]["sector"]["stock_rank"] == 3
@@ -1700,7 +1700,7 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     )
     monkeypatch.setattr(
         "app.services.limit_board_service.premium_gene_detail",
-        lambda _values: {"score": 30.0},
+        lambda _values: {"score": 10.0, "max_score": 10.0},
     )
     monkeypatch.setattr(
         "app.services.limit_board_service.technical_detail",
@@ -1736,7 +1736,7 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     sector = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]["sector"]
     assert sector["name"] == "概念二"
     assert sector["score"] == pytest.approx(42.0)
-    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == pytest.approx(89.0)
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score"] == pytest.approx(69.0)
     assert "proximity" not in runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]
 
     concept_available[0] = False

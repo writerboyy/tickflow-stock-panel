@@ -40,7 +40,7 @@ def _rotation_series(changes: list[float], ranks: list[int]) -> dict:
     return {"dates": dates, "columns": columns, "concept_count": 10}
 
 
-def test_premium_gene_score_uses_sample_confidence():
+def test_premium_gene_score_uses_three_gate_metrics():
     detail = premium_gene_detail({
         "as_of": "2026-08-14",
         "window_days": 200,
@@ -56,9 +56,27 @@ def test_premium_gene_score_uses_sample_confidence():
     })
 
     assert detail is not None
-    assert detail["score"] == pytest.approx(21.9)
+    assert detail["score"] == pytest.approx(8.67)
+    assert detail["max_score"] == pytest.approx(10.0)
     assert detail["premium_5_rate"] == pytest.approx(0.5)
-    assert detail["components"]["consecutive"] == pytest.approx(2.0)
+    assert detail["components"]["first_board_broken"] == pytest.approx(2.67)
+    assert detail["passed"] is True
+    assert detail["criteria"]["limit_up_count"]["passed"] is True
+    assert detail["criteria"]["next_day_red_rate"]["passed"] is True
+    assert detail["criteria"]["first_board_broken_rate"]["passed"] is True
+
+
+def test_premium_gene_score_accepts_live_gate_snapshot_without_optional_counts():
+    detail = premium_gene_detail({
+        "limit_up_count": 4,
+        "next_day_red_rate": 0.80,
+        "first_board_broken_rate": 0.75,
+    })
+
+    assert detail is not None
+    assert detail["score"] == pytest.approx(4.61)
+    assert detail["passed"] is True
+    assert detail["criteria"]["limit_up_count"]["passed"] is True
 
 
 def test_technical_score_combines_all_configured_indicators():

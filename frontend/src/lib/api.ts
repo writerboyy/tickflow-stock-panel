@@ -182,6 +182,19 @@ export interface PremiumGene {
   symbol: string
   as_of: string | null
   window_days: number
+  score?: number
+  max_score?: number
+  passed?: boolean
+  components?: {
+    limit_frequency?: number
+    next_day_red?: number
+    first_board_broken?: number
+  }
+  criteria?: {
+    limit_up_count?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+    next_day_red_rate?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+    first_board_broken_rate?: { value: number; threshold: number; operator: '<='; passed: boolean; score: number; max_score: number }
+  }
   limit_up_count?: number
   premium_5_count?: number
   next_day_observation_count?: number
@@ -1331,6 +1344,17 @@ export interface LimitBoardRow {
     premium_gene?: {
       score: number
       max_score: number
+      passed?: boolean
+      components?: {
+        limit_frequency?: number
+        next_day_red?: number
+        first_board_broken?: number
+      }
+      criteria?: {
+        limit_up_count?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+        next_day_red_rate?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+        first_board_broken_rate?: { value: number; threshold: number; operator: '<='; passed: boolean; score: number; max_score: number }
+      }
       as_of?: string | null
       window_days?: number
       limit_up_count?: number

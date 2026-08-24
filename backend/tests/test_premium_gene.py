@@ -166,3 +166,5 @@ async def test_get_for_symbol_async_prefers_kaipanla_gene_result(tmp_path, monke
     assert result["first_board_seal_rate"] == pytest.approx(0.888889)
     assert result["first_board_broken_rate"] == pytest.approx(0.111111)
     assert result["consecutive_rate"] == 0.125
+    assert result["max_score"] == 10.0
+    assert result["passed"] is True

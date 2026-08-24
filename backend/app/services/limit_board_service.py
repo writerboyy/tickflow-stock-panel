@@ -59,7 +59,7 @@ _SCORE_STOCK_COLUMNS = {
 }
 _SCORE_WEIGHTS = {
     "sector": 50.0,
-    "premium_gene": 30.0,
+    "premium_gene": 10.0,
     "intraday_flow": 15.0,
     "technical": 5.0,
 }
@@ -1470,7 +1470,7 @@ class LimitBoardService:
         self._history_ready = True
         self._history_reason = (
             f"已核对前 {lookback} 个交易日；自动候选仅来自实时板块强度前 10 名，"
-            "涨停基因用于 30 分个股排序"
+            "涨停基因用于 10 分个股排序"
         )
 
     def _retry_history(self) -> None:
@@ -2794,7 +2794,7 @@ class LimitBoardService:
                 f" · {sector.get('leadership') or 'follower'}"
             )
         if gene:
-            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/30")
+            reasons.append(f"涨停基因 {float(gene.get('score') or 0):.1f}/10")
         if technical:
             reasons.append(f"技术面 {float(technical.get('score') or 0):.1f}/5")
         return reasons
@@ -3077,7 +3077,7 @@ class LimitBoardService:
                 gene = self._scale_score_detail(
                     premium_gene_detail(self._premium_stats.get(symbol) or {}),
                     _SCORE_WEIGHTS["premium_gene"],
-                    30.0,
+                    10.0,
                 )
                 technical = self._scale_score_detail(technical_detail(
                     stock_rows.get(symbol) or {}, as_of=now.isoformat(),
