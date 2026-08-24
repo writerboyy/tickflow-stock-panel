@@ -1210,7 +1210,7 @@ export interface LimitBoardRow {
   source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
   order_mode?: 'sweep' | 'queue'
-  allocation_mode?: 'global' | 'available' | 'lot' | 'fixed' | 'volume'
+  allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
   allocation_value?: number | null
   order_price?: number | null
   order_volume?: number | null
@@ -1227,7 +1227,7 @@ export interface LimitBoardRow {
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
-  auto_order_allocation_mode?: 'quarter' | 'third' | 'half' | 'available' | 'fixed' | 'lot' | 'volume'
+  auto_order_allocation_mode?: 'sixth' | 'fifth' | 'quarter' | 'third' | 'half' | 'available' | 'fixed' | 'lot' | 'volume'
   auto_order_allocation_value?: number | null
   auto_order_volume?: number | null
   auto_order_amount?: number | null
@@ -1600,7 +1600,7 @@ export interface LimitBoardConfig {
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     auto_trade: boolean
     order_mode?: 'sweep' | 'queue'
-    allocation_mode?: 'global' | 'available' | 'lot' | 'fixed' | 'volume'
+    allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
     allocation_value?: number
     added_at?: string
   }>
@@ -1608,7 +1608,7 @@ export interface LimitBoardConfig {
     symbol: string
     name?: string
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
-    allocation_mode: 'available' | 'lot' | 'fixed' | 'volume'
+    allocation_mode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
     allocation_value?: number
     order_price?: number
     order_volume?: number
@@ -2903,11 +2903,11 @@ export const api = {
       `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
-  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'global' | 'available' | 'lot' | 'fixed' | 'volume' = 'global', allocationValue?: number | null) =>
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'global', allocationValue?: number | null) =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
       method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
     }),
-  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'available' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null) =>
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
       method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
     }),
@@ -2920,7 +2920,7 @@ export const api = {
     symbol: string,
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual',
     revision: number,
-    allocationMode: 'available' | 'lot' | 'fixed' | 'volume' = 'lot',
+    allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'lot',
     allocationValue?: number | null,
   ) => request<{ ok: boolean; config: LimitBoardConfig; order: QmtOrder }>('/api/limit-board/buy-pool', {
     method: 'POST',

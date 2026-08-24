@@ -1956,6 +1956,17 @@ def test_board_pool_persists_per_stock_fixed_amount(tmp_path):
     assert saved["board_pool"][0]["allocation_value"] == 10_000
 
 
+def test_board_pool_persists_fraction_allocation(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+
+    saved = service.add_pool(
+        "600000.SH", "first_board", 0, "sixth",
+    )
+
+    assert saved["board_pool"][0]["allocation_mode"] == "sixth"
+    assert "allocation_value" not in saved["board_pool"][0]
+
+
 def test_board_pool_updates_per_stock_fixed_volume(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     service.add_pool("600000.SH", "first_board", 0)

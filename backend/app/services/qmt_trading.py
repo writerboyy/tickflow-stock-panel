@@ -76,6 +76,8 @@ def _float(value: Any) -> float | None:
 
 
 _ALLOCATION_RATIOS = {
+    "sixth": 1 / 6,
+    "fifth": 0.2,
     "quarter": 0.25,
     "third": 1 / 3,
     "half": 0.5,
@@ -732,7 +734,7 @@ class QmtTradingService:
             raise ValueError("金额下单需要有效的参考价格")
         mode = str(request.get("allocation_mode") or "").strip().lower()
         if mode not in _ALLOCATION_MODES:
-            raise ValueError("金额分配方式必须是当前可用金额、可用金额四分之一、三分之一、二分之一、固定金额或一手模式")
+            raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
 
         if action == "BUY":
             basis_amount = _float((snapshot.get("account") or {}).get("cash"))

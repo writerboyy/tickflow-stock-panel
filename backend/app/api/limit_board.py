@@ -17,13 +17,13 @@ class SelectedWrite(BaseModel):
 
 class PoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
-    allocation_mode: str = Field(default="global", pattern="^(global|available|lot|fixed|volume)$")
+    allocation_mode: str = Field(default="global", pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
 
 
 class BuyPoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
-    allocation_mode: str = Field(default="lot", pattern="^(available|lot|fixed|volume)$")
+    allocation_mode: str = Field(default="lot", pattern="^(available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
 
 
@@ -31,7 +31,7 @@ class PoolUpdate(BaseModel):
     revision: int = Field(ge=0)
     auto_trade: bool
     order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
-    allocation_mode: str | None = Field(default=None, pattern="^(global|available|lot|fixed|volume)$")
+    allocation_mode: str | None = Field(default=None, pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
 
 
