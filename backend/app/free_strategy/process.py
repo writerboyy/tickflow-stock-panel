@@ -2183,6 +2183,24 @@ def replay_second_precision_session(
     for at in schedules:
         target = datetime.combine(day, time.fromisoformat(at))
         consume_until(target)
+        # Four-mode pre-open callbacks (09:05/09:24) use daily/PIT inputs and
+        # occur before executable ticks exist.  Keep the strict snapshot
+        # contract from the 09:25:45 auction boundary onward.
+        required = _scheduled_required_symbols(engine, target)
+        missing = [symbol for symbol in required if symbol not in latest]
+        if missing and target.time() < time(9, 25, 45):
+            engine.advance_event(
+                target,
+                sorted(latest.values(), key=lambda bar: bar.symbol),
+                event_type="scheduled",
+                scheduled_at=at,
+            )
+            continue
+        if missing:
+            raise ValueError(
+                f"{target.isoformat()} Tick 回调边界缺少快照: "
+                f"{', '.join(missing[:8])}"
+            )
         if latest:
             engine.advance_event(
                 target,

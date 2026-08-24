@@ -1121,6 +1121,51 @@ def mark(context):
     ]
 
 
+def test_second_precision_replay_allows_pre_open_callbacks_without_ticks():
+    day = date(2024, 1, 2)
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(pre_open, '09:05')
+    context.schedule(confirm, '09:25:45')
+
+def pre_open(context):
+    context.state['pre_open'] = context.now.isoformat()
+
+def confirm(context):
+    context.state['confirmed_price'] = context.current_bars()['X'].close
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(
+            initial_capital=10_000,
+            fees_pct=0,
+            slippage_bps=0,
+            benchmark_symbol="X",
+        ),
+    )
+    rows = [
+        _Bar(
+            "X", datetime(2024, 1, 2, 9, 25, 1),
+            10.0, 10.2, 10.0, 10.2,
+            volume=100, amount=1_020,
+        ),
+    ]
+
+    replay_second_precision_session(
+        engine,
+        day,
+        rows,
+        datetime(2024, 1, 2, 9, 25, 45),
+    )
+
+    assert engine.context.state == {
+        "pre_open": "2024-01-02T09:05:00",
+        "confirmed_price": 10.2,
+    }
+
+
 def test_market_preparation_does_not_inject_undeclared_history():
     start = datetime(2024, 2, 1).date()
     rows = {"X": [daily_row(start - timedelta(days=day), float(day)) for day in range(1, 11)]}
