@@ -18,6 +18,7 @@ from typing import Any, Iterable
 import polars as pl
 
 from app.price_limits import limit_price, price_limit_pct
+from app.market_time import cn_today
 from app.services.ingestion_manifest import load_ingestion_manifest
 
 
@@ -996,9 +997,18 @@ class FourModeSnapshotCache:
 
     def _trading_days(self) -> list[date]:
         frame = self.repo.get_daily_asset("index", self.requirement.get("index_symbol", "000852.SH"), self.start, self.end, ["date"])
-        if frame.is_empty() or "date" not in frame.columns:
-            return []
-        return sorted({day for value in frame["date"].to_list() if (day := _as_day(value)) is not None})
+        dates = {
+            day
+            for value in (frame["date"].to_list() if frame is not None and "date" in frame.columns else [])
+            if (day := _as_day(value)) is not None
+        }
+        # The current session's index daily bar is only published after the
+        # close.  The live paper runner still needs today's snapshot before
+        # the auction, so use the current Beijing date as the session marker;
+        # historical windows remain driven by persisted index dates.
+        if self.end == cn_today() and self.end.weekday() < 5:
+            dates.add(self.end)
+        return sorted(dates)
 
 
 def four_mode_bid_symbols(

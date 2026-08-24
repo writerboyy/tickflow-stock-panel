@@ -62,6 +62,44 @@ def test_snapshot_day_normalization_handles_datetime_index():
     assert cache._trading_days() == [date(2026, 8, 20)]
 
 
+def test_trading_days_include_current_session_before_index_close(monkeypatch):
+    today = date(2026, 8, 24)
+
+    class Repo:
+        def get_daily_asset(self, *_args, **_kwargs):
+            import polars as pl
+
+            return pl.DataFrame({"date": [date(2026, 8, 21)]})
+
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.repo = Repo()
+    cache.start = today
+    cache.end = today
+    cache.requirement = {"index_symbol": "000852.SH"}
+    monkeypatch.setattr(snapshot, "cn_today", lambda: today)
+
+    assert cache._trading_days() == [date(2026, 8, 21), today]
+
+
+def test_trading_days_do_not_add_weekend_current_date(monkeypatch):
+    today = date(2026, 8, 22)
+
+    class Repo:
+        def get_daily_asset(self, *_args, **_kwargs):
+            import polars as pl
+
+            return pl.DataFrame({"date": [date(2026, 8, 21)]})
+
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.repo = Repo()
+    cache.start = today
+    cache.end = today
+    cache.requirement = {"index_symbol": "000852.SH"}
+    monkeypatch.setattr(snapshot, "cn_today", lambda: today)
+
+    assert cache._trading_days() == [date(2026, 8, 21)]
+
+
 def test_snapshot_build_filters_stock_symbols_without_polars_list_cast_error():
     import polars as pl
 
