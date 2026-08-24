@@ -909,7 +909,7 @@ function SectorStrengthTable({
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
     <div className="overflow-x-auto overscroll-x-contain">
-    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[18%_24%_34%_24%]' : 'lg:grid-cols-[20%_35%_45%]'}`}>
+    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_20%_34%_24%]' : 'lg:grid-cols-[25%_30%_45%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">榜60秒 · 行情5秒</div></div>
@@ -936,7 +936,7 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`h-[68px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
+                className={`h-[68px] w-[184px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span><div className="flex shrink-0 items-center gap-0.5">
@@ -951,7 +951,7 @@ function SectorStrengthTable({
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取热股雷达' : hotError ? '热股雷达暂不可用' : '暂无热股数据'}</div>}
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
-        <table className="w-full min-w-[420px] table-fixed border-collapse">
+        <table className="w-full min-w-[360px] table-fixed border-collapse">
           <thead className="text-left text-[9px] text-muted"><tr><th className="w-[31%] px-2 py-1.5">板块</th><th className="w-[14%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[26%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th><th className="w-[29%] px-2 py-1.5 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
           <tbody>{rows.length ? rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
@@ -981,7 +981,7 @@ function SectorStrengthTable({
       <div className="min-w-0">
         {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[540px] table-fixed border-collapse">
-            <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[25%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[17%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
+            <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[29%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[13%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
             <tbody>{constituentRows.map(row => {
               const linked = row.symbol === selectedStockSymbol
               return <tr
@@ -992,7 +992,7 @@ function SectorStrengthTable({
                 }}
                 className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
-              <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium">{row.name || row.code}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank}{row.tags ? ` · ${row.tags}` : ''} · {row.symbol}</span></button></td>
+              <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium"><span>{row.name || row.code}</span>{row.tags ? <span className="ml-1 text-[9px] font-normal text-accent/80">· {row.tags}</span> : null}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank} · {row.symbol}</span></button></td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
               <td className={`px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums ${financialTone(row.change_pct)}`}>{scorePct(row.change_pct, 2)}</td>
               <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>
