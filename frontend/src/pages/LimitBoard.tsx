@@ -6,34 +6,28 @@ import {
   Ban,
   Bell,
   Check,
-  CircleHelp,
   CircleDot,
   Crosshair,
   Flame,
   Layers3,
   LineChart,
-  ListFilter,
   Loader2,
   PanelRightClose,
   PanelRightOpen,
-  Plus,
   Radio,
   RefreshCw,
-  Search,
   Settings2,
   ShieldAlert,
   ShoppingCart,
   SlidersHorizontal,
   Trash2,
-  WalletCards,
   Wifi,
   X,
-  Zap,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
-import { QMT_ALLOCATION_OPTIONS, QmtTradePanel, type QmtAllocationMode } from '@/components/QmtTradePanel'
+import { QMT_ALLOCATION_OPTIONS, type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 import {
@@ -52,8 +46,8 @@ import { useChartTheme } from '@/lib/theme'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'candidate' | 'opportunity' | 'buy_pool' | 'pool' | 'events'
-type TableMode = 'candidate' | 'buy_pool' | 'pool'
+type Tab = 'ladder' | 'sector' | 'buy_pool' | 'pool' | 'events'
+type TableMode = 'buy_pool' | 'pool'
 type AdvancedSettings = LimitBoardView['settings']
 type PoolAllocationMode = 'global' | 'lot' | 'fixed' | 'volume'
 type AllocationDialogState = {
@@ -92,10 +86,6 @@ function themes(value: unknown): string[] {
     }
   }
   return result
-}
-
-function isStName(name: unknown): boolean {
-  return String(name ?? '').toUpperCase().includes('ST')
 }
 
 function scorePct(value: number | null | undefined, digits = 1): string {
@@ -374,64 +364,37 @@ function LimitBoardAllocationDialog({
   </Modal>
 }
 
-const LEADERSHIP = {
-  leader: '龙头',
-  front: '前排',
-  follower: '跟随',
-} as const
-
 interface RowProps {
   row: LimitBoardRow
   mode: TableMode
-  inPool: boolean
-  inBuyPool: boolean
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
   queueConfirmSnapshots: number
   onOpen: () => void
-  onAddPool: () => void
-  onAddBuyPool: () => void
   onEditAllocation: () => void
-  onRemoveCandidate: () => void
   onToggleAuto: (enabled: boolean) => void
   onChangeOrderMode: (mode: 'sweep' | 'queue') => void
   onRemovePool: () => void
-  onTrade: () => void
 }
 
 function Row({
   row,
   mode,
-  inPool,
-  inBuyPool,
   busy,
   sweepPriceLevels,
   queueWaitSeconds,
   queueConfirmSnapshots,
   onOpen,
-  onAddPool,
-  onAddBuyPool,
   onEditAllocation,
-  onRemoveCandidate,
   onToggleAuto,
   onChangeOrderMode,
   onRemovePool,
-  onTrade,
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
-  const atLimit = row.limit_gap_pct != null && row.limit_gap_pct <= 0.0001
-  const change = row.change_pct == null ? '--' : `${scorePct(row.change_pct, 2)}${atLimit ? '（涨停）' : ''}`
-  const rebound = row.source === 'rebound_board' || row.source_modes?.includes('rebound_board')
   const allThemes = themes(row.concept)
   const visibleThemes = allThemes.slice(0, 2)
-  const scoreDetail = row.candidate_score_detail
-  const intradayFlow = scoreDetail?.intraday_flow
-  const sector = scoreDetail?.sector
-  const gene = scoreDetail?.premium_gene
-  const technical = scoreDetail?.technical
-  const leadership = LEADERSHIP[sector?.leadership ?? 'follower']
   const orderMode = row.order_mode === 'queue' ? 'queue' : 'sweep'
   const orderStatus = !row.auto_trade && !row.auto_order_key
     ? { label: '未开启', tone: 'text-muted' }
@@ -468,110 +431,58 @@ function Row({
         <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
           <div className="truncate font-medium">{row.name || row.symbol}</div>
           <div className="mt-0.5 font-mono text-[10px] text-muted">{row.symbol}</div>
-          {mode !== 'pool' && rebound ? <div className="mt-0.5 text-[10px] text-warning">反包候选</div> : null}
         </button>
       </td>
       <td className="w-[160px] max-w-[160px] px-2">
         <div className="truncate text-[10px] text-secondary" title={allThemes.join('、') || undefined}>
           {visibleThemes.length ? visibleThemes.join('、') : '--'}
         </div>
-        {mode !== 'candidate' && sector?.realtime_available ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted" title="开盘啦实时板块强度">板强 {sector.realtime_strength?.toFixed(1) ?? '--'} · #{sector.realtime_rank ?? '--'}/{sector.realtime_rank_count ?? '--'} · {scorePct(sector.realtime_change_pct, 2)}</div> : null}
       </td>
-      {mode === 'candidate' ? <>
-        <td className="w-[116px] min-w-[116px] px-2" title={(row.candidate_reasons || []).join('；')}>
-          {row.candidate_score == null ? <div className={intradayFlow?.capital_available === false ? 'text-warning' : 'text-muted'}>{intradayFlow?.capital_available === false ? '实时资金待补' : '待补数据'}</div> : <>
-            <div className="font-mono text-sm font-semibold tabular-nums text-accent">强 {row.candidate_score.toFixed(1)}</div>
-            <div className="mt-0.5 font-mono text-[9px] text-bull">机会 {row.entry_rank != null ? `#${row.entry_rank} ` : ''}{row.entry_score == null ? '--' : row.entry_score.toFixed(1)}{row.candidate_score_velocity != null ? ` · ${row.candidate_score_velocity >= 0 ? '+' : ''}${row.candidate_score_velocity.toFixed(1)}` : ''}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">板{sector?.score.toFixed(1)} 基{gene?.score.toFixed(1)}</div>
-            <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] text-muted">分{intradayFlow?.score.toFixed(1)} 技{technical?.score.toFixed(1)}</div>
-          </>}
-          {row.candidate_score_state === 'cached' ? <div className="mt-0.5 whitespace-nowrap text-[9px] text-warning">缓存 · {scoreTime(row.candidate_score_as_of)}</div> : null}
-        </td>
-        <td className="w-[118px] min-w-[118px] px-2" title={`涨幅 ${change}；距涨停 ${gap}；${status.label}`}>
-          <div className="font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'} <span className="text-secondary">{change}</span></div>
-          <div className="mt-0.5 flex items-center gap-1.5 text-[9px]"><span className="font-mono text-muted">距涨停 {gap}</span><span className={status.tone}>{status.label}</span></div>
-          <div className="mt-0.5 truncate text-[9px] text-secondary">{row.tradability_state === 'tradable' ? '可交易机会' : row.tradability_reason || '待观察'}</div>
-        </td>
-        <td className="w-[292px] min-w-[292px] px-2" title={(row.candidate_reasons || []).join('；')}>
-          <div className="truncate text-[10px] text-secondary">板 {sector?.name || '--'} · {leadership} · {sector?.score.toFixed(1) ?? '--'}/50</div>
-          <div className="mt-0.5 font-mono text-[9px] text-muted">基 涨{gene?.limit_up_count ?? '--'} · 红{scorePct(gene?.next_day_red_rate, 0)} · {gene?.score.toFixed(1) ?? '--'}/30</div>
-          <div className="mt-0.5 font-mono text-[9px] text-muted">分 {intradayFlow?.trend_state === 'strong' ? '强' : intradayFlow?.trend_state === 'weak' ? '弱' : '中'} · 资金 {intradayFlow?.capital_available ? intradayFlow.capital_score?.toFixed(1) ?? '--' : '待补'} · {intradayFlow?.score.toFixed(1) ?? '--'}/15</div>
-          <div className="mt-0.5 font-mono text-[9px] text-muted">技 量比 {technical?.vol_ratio_5d?.toFixed(2) ?? '--'} · RSI {technical?.rsi_14?.toFixed(0) ?? '--'} · {technical?.score.toFixed(1) ?? '--'}/5</div>
-        </td>
-      </> : null}
-      {mode !== 'candidate' ? <>
-        <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
-        <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td>
-        <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
-        <td className="px-2">
-          <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
-            <CircleDot className="h-3 w-3" />{status.label}
-          </span>
-        </td>
-        <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
-      </> : null}
-      {mode !== 'candidate' ? <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td> : null}
-      {mode !== 'candidate' ? <td className="px-2">
-        <span className={mode === 'pool' && row.ws_active ? 'text-bear' : 'text-muted'}>{mode === 'pool' && row.ws_active ? 'WS' : '轮询'}</span>
-      </td> : null}
-      {mode === 'pool' ? (
-        <>
-          <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
-            <div>{orderStatus.label}</div>
-            {row.auto_order_volume && row.auto_order_amount != null ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] font-normal text-muted">{row.auto_order_volume.toLocaleString('zh-CN')} 股 · {row.auto_order_amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 元</div> : null}
-          </td>
-          <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
-            <div className="flex items-center justify-end gap-1.5">
-              <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
-                {([
-                  ['sweep', '扫板', `新鲜盘口中卖一距涨停价不超过 ${sweepPriceLevels} 个价位时提交`],
-                  ['queue', '排板', queueTriggerDescription(queueWaitSeconds, queueConfirmSnapshots)],
-                ] as const).map(([mode, label, title]) => <button
-                  key={mode}
-                  type="button"
-                  title={title}
-                  disabled={busy}
-                  onClick={() => onChangeOrderMode(mode)}
-                  className={`px-2 text-[10px] ${orderMode === mode ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'} disabled:opacity-40`}
-                >{label}</button>)}
-              </div>
-              <label className="inline-flex items-center gap-1 whitespace-nowrap text-secondary" title="自动打板">
-                <input
-                  type="checkbox"
-                  checked={row.auto_trade === true}
-                  disabled={busy}
-                  onChange={event => onToggleAuto(event.target.checked)}
-                />
-                {row.auto_trade ? '已开启' : '已关闭'}
-              </label>
-              <button type="button" title="设置该股票的交易数量或金额" disabled={busy} onClick={onEditAllocation} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-elevated hover:text-accent disabled:opacity-40"><Settings2 className="h-3.5 w-3.5" /></button>
-              <button type="button" title="移出打板池" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </td>
-        </>
-      ) : (
-        <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 group-hover:bg-elevated">
-          <div className="flex items-center justify-end gap-1">
-            {mode === 'candidate' ? <button type="button" title="打开 QMT 手动交易" disabled={busy} onClick={onTrade} className="inline-flex h-7 items-center gap-1 rounded-btn border border-border px-2 text-secondary hover:border-warning/50 hover:text-warning disabled:opacity-60"><WalletCards className="h-3.5 w-3.5" />交易</button> : null}
-            {mode === 'candidate' ? <button type="button" title={inBuyPool ? '已在买入池' : '加入买入池并立即限价挂单'} disabled={inBuyPool || busy} onClick={onAddBuyPool} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-60`}>{inBuyPool ? <Check className="h-3.5 w-3.5" /> : <ShoppingCart className="h-3.5 w-3.5" />}{inBuyPool ? '已买入' : '买入'}</button> : null}
-            <button
+      <td className="px-2 font-mono tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
+      <td className="px-2 font-mono tabular-nums text-secondary">{row.limit_up?.toFixed(2) ?? '--'}</td>
+      <td className="px-2 font-mono tabular-nums text-secondary">{gap}</td>
+      <td className="px-2">
+        <span className={`inline-flex items-center gap-1 font-medium ${status.tone}`}>
+          <CircleDot className="h-3 w-3" />{status.label}
+        </span>
+      </td>
+      <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
+      <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td>
+      <td className="px-2"><span className={row.ws_active ? 'text-bear' : 'text-muted'}>{row.ws_active ? 'WS' : '轮询'}</span></td>
+      <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
+        <div>{orderStatus.label}</div>
+        {row.auto_order_volume && row.auto_order_amount != null ? <div className="mt-0.5 whitespace-nowrap font-mono text-[9px] font-normal text-muted">{row.auto_order_volume.toLocaleString('zh-CN')} 股 · {row.auto_order_amount.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 元</div> : null}
+      </td>
+      <td className="sticky right-0 z-30 border-l border-border bg-surface px-2 text-right group-hover:bg-elevated">
+        <div className="flex items-center justify-end gap-1.5">
+          <div className="inline-flex h-7 overflow-hidden rounded-btn border border-border" aria-label="打板方式">
+            {([
+              ['sweep', '扫板', `新鲜盘口中卖一距涨停价不超过 ${sweepPriceLevels} 个价位时提交`],
+              ['queue', '排板', queueTriggerDescription(queueWaitSeconds, queueConfirmSnapshots)],
+            ] as const).map(([mode, label, title]) => <button
+              key={mode}
               type="button"
-              title={inPool ? '已在打板池' : '加入打板池'}
-              disabled={inPool || busy}
-              onClick={onAddPool}
-              className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-60`}
-            >
-              {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
-              {inPool ? '已加入' : '打板'}
-            </button>
-            {mode === 'candidate' ? <button type="button" title="从备选池删除，当日自动候选不再回流" disabled={busy} onClick={onRemoveCandidate} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
-              <Trash2 className="h-3.5 w-3.5" />
-            </button> : null}
+              title={title}
+              disabled={busy}
+              onClick={() => onChangeOrderMode(mode)}
+              className={`px-2 text-[10px] ${orderMode === mode ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'} disabled:opacity-40`}
+            >{label}</button>)}
           </div>
-        </td>
-      )}
+          <label className="inline-flex items-center gap-1 whitespace-nowrap text-secondary" title="自动打板">
+            <input
+              type="checkbox"
+              checked={row.auto_trade === true}
+              disabled={busy}
+              onChange={event => onToggleAuto(event.target.checked)}
+            />
+            {row.auto_trade ? '已开启' : '已关闭'}
+          </label>
+          <button type="button" title="设置该股票的交易数量或金额" disabled={busy} onClick={onEditAllocation} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-elevated hover:text-accent disabled:opacity-40"><Settings2 className="h-3.5 w-3.5" /></button>
+          <button type="button" title="移出打板池" disabled={busy} onClick={onRemovePool} className="inline-flex h-7 w-7 items-center justify-center rounded-btn text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-40">
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </td>
     </tr>
   )
 }
@@ -579,21 +490,15 @@ function Row({
 interface TableProps {
   rows: LimitBoardRow[]
   mode: TableMode
-  poolSymbols: Set<string>
-  buyPoolSymbols: Set<string>
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
   queueConfirmSnapshots: number
   onOpen: (row: LimitBoardRow) => void
-  onAddPool: (row: LimitBoardRow) => void
-  onAddBuyPool: (row: LimitBoardRow) => void
   onEditAllocation: (row: LimitBoardRow) => void
-  onRemoveCandidate: (row: LimitBoardRow) => void
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onChangeOrderMode: (row: LimitBoardRow, mode: 'sweep' | 'queue') => void
   onRemovePool: (row: LimitBoardRow) => void
-  onTrade: (row: LimitBoardRow) => void
 }
 
 function Table(props: TableProps) {
@@ -601,12 +506,11 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'candidate' ? 'min-w-[1160px]' : mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1080px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             <th className="w-[160px] px-2">题材</th>
-            {mode === 'candidate' ? <><th className="w-[116px] min-w-[116px] whitespace-nowrap px-2">评分</th><th className="w-[118px] min-w-[118px] whitespace-nowrap px-2">行情</th><th className="w-[292px] min-w-[292px] px-2">评分依据</th></> : null}
             {mode === 'buy_pool' ? <><th className="px-2">限价</th><th className="px-2">数量</th><th className="px-2">金额</th><th className="px-2">委托状态</th><th className="px-2">行情</th></> : null}
             {mode === 'pool' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
             <th className={`sticky right-0 z-40 border-l border-border bg-surface px-2 text-right ${mode === 'pool' ? 'w-[250px]' : 'w-[172px]'}`}>操作</th>
@@ -618,21 +522,15 @@ function Table(props: TableProps) {
               key={row.symbol}
               row={row}
               mode={mode}
-              inPool={props.poolSymbols.has(row.symbol)}
-              inBuyPool={props.buyPoolSymbols.has(row.symbol)}
               busy={props.busy}
               sweepPriceLevels={props.sweepPriceLevels}
               queueWaitSeconds={props.queueWaitSeconds}
               queueConfirmSnapshots={props.queueConfirmSnapshots}
               onOpen={() => props.onOpen(row)}
-              onAddPool={() => props.onAddPool(row)}
-              onAddBuyPool={() => props.onAddBuyPool(row)}
               onEditAllocation={() => props.onEditAllocation(row)}
-              onRemoveCandidate={() => props.onRemoveCandidate(row)}
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onChangeOrderMode={mode => props.onChangeOrderMode(row, mode)}
               onRemovePool={() => props.onRemovePool(row)}
-              onTrade={() => props.onTrade(row)}
             />
           ))}
         </tbody>
@@ -670,6 +568,23 @@ function sectorConstituentStatus(row: LimitBoardSectorConstituent): string {
   return '--'
 }
 
+function manualActionRow(
+  symbol: string,
+  name: string | null | undefined,
+  lastPrice: number | null | undefined,
+  changePct: number | null | undefined,
+  limitUp: number | null | undefined,
+): LimitBoardRow {
+  return {
+    symbol,
+    name: name || symbol,
+    source: 'manual',
+    last_price: lastPrice ?? undefined,
+    change_pct: changePct,
+    limit_up: limitUp ?? undefined,
+  }
+}
+
 function sectorStrengthSpeed(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return '--'
   return `${value > 0 ? '+' : ''}${value.toFixed(1)}`
@@ -679,24 +594,8 @@ function sectorNameKey(value: string | null | undefined): string {
   return String(value ?? '').replace(/\s+/g, '').trim()
 }
 
-function signalSectorNames(row: LimitBoardRow): string[] {
-  const values = [
-    ...(row.top_sector_names ?? []),
-    row.candidate_score_detail?.sector?.name,
-    ...themes(row.concept),
-  ]
-  const seen = new Set<string>()
-  return values.filter((value): value is string => {
-    const key = sectorNameKey(value)
-    if (!key || seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
-
 function SectorStrengthTable({
   snapshot,
-  signalRows = [],
   hotRows = [],
   hotQuotes = {},
   hotSectorLinks = {},
@@ -704,11 +603,14 @@ function SectorStrengthTable({
   hotError = false,
   refreshIntervalSeconds = 5,
   refreshCycleUpdatedAt = 0,
-  onOpenAlgorithm,
   onOpenStock,
+  onAddPool,
+  onAddBuyPool,
+  poolSymbols,
+  buyPoolSymbols,
+  busy,
 }: {
   snapshot: LimitBoardView['sector_strength']
-  signalRows?: LimitBoardRow[]
   hotRows?: MarketHeatItem[]
   hotQuotes?: LimitBoardQuoteSnapshot['quotes']
   hotSectorLinks?: LimitBoardQuoteSnapshot['sector_links']
@@ -716,8 +618,12 @@ function SectorStrengthTable({
   hotError?: boolean
   refreshIntervalSeconds?: number
   refreshCycleUpdatedAt?: number
-  onOpenAlgorithm: () => void
   onOpenStock: (symbol: string, name?: string) => void
+  onAddPool: (row: LimitBoardRow) => void
+  onAddBuyPool: (row: LimitBoardRow) => void
+  poolSymbols: ReadonlySet<string>
+  buyPoolSymbols: ReadonlySet<string>
+  busy: boolean
 }) {
   const [sortKey, setSortKey] = useState<SectorSortKey>('strength')
   const [descending, setDescending] = useState(true)
@@ -789,20 +695,17 @@ function SectorStrengthTable({
     orphans.sort(compare)
     return roots.flatMap(row => [row, ...(children.get(row.plate_id) ?? []).sort(compare)]).concat(orphans)
   }, [activeSnapshot?.rows, descending, sortKey])
-  const selectedSignal = signalRows.find(row => row.symbol === selectedStockSymbol) ?? null
   const linkedPlateIds = useMemo(() => {
     if (!selectedStockSymbol) return new Set<string>()
     const heatLinks = hotSectorLinks[selectedStockSymbol] ?? []
     const ids = new Set([
-      ...(selectedSignal?.top_sector_ids ?? []),
       ...heatLinks.map(link => link.plate_id),
     ])
     const names = new Set([
-      ...(selectedSignal ? signalSectorNames(selectedSignal) : []),
       ...heatLinks.map(link => link.plate_name),
     ].map(sectorNameKey))
     return new Set(rows.filter(row => ids.has(row.plate_id) || names.has(sectorNameKey(row.plate_name))).map(row => row.plate_id))
-  }, [hotSectorLinks, rows, selectedSignal, selectedStockSymbol])
+  }, [hotSectorLinks, rows, selectedStockSymbol])
   const selectedPlate = rows.find(row => row.plate_id === selectedPlateId) ?? rows[0] ?? null
   useEffect(() => {
     if (selectedPlateId == null || rows.some(row => row.plate_id === selectedPlateId)) return
@@ -876,16 +779,13 @@ function SectorStrengthTable({
   )
   const selectStock = (symbol: string) => {
     const normalized = symbol.trim().toUpperCase()
-    const signal = signalRows.find(row => row.symbol === normalized)
     const heatLinks = hotSectorLinks[normalized] ?? []
     setSelectedStockSymbol(normalized)
     lastScrolledConstituent.current = null
     const ids = new Set([
-      ...(signal?.top_sector_ids ?? []),
       ...heatLinks.map(link => link.plate_id),
     ])
     const names = new Set([
-      ...(signal ? signalSectorNames(signal) : []),
       ...heatLinks.map(link => link.plate_name),
     ].map(sectorNameKey))
     const matches = rows.filter(row => ids.has(row.plate_id) || names.has(sectorNameKey(row.plate_name)))
@@ -931,7 +831,7 @@ function SectorStrengthTable({
   return <div className="min-w-0">
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><div className="shrink-0 text-xs font-medium">板块强度</div><span className="truncate text-[10px] text-muted">强势股、板块与成分股按同一截面每 {refreshIntervalSeconds} 秒刷新</span></div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"><div className="shrink-0 text-xs font-medium">板块强度</div><span className="truncate text-[10px] text-muted">板块与成分股按同一截面每 {refreshIntervalSeconds} 秒刷新</span></div>
       <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px] text-muted">
         <span className={snapshot?.history_state === 'unavailable' ? 'text-warning' : 'text-secondary'}>{historyLabel}</span>
         <span>{activeSnapshot?.state === 'live' ? `${isLive ? '实时' : isClosedLatest ? '收盘' : '回看'} ${scoreTime(activeCapturedAt)}` : '实时板块数据暂不可用'}</span>
@@ -950,7 +850,7 @@ function SectorStrengthTable({
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
     <div className="overflow-x-auto overscroll-x-contain">
-    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[14%_14%_22%_28%_22%]' : 'lg:grid-cols-[16%_16%_28%_40%]'}`}>
+    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[18%_24%_34%_24%]' : 'lg:grid-cols-[20%_35%_45%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">榜60秒 · 行情5秒</div></div>
@@ -962,6 +862,9 @@ function SectorStrengthTable({
               const selected = item.thscode.toUpperCase() === selectedStockSymbol
               const atLimit = quote?.last_price != null && quote.limit_up != null
                 && quote.last_price >= quote.limit_up - 0.001
+              const actionRow = manualActionRow(item.thscode.toUpperCase(), item.name || item.ticker, quote?.last_price, quote?.change_pct, quote?.limit_up)
+              const inPool = poolSymbols.has(actionRow.symbol)
+              const inBuyPool = buyPoolSymbols.has(actionRow.symbol)
               return <div
                 key={item.thscode}
                 role="button"
@@ -977,58 +880,16 @@ function SectorStrengthTable({
                 className={`h-[68px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
                 title="联动强势股、实时板块与成分股"
               >
-                <div className="flex items-center justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span></div>
+                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span><div className="flex shrink-0 items-center gap-0.5">
+                  <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
+                  <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
+                </div></div>
                 <div className="mt-0.5 flex items-center justify-between gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span><span className="shrink-0"><span className="text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span> <span className={financialTone(quote?.change_pct)}>{scorePct(quote?.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></span></div>
                 <div className="mt-0.5 truncate font-mono text-[8px] text-muted">热度 {item.heat == null ? '--' : item.heat.toFixed(0)} · 排名变化 {item.rank_change == null ? '--' : `${item.rank_change > 0 ? '+' : ''}${item.rank_change}`}</div>
               </div>
             })}
           </div>
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取热股雷达' : hotError ? '热股雷达暂不可用' : '暂无热股数据'}</div>}
-      </div>
-      <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
-        <div className="flex min-h-12 items-center justify-between gap-1 border-b border-border px-2 py-1.5">
-          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">强势股打分</span></div><div className="mt-0.5 truncate pl-[18px] font-mono text-[8px] text-muted">{signalRows.length} 只</div></div>
-          <div className="flex shrink-0 items-center">
-            <button type="button" onClick={onOpenAlgorithm} className="inline-flex h-6 items-center gap-1 rounded-btn border border-border px-1.5 text-[9px] text-secondary hover:bg-elevated hover:text-foreground" title="查看强势股打分算法"><CircleHelp className="h-3 w-3" />算法</button>
-          </div>
-        </div>
-        {signalRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
-          <div className="flex w-max gap-2 lg:w-full lg:flex-col">
-            {signalRows.map(signal => {
-              const selected = signal.symbol === selectedStockSymbol
-              const status = STATUS[signal.status || 'watching'] || STATUS.watching
-              const rebound = signal.source === 'rebound_board' || signal.source_modes?.includes('rebound_board')
-              const atLimit = signal.limit_gap_pct != null && signal.limit_gap_pct <= 0.0001
-              const boardLabel = atLimit ? (rebound ? '反包' : '首板') : '观察'
-              const names = new Set(signalSectorNames(signal).map(sectorNameKey))
-              const matchedPlates = rows.filter(row => names.has(sectorNameKey(row.plate_name)))
-              const displayThemes = matchedPlates.length
-                ? matchedPlates.slice(0, 2).map(row => row.plate_name).filter((value): value is string => Boolean(value))
-                : themes(signal.concept).slice(0, 2)
-              return <div
-                key={signal.symbol}
-                role="button"
-                tabIndex={0}
-                aria-pressed={selected}
-                onClick={() => selectStock(signal.symbol)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    selectStock(signal.symbol)
-                  }
-                }}
-                className={`h-[92px] w-[164px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : 'border-border bg-surface'}`}
-              >
-                <div className="flex items-start justify-between gap-2"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(signal.symbol, signal.name || signal.symbol) }} className="min-w-0 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{signal.name || signal.symbol}</button><span className="shrink-0 text-right text-[9px] text-secondary"><span className="block">{boardLabel}{signal.candidate_score_state === 'cached' ? ' · 缓存' : ''}</span><span className={`block font-mono ${signal.candidate_score_state === 'cached' ? 'text-warning' : 'text-accent'}`} title={signal.candidate_score_state === 'cached' ? `缓存评分 ${scoreTime(signal.candidate_score_as_of)}` : '强势股打分最终总分'}>总分 {signal.candidate_score == null ? '--' : signal.candidate_score.toFixed(1)}</span></span></div>
-                <div className="mt-0.5 flex items-center justify-between gap-1 font-mono text-[9px] text-muted"><span>{signal.symbol}</span><span className={financialTone(signal.change_pct)}>{scorePct(signal.change_pct, 2)}{atLimit ? '（涨停）' : ''}</span></div>
-                <div className="mt-1.5 flex min-w-0 items-center gap-1 text-[9px] text-secondary">
-                  {displayThemes.length ? displayThemes.map(name => <span key={name} className="max-w-[70px] truncate rounded-sm bg-elevated px-1 py-0.5">{name}</span>) : <span className="truncate text-muted">未匹配实时板块</span>}
-                </div>
-                <div className="mt-1 flex items-center justify-between text-[9px]"><span className={status.tone}>{status.label}</span><span className="font-mono text-muted">距涨停 {signal.limit_gap_pct == null ? '--' : scorePct(signal.limit_gap_pct, 2)}</span></div>
-              </div>
-            })}
-          </div>
-        </div> : <div className="px-3 py-10 text-center text-xs text-muted">暂无标的</div>}
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[420px] table-fixed border-collapse">
@@ -1060,8 +921,8 @@ function SectorStrengthTable({
       </div>
       <div className="min-w-0">
         {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
-          <table className="w-full min-w-[480px] table-fixed border-collapse">
-            <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[28%] px-2 py-1.5">股票</th><th className="w-[12%] px-2 py-1.5 text-right">现价</th><th className="w-[12%] px-2 py-1.5 text-right">涨幅</th><th className="w-[14%] px-2 py-1.5 text-right">板状态</th><th className="w-[14%] px-2 py-1.5 text-right">换手率</th><th className="w-[20%] px-2 py-1.5 text-right">成交额</th></tr></thead>
+          <table className="w-full min-w-[540px] table-fixed border-collapse">
+            <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[25%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[17%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
             <tbody>{constituentRows.map(row => {
               const linked = row.symbol === selectedStockSymbol
               return <tr
@@ -1078,6 +939,10 @@ function SectorStrengthTable({
               <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{moneyYi(row.amount)}</td>
+              <td className="px-2 py-1.5"><div className="flex justify-end gap-0.5">
+                <button type="button" aria-label={`加入${row.name || row.symbol}买入池`} title="加入买入池" disabled={busy} onClick={() => onAddBuyPool(manualActionRow(row.symbol, row.name, row.last_price, row.change_pct, null))} className={`grid h-6 w-6 place-items-center rounded-btn border ${buyPoolSymbols.has(row.symbol) ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{buyPoolSymbols.has(row.symbol) ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
+                <button type="button" aria-label={`加入${row.name || row.symbol}打板池`} title="加入打板池" disabled={busy} onClick={() => onAddPool(manualActionRow(row.symbol, row.name, row.last_price, row.change_pct, null))} className={`grid h-6 w-6 place-items-center rounded-btn border ${poolSymbols.has(row.symbol) ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{poolSymbols.has(row.symbol) ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
+              </div></td>
               </tr>
             })}</tbody>
           </table>
@@ -1157,85 +1022,6 @@ function SectorStrengthTable({
     </div>
     </section>
   </div>
-}
-
-function CandidateAlgorithmDialog({ onClose }: { onClose: () => void }) {
-  return <Modal labelledBy="limit-board-candidate-algorithm-title" onClose={onClose} panelClassName="flex max-h-[90vh] w-[94vw] max-w-3xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
-    <div className="flex items-center justify-between border-b border-border px-4 py-3">
-      <div>
-        <h2 id="limit-board-candidate-algorithm-title" className="text-sm font-semibold">强势股打分算法</h2>
-        <p className="mt-0.5 text-[10px] text-muted">板块优先的确定性排序，用于自动备选池优先级</p>
-      </div>
-      <button type="button" onClick={onClose} className="grid h-7 w-7 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭排序算法"><X className="h-4 w-4" /></button>
-    </div>
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs text-secondary sm:px-5">
-      <section>
-        <h3 className="font-medium text-foreground">候选范围</h3>
-        <ol className="mt-2 grid gap-2 sm:grid-cols-3">
-          {[
-            ['1', '板块入围', '只取开盘啦实时板块强度前 10 名。'],
-            ['2', '成分去重', '盘中通过开盘啦 socket 获取当天实时板块成分。'],
-            ['3', '保留 Top 30', '首板、反包合并打分后只保留自动排名前 30。'],
-          ].map(([step, title, detail]) => <li key={step} className="flex gap-2 border-t border-border pt-2"><span className="font-mono text-accent">{step}</span><span><strong className="font-medium text-foreground">{title}</strong><span className="mt-0.5 block text-[11px] leading-5 text-muted">{detail}</span></span></li>)}
-        </ol>
-        <p className="mt-2 text-[11px] leading-5 text-muted">首板资格为回看窗口内无涨停记录；反包资格为窗口内曾涨停、随后炸板或断板，且最近一个完整交易日未涨停。两类只有当日真实触及涨停时才显示对应标签，未触及时显示“观察”。“仅沪深主板”只限制自动候选，手工加入不受影响；强势确认分不使用距涨停，但可交易机会榜会使用成交空间和行情新鲜度。</p>
-      </section>
-
-      <section className="mt-4 border-t border-border pt-4">
-        <h3 className="font-medium text-foreground">总分构成</h3>
-        <div className="mt-2 grid grid-cols-2 divide-x divide-y divide-border border border-border sm:grid-cols-4 sm:divide-y-0">
-          {[
-            ['50', '板块强度与轮动'],
-            ['30', '涨停基因'],
-            ['15', '日内分时与资金'],
-            ['5', '技术面'],
-          ].map(([score, label]) => <div key={label} className="px-3 py-2.5"><div className="font-mono text-lg font-semibold text-foreground">{score}<span className="ml-0.5 text-[10px] font-normal text-muted">分</span></div><div className="mt-0.5 text-[10px] text-muted">{label}</div></div>)}
-        </div>
-      </section>
-
-      <section className="mt-4 divide-y divide-border border-y border-border">
-        <div className="py-3">
-          <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">板块强度与轮动</h3><span className="font-mono text-accent">50 分</span></div>
-          <div className="mt-2 grid gap-x-5 gap-y-2 text-[11px] leading-5 sm:grid-cols-2">
-            <p><strong className="font-medium text-foreground">当日实时 30 分：</strong>板块涨跌 8、上涨家数占比 5、代表龙头涨幅 3、个股相对板块强度 4、龙头/前排/跟随 10/5/0。</p>
-            <p><strong className="font-medium text-foreground">前 5 日轮动 20 分：</strong>复合涨跌 6、趋势斜率 4、排名百分位变化 4、前 20% 持续性 3、昨日强度 3。今日不进入 5 日窗口。</p>
-            <p><strong className="font-medium text-foreground">线性区间：</strong>板块涨跌 -1%→+4%，龙头 0%→+10%，个股跑赢板块 -2%→+4%；5 日复合 -5%→+10%，斜率 -1%→+1%/日。</p>
-            <p><strong className="font-medium text-foreground">板块选择：</strong>优先题材，无有效题材时回退二级行业；同类中先比实时排名、强度，再比板块分。覆盖率低于 80% 或成员少于 5 只时不计算。</p>
-          </div>
-        </div>
-        <div className="py-3">
-          <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">涨停基因</h3><span className="font-mono text-accent">30 分</span></div>
-          <p className="mt-2 text-[11px] leading-5">近 200 日涨停次数 7 分、次日红盘率 7 分、次日涨幅超 5% 比例 5 分、首板封板率 6 分、连板晋级率 5 分。除涨停次数外，比例分均乘以 <span className="font-mono text-foreground">min(有效样本 / 10, 1)</span> 的样本置信度。</p>
-        </div>
-        <div className="py-3">
-          <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">日内分时与资金</h3><span className="font-mono text-accent">15 分</span></div>
-          <div className="mt-2 grid gap-x-5 gap-y-2 text-[11px] leading-5 sm:grid-cols-2">
-            <p><strong className="font-medium text-foreground">分时强势 7.5 分：</strong>相对昨收涨幅 2.4、现价相对 VWAP 1.8、非水下时间占比 1.8、价涨量增 1.5。</p>
-            <p><strong className="font-medium text-foreground">主动资金 7.5 分：</strong>大单净流向 5.4、资金持续性 2.1。一直水下、净流出或连续走弱会显著拉低该项。</p>
-          </div>
-        </div>
-        <div className="py-3">
-          <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">技术面</h3><span className="font-mono text-accent">5 分</span></div>
-          <p className="mt-2 text-[11px] leading-5">均线趋势 1.75 分（现价、MA5、MA10、MA20、MA60 多头关系），5/20 日动量 1.25 分，5 日量比 0.75 分，MACD 0.75 分，RSI14 0.5 分。RSI 50–85 为满分区，85 后逐步降分。</p>
-        </div>
-      </section>
-
-      <section className="mt-4">
-        <h3 className="font-medium text-foreground">数据门槛与排序</h3>
-        <div className="mt-2 grid gap-x-5 gap-y-2 text-[11px] leading-5 sm:grid-cols-2">
-          <p><strong className="font-medium text-foreground">完整性：</strong>板块及 5 日轮动、涨停基因、分时、实时主动资金和技术面必须全部可用，才会生成总分。缺实时资金时不把代理数据伪装成真实分数。</p>
-          <p><strong className="font-medium text-foreground">排序顺序：</strong>可计算状态 → 实时板块可用 → 板块实时排名 → 板块强度 → 板块分 → 龙头地位与成分排名 → 总分 → 基因 → 分时资金 → 技术面 → 股票代码。</p>
-          <p className="sm:col-span-2"><strong className="font-medium text-foreground">缓存：</strong>5 秒一轮批量更新。同一交易日某项短暂缺数时可沿用最后有效值并标记“缓存”；跨交易日清空。实时板块或当日实时成分缺失时，自动候选严格停止，不使用本地聚合降级。</p>
-        </div>
-      </section>
-
-      <section className="mt-4 border-t border-border pt-4">
-        <div className="flex items-center justify-between"><h3 className="font-medium text-foreground">可交易机会分</h3><span className="font-mono text-bull">100 分</span></div>
-        <p className="mt-2 text-[11px] leading-5">强势确认分 50%、评分上升速度 20%、日内分时 15%、距涨停成交空间 15%。机会榜只保留行情 10 秒内、距涨停 0.5%–3%、未触板且强势分连续两轮上升的标的；涨停、封板、炸板和缓存评分只留在强势确认榜。</p>
-      </section>
-    </div>
-    <div className="flex justify-end border-t border-border px-4 py-3"><button type="button" onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated hover:text-foreground">关闭</button></div>
-  </Modal>
 }
 
 function queueTriggerDescription(waitSeconds: number, confirmSnapshots: number): string {
@@ -1326,10 +1112,6 @@ function AdvancedSettingsDialog({
         <span><span className="block">今日破板率停手阈值</span><span className="mt-0.5 block text-[10px] text-muted">达到后停止自动打板，默认 40%</span></span>
         <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={0.1} value={draft.max_market_broken_rate_pct} disabled={pending} onChange={event => update('max_market_broken_rate_pct', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">%</span></span>
       </label>
-      <label className="flex items-center justify-between gap-3 border-b border-border py-3 text-xs sm:col-span-2">
-        <span><span className="block font-medium">自动候选仅沪深主板</span><span className="mt-0.5 block text-[10px] text-muted">只限制自动评分 Top 30，手工备选和打板池不受影响</span></span>
-        <input type="checkbox" checked={draft.main_board_only} disabled={pending} onChange={event => update('main_board_only', event.target.checked)} />
-      </label>
       <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
         <span>临板 WS 阈值</span>
         <span className="flex items-center gap-2"><input type="number" min={0.1} max={10} step={0.1} value={Number((draft.near_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('near_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
@@ -1379,12 +1161,9 @@ export function LimitBoard() {
   const { data: quoteStatus } = useQuoteStatus({ poll: true })
   const isTradingHours = quoteStatus?.is_trading_hours ?? false
   const [tab, setTab] = useState<Tab>('sector')
-  const [search, setSearch] = useState('')
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [candidateAlgorithmOpen, setCandidateAlgorithmOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
-  const [tradeRow, setTradeRow] = useState<LimitBoardRow | null>(null)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const view = useQuery({
     queryKey: QK.limitBoard,
@@ -1427,16 +1206,7 @@ export function LimitBoard() {
     staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
-  const searchQuery = useQuery({
-    queryKey: QK.instrumentSearch(search, 'stock'),
-    queryFn: () => api.instrumentSearch(search, 10, 'stock'),
-    enabled: search.trim().length >= 2,
-  })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
-  const add = useMutation({
-    mutationFn: (symbol: string) => api.limitBoardCandidateAdd(symbol, view.data?.revision ?? 0),
-    onSuccess: () => { setSearch(''); refresh() },
-  })
   const addPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
     onSuccess: () => { setAllocationDialog(null); refresh() },
@@ -1444,10 +1214,6 @@ export function LimitBoard() {
   const addBuyPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'lot' | 'fixed' | 'volume'; allocationValue?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
     onSuccess: () => { setAllocationDialog(null); refresh() },
-  })
-  const removeCandidate = useMutation({
-    mutationFn: (row: LimitBoardRow) => api.limitBoardCandidateRemove(row.symbol, view.data?.revision ?? 0),
-    onSuccess: refresh,
   })
   const updatePool = useMutation({
     mutationFn: ({ row, enabled, orderMode, allocationMode, allocationValue }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue'; allocationMode?: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0, allocationMode, allocationValue),
@@ -1473,14 +1239,7 @@ export function LimitBoard() {
 
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
   const buyPoolSymbols = useMemo(() => new Set((view.data?.buy_pool ?? []).map(row => row.symbol)), [view.data?.buy_pool])
-  const candidateSymbols = useMemo(() => new Set([
-    ...(view.data?.candidate_pool ?? []).map(row => row.symbol),
-    ...(view.data?.opportunity_pool ?? []).map(row => row.symbol),
-    ...(view.data?.board_pool ?? []).map(row => row.symbol),
-    ...(view.data?.buy_pool ?? []).map(row => row.symbol),
-  ]), [view.data?.candidate_pool, view.data?.opportunity_pool, view.data?.board_pool, view.data?.buy_pool])
-  const searchResults = (searchQuery.data?.results ?? []).filter(item => !isStName(item.name))
-  const busy = add.isPending || addPool.isPending || addBuyPool.isPending || removeCandidate.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || updateAdvanced.isPending
+  const busy = addPool.isPending || addBuyPool.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || updateAdvanced.isPending
   const data = view.data
   const sentimentHistory = useMemo(() => mergeSentimentHistory(
     data?.market_sentiment?.emotion_history,
@@ -1499,16 +1258,12 @@ export function LimitBoard() {
   }
   if (!data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
-  const rows = tab === 'candidate' ? data.candidate_pool : tab === 'opportunity' ? data.opportunity_pool : tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : tab === 'buy_pool' ? 'buy_pool' : 'candidate'
-  const tableTitle = tab === 'candidate' ? '备选池' : tab === 'opportunity' ? '可交易机会' : tab === 'buy_pool' ? '买入池' : '实盘打板池'
+  const rows = tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : 'buy_pool'
+  const tableTitle = tab === 'buy_pool' ? '买入池' : '实盘打板池'
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
-    : tab === 'opportunity'
-      ? '独立机会分排序：强势确认、评分上升速度、日内分时和成交空间；只显示仍有成交空间的实时标的'
-      : tab === 'buy_pool'
-        ? '加入后立即按当前 TickFlow 价格发送限价买入委托；移出买入池不会自动撤销已发委托'
-    : `前 10 板块强势股统一打分，自动候选只取 Top 30${data.settings.main_board_only ? ' · 仅沪深主板' : ''}；手工标的不受限制`
+    : '加入后立即按当前 TickFlow 价格发送限价买入委托；移出买入池不会自动撤销已发委托'
   const sentimentPanel = <>
     <section className="border-b border-border px-4 py-3 sm:px-5">
       <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(220px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
@@ -1564,19 +1319,14 @@ export function LimitBoard() {
           <span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-secondary"><Radio className="h-3 w-3 text-accent" />买入/打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>
           <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '买入池与打板池已接入 WS' : '买入池与打板池未接入 WS'}</span>
           <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
-          {!runtime.first_board_enabled ? <span className="max-w-[520px] truncate text-warning" title={`强势股打分暂不可用：${runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}`}>
-            强势股打分暂不可用：{runtime.candidate_scope.state === 'unavailable' ? runtime.candidate_scope.reason : runtime.history_reason}
-          </span> : null}
         </div>}
-        right={<div className="flex flex-wrap items-center justify-end gap-2"><div className="relative"><Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索股票加入备选池" className="h-8 w-48 rounded-btn border border-border bg-elevated pl-7 pr-2 text-xs outline-none focus:border-accent" />{searchResults.length && search.trim() ? <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-btn border border-border bg-surface shadow-lg">{searchResults.map(item => <button type="button" key={item.symbol} disabled={candidateSymbols.has(item.symbol) || add.isPending} onClick={() => add.mutate(item.symbol)} className="flex w-full items-center justify-between px-3 py-2 text-left text-xs hover:bg-elevated disabled:opacity-50"><span>{item.name}<span className="ml-2 font-mono text-[10px] text-muted">{item.symbol}</span></span><Plus className="h-3.5 w-3.5 text-accent" /></button>)}</div> : null}</div><button type="button" onClick={() => setAdvancedOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5" />高级设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
+        right={<div className="flex flex-wrap items-center justify-end gap-2"><button type="button" onClick={() => setAdvancedOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5" />高级设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}
       />
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
           ['ladder', '连板天梯', null, Flame],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
-          ['candidate', '备选池', data.candidate_pool.length, ListFilter],
-          ['opportunity', '机会榜', data.opportunity_pool.length, Zap],
           ['buy_pool', '买入池', data.buy_pool.length, ShoppingCart],
           ['pool', '打板池', data.board_pool.length, Crosshair],
           ['events', '触发记录', data.events.length, Bell],
@@ -1588,48 +1338,31 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} signalRows={data.first_board} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenAlgorithm={() => setCandidateAlgorithmOpen(true)} onOpenStock={(symbol, name) => setPreview({ symbol, name })} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
               <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
-                {tab === 'candidate' || tab === 'opportunity' ? <button type="button" onClick={() => setCandidateAlgorithmOpen(true)} className="inline-flex items-center gap-1 rounded-btn border border-border px-2 py-1 text-secondary hover:bg-elevated hover:text-foreground"><CircleHelp className="h-3.5 w-3.5" />排序算法</button> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
               </div>
             </div>
             <Table
               rows={rows}
               mode={tableMode}
-              poolSymbols={poolSymbols}
-              buyPoolSymbols={buyPoolSymbols}
               busy={busy}
               sweepPriceLevels={data.settings.sweep_price_levels}
               queueWaitSeconds={data.settings.queue_wait_seconds}
               queueConfirmSnapshots={data.settings.queue_confirm_snapshots}
               onOpen={setPreview}
-              onAddPool={row => setAllocationDialog({
-                row,
-                kind: 'board',
-                initialMode: row.allocation_mode ?? 'global',
-                initialValue: row.allocation_value,
-              })}
-              onAddBuyPool={row => setAllocationDialog({
-                row,
-                kind: 'buy',
-                initialMode: row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot',
-                initialValue: row.allocation_value,
-              })}
               onEditAllocation={row => setAllocationDialog({
                 row,
                 kind: 'edit',
                 initialMode: row.allocation_mode ?? 'global',
                 initialValue: row.allocation_value,
               })}
-              onRemoveCandidate={row => removeCandidate.mutate(row)}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
               onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
               onRemovePool={row => tableMode === 'buy_pool' ? removeBuyPool.mutate(row) : removePool.mutate(row)}
-              onTrade={setTradeRow}
             />
           </section>
         ) : (
@@ -1650,7 +1383,6 @@ export function LimitBoard() {
 
       {data.blacklist.length ? <div className="flex items-center gap-2 border-t border-border px-4 py-2 text-[10px] text-danger sm:px-5"><Ban className="h-3.5 w-3.5" />今日黑名单：{data.blacklist.join('、')}</div> : null}
       {advancedOpen ? <AdvancedSettingsDialog value={advancedSettings(data.settings)} pending={updateAdvanced.isPending} onClose={() => setAdvancedOpen(false)} onSave={value => updateAdvanced.mutate(value)} /> : null}
-      {candidateAlgorithmOpen ? <CandidateAlgorithmDialog onClose={() => setCandidateAlgorithmOpen(false)} /> : null}
       {allocationDialog ? <LimitBoardAllocationDialog
         key={`${allocationDialog.kind}:${allocationDialog.row.symbol}`}
         row={allocationDialog.row}
@@ -1689,7 +1421,6 @@ export function LimitBoard() {
           })
         }}
       /> : null}
-      {tradeRow ? <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.last_price, limitUp: tradeRow.limit_up }} preset={{ action: 'BUY' }} onClose={() => setTradeRow(null)} /> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} defaultShowIntraday onClose={() => setPreview(null)} />
     </div>
   )
