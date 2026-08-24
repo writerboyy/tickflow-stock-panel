@@ -51,7 +51,7 @@ _ENTRY_MIN_LIMIT_GAP_PCT = 0.005
 _ENTRY_MAX_LIMIT_GAP_PCT = 0.03
 _ENTRY_QUOTE_FRESH_SECONDS = 10.0
 _ENTRY_SCORE_RISING_DELTA = 0.05
-_POOL_ALLOCATION_MODES = frozenset({"global", "lot", "fixed", "volume"})
+_POOL_ALLOCATION_MODES = frozenset({"global", "available", "lot", "fixed", "volume"})
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
@@ -2086,7 +2086,7 @@ class LimitBoardService:
         else:
             mode = str(config["settings"].get("order_allocation_mode") or "fixed").strip().lower()
             amount = _finite(config["settings"].get("order_amount_per_board", 0))
-        if mode not in {"quarter", "third", "half", "fixed", "lot", "volume"}:
+        if mode not in {"quarter", "third", "half", "fixed", "available", "lot", "volume"}:
             return "fixed", None, "单板资金分配方式无效"
         if mode == "lot":
             return mode, None, None
@@ -3443,7 +3443,7 @@ class LimitBoardService:
         cleaned_mode = str(mode or default).strip().lower()
         if cleaned_mode not in _POOL_ALLOCATION_MODES:
             raise ValueError("交易数量/金额方式无效")
-        if cleaned_mode in {"global", "lot"}:
+        if cleaned_mode in {"global", "available", "lot"}:
             if value is not None:
                 raise ValueError("一手或跟随全局设置时不应填写金额")
             return cleaned_mode, None

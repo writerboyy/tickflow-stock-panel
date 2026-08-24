@@ -49,7 +49,7 @@ const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => 
 type Tab = 'ladder' | 'sector' | 'buy_pool' | 'pool' | 'events'
 type TableMode = 'buy_pool' | 'pool'
 type AdvancedSettings = LimitBoardView['settings']
-type PoolAllocationMode = 'global' | 'lot' | 'fixed' | 'volume'
+type PoolAllocationMode = 'global' | 'available' | 'lot' | 'fixed' | 'volume'
 type AllocationDialogState = {
   row: LimitBoardRow
   kind: 'buy' | 'board' | 'edit'
@@ -264,6 +264,7 @@ function moneyValue(value: number | null | undefined): string {
 
 function poolAllocationLabel(mode: PoolAllocationMode): string {
   if (mode === 'global') return '跟随高级设置'
+  if (mode === 'available') return '当前可用金额'
   if (mode === 'lot') return '一手（100 股）'
   if (mode === 'fixed') return '固定金额'
   return '固定数量'
@@ -294,9 +295,31 @@ function LimitBoardAllocationDialog({
   const [value, setValue] = useState<number>(initialValue ?? (kind === 'buy' ? 0 : globalValue))
   const price = row.last_price ?? row.order_price ?? null
   const usesGlobal = mode === 'global'
+  const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
+  const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
+  const validPrice = price != null && Number.isFinite(price) && price > 0
+  const availablePreview = useQuery({
+    queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, 'available', null),
+    queryFn: () => api.qmtPreviewOrder({
+      action: 'BUY',
+      symbol: row.symbol,
+      price,
+      price_type: 'LIMIT',
+      reference_price: price,
+      allocation_mode: 'available',
+      allocation_value: null,
+    }, true),
+    enabled: mode === 'available' && qmtReady && validPrice,
+    retry: false,
+    placeholderData: previous => previous,
+  })
+  const availableOrder = availablePreview.data?.preview
+  const premiumGene = row.candidate_score_detail?.premium_gene
   const globalUsesFixedAmount = globalMode === 'fixed' && globalValue > 0
   const estimatedVolume = price != null && price > 0
-    ? mode === 'volume'
+    ? mode === 'available'
+      ? availableOrder?.volume ?? 0
+      : mode === 'volume'
       ? Math.floor(Math.max(0, value) / 100) * 100
       : mode === 'fixed' || (usesGlobal && globalUsesFixedAmount)
         ? Math.floor(Math.max(0, usesGlobal ? globalValue : value) / price / 100) * 100
@@ -304,13 +327,16 @@ function LimitBoardAllocationDialog({
           ? 100
           : 0
     : 0
-  const estimatedAmount = price != null && estimatedVolume > 0 ? price * estimatedVolume : null
+  const estimatedAmount = mode === 'available'
+    ? availableOrder?.actual_amount ?? null
+    : price != null && estimatedVolume > 0 ? price * estimatedVolume : null
   const globalEstimate = usesGlobal && globalMode !== 'fixed' ? '按全局资金计算' : null
-  const validValue = usesGlobal || (Number.isFinite(value) && value > 0)
+  const validValue = usesGlobal || mode === 'available' || (Number.isFinite(value) && value > 0)
   const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
   const canConfirm = Boolean(
     validValue
     && validVolume
+    && (mode !== 'available' || (qmtReady && !availablePreview.isFetching && availableOrder != null && estimatedVolume >= 100))
     && (kind !== 'buy' || (price != null && price > 0 && estimatedVolume >= 100))
     && (kind === 'buy' || usesGlobal || price == null || price <= 0 || estimatedVolume >= 100),
   )
@@ -335,14 +361,33 @@ function LimitBoardAllocationDialog({
         <div><div className="text-[10px] text-muted">当前限价参考</div><div className="mt-1 font-mono text-foreground">{price == null ? '--' : price.toFixed(3)}</div></div>
         <div><div className="text-[10px] text-muted">预计委托金额</div><div className="mt-1 font-mono text-foreground">{globalEstimate ?? moneyValue(estimatedAmount)}</div></div>
       </div>
+      {kind === 'board' ? <div className="border-y border-border py-3 text-[10px]">
+        <div className="mb-2 font-medium text-secondary">涨停基因</div>
+        {premiumGene ? <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+          <span>评分 <b className="font-mono text-foreground">{premiumGene.score.toFixed(1)} / {premiumGene.max_score.toFixed(1)}</b></span>
+          <span>近{premiumGene.window_days ?? '--'}日涨停 <b className="font-mono text-foreground">{premiumGene.limit_up_count ?? '--'} 次</b></span>
+          <span>近5日溢价 <b className="font-mono text-foreground">{ratioPct(premiumGene.premium_5_rate, 1)}</b></span>
+          <span>次日收红 <b className="font-mono text-foreground">{ratioPct(premiumGene.next_day_red_rate, 1)}</b></span>
+          <span>首板封板 <b className="font-mono text-foreground">{ratioPct(premiumGene.first_board_seal_rate, 1)}</b></span>
+        </div> : <div className="text-muted">暂无涨停基因数据</div>}
+      </div> : null}
       <label className="block text-[10px] text-muted">交易数量/金额方式
         <select value={mode} disabled={pending} onChange={event => setMode(event.target.value as PoolAllocationMode)} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
           {kind !== 'buy' ? <option value="global">{poolAllocationLabel('global')}</option> : null}
+          <option value="available" disabled={!qmtReady}>当前可用金额{qmtReady ? '' : '（QMT 未就绪）'}</option>
           <option value="lot">{poolAllocationLabel('lot')}</option>
           <option value="fixed">{poolAllocationLabel('fixed')}</option>
           <option value="volume">{poolAllocationLabel('volume')}</option>
         </select>
       </label>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] text-muted">快捷金额</span>
+        {[10_000, 20_000, 30_000].map(amount => <button key={amount} type="button" disabled={pending} onClick={() => { setMode('fixed'); setValue(amount) }} className="h-7 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40">{amount.toLocaleString('zh-CN')}</button>)}
+        <button type="button" disabled={pending || !qmtReady} onClick={() => setMode('available')} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40">当前可用</button>
+      </div>
+      {mode === 'available' ? <div className="border-y border-accent/25 bg-accent/5 px-3 py-2 text-[10px] leading-4 text-secondary">
+        {availableOrder ? <span>可用资金 {moneyValue(availableOrder.basis_amount)}，按整手预计委托 {moneyValue(availableOrder.actual_amount)}（{availableOrder.volume.toLocaleString('zh-CN')} 股）</span> : availablePreview.isError ? <span className="text-warning">{availablePreview.error instanceof Error ? availablePreview.error.message : '当前可用金额暂时无法读取'}</span> : qmt.isLoading ? '正在读取 QMT 可用金额…' : qmtReady ? '正在计算当前可用金额…' : (qmt.data?.reason || 'QMT 未就绪，无法读取当前可用金额')}
+      </div> : null}
       {mode === 'fixed' ? <label className="block text-[10px] text-muted">确认金额
         <input type="number" min={100} step={100} value={value} disabled={pending} onChange={event => setValue(Number(event.target.value))} className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50" />
       </label> : null}
@@ -357,7 +402,7 @@ function LimitBoardAllocationDialog({
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
       <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>
-      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, usesGlobal ? undefined : value)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, usesGlobal || mode === 'available' ? undefined : value)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
         {pending ? '提交中…' : kind === 'buy' ? '确认买入并挂单' : kind === 'edit' ? '保存设置' : '确认加入打板池'}
       </button>
     </div>
@@ -1214,7 +1259,7 @@ export function LimitBoard() {
     onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const addBuyPool = useMutation({
-    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'lot' | 'fixed' | 'volume'; allocationValue?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
+    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'lot' | 'fixed' | 'volume'; allocationValue?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
     onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const updatePool = useMutation({
@@ -1340,7 +1385,7 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
@@ -1405,7 +1450,7 @@ export function LimitBoard() {
             addBuyPool.mutate({
               row,
               source,
-              allocationMode: allocationMode as 'lot' | 'fixed' | 'volume',
+              allocationMode: allocationMode as 'available' | 'lot' | 'fixed' | 'volume',
               allocationValue,
             })
             return

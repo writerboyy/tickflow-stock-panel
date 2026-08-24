@@ -17,9 +17,10 @@ export type QmtTradeInstrument = {
 
 type QmtTradePriceType = 'LIMIT' | 'LATEST' | 'LIMIT_UP' | 'LIMIT_DOWN'
 
-export type QmtAllocationMode = 'quarter' | 'third' | 'half' | 'fixed'
+export type QmtAllocationMode = 'quarter' | 'third' | 'half' | 'available' | 'fixed'
 
 export const QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtAllocationMode; label: string }> = [
+  { value: 'available', label: '当前可用金额' },
   { value: 'quarter', label: '可用金额 1/4' },
   { value: 'third', label: '可用金额 1/3' },
   { value: 'half', label: '可用金额 1/2' },
@@ -57,12 +58,14 @@ const QMT_ORDER_STATUS: Record<string, string> = {
 }
 
 const ALLOCATION_FRACTION_LABELS: Record<Exclude<QmtAllocationMode, 'fixed'>, string> = {
+  available: '100%',
   quarter: '1/4',
   third: '1/3',
   half: '1/2',
 }
 
 const ALLOCATION_RATIOS: Record<Exclude<QmtAllocationMode, 'fixed'>, number> = {
+  available: 1,
   quarter: 0.25,
   third: 1 / 3,
   half: 0.5,
