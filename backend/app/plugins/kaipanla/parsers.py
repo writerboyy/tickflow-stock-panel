@@ -719,6 +719,19 @@ def parse_rise_fall_analysis(payload: dict) -> dict:
     }
 
 
+def parse_market_performance(payload: dict, plate_id: str) -> dict:
+    """Parse the current change percentage for a documented market index."""
+    values = _rows(payload, "List")
+    if len(values) < 5:
+        raise ResponseShapeError("List 至少需要 5 列")
+    trade_date = parse_trade_date(payload.get("Date"))
+    return {
+        "as_of": trade_date.isoformat() if trade_date else None,
+        "plate_id": str(plate_id),
+        "change_pct": _float(values[4], "List[4]"),
+    }
+
+
 def parse_market_sentiment_statistics(payload: dict) -> list[dict]:
     """Parse ChangeStatistics history or its single current snapshot."""
     result: list[dict] = []

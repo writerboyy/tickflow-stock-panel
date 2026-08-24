@@ -93,6 +93,17 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
             "VerSion": "5.22.0.2",
         },
     ),
+    "market_performance": (
+        "GET",
+        "apphwshhq.longhuvip.com",
+        {
+            "a": "GetPlate_Info_QJ",
+            "c": "ZhiShuRanking",
+            "apiv": "w42",
+            "VerSion": "5.21.0.2",
+            "Date": "",
+        },
+    ),
     "market_sentiment_history": (
         "GET",
         "apphis.longhuvip.com",

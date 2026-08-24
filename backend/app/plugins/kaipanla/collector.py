@@ -26,8 +26,7 @@ from app.plugins.kaipanla.parsers import (
     parse_lhb_list,
     parse_interval_stock,
     parse_large_order_statistics,
-    parse_limit_up_expression,
-    parse_limit_up_ladder_height,
+    parse_market_performance,
     parse_market_sentiment_statistics,
     parse_rise_fall_analysis,
     parse_limitup,
@@ -846,11 +845,11 @@ class KaipanlaCollector:
     async def refresh_market_sentiment(self, trade_date: date) -> int:
         """Collect the five sentiment cards from their documented KPL endpoints."""
         selected: dict[str, Any] = {}
-        ladder: dict[str, Any] = {}
         rise_fall: dict[str, Any] | None = None
-        expression: dict[str, Any] | None = None
+        performances: dict[str, dict[str, Any]] = {}
         sentiment_history: list[dict[str, Any]] = []
         sentiment_realtime: dict[str, Any] | None = None
+        performance_ids = ("801900", "801902", "801903")
         async with self._client_factory() as client:
             try:
                 rise_fall = parse_rise_fall_analysis(
@@ -858,6 +857,23 @@ class KaipanlaCollector:
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("涨跌停数量/破板率接口暂不可用", exc_info=True)
+
+            performance_payloads = await asyncio.gather(
+                *(client.request("market_performance", {"PlateID": plate_id}) for plate_id in performance_ids),
+                return_exceptions=True,
+            )
+            for plate_id, payload in zip(performance_ids, performance_payloads, strict=True):
+                if isinstance(payload, Exception):
+                    logger.debug(
+                        "市场表现接口 %s 暂不可用 (%s)",
+                        plate_id,
+                        type(payload).__name__,
+                    )
+                    continue
+                try:
+                    performances[plate_id] = parse_market_performance(payload, plate_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug("市场表现接口 %s 返回结构无效", plate_id, exc_info=True)
 
             with self._sentiment_lock:
                 history_cached = self._market_sentiment_history_date == trade_date
@@ -888,35 +904,22 @@ class KaipanlaCollector:
                 or trade_date.isoformat()
             )
 
-            try:
-                expression = parse_limit_up_expression(
-                    await client.request("limit_up_expression", {"Day": as_of}),
-                    date.fromisoformat(as_of),
-                )
-            except Exception:  # noqa: BLE001
-                logger.debug("情绪值指标接口暂不可用", exc_info=True)
-
-            try:
-                ladder_payload = await client.request("limit_up_ladder")
-                ladder = parse_limit_up_ladder_height(ladder_payload)
-            except Exception:  # noqa: BLE001
-                logger.debug("实时连板高度接口暂不可用", exc_info=True)
-
         if rise_fall:
             selected.update(
                 market_broken_rate_pct=rise_fall.get("market_broken_rate_pct"),
                 market_broken_count=rise_fall.get("market_broken_count"),
             )
-        if expression:
-            selected.update(
-                yesterday_limitup_change_pct=expression.get("yesterday_limitup_change_pct"),
-                yesterday_consecutive_change_pct=expression.get("yesterday_consecutive_change_pct"),
-                yesterday_broken_change_pct=expression.get("yesterday_broken_change_pct"),
-                market_evaluation=expression.get("market_evaluation"),
-            )
+        for plate_id, field in (
+            ("801900", "yesterday_limitup_change_pct"),
+            ("801902", "yesterday_consecutive_change_pct"),
+            ("801903", "yesterday_broken_change_pct"),
+        ):
+            if performances.get(plate_id, {}).get("as_of") == as_of:
+                selected[field] = performances[plate_id].get("change_pct")
         if sentiment_history:
             selected["emotion_history"] = sentiment_history
-        if sentiment_realtime:
+        realtime_is_current = (sentiment_realtime or {}).get("as_of") == as_of
+        if realtime_is_current:
             selected.update(
                 emotion_strength=sentiment_realtime.get("emotion_strength"),
                 emotion_limit_up_count=sentiment_realtime.get("limit_up_count"),
@@ -927,14 +930,15 @@ class KaipanlaCollector:
         as_of = (
             (rise_fall or {}).get("as_of")
             or (sentiment_realtime or {}).get("as_of")
-            or (expression or {}).get("as_of")
-            or ladder.get("as_of")
             or trade_date.isoformat()
         )
-        has_data = bool(selected) or bool(ladder.get("as_of"))
+        has_data = bool(rise_fall) or any(
+            performance.get("as_of") == as_of
+            for performance in performances.values()
+        ) or realtime_is_current
         selected["max_consecutive"] = (
-            ladder.get("max_consecutive")
-            if ladder.get("as_of") == as_of
+            (sentiment_realtime or {}).get("max_consecutive")
+            if realtime_is_current
             else None
         )
 
