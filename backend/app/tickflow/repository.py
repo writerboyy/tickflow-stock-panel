@@ -322,6 +322,7 @@ class KlineRepository:
         self._live_agg_cache_date: date | None = None
         self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
         self._instruments_cache: pl.DataFrame | None = None
+        self._instruments_mtime_ns: int | None = None
         self._historical_shares_cache: pl.DataFrame | None = None
         self._historical_shares_mtime_ns: int | None = None
         self._historical_names_cache: pl.DataFrame | None = None
@@ -493,6 +494,7 @@ class KlineRepository:
         self._live_agg_cache_date = None
         self._live_agg_check_date = None
         self._instruments_cache = None
+        self._instruments_mtime_ns = None
         self._index_instruments_cache = None
         self._etf_enriched_cache = None
         self._etf_enriched_cache_date = None
@@ -1074,11 +1076,23 @@ class KlineRepository:
         """加载 instruments 到内存。"""
         try:
             df = pl.scan_parquet(self._inst_glob).collect()
-            if not df.is_empty():
-                self._instruments_cache = df
-                logger.info("instruments 缓存已加载: %d 只", len(df))
+            self._instruments_cache = df
+            self._instruments_mtime_ns = self._instruments_source_mtime_ns()
+            logger.info("instruments 缓存已加载: %d 只", len(df))
         except Exception as e:  # noqa: BLE001
             logger.warning("instruments 缓存刷新失败: %s", e)
+
+    def _instruments_source_mtime_ns(self) -> int | None:
+        """返回个股维表源文件的修改时间，用于跨任务发现盘前覆盖。"""
+        directory = self.store.data_dir / "instruments"
+        canonical = directory / "instruments.parquet"
+        try:
+            if canonical.exists():
+                return canonical.stat().st_mtime_ns
+            mtimes = [path.stat().st_mtime_ns for path in directory.rglob("*.parquet")]
+            return max(mtimes, default=None)
+        except OSError:
+            return None
 
     def _refresh_index_instruments(self) -> None:
         """加载指数 instruments 到内存。"""
@@ -1251,7 +1265,11 @@ class KlineRepository:
 
     def get_instruments(self) -> pl.DataFrame:
         """返回缓存的 instruments DataFrame。如无缓存则懒加载。"""
-        if self._instruments_cache is None:
+        source_mtime_ns = self._instruments_source_mtime_ns()
+        if (
+            self._instruments_cache is None
+            or source_mtime_ns != self._instruments_mtime_ns
+        ):
             self._refresh_instruments()
         if self._instruments_cache is None:
             return pl.DataFrame()

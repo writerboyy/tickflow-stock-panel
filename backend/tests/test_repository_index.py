@@ -1,4 +1,6 @@
 """指数资产路由 — repository 层测试。"""
+import os
+
 import polars as pl
 import pytest
 
@@ -42,6 +44,20 @@ def test_name_map_stock_beats_index(repo):
     }).write_parquet(repo.store.data_dir / "instruments" / "instruments.parquet")
     repo._refresh_instruments()
     assert repo.get_name_map(["600000.SH"]).get("600000.SH") == "浦发银行"
+
+
+def test_get_instruments_reloads_when_source_file_changes(repo):
+    path = repo.store.data_dir / "instruments" / "instruments.parquet"
+    pl.DataFrame({"symbol": ["600000.SH"], "limit_up": [20.55]}).write_parquet(path)
+    first = repo.get_instruments()
+    assert first["limit_up"].to_list() == [20.55]
+
+    pl.DataFrame({"symbol": ["600000.SH"], "limit_up": [22.61]}).write_parquet(path)
+    current_mtime = path.stat().st_mtime_ns
+    os.utime(path, ns=(current_mtime + 1, current_mtime + 1))
+    second = repo.get_instruments()
+
+    assert second["limit_up"].to_list() == [22.61]
 
 
 import datetime as _dt

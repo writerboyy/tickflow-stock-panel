@@ -332,7 +332,14 @@ async def lifespan(app: FastAPI):
             daemon=True,
         ).start()
 
-    repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
+    def _on_repository_refresh_done() -> None:
+        _schedule_matrix_cache_prewarm()
+        board_service = getattr(app.state, "limit_board_service", None)
+        invalidate = getattr(board_service, "invalidate_instrument_limit_up_cache", None)
+        if callable(invalidate):
+            invalidate()
+
+    repo._on_refresh_done = _on_repository_refresh_done  # noqa: SLF001
     if repo.enriched_ready:
         _schedule_matrix_cache_prewarm()
 

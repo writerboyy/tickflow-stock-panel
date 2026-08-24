@@ -192,6 +192,7 @@ class LimitBoardService:
         self._name_map: dict[str, str] = {}
         self._instrument_limit_up_date: date | None = None
         self._instrument_limit_up: dict[str, object] = {}
+        self._instrument_limit_up_source: object | None = None
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
         self._premium_stats: dict[str, dict[str, Any]] = {}
@@ -357,9 +358,16 @@ class LimitBoardService:
         # QuoteService 缓存的是 TickFlow 原始报价，不包含 instruments 中的
         # 当日涨跌停价。补入维表哨兵值后，_limit_up 才能识别新股首日无涨跌停。
         today = cn_today()
-        if self._instrument_limit_up_date != today:
+        try:
+            instruments = self.repo.get_instruments()
+        except Exception:  # noqa: BLE001
+            logger.debug("读取股票涨停价维表失败", exc_info=True)
+            instruments = pl.DataFrame()
+        with self._lock:
+            cached_source = self._instrument_limit_up_source
+            cached_date = self._instrument_limit_up_date
+        if cached_date != today or cached_source is not instruments:
             try:
-                instruments = self.repo.get_instruments()
                 if (
                     instruments.is_empty()
                     or "symbol" not in instruments.columns
@@ -375,9 +383,12 @@ class LimitBoardService:
             except Exception:  # noqa: BLE001
                 logger.debug("读取股票涨停价维表失败", exc_info=True)
                 limit_map = {}
-            self._instrument_limit_up = limit_map
-            self._instrument_limit_up_date = today
-        limit_map = self._instrument_limit_up
+            with self._lock:
+                self._instrument_limit_up = limit_map
+                self._instrument_limit_up_date = today
+                self._instrument_limit_up_source = instruments
+        with self._lock:
+            limit_map = self._instrument_limit_up
         if not limit_map:
             return payload
 
@@ -395,6 +406,13 @@ class LimitBoardService:
                 quote["limit_up"] = limit_map[symbol]
             enriched_quotes[raw_symbol] = quote
         return {**payload, "quotes": enriched_quotes}
+
+    def invalidate_instrument_limit_up_cache(self) -> None:
+        """让盘前维表覆盖后，下一次行情处理重新读取涨停价。"""
+        with self._lock:
+            self._instrument_limit_up_date = None
+            self._instrument_limit_up = {}
+            self._instrument_limit_up_source = None
 
     def _refresh_interval_seconds(self) -> float:
         getter = getattr(self.quote_service, "get_min_interval", None)
@@ -1718,6 +1736,9 @@ class LimitBoardService:
             if symbol in blacklist:
                 state["status"] = "blacklisted"
                 continue
+            if self._quote_limit_consistency_error(quote):
+                state["status"] = "watching"
+                continue
             if (
                 not trading_time
                 or quote.get("limit_up") is None
@@ -1751,6 +1772,19 @@ class LimitBoardService:
                 state["status"] = "near_limit"
             else:
                 state["status"] = "watching"
+
+    @staticmethod
+    def _quote_limit_consistency_error(quote: dict[str, Any]) -> str | None:
+        last_price = _finite(quote.get("last_price"))
+        limit_up = _finite(quote.get("limit_up"))
+        if last_price is None or limit_up is None or limit_up <= 0:
+            return None
+        if last_price > limit_up + _STOCK_PRICE_TICK / 2:
+            return (
+                f"行情涨停价不一致：最新价 {last_price:.2f} 高于涨停价 {limit_up:.2f}，"
+                "已阻止自动委托"
+            )
+        return None
 
     def _process_depth(self, records: list[dict[str, Any]]) -> None:
         config = self.store.load_config()
@@ -1908,6 +1942,11 @@ class LimitBoardService:
             None,
         )
         if not member or not bool(member.get("auto_trade")) or state.get("auto_order_key"):
+            return
+        consistency_error = self._quote_limit_consistency_error(quote)
+        if consistency_error:
+            state["auto_order_status"] = "blocked"
+            state["auto_order_error"] = consistency_error
             return
         order_mode = str(member.get("order_mode") or "sweep")
         if trigger_mode != "limit_touch" and order_mode != trigger_mode:

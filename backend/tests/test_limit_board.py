@@ -479,6 +479,75 @@ def test_authoritative_limit_price_is_preserved_in_quote_snapshot(tmp_path):
     assert snapshot["quotes"]["600000.SH"]["limit_up"] == 11.0
 
 
+def test_instrument_limit_up_cache_reloads_after_repository_snapshot_changes(tmp_path):
+    service, quotes, _config = make_service(tmp_path)
+    repo_instruments = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "limit_up": [20.55],
+    })
+    service.repo.get_instruments = lambda: repo_instruments
+    quotes.latest_quotes = [{
+        "symbol": "600000.SH",
+        "last_price": 21.53,
+        "timestamp": "2026-08-24T09:30:00+08:00",
+    }]
+
+    first = service._fresh_tickflow_quotes({"600000.SH"})
+    assert first["quotes"]["600000.SH"]["limit_up"] == 20.55
+
+    repo_instruments = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "limit_up": [22.61],
+    })
+    second = service._fresh_tickflow_quotes({"600000.SH"})
+
+    assert second["quotes"]["600000.SH"]["limit_up"] == 22.61
+
+
+def test_auto_trade_blocks_quote_above_limit_price(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    state = {}
+
+    service._maybe_auto_trade(
+        "600000.SH",
+        quote(price=21.61, limit=20.55),
+        state,
+        config,
+    )
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "最新价" in state["auto_order_error"]
+    assert "涨停价" in state["auto_order_error"]
+
+
+def test_evaluate_quotes_ignores_quote_above_limit_price(tmp_path, monkeypatch):
+    service, quotes, config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ),
+    )
+    runtime = service._runtime_for_today()
+
+    service._evaluate_quotes(
+        {"600000.SH": quote(price=21.61, limit=20.55)},
+        runtime,
+        config,
+    )
+
+    state = runtime["symbols"]["600000.SH"]
+    assert state["status"] == "watching"
+    assert state.get("touched") is not True
+    assert service.store.events("2026-08-13") == []
+    assert quotes.events == []
+
+
 def test_automatic_preselection_keeps_top_ten_per_sector_and_manual_rows():
     updates = {
         f"600{index:03d}.SH": {
