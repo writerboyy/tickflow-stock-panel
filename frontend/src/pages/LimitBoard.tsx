@@ -693,9 +693,7 @@ function SectorStrengthTable({
   const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
   const [selectedStockSymbol, setSelectedStockSymbol] = useState<string | null>(null)
   const [rankingWindowMinutes, setRankingWindowMinutes] = useState<5 | 30>(5)
-  const [rankingOpen, setRankingOpen] = useState(() => (
-    typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches
-  ))
+  const [rankingOpen, setRankingOpen] = useState(false)
   const [progressClock, setProgressClock] = useState(() => Date.now())
   const [cycleStartedAt, setCycleStartedAt] = useState(() => Date.now())
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
@@ -994,7 +992,7 @@ function SectorStrengthTable({
                 }}
                 className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
-              <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium">{row.name || row.code}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank} {row.symbol}{row.tags ? ` · ${row.tags}` : ''}</span></button></td>
+              <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium">{row.name || row.code}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank}{row.tags ? ` · ${row.tags}` : ''} · {row.symbol}</span></button></td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
               <td className={`px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums ${financialTone(row.change_pct)}`}>{scorePct(row.change_pct, 2)}</td>
               <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>

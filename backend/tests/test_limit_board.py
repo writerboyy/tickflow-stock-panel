@@ -2624,6 +2624,109 @@ def test_limit_board_view_exposes_live_sector_strength_tree(tmp_path, monkeypatc
         service.sector_strength_view("not-a-time")
 
 
+def test_sector_strength_view_uses_previous_day_before_nine_and_today_at_nine(
+    tmp_path,
+    monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 25)
+    previous = date(2026, 8, 24)
+    previous_snapshot = {
+        "provider": "kaipanla",
+        "state": "live",
+        "as_of": previous.isoformat(),
+        "refreshed_at": "2026-08-24T15:00:00+08:00",
+        "history_state": "closed",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片", "strength": 88}],
+    }
+    collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: {
+            "provider": "kaipanla",
+            "state": "unavailable",
+            "as_of": today.isoformat(),
+            "rows": [],
+        },
+        latest_completed_trading_date=lambda _day: previous,
+        sector_strength_snapshot_at=lambda trade_date, _captured_at: (
+            previous_snapshot if trade_date == previous else None
+        ),
+        sector_strength_timeline=lambda trade_date: (
+            ["2026-08-24T15:00:00+08:00"] if trade_date == previous else []
+        ),
+    )
+    service.app_state.kaipanla_collector = collector
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 25, 8, 59, tzinfo=CN_TZ),
+    )
+    before_open = service.sector_strength_view()
+    assert before_open["as_of"] == previous.isoformat()
+    assert before_open["rows"][0]["plate_name"] == "芯片"
+
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 25, 9, 0, tzinfo=CN_TZ),
+    )
+    at_switch = service.sector_strength_view()
+    assert at_switch["as_of"] == today.isoformat()
+    assert at_switch["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_sector_constituents_view_uses_previous_day_history_before_nine(
+    tmp_path,
+    monkeypatch,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 25)
+    previous = date(2026, 8, 24)
+    captured_at = "2026-08-24T15:00:00+08:00"
+    snapshot = {
+        "provider": "kaipanla",
+        "state": "live",
+        "as_of": previous.isoformat(),
+        "refreshed_at": captured_at,
+        "history_state": "closed",
+        "rows": [{"plate_id": "P1", "plate_name": "芯片"}],
+    }
+
+    async def constituents_at(trade_date, plate_id):
+        assert trade_date == previous
+        assert plate_id == "P1"
+        return [{
+            "code": "600000",
+            "name": "浦发银行",
+            "change_pct": 10.01,
+            "turnover_rate": 9.63,
+            "amount": 123456789,
+            "main_net": 456789,
+        }]
+
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: snapshot,
+        sector_strength_snapshot_at=lambda _day, _captured_at: snapshot,
+        sector_strength_timeline=lambda _day: [captured_at],
+        latest_completed_trading_date=lambda _day: previous,
+        sector_constituents_at=constituents_at,
+    )
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 25, 8, 59, tzinfo=CN_TZ),
+    )
+
+    result = await service.sector_constituents_view("P1", captured_at)
+
+    assert result["state"] == "closed"
+    assert result["as_of"] == previous.isoformat()
+    assert result["membership_as_of"] == previous.isoformat()
+    assert result["rows"][0]["change_pct"] == pytest.approx(0.1001)
+    assert result["rows"][0]["turnover_rate"] == pytest.approx(0.0963)
+    assert result["rows"][0]["main_net"] == 456789
+
+
 @pytest.mark.skip(reason="短线猎手改用开盘啦当日 socket 成分，不再读取上一交易日分区")
 def test_sector_candidate_universe_uses_top_ten_and_one_membership_batch(
     tmp_path,

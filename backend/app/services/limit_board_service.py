@@ -47,6 +47,7 @@ _SECTOR_CANDIDATE_LIMIT = 10
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_NEAR_LIMIT_PER_SECTOR = 5
 _AUTOMATIC_CANDIDATE_LIMIT = 30
+_SECTOR_DISPLAY_SWITCH_TIME = clock_time(9, 0)
 _ENTRY_MIN_LIMIT_GAP_PCT = 0.005
 _ENTRY_MAX_LIMIT_GAP_PCT = 0.03
 _ENTRY_QUOTE_FRESH_SECONDS = 10.0
@@ -631,6 +632,7 @@ class LimitBoardService:
         captured_at: str | None = None,
         *,
         include_timeline: bool = False,
+        fallback_previous: bool = False,
     ) -> dict[str, Any] | None:
         collector = getattr(self.app_state, "kaipanla_collector", None)
         if collector is None:
@@ -647,6 +649,31 @@ class LimitBoardService:
         except Exception:  # noqa: BLE001
             logger.debug("读取开盘啦实时板块强度快照失败", exc_info=True)
             return None
+        if (
+            fallback_previous
+            and captured_at is None
+            and self._should_display_previous_sector(today)
+            and (
+                not isinstance(snapshot, dict)
+                or snapshot.get("state") != "live"
+                or snapshot.get("as_of") != today.isoformat()
+            )
+        ):
+            previous_date = self._latest_completed_sector_date(today, collector)
+            previous_getter = getattr(collector, "sector_strength_snapshot_at", None)
+            if previous_date is not None and callable(previous_getter):
+                try:
+                    previous_snapshot = previous_getter(previous_date, None)
+                except Exception:  # noqa: BLE001
+                    logger.debug("读取上一交易日板块强度快照失败", exc_info=True)
+                    previous_snapshot = None
+                if (
+                    isinstance(previous_snapshot, dict)
+                    and previous_snapshot.get("state") == "live"
+                    and previous_snapshot.get("as_of") == previous_date.isoformat()
+                ):
+                    today = previous_date
+                    snapshot = previous_snapshot
         timeline = []
         if include_timeline:
             timeline_getter = getattr(collector, "sector_strength_timeline", None)
@@ -730,6 +757,24 @@ class LimitBoardService:
             "rows": ordered,
         }
 
+    @staticmethod
+    def _should_display_previous_sector(today: date) -> bool:
+        now = cn_now()
+        current = now.timetz().replace(tzinfo=None)
+        return today.weekday() >= 5 or current < _SECTOR_DISPLAY_SWITCH_TIME
+
+    @staticmethod
+    def _latest_completed_sector_date(today: date, collector: object) -> date | None:
+        getter = getattr(collector, "latest_completed_trading_date", None)
+        if not callable(getter):
+            return None
+        try:
+            previous = getter(today)
+        except Exception:  # noqa: BLE001
+            logger.debug("读取上一交易日日期失败", exc_info=True)
+            return None
+        return previous if isinstance(previous, date) and previous < today else None
+
     def sector_strength_view(self, captured_at: str | None = None) -> dict[str, Any] | None:
         today = cn_today()
         if captured_at:
@@ -737,9 +782,158 @@ class LimitBoardService:
                 point = datetime.fromisoformat(captured_at)
             except ValueError as exc:
                 raise ValueError("板块强度时间点格式无效") from exc
-            if point.tzinfo is None or point.astimezone(CN_TZ).date() != today:
-                raise ValueError("只能回看当前交易日的板块强度")
-        return self._sector_strength_view(today, captured_at, include_timeline=True)
+            if point.tzinfo is None:
+                raise ValueError("只能回看带时区的板块强度时间点")
+            point_date = point.astimezone(CN_TZ).date()
+            collector = getattr(self.app_state, "kaipanla_collector", None)
+            previous_date = self._latest_completed_sector_date(today, collector)
+            if point_date != today and not (
+                self._should_display_previous_sector(today)
+                and point_date == previous_date
+            ):
+                raise ValueError("只能回看当前交易日或非交易时段的上一交易日板块强度")
+            today = point_date
+        return self._sector_strength_view(
+            today,
+            captured_at,
+            include_timeline=True,
+            fallback_previous=captured_at is None,
+        )
+
+    async def _historical_sector_constituents_view(
+        self,
+        collector: object,
+        plate_id: str,
+        snapshot: dict[str, Any],
+        trade_date: date,
+    ) -> dict[str, Any]:
+        getter = getattr(collector, "sector_constituents_at", None)
+        if not callable(getter):
+            raise RuntimeError("开盘啦历史板块成分数据暂不可用")
+        try:
+            source_rows = await getter(trade_date, plate_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("查询开盘啦历史板块成分失败 (%s)", type(exc).__name__)
+            raise RuntimeError("开盘啦历史板块成分数据暂不可用") from exc
+        if not source_rows:
+            raise RuntimeError("开盘啦历史板块成分数据为空")
+
+        try:
+            instruments = self.repo.get_instruments()
+            symbol_lookup = {
+                str(symbol).split(".", 1)[0]: str(symbol).upper()
+                for symbol in instruments.get_column("symbol").to_list()
+            } if "symbol" in instruments.columns else {}
+        except Exception:  # noqa: BLE001
+            symbol_lookup = {}
+
+        members = []
+        for row in source_rows:
+            if not isinstance(row, dict):
+                continue
+            code = str(row.get("code") or row.get("symbol") or "").split(".", 1)[0]
+            if not code:
+                continue
+            symbol = symbol_lookup.get(code) or (
+                f"{code}.{'SH' if code.startswith(('6', '9')) else 'BJ' if code.startswith(('4', '8')) else 'SZ'}"
+            )
+            members.append({
+                "plate_id": plate_id,
+                "symbol": symbol,
+                "code": code,
+                "name": str(row.get("name") or "").strip() or None,
+                "tags": str(row.get("tags") or "").strip() or None,
+                "last_price": _finite(row.get("last_price")),
+                # /30 historical constituents report percentages (e.g. 10.01),
+                # while the page contract uses decimal ratios (0.1001).
+                "change_pct": (
+                    _finite(row.get("change_pct")) / 100
+                    if _finite(row.get("change_pct")) is not None else None
+                ),
+                "amount": _finite(row.get("amount")),
+                "turnover_rate": (
+                    _finite(row.get("turnover_rate")) / 100
+                    if _finite(row.get("turnover_rate")) is not None else None
+                ),
+                "main_net": _finite(row.get("main_net")),
+                "limit_tag": str(row.get("limit_tag") or "").strip() or None,
+            })
+        if not members:
+            raise RuntimeError("开盘啦历史板块成分代码无效")
+
+        symbols = {str(row["symbol"]) for row in members}
+        try:
+            quote_rows = self.quote_service.get_latest_quotes(symbols)
+        except Exception:  # noqa: BLE001
+            quote_rows = []
+        quotes_by_symbol = {}
+        for quote in quote_rows:
+            symbol = str(quote.get("symbol") or "").strip().upper()
+            quote_at = _quote_time(quote.get("timestamp"))
+            if symbol in symbols and quote_at is not None and quote_at.date() == trade_date:
+                quotes_by_symbol[symbol] = quote
+
+        normalized = []
+        for member in members:
+            symbol = str(member["symbol"])
+            quote = quotes_by_symbol.get(symbol)
+            name = str((quote or {}).get("name") or member.get("name") or "").strip() or None
+            last_price = _finite((quote or {}).get("last_price", member.get("last_price")))
+            limit_up = self._limit_up(quote or {}, symbol, name or "", trade_date)
+            at_limit = (
+                last_price is not None
+                and limit_up is not None
+                and last_price >= limit_up - 0.005
+            )
+            normalized.append({
+                **member,
+                "name": name,
+                "last_price": last_price,
+                "change_pct": _finite((quote or {}).get("change_pct", member.get("change_pct"))),
+                "amount": _finite((quote or {}).get("amount", member.get("amount"))),
+                "turnover_rate": _finite((quote or {}).get("turnover_rate", member.get("turnover_rate"))),
+                "float_market_value": None,
+                "main_net": member.get("main_net"),
+                "limit_tag": "涨停" if at_limit else member.get("limit_tag"),
+                "rank_tag": None,
+                "limit_count": None,
+                "quote_available": last_price is not None,
+            })
+        normalized.sort(key=lambda row: (
+            row.get("change_pct") is None,
+            -float(row.get("change_pct") or 0),
+            -float(row.get("amount") or 0),
+            str(row.get("code") or ""),
+        ))
+        for index, row in enumerate(normalized, start=1):
+            row["rank"] = index
+            row["rank_count"] = len(normalized)
+
+        quote_as_of = max(
+            (_quote_time(quote.get("timestamp")) for quote in quotes_by_symbol.values()),
+            default=None,
+        )
+        return {
+            "provider": "kaipanla",
+            "state": "closed",
+            "as_of": trade_date.isoformat(),
+            "captured_at": snapshot.get("refreshed_at"),
+            "membership_as_of": trade_date.isoformat(),
+            "quote_provider": "tickflow",
+            "quote_state": "closed" if quote_as_of is not None else "unavailable",
+            "quote_as_of": quote_as_of.isoformat() if quote_as_of else None,
+            "quote_available": bool(quotes_by_symbol),
+            "plate_id": plate_id,
+            "plate_name": next(
+                (
+                    str(row.get("plate_name") or "")
+                    for row in snapshot.get("rows") or []
+                    if isinstance(row, dict) and str(row.get("plate_id") or "") == plate_id
+                ),
+                None,
+            ),
+            "rows": normalized,
+        }
 
     async def sector_constituents_view(
         self,
@@ -747,16 +941,24 @@ class LimitBoardService:
         captured_at: str | None = None,
     ) -> dict[str, Any]:
         today = cn_today()
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        previous_date = self._latest_completed_sector_date(today, collector)
         requested_point: datetime | None = None
         if captured_at:
             try:
                 requested_point = datetime.fromisoformat(captured_at)
             except ValueError as exc:
                 raise ValueError("板块强度时间点格式无效") from exc
-            if requested_point.tzinfo is None or requested_point.astimezone(CN_TZ).date() != today:
-                raise ValueError("只能查看当前交易日的板块成分")
+            if requested_point.tzinfo is None:
+                raise ValueError("只能查看带时区的板块成分时间点")
+            point_date = requested_point.astimezone(CN_TZ).date()
+            if point_date != today and not (
+                self._should_display_previous_sector(today)
+                and point_date == previous_date
+            ):
+                raise ValueError("只能查看当前交易日或非交易时段的上一交易日板块成分")
             requested_point = requested_point.astimezone(CN_TZ)
-        current_snapshot = self.sector_strength_view()
+        current_snapshot = self.sector_strength_view(captured_at)
         after_close = (
             requested_point is not None
             and requested_point.timetz().replace(tzinfo=None) >= clock_time(15, 0)
@@ -782,7 +984,19 @@ class LimitBoardService:
         if selected is None:
             raise ValueError("该板块在选定时间点不可用")
 
-        collector = getattr(self.app_state, "kaipanla_collector", None)
+        snapshot_date = None
+        try:
+            snapshot_date = date.fromisoformat(str(snapshot.get("as_of")))
+        except (TypeError, ValueError):
+            pass
+        if snapshot_date is not None and snapshot_date != today:
+            return await self._historical_sector_constituents_view(
+                collector,
+                plate_id,
+                snapshot,
+                snapshot_date,
+            )
+
         snapshot_getter = getattr(collector, "shortline_constituents_snapshot", None)
         live_snapshot = snapshot_getter() if callable(snapshot_getter) else None
         plate_loader = getattr(collector, "shortline_constituents_for_plate", None)
