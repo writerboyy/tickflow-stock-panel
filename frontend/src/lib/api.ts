@@ -2999,9 +2999,10 @@ export const api = {
     allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'lot',
     allocationValue?: number | null,
     creditBuyMode: QmtCreditBuyMode = 'collateral',
+    orderPrice?: number | null,
   ) => request<{ ok: boolean; config: LimitBoardConfig; order: QmtOrder }>('/api/limit-board/buy-pool', {
     method: 'POST',
-    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode }),
+    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode, order_price: orderPrice ?? null }),
   }),
   limitBoardBuyPoolRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(

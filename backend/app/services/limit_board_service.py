@@ -3947,6 +3947,7 @@ class LimitBoardService:
         allocation_mode: str = "lot",
         allocation_value: float | None = None,
         credit_buy_mode: str = "collateral",
+        order_price: float | None = None,
     ) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)
         allocation_mode, allocation_value = self._pool_allocation(
@@ -3961,8 +3962,18 @@ class LimitBoardService:
         )
         if capacity_error:
             raise RuntimeError(capacity_error)
-        quote = self._pool_quote(cleaned)
-        price = float(quote["last_price"])
+        now = cn_now()
+        now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
+        requested_price = _finite(order_price)
+        if requested_price is not None and _is_trading_time(now_aware):
+            raise ValueError("盘中只能使用实时行情价格，盘后才可自定义隔夜委托价格")
+        if requested_price is not None:
+            price = requested_price
+        else:
+            if not _is_trading_time(now_aware):
+                raise ValueError("盘后委托需要填写有效的隔夜委托价格")
+            quote = self._pool_quote(cleaned)
+            price = float(quote["last_price"])
         qmt = self._qmt_ready()
         preview = self._buy_order_preview(
             qmt,

@@ -27,6 +27,7 @@ class BuyPoolWrite(SelectedWrite):
     allocation_mode: str = Field(default="lot", pattern="^(available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
     credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
+    order_price: float | None = Field(default=None, gt=0)
 
 
 class PoolUpdate(BaseModel):
@@ -218,6 +219,7 @@ def add_buy_pool(payload: BuyPoolWrite, request: Request):
             payload.allocation_mode,
             payload.allocation_value,
             payload.credit_buy_mode,
+            payload.order_price,
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc

@@ -2038,6 +2038,33 @@ def test_buy_pool_persists_and_submits_credit_buy_mode(tmp_path, monkeypatch):
     assert service.store.load_config()["buy_pool"][0]["credit_buy_mode"] == "financing"
 
 
+def test_buy_pool_after_hours_uses_custom_order_price_without_market_quote(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 13, 20, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    service._pool_quote = lambda _symbol: (_ for _ in ()).throw(AssertionError("盘后不应读取行情"))
+
+    result = service.add_buy_pool(
+        "600000.SH", "manual", 0, "lot", None, "collateral", 9.876,
+    )
+
+    assert result["order"]["status"] == "accepted_pending"
+    assert qmt.orders[0]["price"] == 9.876
+    assert service.store.load_config()["buy_pool"][0]["order_price"] == 9.876
+
+
+def test_buy_pool_after_hours_requires_custom_order_price(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 13, 20, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    service, _quotes, _config = make_service(tmp_path, FakeQmt())
+
+    with pytest.raises(ValueError, match="盘后委托需要填写"):
+        service.add_buy_pool("600000.SH", "manual", 0)
+
+
 def test_default_config_preserves_current_sweep_and_queue_triggers():
     settings = default_config()["settings"]
 
@@ -3457,6 +3484,34 @@ def test_limit_board_buy_pool_api_submits_and_removes_order(tmp_path, monkeypatc
     assert removed.status_code == 200
     assert removed.json()["config"]["buy_pool"] == []
     assert service._runtime_for_today()["buy_orders"] == {}
+
+
+def test_limit_board_buy_pool_api_accepts_after_hours_order_price(tmp_path, monkeypatch):
+    qmt = FakeQmt()
+    service, _quotes, _config = make_service(tmp_path, qmt)
+    now = datetime(2026, 8, 13, 20, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    service._pool_quote = lambda _symbol: (_ for _ in ()).throw(AssertionError("盘后不应读取行情"))
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    added = client.post(
+        "/api/limit-board/buy-pool",
+        json={
+            "symbol": "600000.SH",
+            "source": "manual",
+            "revision": 0,
+            "allocation_mode": "lot",
+            "order_price": 9.876,
+        },
+    )
+
+    assert added.status_code == 200
+    assert qmt.orders[0]["price"] == 9.876
+    assert added.json()["config"]["buy_pool"][0]["order_price"] == 9.876
 
 
 def test_limit_board_api_rejects_legacy_notification_settings(tmp_path):
