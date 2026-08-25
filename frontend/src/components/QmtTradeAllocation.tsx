@@ -51,6 +51,7 @@ export function QmtTradeAllocationControls({
   basisAmount,
   accountType,
   cashAmount,
+  financingBuyingPowerAmount,
   financingAvailableAmount,
   previewState = 'idle',
   previewMessage,
@@ -70,6 +71,7 @@ export function QmtTradeAllocationControls({
   basisAmount?: number | null
   accountType?: string | null
   cashAmount?: number | null
+  financingBuyingPowerAmount?: number | null
   financingAvailableAmount?: number | null
   previewState?: PreviewState
   previewMessage?: string | null
@@ -89,6 +91,7 @@ export function QmtTradeAllocationControls({
         : creditAccount ? '信用账户当前可用持仓市值' : '账户当前可用持仓市值')
   const basisText = basisAmount != null && Number.isFinite(basisAmount) ? `${MONEY.format(basisAmount)} 元` : '—'
   const cashText = cashAmount != null && Number.isFinite(cashAmount) ? `${MONEY.format(cashAmount)} 元` : '—'
+  const financingBuyingPowerText = financingBuyingPowerAmount != null && Number.isFinite(financingBuyingPowerAmount) ? `${MONEY.format(financingBuyingPowerAmount)} 元` : '—'
   const financingText = financingAvailableAmount != null && Number.isFinite(financingAvailableAmount) ? `${MONEY.format(financingAvailableAmount)} 元` : '—'
   const availableDisabled = disabled || disabledModes?.available === true
 
@@ -145,6 +148,7 @@ export function QmtTradeAllocationControls({
         {!(creditAccount && action === 'BUY') ? <div><span className="text-muted">{displayedBasisLabel}</span><div className="mt-0.5 font-mono text-foreground">{basisText}</div></div> : null}
         {creditAccount && action === 'BUY' ? <>
           <div><span className="text-muted">现金可用</span><div className="mt-0.5 font-mono text-foreground">{cashText}</div></div>
+          <div><span className="text-muted">融资可买余额</span><div className="mt-0.5 font-mono text-foreground">{financingBuyingPowerText}</div></div>
           <div><span className="text-muted">融资授信余额</span><div className="mt-0.5 font-mono text-foreground">{financingText}</div><div className="mt-0.5 text-[9px] text-muted">不可直接用于融资买入</div></div>
         </> : null}
       </div>

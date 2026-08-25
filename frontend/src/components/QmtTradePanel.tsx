@@ -160,6 +160,8 @@ export function QmtTradePanel({
   const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
     ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
+  const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
+    ?? cachedAccount?.credit_financing_buying_power
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
   const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
   const previewRequestMode = allocationMode === 'fixed' ? 'fixed' : 'quarter'
@@ -336,6 +338,7 @@ export function QmtTradePanel({
             basisAmount={serverPreview?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
             cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
+            financingBuyingPowerAmount={creditBuyMode === 'financing' ? serverPreview?.buying_power_amount ?? cachedFinancingBuyingPower : cachedFinancingBuyingPower}
             financingAvailableAmount={serverPreview?.financing_available_amount ?? cachedFinancingAvailable}
             previewState={allocationPreviewState}
             previewMessage={allocationPreviewMessage}

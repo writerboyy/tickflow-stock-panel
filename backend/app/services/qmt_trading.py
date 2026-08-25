@@ -124,7 +124,7 @@ def _credit_buying_power(
     financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
     if credit_buy_mode == "financing":
         return (
-            _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS),
+            _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS) or 0.0,
             "可买融资标的资金",
             financing_available,
         )
@@ -146,6 +146,11 @@ def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -
         if value is not None and value >= 0:
             account[field] = value
     account["account_type"] = str(account_type or asset.get("account_type") or "STOCK").upper()
+    # QMT may omit the financing buying-power field when no financing quota is
+    # currently available. Treat the omission as an explicit zero at the
+    # normalized account boundary; it must never fall back to cash or credit.
+    if account["account_type"] == "CREDIT" and _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS) is None:
+        account["fin_enbuy_balance"] = 0.0
     return account
 
 

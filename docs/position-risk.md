@@ -54,7 +54,7 @@ QMT 配置完整时，应用启动后默认每 30 秒自动读取资金、持仓
 金额显示和计算必须使用 `POST /api/position-risk/qmt/orders/preview` 返回的 `preview`：
 
 - 普通账户买入的 `basis_amount` 是 QMT 权威账户资产中的实际可用资金（`get_asset.cash`），不是本地截图导入现金、初始资金或页面缓存值。
-- 信用账户当前的普通买入走 QMT 担保品买入指令，`basis_amount` 使用 `get_asset.assure_enbuy_balance`（QMT `m_dAssureEnbuyBalance`，可买担保品资金）。部分 Big QMT 版本会把该字段返回为最大浮点占位值，桥接层回退到同一账户行的 `m_dAvailable`（可用现金）；不能用 `m_dEnableBailBalance` 代替，因为它是融资保证金口径，可能为 0 而担保品仍有可买现金。融资买入只使用有效的 `m_dFinEnbuyBalance`；该字段为占位值时不把 `m_dFinEnableQuota`（授信额度）冒充可买融资标的资金。页面另行展示 `cash_amount`（现金可用）与 `financing_available_amount`（QMT `m_dFinEnableBalance`，融资可用；占位时回退到 `m_dFinEnableQuota`）。
+- 信用账户当前的普通买入走 QMT 担保品买入指令，`basis_amount` 使用 `get_asset.assure_enbuy_balance`（QMT `m_dAssureEnbuyBalance`，可买担保品资金）。部分 Big QMT 版本会把该字段返回为最大浮点占位值，桥接层回退到同一账户行的 `m_dAvailable`（可用现金）；不能用 `m_dEnableBailBalance` 代替，因为它是融资保证金口径，可能为 0 而担保品仍有可买现金。融资买入只使用有效的 `m_dFinEnbuyBalance`；该字段缺失或为占位值时按 0 元处理，不能把 `m_dFinEnableQuota`（授信额度）冒充可买融资标的资金。页面另行展示 `cash_amount`（现金可用）、实际融资可买余额与 `financing_available_amount`（QMT `m_dFinEnableBalance`，授信口径；占位时回退到 `m_dFinEnableQuota`）。
 - 卖出的 `basis_amount` 是 QMT 该证券可用持仓数量乘以本次参考价格；数量来自 QMT 的 `available`/`can_use_volume`。
 - `target_amount`、`actual_amount` 和 `volume` 已按账户可用资金/持仓及 100 股整手向下取整；提交前后端仍会重新预检，页面预览不能替代后端校验。
 - 预览完成但目标金额不足一手时，公共控件明确显示 `0 股`、`0.00 元` 并提示“金额不足一手”，不能用破折号掩盖已计算出的零结果。

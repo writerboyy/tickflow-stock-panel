@@ -348,6 +348,8 @@ function LimitBoardAllocationDialog({
   const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
     ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
+  const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
+    ?? cachedAccount?.credit_financing_buying_power
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const geneDetail = row.candidate_score_detail?.premium_gene
   const localGeneReady = Boolean(
@@ -481,6 +483,7 @@ function LimitBoardAllocationDialog({
         basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
         accountType={qmt.data?.account_type}
         cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
+        financingBuyingPowerAmount={creditBuyMode === 'financing' ? previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower : cachedFinancingBuyingPower}
         financingAvailableAmount={previewOrder?.financing_available_amount ?? cachedFinancingAvailable}
         previewState={allocationPreviewState}
         previewMessage={allocationPreviewMessage}
