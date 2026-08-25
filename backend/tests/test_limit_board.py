@@ -2023,6 +2023,20 @@ def test_buy_pool_supports_fixed_amount_and_fixed_volume(tmp_path, monkeypatch):
     assert volume_qmt.orders[0]["price"] == 10.5
 
 
+def test_buy_pool_persists_and_submits_credit_buy_mode(tmp_path, monkeypatch):
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    qmt = FakeQmt()
+    service, quotes, _config = make_service(tmp_path, qmt)
+    quotes.latest_quotes = [{**quote(price=10.5, limit=11.0), "timestamp": now.isoformat()}]
+
+    service.add_buy_pool("600000.SH", "manual", 0, "lot", None, "financing")
+
+    assert qmt.orders[0]["credit_buy_mode"] == "financing"
+    assert service.store.load_config()["buy_pool"][0]["credit_buy_mode"] == "financing"
+
+
 def test_default_config_preserves_current_sweep_and_queue_triggers():
     settings = default_config()["settings"]
 

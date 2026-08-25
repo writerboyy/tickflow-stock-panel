@@ -33,6 +33,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
 import {
   api,
+  type QmtCreditBuyMode,
   type LimitBoardEvent,
   type LimitBoardQuoteSnapshot,
   type LimitBoardRow,
@@ -57,6 +58,7 @@ type AllocationDialogState = {
   kind: 'buy' | 'board' | 'edit'
   initialMode: PoolAllocationMode
   initialValue?: number | null
+  initialCreditBuyMode?: QmtCreditBuyMode
 }
 
 const ADVANCED_QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtAllocationMode; label: string }> = [
@@ -288,6 +290,7 @@ function LimitBoardAllocationDialog({
   kind,
   initialMode,
   initialValue,
+  initialCreditBuyMode,
   pending,
   onClose,
   onConfirm,
@@ -296,15 +299,18 @@ function LimitBoardAllocationDialog({
   kind: 'buy' | 'board' | 'edit'
   initialMode: PoolAllocationMode
   initialValue?: number | null
+  initialCreditBuyMode?: QmtCreditBuyMode
   pending: boolean
   onClose: () => void
-  onConfirm: (mode: PoolAllocationMode, value?: number) => void
+  onConfirm: (mode: PoolAllocationMode, value: number | undefined, creditBuyMode: QmtCreditBuyMode) => void
 }) {
   const [mode, setMode] = useState<PoolAllocationMode>(initialMode === 'global' ? 'quarter' : initialMode)
   const [value, setValue] = useState<number>(initialValue ?? 0)
+  const [creditBuyMode, setCreditBuyMode] = useState<QmtCreditBuyMode>(initialCreditBuyMode ?? row.credit_buy_mode ?? 'collateral')
   const price = row.last_price ?? row.order_price ?? null
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
+  const creditBuy = String(qmt.data?.account_type || '').toUpperCase() === 'CREDIT'
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const premiumGeneQuery = useQuery({
     queryKey: QK.stockPremiumGene(row.symbol),
@@ -324,7 +330,7 @@ function LimitBoardAllocationDialog({
     ? (price != null && price > 0 ? price * value : null)
     : mode === 'fixed' ? value : null
   const allocationPreview = useQuery({
-    queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue),
+    queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue, creditBuyMode),
     queryFn: () => api.qmtPreviewOrder({
       action: 'BUY',
       symbol: row.symbol,
@@ -333,6 +339,7 @@ function LimitBoardAllocationDialog({
       reference_price: price,
       allocation_mode: previewMode,
       allocation_value: previewValue,
+      credit_buy_mode: creditBuyMode,
     }, true),
     enabled: Boolean(qmtReady && validPrice),
     retry: false,
@@ -437,11 +444,22 @@ function LimitBoardAllocationDialog({
         previewState={allocationPreviewState}
         previewMessage={allocationPreviewMessage}
       />
+      {creditBuy ? <label className="block text-[10px] text-muted">信用账户买入方式
+        <select
+          value={creditBuyMode}
+          disabled={pending}
+          onChange={event => setCreditBuyMode(event.target.value as QmtCreditBuyMode)}
+          className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50"
+        >
+          <option value="collateral">担保品买入</option>
+          <option value="financing">融资买入</option>
+        </select>
+      </label> : null}
       {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : <div className="text-[10px] leading-4 text-muted">这里只保存该股票的交易数量/金额配置；打板池仍按临板、扫板或排板规则触发委托。</div>}
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
       <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>
-      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, ratioMode ? undefined : value)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, ratioMode ? undefined : value, creditBuyMode)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
         {pending ? '提交中…' : kind === 'buy' ? '确认买入并挂单' : kind === 'edit' ? '保存设置' : '确认加入打板池'}
       </button>
     </div>
@@ -1292,15 +1310,15 @@ export function LimitBoard() {
   })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({
-    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
+    mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number; creditBuyMode: QmtCreditBuyMode }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
     onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const addBuyPool = useMutation({
-    mutationFn: ({ row, source, allocationMode, allocationValue }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'; allocationValue?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue),
+    mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'; allocationValue?: number; creditBuyMode: QmtCreditBuyMode }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
     onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const updatePool = useMutation({
-    mutationFn: ({ row, enabled, orderMode, allocationMode, allocationValue }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue'; allocationMode?: PoolAllocationMode; allocationValue?: number }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0, allocationMode, allocationValue),
+    mutationFn: ({ row, enabled, orderMode, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue'; allocationMode?: PoolAllocationMode; allocationValue?: number; creditBuyMode?: QmtCreditBuyMode }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
     onSuccess: () => { setAllocationDialog(null); refresh() },
   })
   const removePool = useMutation({
@@ -1475,7 +1493,7 @@ export function LimitBoard() {
         initialValue={allocationDialog.initialValue}
         pending={addPool.isPending || addBuyPool.isPending || updatePool.isPending}
         onClose={() => setAllocationDialog(null)}
-        onConfirm={(allocationMode, allocationValue) => {
+        onConfirm={(allocationMode, allocationValue, creditBuyMode) => {
           const row = allocationDialog.row
           const source = row.source === 'manual' || row.source === 'selected'
             ? 'manual'
@@ -1487,11 +1505,12 @@ export function LimitBoard() {
               source,
               allocationMode: allocationMode as 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume',
               allocationValue,
+              creditBuyMode,
             })
             return
           }
           if (allocationDialog.kind === 'board') {
-            addPool.mutate({ row, source, allocationMode, allocationValue })
+            addPool.mutate({ row, source, allocationMode, allocationValue, creditBuyMode })
             return
           }
           updatePool.mutate({
@@ -1500,6 +1519,7 @@ export function LimitBoard() {
             orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep',
             allocationMode,
             allocationValue,
+            creditBuyMode,
           })
         }}
       /> : null}

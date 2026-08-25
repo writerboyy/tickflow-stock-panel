@@ -30,8 +30,8 @@ export const QK = {
   positionRiskQmt: ['position-risk', 'qmt'] as const,
   positionRiskQmtOrders: ['position-risk', 'qmt-orders'] as const,
   positionRiskQmtPriceLimit: (symbol: string) => ['position-risk', 'qmt-price-limit', symbol] as const,
-  positionRiskQmtPreview: (symbol: string, action: string, priceType: string, price: number | null, mode: string, value: number | null) => (
-    ['position-risk', 'qmt-preview', symbol, action, priceType, price, mode, value] as const
+  positionRiskQmtPreview: (symbol: string, action: string, priceType: string, price: number | null, mode: string, value: number | null, creditBuyMode = 'collateral') => (
+    ['position-risk', 'qmt-preview', symbol, action, priceType, price, mode, value, creditBuyMode] as const
   ),
   limitBoard: ['limit-board'] as const,
   limitBoardQuotes: (symbols: string) => ['limit-board', 'quotes', symbols] as const,

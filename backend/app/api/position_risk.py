@@ -39,6 +39,7 @@ class QmtOrderPayload(BaseModel):
     reference_price: float | None = Field(default=None, gt=0)
     allocation_mode: str | None = None
     allocation_value: float | None = Field(default=None, gt=0)
+    credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
     idempotency_key: str = Field(min_length=8, max_length=120)
 
 
@@ -50,6 +51,7 @@ class QmtOrderPreviewPayload(BaseModel):
     reference_price: float | None = Field(default=None, gt=0)
     allocation_mode: str = "quarter"
     allocation_value: float | None = Field(default=None, gt=0)
+    credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
 class QmtTradeTogglePayload(BaseModel):
@@ -61,6 +63,7 @@ class QmtRiskActionPayload(BaseModel):
     symbol: str
     action: str
     volume: int = Field(gt=0)
+    credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
 def _service(request: Request):
@@ -384,6 +387,7 @@ def qmt_confirm_risk_action(payload: QmtRiskActionPayload, request: Request):
             payload.symbol,
             payload.action,
             payload.volume,
+            credit_buy_mode=payload.credit_buy_mode,
         )
         result = _qmt(request).submit_order(order_request)
     except ValueError as exc:

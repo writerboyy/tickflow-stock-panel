@@ -703,6 +703,31 @@ def test_credit_order_preview_uses_credit_buying_power_not_cash(tmp_path: Path):
     assert preview["volume"] == 1_800
 
 
+def test_credit_order_preview_can_use_financing_buying_power(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+
+    service.client.call = lambda method, _params: {
+        "cash": 3_800.52,
+        "m_dAssureEnbuyBalance": 18_000,
+        "m_dFinEnbuyBalance": 25_000,
+        "m_dFinEnableBalance": 30_000,
+    } if method == "get_asset" else None
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["credit_buy_mode"] == "financing"
+    assert preview["basis_label"] == "可买融资标的资金"
+    assert preview["buying_power_amount"] == 25_000
+    assert preview["volume"] == 2_500
+
+
 def test_credit_order_preview_rejects_cash_only_response(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
     service.client.call = lambda method, _params: {"cash": 100_000} if method == "get_asset" else None

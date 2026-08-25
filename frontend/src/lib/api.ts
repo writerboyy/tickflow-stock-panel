@@ -1006,6 +1006,7 @@ export interface QmtOrder {
   volume?: number
   price?: number
   price_type?: string
+  credit_buy_mode?: QmtCreditBuyMode | null
   status?: string
   order_sys_id?: string | null
   user_order_id?: string | null
@@ -1014,11 +1015,14 @@ export interface QmtOrder {
   [key: string]: any
 }
 
+export type QmtCreditBuyMode = 'collateral' | 'financing'
+
 export interface QmtOrderPreview {
   action: 'BUY' | 'SELL' | string
   symbol: string
   price: number
   price_type: string
+  credit_buy_mode?: QmtCreditBuyMode | null
   allocation_mode: string
   allocation_value: number | null
   basis_label: string
@@ -1228,6 +1232,7 @@ export interface LimitBoardRow {
   order_mode?: 'sweep' | 'queue'
   allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
   allocation_value?: number | null
+  credit_buy_mode?: QmtCreditBuyMode
   order_price?: number | null
   order_volume?: number | null
   order_amount?: number | null
@@ -1629,6 +1634,7 @@ export interface LimitBoardConfig {
     order_mode?: 'sweep' | 'queue'
     allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
     allocation_value?: number
+    credit_buy_mode?: QmtCreditBuyMode
     added_at?: string
   }>
   buy_pool: Array<{
@@ -1637,6 +1643,7 @@ export interface LimitBoardConfig {
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     allocation_mode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
     allocation_value?: number
+    credit_buy_mode?: QmtCreditBuyMode
     order_price?: number
     order_volume?: number
     order_amount?: number
@@ -2893,11 +2900,11 @@ export const api = {
   qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
   qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
   qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
-  qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null }, quiet = false) =>
+  qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode }, quiet = false) =>
     request<{ ok: boolean; preview: QmtOrderPreview }>('/api/position-risk/qmt/orders/preview', { method: 'POST', body: JSON.stringify(payload), quiet }),
-  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume?: number | null; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode?: string | null; allocation_value?: number | null; idempotency_key: string }) =>
+  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume?: number | null; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode?: string | null; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode; idempotency_key: string }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
-  qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number }) =>
+  qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number; credit_buy_mode?: QmtCreditBuyMode }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/confirm-action', { method: 'POST', body: JSON.stringify(payload) }),
   qmtCancelOrder: (order_sys_id: string) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
@@ -2930,13 +2937,13 @@ export const api = {
       `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
-  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'global', allocationValue?: number | null) =>
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'global', allocationValue?: number | null, creditBuyMode: QmtCreditBuyMode = 'collateral') =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
-      method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
+      method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode }),
     }),
-  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null) =>
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null, creditBuyMode?: QmtCreditBuyMode) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
-      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
+      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode ?? null }),
     }),
   limitBoardPoolRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(
@@ -2949,9 +2956,10 @@ export const api = {
     revision: number,
     allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'lot',
     allocationValue?: number | null,
+    creditBuyMode: QmtCreditBuyMode = 'collateral',
   ) => request<{ ok: boolean; config: LimitBoardConfig; order: QmtOrder }>('/api/limit-board/buy-pool', {
     method: 'POST',
-    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null }),
+    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode }),
   }),
   limitBoardBuyPoolRemove: (symbol: string, revision: number) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(

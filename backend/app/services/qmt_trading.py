@@ -99,6 +99,7 @@ _CREDIT_ASSET_FIELDS = frozenset(
      *_CREDIT_FINANCING_BUYING_POWER_FIELDS,
      *_CREDIT_FINANCING_AVAILABLE_FIELDS),
 )
+_CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
 
 
 def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
@@ -109,13 +110,24 @@ def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
     return None
 
 
-def _credit_buying_power(account: dict[str, Any]) -> tuple[float | None, str | None, float | None]:
-    """Return collateral-buying power, source label and financing quota."""
+def _credit_buying_power(
+    account: dict[str, Any], credit_buy_mode: str = "collateral",
+) -> tuple[float | None, str | None, float | None]:
+    """Return the selected credit buying power, label and financing quota."""
+    if credit_buy_mode not in _CREDIT_BUY_MODES:
+        raise ValueError("信用账户买入方式必须是担保品买入或融资买入")
     financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
-    assure_power = _first_number(account, _CREDIT_ASSURE_BUYING_POWER_FIELDS)
-    if assure_power is not None:
-        return assure_power, "可买担保品资金", financing_available
-    return None, None, financing_available
+    if credit_buy_mode == "financing":
+        return (
+            _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS),
+            "可买融资标的资金",
+            financing_available,
+        )
+    return (
+        _first_number(account, _CREDIT_ASSURE_BUYING_POWER_FIELDS),
+        "可买担保品资金",
+        financing_available,
+    )
 
 
 def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -> dict[str, Any]:
@@ -743,10 +755,10 @@ class QmtTradingService:
             self.trade_enabled = bool(enabled)
         return self.status()
 
-    def _buying_power(self, account: dict[str, Any]) -> tuple[float | None, str, float | None]:
+    def _buying_power(self, account: dict[str, Any], credit_buy_mode: str = "collateral") -> tuple[float | None, str, float | None]:
         """Resolve the amount that a BUY order may actually consume."""
         if self.account_type == "CREDIT":
-            amount, label, financing_available = _credit_buying_power(account)
+            amount, label, financing_available = _credit_buying_power(account, credit_buy_mode)
             return amount, label or "信用账户可买额度", financing_available
         return _float(account.get("cash")), "可用资金", None
 
@@ -763,6 +775,9 @@ class QmtTradingService:
         if volume <= 0 or volume % 100 != 0:
             raise ValueError("委托数量必须是正数且为 100 股整数手")
         price_type = str(request.get("price_type") or "LIMIT").upper()
+        credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
+        if action == "BUY" and credit_buy_mode not in _CREDIT_BUY_MODES:
+            raise ValueError("信用账户买入方式必须是担保品买入或融资买入")
         if price_type not in {"LIMIT", "LATEST", "LATEST_PRICE"}:
             raise ValueError("暂仅支持限价或最新价")
         price = _float(request.get("price")) or 0.0
@@ -775,13 +790,20 @@ class QmtTradingService:
                 raise ValueError("QMT 可用持仓不足，已拒绝卖出")
         elif price_type == "LIMIT":
             account = snapshot.get("account") or {}
-            buying_power, _label, _financing_available = self._buying_power(account)
+            buying_power, _label, _financing_available = self._buying_power(account, credit_buy_mode)
             if buying_power is None:
                 if self.account_type == "CREDIT":
                     raise QmtRpcError("QMT 未返回信用账户可买额度，已拒绝买入")
             elif buying_power < price * volume:
                 raise ValueError("QMT 可用资金不足，已拒绝买入")
-        return {"action": action, "symbol": symbol, "volume": volume, "price": price, "price_type": price_type}
+        return {
+            "action": action,
+            "symbol": symbol,
+            "volume": volume,
+            "price": price,
+            "price_type": price_type,
+            "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+        }
 
     def _allocation_preview(
         self,
@@ -804,9 +826,10 @@ class QmtTradingService:
             raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
 
         financing_available = None
+        credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
         if action == "BUY":
             account = snapshot.get("account") or {}
-            basis_amount, basis_label, financing_available = self._buying_power(account)
+            basis_amount, basis_label, financing_available = self._buying_power(account, credit_buy_mode)
             if basis_amount is None or basis_amount < 0:
                 if self.account_type == "CREDIT":
                     raise QmtRpcError("QMT 未返回信用账户可买额度，无法把现金余额当作融资额度")
@@ -841,6 +864,7 @@ class QmtTradingService:
             "symbol": symbol,
             "price": price,
             "price_type": price_type,
+            "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
             "allocation_mode": mode,
             "allocation_value": requested_amount if mode == "fixed" else None,
             "basis_label": basis_label,
@@ -936,6 +960,8 @@ class QmtTradingService:
                 "strategy_name": strategy_name, "signal_id": idempotency_key,
                 "remark": order_tag, "require_idempotency_check": True,
             }
+            if self.account_type == "CREDIT" and normalized["action"] == "BUY":
+                params["credit_buy_mode"] = str(request.get("credit_buy_mode") or "collateral").strip().lower()
             created_at = _now()
             row = {
                 "idempotency_key": idempotency_key, **normalized,

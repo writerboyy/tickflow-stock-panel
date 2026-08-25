@@ -2281,6 +2281,7 @@ class LimitBoardService:
                 allocation_value,
                 trigger_at,
                 system_order_at,
+                str((member or {}).get("credit_buy_mode") or "collateral"),
             )
         except RuntimeError as exc:
             self._order_slots.release()
@@ -2332,6 +2333,7 @@ class LimitBoardService:
         allocation_value: float | None,
         trigger_at: str,
         system_order_at: str,
+        credit_buy_mode: str = "collateral",
     ) -> None:
         qmt = self._qmt()
         try:
@@ -2344,6 +2346,7 @@ class LimitBoardService:
                 "symbol": symbol,
                 "price": limit_up,
                 "price_type": "LIMIT",
+                "credit_buy_mode": credit_buy_mode,
                 "trigger_at": trigger_at,
                 "system_order_at": system_order_at,
             }
@@ -3715,6 +3718,7 @@ class LimitBoardService:
         price: float,
         allocation_mode: str,
         allocation_value: float | None,
+        credit_buy_mode: str = "collateral",
     ) -> dict[str, Any]:
         if allocation_mode == "volume":
             volume = int(allocation_value or 0)
@@ -3731,6 +3735,7 @@ class LimitBoardService:
                 "reference_price": price,
                 "allocation_mode": "fixed",
                 "allocation_value": price * volume,
+                "credit_buy_mode": credit_buy_mode,
             })
             preview_volume = int(preview.get("volume") or 0)
             if preview_volume < volume:
@@ -3759,6 +3764,7 @@ class LimitBoardService:
             "reference_price": price,
             "allocation_mode": allocation_mode,
             "allocation_value": allocation_value,
+            "credit_buy_mode": credit_buy_mode,
         })
         volume = int(preview.get("volume") or 0)
         if volume < 100:
@@ -3777,6 +3783,7 @@ class LimitBoardService:
         revision: int,
         allocation_mode: str = "global",
         allocation_value: float | None = None,
+        credit_buy_mode: str = "collateral",
     ) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)
         allocation_mode, allocation_value = self._pool_allocation(
@@ -3784,6 +3791,8 @@ class LimitBoardService:
             allocation_value,
             default="global",
         )
+        if credit_buy_mode not in {"collateral", "financing"}:
+            raise ValueError("信用账户买入方式无效")
         capacity_error = self._pool_websocket_capacity_error(
             self.store.load_config(), {cleaned},
         )
@@ -3802,6 +3811,7 @@ class LimitBoardService:
                 "auto_trade": True,
                 "order_mode": "sweep",
                 "allocation_mode": allocation_mode,
+                "credit_buy_mode": credit_buy_mode,
                 "added_at": cn_now().isoformat(),
             }
             if allocation_value is not None:
@@ -3825,6 +3835,7 @@ class LimitBoardService:
         revision: int,
         allocation_mode: str | None = None,
         allocation_value: float | None = None,
+        credit_buy_mode: str | None = None,
     ) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
         cleaned_mode = str(order_mode or "").strip().lower()
@@ -3851,6 +3862,10 @@ class LimitBoardService:
                     member.pop("allocation_value", None)
                 else:
                     member["allocation_value"] = normalized_value
+            if credit_buy_mode is not None:
+                if credit_buy_mode not in {"collateral", "financing"}:
+                    raise ValueError("信用账户买入方式无效")
+                member["credit_buy_mode"] = credit_buy_mode
 
         saved = self.store.update(revision, update)
         self._on_market_fetch()
@@ -3864,6 +3879,7 @@ class LimitBoardService:
         revision: int,
         allocation_mode: str = "lot",
         allocation_value: float | None = None,
+        credit_buy_mode: str = "collateral",
     ) -> dict[str, Any]:
         cleaned, name = self._validated_stock(symbol)
         allocation_mode, allocation_value = self._pool_allocation(
@@ -3871,6 +3887,8 @@ class LimitBoardService:
             allocation_value,
             default="lot",
         )
+        if credit_buy_mode not in {"collateral", "financing"}:
+            raise ValueError("信用账户买入方式无效")
         capacity_error = self._pool_websocket_capacity_error(
             self.store.load_config(), {cleaned},
         )
@@ -3885,6 +3903,7 @@ class LimitBoardService:
             price,
             allocation_mode,
             allocation_value,
+            credit_buy_mode,
         )
         idempotency_key = f"limit-buy-{cn_today().strftime('%Y%m%d')}-{cleaned}"
 
@@ -3898,6 +3917,7 @@ class LimitBoardService:
                 "name": name,
                 "source": source,
                 "allocation_mode": allocation_mode,
+                "credit_buy_mode": credit_buy_mode,
                 "order_price": price,
                 "order_volume": preview["volume"],
                 "order_amount": preview["actual_amount"],
@@ -3937,6 +3957,7 @@ class LimitBoardService:
             else:
                 request["allocation_mode"] = allocation_mode
                 request["allocation_value"] = allocation_value
+            request["credit_buy_mode"] = credit_buy_mode
             order = qmt.submit_order(request)
             result = {
                 "status": str(order.get("status") or "unknown"),

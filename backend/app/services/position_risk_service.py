@@ -2548,6 +2548,7 @@ class PositionRiskService:
         action: str,
         volume: int,
         *,
+        credit_buy_mode: str = "collateral",
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """校验一次性风控动作，并使用确认时的新鲜行情生成限价委托。"""
@@ -2600,7 +2601,7 @@ class PositionRiskService:
         )
         if position is None:
             raise ValueError("当前持仓中不存在该标的")
-        return {
+        order = {
             "action": cleaned_action,
             "symbol": cleaned_symbol,
             "volume": int(volume),
@@ -2609,6 +2610,9 @@ class PositionRiskService:
             "idempotency_key": f"risk-{cleaned_fingerprint}",
             "strategy_name": "position_risk",
         }
+        if cleaned_action == "BUY":
+            order["credit_buy_mode"] = credit_buy_mode
+        return order
     def _notify_updated(self) -> None:
         notify = getattr(self.quote_service, "notify_position_risk_updated", None)
         if callable(notify):

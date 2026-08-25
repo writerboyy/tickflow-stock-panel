@@ -19,12 +19,14 @@ class PoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
     allocation_mode: str = Field(default="global", pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
+    credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
 class BuyPoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
     allocation_mode: str = Field(default="lot", pattern="^(available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
+    credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
 class PoolUpdate(BaseModel):
@@ -33,6 +35,7 @@ class PoolUpdate(BaseModel):
     order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
     allocation_mode: str | None = Field(default=None, pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
+    credit_buy_mode: str | None = Field(default=None, pattern="^(collateral|financing)$")
 
 
 class AdvancedSettings(BaseModel):
@@ -161,6 +164,7 @@ def add_pool(payload: PoolWrite, request: Request):
             payload.revision,
             payload.allocation_mode,
             payload.allocation_value,
+            payload.credit_buy_mode,
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -181,6 +185,7 @@ def update_pool(symbol: str, payload: PoolUpdate, request: Request):
             payload.revision,
             payload.allocation_mode,
             payload.allocation_value,
+            payload.credit_buy_mode,
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -207,6 +212,7 @@ def add_buy_pool(payload: BuyPoolWrite, request: Request):
             payload.revision,
             payload.allocation_mode,
             payload.allocation_value,
+            payload.credit_buy_mode,
         )
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
