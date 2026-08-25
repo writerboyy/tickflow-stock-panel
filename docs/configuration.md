@@ -77,7 +77,7 @@ LOG_LEVEL=INFO        # DEBUG | INFO | WARNING | ERROR
 DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 ```
 
-整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业/资金流向扩展数据,全部是程序运行时生成/拉取的用户数据。
+整个 `data/` 目录都不纳入 git —— 行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据。
 
 如需迁移数据,直接拷贝整个 `data/` 目录即可。详见 [deployment.md → 更新代码](./deployment.md#更新代码已部署用户必读)。
 
@@ -107,10 +107,6 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 ---
 
 ## 配置优先级
-
-### QMT 实盘交易（可选）
-
-持仓风控的云端 QMT ZMQ RPC 只从环境变量读取，默认关闭连接和交易能力：`QMT_ENABLED=false`、`QMT_TRADE_ENABLED=false`、`QMT_ACCOUNT_TYPE=STOCK`。金额下单不再设置应用侧单笔手数上限，但仍按 100 股整手、可用资金和可用持仓校验。连接配置完整后，`QMT_AUTO_SYNC=true` 默认每 30 秒同步一次权威账户；`QMT_TRADE_ENABLED=true` 只授权交易能力，运行时开关重启后仍默认关闭。ZMQ 端口应通过防火墙限制来源，账户信息和连接地址不要提交到 Git。
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`
 2. **`.env` 文件**:启动时读取

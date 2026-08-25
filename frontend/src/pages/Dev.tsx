@@ -181,10 +181,26 @@ function MinuteProbePanel() {
   )
 }
 
-// ── 监控规则调试 ──────────────────────────────────────
+// ── 演示数据生成 ──────────────────────────────────────
 function SeedPanel() {
   const qc = useQueryClient()
+  const [count, setCount] = useState(12)
+  const [recent, setRecent] = useState(true)
   const [msg, setMsg] = useState('')
+
+  const seedMut = useMutation({
+    mutationFn: () => api.alertSeed(count, recent),
+    onSuccess: (data) => {
+      setMsg(`已生成 ${data.generated} 条触发记录`)
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+      qc.invalidateQueries({ queryKey: ['alerts-total'] })
+      setTimeout(() => setMsg(''), 4000)
+    },
+    onError: () => {
+      setMsg('生成失败')
+      setTimeout(() => setMsg(''), 4000)
+    },
+  })
 
   const clearMut = useMutation({
     mutationFn: () => api.alertsClear(),
@@ -213,27 +229,44 @@ function SeedPanel() {
   return (
     <div className="space-y-4">
       <div>
-        <h2 className="text-sm font-semibold text-foreground">监控规则调试</h2>
+        <h2 className="text-sm font-semibold text-foreground">监控触发记录演示数据</h2>
         <p className="mt-1 text-xs text-muted">
-          监控中心只接收规则引擎的真实命中记录。可生成演示规则，再由实时行情触发并验证完整通知链路。
+          生成模拟的触发记录,用于测试监控中心页面的展示效果、未读徽标、新增闪烁等功能。生成的数据可随时清空。
         </p>
       </div>
 
       <div className="space-y-3 rounded-btn bg-elevated p-4">
-        <div>
-          <h3 className="text-sm font-medium text-foreground">监控规则</h3>
-          <p className="mt-0.5 text-xs text-muted">
-            生成多种类型的演示监控规则 (个股信号/价格/市场异动/策略变更),用于测试监控中心规则列表和真实触发。
-          </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-muted">生成条数</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={count}
+              onChange={(e) => setCount(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+              className="w-24 rounded-btn border border-border bg-base px-3 py-1.5 text-sm text-foreground outline-none focus:border-accent"
+            />
+          </div>
+          <label className="flex items-center gap-1.5 pb-1.5">
+            <input
+              type="checkbox"
+              checked={recent}
+              onChange={(e) => setRecent(e.target.checked)}
+              className="h-3.5 w-3.5 accent-accent"
+            />
+            <span className="text-xs text-secondary">时间戳设为"刚刚"(测试闪烁效果)</span>
+          </label>
         </div>
+
         <div className="flex flex-wrap gap-2">
           <button
-            onClick={() => ruleSeedMut.mutate()}
-            disabled={ruleSeedMut.isPending}
+            onClick={() => seedMut.mutate()}
+            disabled={seedMut.isPending}
             className="flex items-center gap-1.5 rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-base hover:bg-accent/90 disabled:opacity-50 cursor-pointer"
           >
-            {ruleSeedMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
-            生成演示规则
+            {seedMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+            生成演示数据
           </button>
           <button
             onClick={() => clearMut.mutate()}
@@ -250,11 +283,32 @@ function SeedPanel() {
         <div className="rounded-btn border border-accent/40 bg-accent/10 p-3 text-sm text-accent">{msg}</div>
       )}
 
+      {/* 监控规则生成 */}
+      <div className="space-y-3 rounded-btn bg-elevated p-4">
+        <div>
+          <h3 className="text-sm font-medium text-foreground">监控规则</h3>
+          <p className="mt-0.5 text-xs text-muted">
+            生成多种类型的演示监控规则 (个股信号/价格/市场异动/策略变更),用于测试监控中心规则列表展示。
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => ruleSeedMut.mutate()}
+            disabled={ruleSeedMut.isPending}
+            className="flex items-center gap-1.5 rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-base hover:bg-accent/90 disabled:opacity-50 cursor-pointer"
+          >
+            {ruleSeedMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
+            生成演示规则
+          </button>
+        </div>
+      </div>
+
       <div className="rounded-btn border border-border/40 bg-surface/40 p-4 text-xs leading-relaxed text-muted">
         <div className="mb-1 font-medium text-secondary">使用说明</div>
         <ul className="list-disc space-y-0.5 pl-4">
-          <li>演示规则与手工创建的规则走同一存储和规则引擎</li>
-          <li>只有规则被实时行情命中后，才会生成触发记录和未读提醒</li>
+          <li>勾选「时间戳设为刚刚」后,切到其他页面再回监控中心,新记录会闪烁高亮</li>
+          <li>生成后菜单「监控中心」会出现红色未读徽标</li>
+          <li>数据覆盖策略/信号/价格/市场异动四种来源</li>
           <li>清空操作不可撤销</li>
         </ul>
       </div>

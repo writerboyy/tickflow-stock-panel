@@ -6,15 +6,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
-import shutil
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import polars as pl
 
@@ -25,22 +21,8 @@ logger = logging.getLogger(__name__)
 # 每个 API 请求最多 100 个标的
 _BATCH_SIZE = 100
 
-
-class FinancialSyncError(RuntimeError):
-    """A financial refresh was rejected before it could replace canonical data."""
-
-
-_PIT_KEYS = ("symbol", "period_end", "announce_date")
-
 # 财务报表 + 历史股本表
-FINANCIAL_TABLES = (
-    "metrics",
-    "income",
-    "balance_sheet",
-    "cash_flow",
-    "shares",
-)
-DERIVED_FINANCIAL_TABLES = ("valuation_daily",)
+FINANCIAL_TABLES = ("metrics", "income", "balance_sheet", "cash_flow", "shares")
 
 
 # ================================================================
@@ -93,9 +75,10 @@ def _fetch_table(
             provider = custom_sources.get_provider(preferences.get_financial_provider())
             df = provider.get_financials(table, symbols, latest_only=latest_only)
         except Exception as e:  # noqa: BLE001
-            raise FinancialSyncError(f"sync_{table} custom provider failed") from e
+            logger.warning("sync_%s custom provider failed: %s", table, e)
+            return pl.DataFrame()
         if df.is_empty() or "symbol" not in df.columns:
-            raise FinancialSyncError(f"sync_{table} custom provider returned no rows")
+            return pl.DataFrame()
         return df
 
     from app.tickflow.client import get_client
@@ -108,16 +91,12 @@ def _fetch_table(
         "balance_sheet": tf.financials.balance_sheet,
         "cash_flow": tf.financials.cash_flow,
         "shares": getattr(tf.financials, "shares", None),
-    }.get(table)
+    }[table]
     if api_method is None:
-        logger.info(
-            "sync_%s skipped: current TickFlow SDK does not support this table",
-            table,
-        )
+        logger.warning("sync_shares skipped: current TickFlow SDK does not support shares")
         return pl.DataFrame()
 
     all_records: list[dict] = []
-    failed_batches: list[int] = []
     total_batches = (len(symbols) + _BATCH_SIZE - 1) // _BATCH_SIZE
 
     for i in range(0, len(symbols), _BATCH_SIZE):
@@ -126,166 +105,38 @@ def _fetch_table(
         try:
             data = api_method(chunk, latest=latest_only)
             # data 格式: { "600519.SH": [record, ...], ... }
-            if not isinstance(data, dict):
-                raise TypeError("expected a symbol-to-records mapping")
-            for sym, records in data.items():
-                if not isinstance(records, list):
-                    raise TypeError(f"records for {sym} are not a list")
-                for rec in records:
-                    if not isinstance(rec, dict):
-                        raise TypeError(f"record for {sym} is not an object")
-                    rec["symbol"] = sym
-                    all_records.append(rec)
-            logger.debug(
-                "sync_%s batch %d/%d: %d records",
-                table,
-                batch_num,
-                total_batches,
-                len(data),
-            )
+            if isinstance(data, dict):
+                for sym, records in data.items():
+                    if isinstance(records, list):
+                        for rec in records:
+                            if isinstance(rec, dict):
+                                rec["symbol"] = sym
+                                all_records.append(rec)
+            logger.debug("sync_%s batch %d/%d: %d records", table, batch_num, total_batches, len(data) if isinstance(data, dict) else 0)
         except Exception as e:
-            failed_batches.append(batch_num)
             logger.warning("sync_%s batch %d/%d failed: %s", table, batch_num, total_batches, e)
 
-    if failed_batches:
-        batches = ", ".join(str(batch) for batch in failed_batches)
-        raise FinancialSyncError(
-            f"sync_{table} rejected partial response; failed batches: {batches}"
-        )
-
     if not all_records:
-        raise FinancialSyncError(f"sync_{table} returned no rows")
+        return pl.DataFrame()
 
     df = pl.DataFrame(all_records)
     if df.is_empty() or "symbol" not in df.columns:
-        raise FinancialSyncError(f"sync_{table} returned an invalid response")
+        return pl.DataFrame()
     return df
 
 
-def _new_sync_id() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
-
-
-class _FinancialPublication:
-    """Publish a group of financial tables with recoverable replacements."""
-
-    def __init__(self, data_dir: Path) -> None:
-        self.data_dir = Path(data_dir)
-        self.sync_id = _new_sync_id()
-        self.backup_dir = self.data_dir / "financials_sync_backups" / self.sync_id
-        self.manifest_path = self.data_dir / "financials" / f"sync-manifest-{self.sync_id}.json"
-        self.entries: list[dict[str, Any]] = []
-
-    def write(self, table: str, df: pl.DataFrame) -> int:
-        if df.is_empty() or "symbol" not in df.columns:
-            return 0
-        out_dir = self.data_dir / "financials" / table
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / "part.parquet"
-        temporary = out_file.with_name(f".{out_file.name}.{uuid4().hex}.tmp")
-        backup: Path | None = None
-        try:
-            df.write_parquet(temporary)
-            if out_file.exists():
-                self.backup_dir.mkdir(parents=True, exist_ok=True)
-                backup = self.backup_dir / f"{table}.part.parquet"
-                shutil.copy2(out_file, backup)
-            os.replace(temporary, out_file)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-        self.entries.append({
-            "table": table,
-            "rows": df.height,
-            "path": str(out_file),
-            "backup_path": str(backup) if backup else None,
-        })
-        return df.height
-
-    def _write_manifest(self, status: str, *, error: str | None = None) -> None:
-        payload: dict[str, Any] = {
-            "schema_version": 1,
-            "sync_id": self.sync_id,
-            "status": status,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "tables": self.entries,
-        }
-        if error:
-            payload["error"] = error
-        temporary = self.manifest_path.with_name(f".{self.manifest_path.name}.{uuid4().hex}.tmp")
-        self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.manifest_path)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
-
-    def publish(self) -> None:
-        self._write_manifest("published")
-
-    def rollback(self, error: Exception) -> None:
-        for entry in reversed(self.entries):
-            path = Path(str(entry["path"]))
-            backup_value = entry.get("backup_path")
-            if backup_value:
-                backup = Path(str(backup_value))
-                if backup.exists():
-                    shutil.copy2(backup, path)
-                    continue
-            if path.exists():
-                path.unlink()
-        self._write_manifest("rolled_back", error=str(error))
-
-
-def _validate_pit_rows(table: str, df: pl.DataFrame) -> None:
-    if table == "shares":
-        return
-    missing = sorted(set(_PIT_KEYS) - set(df.columns))
-    if missing:
-        raise FinancialSyncError(f"sync_{table} missing PIT columns: {', '.join(missing)}")
-    unique = df.unique(maintain_order=True)
-    conflicts = (
-        unique
-        .group_by(list(_PIT_KEYS))
-        .agg(pl.len().alias("_rows"))
-        .filter(pl.col("_rows") > 1)
-    )
-    if conflicts.is_empty():
-        return
-    samples = ", ".join(
-        "/".join(str(row[column]) for column in _PIT_KEYS)
-        for row in conflicts.head(8).iter_rows(named=True)
-    )
-    raise FinancialSyncError(
-        f"sync_{table} rejected {conflicts.height} unresolved PIT conflicts: {samples}"
-    )
-
-
-def _write_table(
-    table: str,
-    df: pl.DataFrame,
-    data_dir: Path,
-    *,
-    publication: _FinancialPublication | None = None,
-) -> int:
+def _write_table(table: str, df: pl.DataFrame, data_dir: Path) -> int:
     if df.is_empty() or "symbol" not in df.columns:
         return 0
-    own_publication = publication is None
-    publication = publication or _FinancialPublication(data_dir)
-    try:
-        rows = publication.write(table, df)
-        if own_publication:
-            publication.publish()
-    except Exception as exc:
-        if own_publication:
-            publication.rollback(exc)
-        raise
-    logger.info("sync_%s done: %d records written", table, rows)
-    return rows
+
+    # 写入 Parquet (全量覆盖)
+    out_dir = data_dir / "financials" / table
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / "part.parquet"
+    df.write_parquet(out_file)
+
+    logger.info("sync_%s done: %d records written", table, len(df))
+    return len(df)
 
 
 def _sync_table(
@@ -294,55 +145,16 @@ def _sync_table(
     data_dir: Path,
     capset: CapabilitySet,
     latest_only: bool = True,
-    publication: _FinancialPublication | None = None,
 ) -> int:
     """同步单张财务表。返回写入的行数。"""
-    frame = _fetch_table(table, symbols, capset, latest_only=latest_only)
-    if frame.is_empty():
-        if symbols:
-            raise FinancialSyncError(f"sync_{table} returned no rows")
-        return 0
-    _validate_pit_rows(table, frame)
     return _write_table(
         table,
-        frame,
+        _fetch_table(table, symbols, capset, latest_only=latest_only),
         data_dir,
-        publication=publication,
-    )
-
-
-def _merge_share_history(*frames: pl.DataFrame) -> pl.DataFrame:
-    valid = [
-        frame
-        for frame in frames
-        if not frame.is_empty() and {"symbol", "period_end"} <= set(frame.columns)
-    ]
-    if not valid:
-        return pl.DataFrame()
-    return (
-        pl.concat(valid, how="diagonal_relaxed")
-        .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
-        .unique(subset=["symbol", "period_end"], keep="last")
-        .sort(["symbol", "period_end"])
-    )
-
-
-def _merge_statement_history(table: str, *frames: pl.DataFrame) -> pl.DataFrame:
-    """合并财务报表历史，同一 PIT 公告键以新拉取的记录为准。"""
-    valid = [frame for frame in frames if not frame.is_empty()]
-    if not valid:
-        return pl.DataFrame()
-    for frame in valid:
-        _validate_pit_rows(table, frame)
-    return (
-        pl.concat(valid, how="diagonal_relaxed")
-        .unique(subset=list(_PIT_KEYS), keep="last", maintain_order=True)
-        .sort(list(_PIT_KEYS))
     )
 
 
 def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
-    """Compatibility wrapper for older financial sync callers."""
     valid = [
         frame
         for frame in frames
@@ -350,107 +162,74 @@ def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
     ]
     if not valid:
         return pl.DataFrame()
-    return (
+    merged = (
         pl.concat(valid, how="diagonal_relaxed")
         .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
-        .unique(subset=["symbol", "period_end"], keep="last")
-        .sort(["symbol", "period_end"])
+    )
+    # 同一 (symbol, period_end) 多条时保留 announce_date 最新一条 (业绩修正以最新公告为准)。
+    if "announce_date" in merged.columns:
+        merged = merged.sort(["symbol", "period_end", "announce_date"], nulls_last=True)
+    return merged.unique(subset=["symbol", "period_end"], keep="last").sort(
+        ["symbol", "period_end"]
     )
 
 
-def _sync_statement_incremental(
+def _sync_history_table_for_symbols(
     table: str,
     symbols: list[str],
     data_dir: Path,
     capset: CapabilitySet,
-    publication: _FinancialPublication | None = None,
 ) -> int:
-    """已有标的只拉最新公告，新标的补全历史后合并入 PIT 表。"""
+    """历史累积同步: 保留已有各期记录, 仅拉最新期 + 为新标的补全量历史。
+
+    与 shares 同一模式。若改为 latest_only 全量覆盖, 历史各期会在每次同步时
+    被冲掉, 财务因子将永远只有单期快照, 任何回测都是未来函数。
+    """
     existing = get_financial_df(data_dir, table)
-    if existing.is_empty() or not set(_PIT_KEYS) <= set(existing.columns):
-        return _sync_table(
-            table,
-            symbols,
-            data_dir,
-            capset,
-            latest_only=False,
-            publication=publication,
-        )
+    if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
+        return _sync_table(table, symbols, data_dir, capset, latest_only=False)
 
     existing_symbols = set(existing["symbol"].drop_nulls().to_list())
     missing_symbols = [symbol for symbol in symbols if symbol not in existing_symbols]
-    current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
     missing_history = (
         _fetch_table(table, missing_symbols, capset, latest_only=False)
         if missing_symbols
         else pl.DataFrame()
     )
-    latest = (
-        _fetch_table(table, current_symbols, capset, latest_only=True)
-        if current_symbols
-        else pl.DataFrame()
-    )
-    merged = _merge_statement_history(table, existing, missing_history, latest)
-    return _write_table(table, merged, data_dir, publication=publication)
-
-
-def _sync_shares_for_symbols(
-    symbols: list[str],
-    data_dir: Path,
-    capset: CapabilitySet,
-    publication: _FinancialPublication | None = None,
-) -> int:
-    """首次拉全量股本历史，后续更新最新记录并补齐新增标的历史。"""
-    existing = get_financial_df(data_dir, "shares")
-    if existing.is_empty() or not {"symbol", "period_end"} <= set(existing.columns):
-        return _sync_table(
-            "shares", symbols, data_dir, capset, latest_only=False, publication=publication
-        )
-
-    existing_symbols = set(existing["symbol"].drop_nulls().to_list())
-    missing_symbols = [symbol for symbol in symbols if symbol not in existing_symbols]
-    missing_history = (
-        _fetch_table("shares", missing_symbols, capset, latest_only=False)
-        if missing_symbols
-        else pl.DataFrame()
-    )
     current_symbols = [symbol for symbol in symbols if symbol in existing_symbols]
-    latest = _fetch_table("shares", current_symbols, capset, latest_only=True)
-    merged = _merge_share_history(existing, missing_history, latest)
-    return _write_table("shares", merged, data_dir, publication=publication)
+    latest = _fetch_table(table, current_symbols, capset, latest_only=True)
+    merged = _merge_report_history(existing, missing_history, latest)
+    return _write_table(table, merged, data_dir)
 
 
 def sync_metrics(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步核心财务指标历史 (metrics)。
-
-    回测需要按 announce_date 做 point-in-time 财务快照，不能只保留最新一期。
-    """
+    """同步核心财务指标 (metrics), 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("metrics", symbols, data_dir, capset, latest_only=False)
+    return _sync_history_table_for_symbols("metrics", symbols, data_dir, capset)
 
 
 def sync_income(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步利润表历史。"""
+    """同步利润表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("income", symbols, data_dir, capset, latest_only=False)
+    return _sync_history_table_for_symbols("income", symbols, data_dir, capset)
 
 
 def sync_balance_sheet(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步资产负债表历史。"""
+    """同步资产负债表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("balance_sheet", symbols, data_dir, capset, latest_only=False)
+    return _sync_history_table_for_symbols("balance_sheet", symbols, data_dir, capset)
 
 
 def sync_cash_flow(data_dir: Path, capset: CapabilitySet) -> int:
-    """同步现金流量表历史。"""
+    """同步现金流量表, 历史各期累积保留。"""
     symbols = _get_symbols(data_dir)
-    return _sync_table("cash_flow", symbols, data_dir, capset, latest_only=False)
+    return _sync_history_table_for_symbols("cash_flow", symbols, data_dir, capset)
 
 
 def sync_shares(data_dir: Path, capset: CapabilitySet) -> int:
     """同步历史股本表。"""
     symbols = _get_symbols(data_dir)
-    return _sync_shares_for_symbols(symbols, data_dir, capset)
+    return _sync_history_table_for_symbols("shares", symbols, data_dir, capset)
 
 
 def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
@@ -461,68 +240,14 @@ def sync_all(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
 
     symbols = _get_symbols(data_dir)
     results: dict[str, int] = {}
-    publication = _FinancialPublication(data_dir)
-    try:
-        for table in FINANCIAL_TABLES:
-            results[table] = (
-                _sync_shares_for_symbols(
-                    symbols, data_dir, capset, publication=publication
-                )
-                if table == "shares"
-                else _sync_table(
-                    table,
-                    symbols,
-                    data_dir,
-                    capset,
-                    latest_only=False,
-                    publication=publication,
-                )
-            )
-
-        from app.services.daily_valuation import build_daily_valuation
-
-        results["valuation_daily"] = build_daily_valuation(data_dir)["rows"]
-        publication.publish()
-    except Exception as exc:
-        publication.rollback(exc)
-        raise
+    for table in FINANCIAL_TABLES:
+        results[table] = _sync_history_table_for_symbols(
+            table, symbols, data_dir, capset
+        )
 
     # 同步完成后注册 DuckDB 视图
     _refresh_financials_views(data_dir)
 
-    return results
-
-
-def sync_incremental(data_dir: Path, capset: CapabilitySet) -> dict[str, int]:
-    """盘后增量同步财务表，首次或新标的自动补全历史。"""
-    if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
-        logger.info("incremental financial sync skipped: no FINANCIAL capability")
-        return {}
-
-    symbols = _get_symbols(data_dir)
-    results: dict[str, int] = {}
-    publication = _FinancialPublication(data_dir)
-    try:
-        for table in FINANCIAL_TABLES:
-            results[table] = (
-                _sync_shares_for_symbols(
-                    symbols, data_dir, capset, publication=publication
-                )
-                if table == "shares"
-                else _sync_statement_incremental(
-                    table, symbols, data_dir, capset, publication=publication
-                )
-            )
-
-        from app.services.daily_valuation import build_daily_valuation
-
-        results["valuation_daily"] = build_daily_valuation(data_dir)["rows"]
-        publication.publish()
-    except Exception as exc:
-        publication.rollback(exc)
-        raise
-
-    _refresh_financials_views(data_dir)
     return results
 
 
@@ -565,27 +290,19 @@ def get_financial_df(data_dir: Path, table: str) -> pl.DataFrame:
 # ================================================================
 
 class FinancialScheduler:
-    """财务同步调度状态：支持手动全量与盘后增量同步。"""
+    """独立调度器: 每周同步 metrics, 财务表支持手动同步。"""
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
         self._running = False
         self._data_dir: Path | None = None
         self._capset: CapabilitySet | None = None
-        self._repo: Any | None = None
         self._lock = threading.Lock()
         self._last_sync: dict[str, str] = {}  # {table: iso_timestamp}
         # 手动同步(run_now)是否正在进行。前端据此显示"同步中"并防重复点击。
         self._is_syncing = False
 
-    def start(
-        self,
-        data_dir: Path,
-        capset: CapabilitySet,
-        repo: Any,
-        *,
-        auto_schedule: bool = False,
-    ) -> None:
+    def start(self, data_dir: Path, capset: CapabilitySet, *, auto_schedule: bool = False) -> None:
         """初始化调度器，并按需启动周期同步后台任务。
 
         auto_schedule=False (默认): 仅初始化 (设置数据目录/能力 + 恢复 last_sync),
@@ -598,7 +315,6 @@ class FinancialScheduler:
         # 即便 app.state.capabilities 已更新, 调度器仍报 "no FINANCIAL capability"。
         self._data_dir = data_dir
         self._capset = capset
-        self._repo = repo
         if not capset.has(Cap.FINANCIAL) and not _financial_is_custom():
             logger.info("FinancialScheduler skipped: no FINANCIAL capability")
             return
@@ -646,10 +362,6 @@ class FinancialScheduler:
         except Exception as e:  # noqa: BLE001
             logger.warning("persist financial_sync_time(%s) failed: %s", e)
 
-    def _refresh_views(self) -> None:
-        if self._repo is not None:
-            self._repo.rebuild_views()
-
     def update_capabilities(self, capset: CapabilitySet) -> None:
         """刷新调度器持有的能力集。
 
@@ -686,8 +398,7 @@ class FinancialScheduler:
                 # 每周: 只同步 metrics
                 try:
                     rows = sync_metrics(self._data_dir, self._capset)
-                    if rows:
-                        self._record_sync("metrics")
+                    self._record_sync("metrics")
                     logger.info("FinancialScheduler: metrics synced, %d rows", rows)
                 except Exception as e:
                     logger.warning("FinancialScheduler: metrics sync failed: %s", e)
@@ -708,14 +419,6 @@ class FinancialScheduler:
         每张表完成立即更新 last_sync,让前端轮询 /status 能看到进度递增。
         """
         if table:
-            if table == "valuation_daily":
-                from app.services.daily_valuation import build_daily_valuation
-
-                rows = build_daily_valuation(self._data_dir)["rows"]
-                self._refresh_views()
-                if rows:
-                    self._record_sync(table)
-                return {table: rows}
             fn = {
                 "metrics": sync_metrics,
                 "income": sync_income,
@@ -726,44 +429,17 @@ class FinancialScheduler:
             if not fn:
                 return {}
             rows = fn(self._data_dir, self._capset)
-            if rows:
-                self._record_sync(table)
-            result = {table: rows}
-            if table in {"income", "balance_sheet", "cash_flow", "shares"}:
-                from app.services.daily_valuation import build_daily_valuation
-
-                result["valuation_daily"] = build_daily_valuation(self._data_dir)["rows"]
-                self._refresh_views()
-                if result["valuation_daily"]:
-                    self._record_sync("valuation_daily")
-            return result
+            self._record_sync(table)
+            return {table: rows}
         # 全部同步
         symbols = _get_symbols(self._data_dir)
         result: dict[str, int] = {}
         for t in FINANCIAL_TABLES:
-            result[t] = (
-                _sync_shares_for_symbols(symbols, self._data_dir, self._capset)
-                if t == "shares"
-                else _sync_table(t, symbols, self._data_dir, self._capset, latest_only=False)
+            result[t] = _sync_history_table_for_symbols(
+                t, symbols, self._data_dir, self._capset
             )
-            if result[t]:
-                self._record_sync(t)
-        from app.services.daily_valuation import build_daily_valuation
-
-        result["valuation_daily"] = build_daily_valuation(self._data_dir)["rows"]
-        self._refresh_views()
-        if result["valuation_daily"]:
-            self._record_sync("valuation_daily")
+            self._record_sync(t)
         _refresh_financials_views(self._data_dir)
-        return result
-
-    def _run_incremental_body(self) -> dict[str, int]:
-        """执行盘后增量同步并刷新仓库视图。"""
-        result = sync_incremental(self._data_dir, self._capset)
-        self._refresh_views()
-        for table, rows in result.items():
-            if rows:
-                self._record_sync(table)
         return result
 
     def run_now(self, table: str | None = None) -> dict[str, int]:
@@ -822,36 +498,6 @@ class FinancialScheduler:
         t = threading.Thread(target=_bg, name="financial-sync", daemon=True)
         t.start()
         logger.info("financial sync triggered in background: table=%s", table or "all")
-        return {"started": True}
-
-    def trigger_incremental(self) -> dict[str, int]:
-        """后台触发盘后增量同步，与手动同步共用单飞锁。"""
-        if not self._capset or (
-            not self._capset.has(Cap.FINANCIAL) and not _financial_is_custom()
-        ):
-            return {"started": False, "reason": "no FINANCIAL capability"}
-        with self._lock:
-            if self._is_syncing:
-                logger.info("incremental financial sync skipped: already running")
-                return {"started": False, "reason": "already running"}
-            self._is_syncing = True
-
-        def _bg() -> None:
-            try:
-                self._run_incremental_body()
-            except Exception as e:  # noqa: BLE001
-                logger.exception("background incremental financial sync failed: %s", e)
-            finally:
-                with self._lock:
-                    self._is_syncing = False
-
-        thread = threading.Thread(
-            target=_bg,
-            name="financial-incremental-sync",
-            daemon=True,
-        )
-        thread.start()
-        logger.info("incremental financial sync triggered in background")
         return {"started": True}
 
     @property

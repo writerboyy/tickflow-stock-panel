@@ -433,11 +433,6 @@ class BacktestEngine:
                     if asset_type == "stock" and self.repo is not None
                     else None
                 ),
-                historical_names=(
-                    self.repo.get_instrument_name_history()
-                    if asset_type == "stock" and self.repo is not None
-                    else None
-                ),
             )
             join_cols = ["symbol"] if "symbol" in instruments.columns else []
             join_cols.extend(
@@ -634,16 +629,7 @@ class BacktestEngine:
         # 按 asset_type 取维表: ETF 回测须用 ETF 维表, 否则名称 JOIN 失败(全 null)、
         # 涨停信号算在错误的 instruments 上。
         instruments = self.repo.get_instruments_asset(asset_type)
-        df = compute_all(
-            df,
-            instruments=instruments,
-            historical_shares=(
-                self.repo.get_historical_shares() if asset_type == "stock" else None
-            ),
-            historical_names=(
-                self.repo.get_instrument_name_history() if asset_type == "stock" else None
-            ),
-        )
+        df = compute_all(df, instruments=instruments)
         if not instruments.is_empty() and "name" not in df.columns:
             inst_cols = [c for c in ["symbol", "name"] if c in instruments.columns]
             if len(inst_cols) == 2:
@@ -858,20 +844,10 @@ class BacktestEngine:
         minute_cache: dict = {}
         if config.minute_fill:
             trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            required_minute_keys = {
-                (matrix.symbols[int(asset)], matrix.timestamp_labels[int(moment)][:10])
-                for moment, asset in zip(trigger_times, trigger_assets, strict=True)
-            }
-            dates = {day for _, day in required_minute_keys}
-            symbols = {symbol for symbol, _ in required_minute_keys}
+            dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
+            symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if dates and symbols:
-                loaded = self._load_minute_for_fills(
-                    self.repo,
-                    list(symbols),
-                    dates,
-                    "stock",
-                    required_keys=required_minute_keys,
-                )
+                loaded = self._load_minute_for_fills(self.repo, list(symbols), dates, "stock")
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
         def _count(key: str) -> None:
@@ -1233,21 +1209,13 @@ class BacktestEngine:
         if config.minute_fill:
             _trigger_dates: set[str] = set()
             _trigger_symbols: set[str] = set()
-            _required_minute_keys: set[tuple[str, str]] = set()
             for _idx in range(n):
                 if ent[_idx] or ext[_idx]:
-                    _day = self._date_str(panel_dates[_idx])
-                    _symbol = str(panel_symbols[_idx])
-                    _trigger_dates.add(_day)
-                    _trigger_symbols.add(_symbol)
-                    _required_minute_keys.add((_symbol, _day))
+                    _trigger_dates.add(self._date_str(panel_dates[_idx]))
+                    _trigger_symbols.add(str(panel_symbols[_idx]))
             if _trigger_dates and _trigger_symbols:
                 _loaded = self._load_minute_for_fills(
-                    self.repo,
-                    list(_trigger_symbols),
-                    _trigger_dates,
-                    "stock",
-                    required_keys=_required_minute_keys,
+                    self.repo, list(_trigger_symbols), _trigger_dates, "stock",
                 )
                 for _key, _marr in _loaded.items():
                     if _marr is not None and len(_marr) > 0:
@@ -1610,20 +1578,12 @@ class BacktestEngine:
             # 参考线存在但当日分钟K未穿越 → 用收盘 (信号确认)
             return float(closes[-1]) if np.isfinite(closes[-1]) else None
 
-        # 无参考线 → VWAP (成交额/成交量股数), 退化到收盘价
+        # 无参考线 → VWAP (成交额/成交量), 退化到收盘价
         if volumes is not None and amounts is not None:
             total_vol = float(np.nansum(volumes))
             total_amt = float(np.nansum(amounts))
             if total_vol > 0 and total_amt > 0:
-                vwap = total_amt / (total_vol * 100.0)
-                finite_lows = lows[np.isfinite(lows)]
-                finite_highs = highs[np.isfinite(highs)]
-                if (
-                    finite_lows.size
-                    and finite_highs.size
-                    and float(np.min(finite_lows)) <= vwap <= float(np.max(finite_highs))
-                ):
-                    return vwap
+                return total_amt / total_vol
 
         return float(closes[-1]) if np.isfinite(closes[-1]) else None
 
@@ -1664,8 +1624,6 @@ class BacktestEngine:
         symbols: list[str],
         dates_needed: set,
         asset_type: str,
-        *,
-        required_keys: set[tuple[str, str]] | None = None,
     ) -> dict:
         """按触发日加载分钟K, 返回 {(symbol, date_str): float64 2D ndarray}。
 
@@ -1685,7 +1643,6 @@ class BacktestEngine:
         date_objs = [_date.fromisoformat(s) for s in sorted_date_strs]
 
         cache: dict = {}
-        loaded_frames: list[pl.DataFrame] = []
         # 分批读取: 每批 50 个交易日, 处理完拼进 cache, 避免单批过大。
         BATCH = 50
         numeric_cols = BacktestEngine._MINUTE_NUMERIC_COLS
@@ -1698,7 +1655,6 @@ class BacktestEngine:
                 continue
             if df.is_empty():
                 continue
-            loaded_frames.append(df)
             # 按 (symbol, 日期) 分组, 每组转紧凑 float64 数组存入 cache
             df = df.sort(["symbol", "datetime"]).with_columns(
                 pl.col("datetime").dt.strftime("%Y-%m-%d").alias("_d_str")
@@ -1712,15 +1668,6 @@ class BacktestEngine:
                 cache[(sym, d_str)] = sub.select(
                     [pl.col(c).cast(pl.Float64) for c in cols]
                 ).to_numpy()
-        if required_keys is not None:
-            from app.services.minute_quality import assert_required_minute_coverage
-
-            combined = (
-                pl.concat(loaded_frames, how="diagonal_relaxed")
-                if loaded_frames
-                else pl.DataFrame()
-            )
-            assert_required_minute_coverage(combined, required_keys)
         return cache
 
     def simulate_portfolio(
@@ -1809,23 +1756,15 @@ class BacktestEngine:
         minute_cache: dict = {}
         if config.minute_fill:
             trigger_times, trigger_assets = np.nonzero(matrix.entry | matrix.exit)
-            required_minute_keys = {
-                (matrix.symbols[int(asset)], matrix.timestamp_labels[int(moment)][:10])
-                for moment, asset in zip(trigger_times, trigger_assets, strict=True)
-            }
-            trigger_dates = {day for _, day in required_minute_keys}
-            trigger_symbols = {symbol for symbol, _ in required_minute_keys}
+            trigger_dates = {matrix.timestamp_labels[int(t)][:10] for t in trigger_times}
+            trigger_symbols = {matrix.symbols[int(a)] for a in trigger_assets}
             if trigger_dates and trigger_symbols:
                 asset_type = "etf" if all(
                     symbol.endswith(".SH") and symbol.startswith("5")
                     for symbol in list(trigger_symbols)[:5]
                 ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo,
-                    list(trigger_symbols),
-                    trigger_dates,
-                    asset_type,
-                    required_keys=required_minute_keys,
+                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
                 )
                 minute_cache = {key: value for key, value in loaded.items() if value is not None and len(value) > 0}
 
@@ -2346,24 +2285,16 @@ class BacktestEngine:
         if config.minute_fill:
             trigger_dates: set[str] = set()
             trigger_symbols: set[str] = set()
-            required_minute_keys: set[tuple[str, str]] = set()
             for idx in range(n):
                 if ent[idx] or ext[idx]:
-                    day = self._date_str(panel_dates[idx])
-                    symbol = str(panel_symbols[idx])
-                    trigger_dates.add(day)
-                    trigger_symbols.add(symbol)
-                    required_minute_keys.add((symbol, day))
+                    trigger_dates.add(self._date_str(panel_dates[idx]))
+                    trigger_symbols.add(str(panel_symbols[idx]))
             if trigger_dates and trigger_symbols:
                 asset_type = "etf" if all(
                     str(s).endswith(".SH") and str(s).startswith("5") for s in list(trigger_symbols)[:5]
                 ) else "stock"
                 loaded = self._load_minute_for_fills(
-                    self.repo,
-                    list(trigger_symbols),
-                    trigger_dates,
-                    asset_type,
-                    required_keys=required_minute_keys,
+                    self.repo, list(trigger_symbols), trigger_dates, asset_type,
                 )
                 for key, marr in loaded.items():
                     if marr is not None and len(marr) > 0:

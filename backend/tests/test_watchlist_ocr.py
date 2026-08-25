@@ -11,7 +11,7 @@ import anyio
 import polars as pl
 import pytest
 from fastapi import HTTPException
-from PIL import Image, ImageStat
+from PIL import Image
 
 from app.api import watchlist as watchlist_api
 from app.api.watchlist import BatchAddRequest, add_batch, import_from_image, ocr_status
@@ -39,9 +39,9 @@ class _FakeOcr(OcrProvider):
         return self._text
 
 
-def _png_bytes(width: int, height: int, color: int = 20) -> bytes:
+def _png_bytes(width: int, height: int) -> bytes:
     buf = BytesIO()
-    Image.new("RGB", (width, height), color=(color, color, color)).save(buf, format="PNG")
+    Image.new("RGB", (width, height), color=(20, 20, 20)).save(buf, format="PNG")
     return buf.getvalue()
 
 
@@ -163,13 +163,6 @@ def test_preprocess_downsamples_large_edge():
     # 2500×1000 = 2.5M 像素未超限，但长边 > 2000，应降采样
     out = preprocess_for_ocr(_png_bytes(2500, 1000))
     assert max(out.size) <= 2000
-
-
-@pytest.mark.parametrize("color", [20, 235])
-def test_preprocess_normalizes_dark_and_light_themes_to_light_background(color: int):
-    out = preprocess_for_ocr(_png_bytes(1400, 100, color))
-
-    assert ImageStat.Stat(out).mean[0] > 200
 
 
 def test_ocr_status_reflects_provider(monkeypatch):

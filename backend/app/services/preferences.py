@@ -66,14 +66,7 @@ def save(updates: dict) -> dict:
 
 
 def get_realtime_quotes_enabled() -> bool:
-    data = load()
-    if "realtime_quotes_enabled" in data:
-        return bool(data["realtime_quotes_enabled"])
-    try:
-        from app.services.quote_service import QuoteService
-        return QuoteService.is_realtime_allowed()
-    except Exception:
-        return False
+    return load().get("realtime_quotes_enabled", False)
 
 
 def get_indices_nav_pinned() -> bool:
@@ -85,11 +78,6 @@ def get_indices_nav_pinned() -> bool:
 def get_watchlist_groups_in_nav() -> bool:
     """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
     return load().get("watchlist_groups_in_nav", False)
-
-
-def set_watchlist_groups_in_nav(enabled: bool) -> bool:
-    save({"watchlist_groups_in_nav": bool(enabled)})
-    return bool(enabled)
 
 
 def get_realtime_quote_interval() -> float:
@@ -132,10 +120,6 @@ def set_realtime_quote_interval(interval: float) -> float:
 
 def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
-
-
-def get_etf_minute_sync_enabled() -> bool:
-    return bool(load().get("etf_minute_sync_enabled", False))
 
 
 def get_minute_intraday_refresh() -> bool:
@@ -233,7 +217,7 @@ def get_minute_sync_segment_days() -> int:
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
-_ALLOWED_DATA_PROVIDERS = {"tickflow", "baostock"}
+_ALLOWED_DATA_PROVIDERS = {"tickflow"}
 DATA_SOURCE_JOB_TIMEOUT_MIN_S = 60
 
 
@@ -260,74 +244,6 @@ def get_data_source_long_job_timeout_s() -> int:
     except (TypeError, ValueError):
         timeout_s = LONG_JOB_TIMEOUT_S
     return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
-
-
-_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
-
-
-def get_large_orders_preferences() -> dict:
-    data = load()
-    raw = data.get("large_orders_market_segments")
-    if isinstance(raw, list):
-        segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in {str(v) for v in raw}]
-    else:
-        # 兼容 v1 的两个排除开关。缺失的旧字段保持原来的默认排除行为。
-        segments = ["main", "star", "chinext"]
-        if data.get("large_orders_exclude_bse") is False:
-            segments.append("bse")
-        if data.get("large_orders_exclude_st") is False:
-            segments.append("st")
-    def bounded(key, default, low, high, cast=int):
-        try:
-            value = cast(data.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return max(low, min(high, value))
-    return {
-        "enabled": bool(data.get("large_orders_enabled", True)),
-        "score_threshold": bounded("large_orders_score_threshold", 75, 50, 100),
-        "cooldown_seconds": bounded("large_orders_cooldown_seconds", 120, 30, 3600),
-        "deep_dive_interval_seconds": bounded("large_orders_deep_dive_interval_seconds", 60, 15, 600),
-        "max_deep_dive_symbols": bounded("large_orders_max_deep_dive_symbols", 3, 0, 10),
-        "candidate_limit": bounded("large_orders_candidate_limit", 50, 10, 200),
-        "min_limit_up_gap_pct": bounded("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10, float),
-        "market_segments": segments,
-        "exclude_bse": "bse" not in segments,
-        "exclude_st": "st" not in segments,
-        "version": "large_orders_v2",
-    }
-
-
-def set_large_orders_preferences(updates: dict) -> dict:
-    mapping = {
-        "enabled": "large_orders_enabled", "score_threshold": "large_orders_score_threshold",
-        "cooldown_seconds": "large_orders_cooldown_seconds",
-        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
-        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
-        "candidate_limit": "large_orders_candidate_limit",
-        "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
-    }
-    saved = {mapping[key]: value for key, value in updates.items() if key in mapping and value is not None}
-    if updates.get("market_segments") is not None:
-        saved["large_orders_market_segments"] = [v for v in updates["market_segments"] if v in _LARGE_ORDER_MARKET_SEGMENTS]
-    elif "exclude_bse" in updates or "exclude_st" in updates:
-        # 首次通过旧字段写入时，同时 materialize 新字段，完成配置迁移。
-        migrated = get_large_orders_preferences()["market_segments"]
-        for key, segment in (("exclude_bse", "bse"), ("exclude_st", "st")):
-            if key not in updates:
-                continue
-            if bool(updates[key]) and segment in migrated:
-                migrated.remove(segment)
-            elif not bool(updates[key]) and segment not in migrated:
-                migrated.append(segment)
-        saved["large_orders_market_segments"] = migrated
-    if "exclude_bse" in updates:
-        saved["large_orders_exclude_bse"] = bool(updates["exclude_bse"])
-    if "exclude_st" in updates:
-        saved["large_orders_exclude_st"] = bool(updates["exclude_st"])
-    if saved:
-        save(saved)
-    return get_large_orders_preferences()
 
 
 def _allowed_data_providers() -> set[str]:

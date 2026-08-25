@@ -9,14 +9,13 @@ from __future__ import annotations
 import logging
 import gc
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import polars as pl
 
 from app.indicators.pipeline import compute_enriched
 from app.services import kline_sync, preferences
 from app.tickflow.capabilities import Cap, CapabilitySet
-from app.tickflow.catalog import DEFAULT_CN_EXCHANGES, list_cn_exchanges
 from app.tickflow.client import get_client
 from app.tickflow.rate_limits import chunked, min_batch, resolve_limit, sleep_between_batches
 from app.tickflow.repository import KlineRepository
@@ -24,131 +23,7 @@ from app.tickflow.repository import KlineRepository
 logger = logging.getLogger(__name__)
 
 # exchanges.get_instruments 查询的交易所(沪深京)
-_EXCHANGES = list(DEFAULT_CN_EXCHANGES)
-_MAX_REASONABLE_INDEX_AMOUNT = 1e15
-_CONSENSUS_REPAIRABLE_FIELDS = frozenset({"volume", "amount"})
-
-
-class IndexDailyQualityError(ValueError):
-    """Raised when provider index bars cannot be safely persisted."""
-
-    def __init__(self, message: str, invalid_rows: pl.DataFrame | None = None) -> None:
-        super().__init__(message)
-        self.invalid_rows = invalid_rows if invalid_rows is not None else pl.DataFrame()
-
-
-def _validate_index_daily(frame: pl.DataFrame) -> pl.DataFrame:
-    required = {"symbol", "date", "open", "high", "low", "close", "volume", "amount"}
-    if frame.is_empty():
-        return frame
-    missing = sorted(required - set(frame.columns))
-    if missing:
-        raise IndexDailyQualityError(f"指数日线缺少字段: {', '.join(missing)}")
-    invalid = frame.filter(
-        pl.any_horizontal(
-            pl.col(column).is_null() | ~pl.col(column).is_finite()
-            for column in ("open", "high", "low", "close", "volume", "amount")
-        )
-        | (pl.col("open") <= 0)
-        | (pl.col("high") <= 0)
-        | (pl.col("low") <= 0)
-        | (pl.col("close") <= 0)
-        | (pl.col("volume") < 0)
-        | (pl.col("amount") < 0)
-        | (pl.col("amount") >= _MAX_REASONABLE_INDEX_AMOUNT)
-        | (pl.col("high") < pl.max_horizontal("open", "low", "close"))
-        | (pl.col("low") > pl.min_horizontal("open", "high", "close"))
-    )
-    if invalid.is_empty():
-        return frame
-    sample = ", ".join(
-        f"{row['symbol']}/{row['date']}"
-        for row in invalid.select("symbol", "date").unique().sort(["symbol", "date"]).head(8).iter_rows(named=True)
-    )
-    raise IndexDailyQualityError(
-        "指数日线包含负成交量、异常成交额或非法 OHLC，拒绝发布批次: " + sample,
-        invalid,
-    )
-
-
-def _validate_index_daily_with_crosscheck(frame: pl.DataFrame) -> pl.DataFrame:
-    try:
-        return _validate_index_daily(frame)
-    except IndexDailyQualityError as exc:
-        from app.services.index_consensus import (
-            consensus_summary,
-            crosscheck_index_daily_consensus,
-        )
-
-        if exc.invalid_rows.is_empty():
-            raise
-        result = crosscheck_index_daily_consensus(exc.invalid_rows)
-        summary = consensus_summary(result)
-        repaired = _apply_consensus_replacements(frame, exc.invalid_rows, result)
-        if repaired is not None:
-            logger.warning("TickFlow 指数日线异常已由多源共识修复: %s", summary)
-            return repaired
-        logger.error("TickFlow 指数日线异常，备用源只读核验未闭合: %s", summary)
-        raise IndexDailyQualityError(f"{exc}; 备用源核验: {summary}", exc.invalid_rows) from exc
-
-
-def _apply_consensus_replacements(
-    frame: pl.DataFrame,
-    invalid_rows: pl.DataFrame,
-    result: dict,
-) -> pl.DataFrame | None:
-    requested = int(result.get("requested_rows") or 0)
-    if (
-        result.get("status") != "complete"
-        or requested <= 0
-        or int(result.get("confirmed_rows") or 0) != requested
-    ):
-        return None
-
-    invalid_keys = {
-        (str(row["symbol"]), row["date"])
-        for row in invalid_rows.select("symbol", "date").unique().iter_rows(named=True)
-    }
-    replacements: dict[tuple[str, date], dict[str, float]] = {}
-    for item in result.get("rows") or []:
-        if item.get("status") != "replacement_confirmed":
-            return None
-        try:
-            key = (str(item["symbol"]), date.fromisoformat(str(item["date"])))
-        except (KeyError, ValueError):
-            return None
-        values = item.get("replacement")
-        if (
-            key in replacements
-            or not isinstance(values, dict)
-            or not values
-            or not set(values).issubset(_CONSENSUS_REPAIRABLE_FIELDS)
-        ):
-            return None
-        replacements[key] = values
-
-    if set(replacements) != invalid_keys or len(replacements) != requested:
-        return None
-
-    repaired = frame
-    for (symbol, trade_date), values in replacements.items():
-        predicate = (pl.col("symbol") == symbol) & (pl.col("date") == trade_date)
-        expressions = []
-        for field, value in values.items():
-            if field not in repaired.columns or not isinstance(value, (int, float)):
-                return None
-            expressions.append(
-                pl.when(predicate)
-                .then(pl.lit(value).cast(repaired.schema[field]))
-                .otherwise(pl.col(field))
-                .alias(field)
-            )
-        repaired = repaired.with_columns(expressions)
-
-    try:
-        return _validate_index_daily(repaired)
-    except IndexDailyQualityError:
-        return None
+_EXCHANGES = ["SH", "SZ", "BJ"]
 
 
 def _quotes_to_index_instruments(resp) -> pl.DataFrame:
@@ -208,7 +83,7 @@ def _fetch_instruments_by_type(instrument_type: str, asset_type_label: str) -> p
     """
     tf = get_client()
     rows: list[dict] = []
-    for ex in list_cn_exchanges(tf, tuple(_EXCHANGES)):
+    for ex in _EXCHANGES:
         try:
             items = tf.exchanges.get_instruments(ex, instrument_type=instrument_type)
             for it in items or []:
@@ -329,10 +204,7 @@ def sync_and_persist_index_daily(
     否则取 index_instruments 表全量(指数+ETF 合并存储)。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    has_custom_daily = kline_sync._provider_has_dataset(
-        preferences.get_daily_data_provider(), "daily"
-    )
-    if not capset.has(Cap.KLINE_DAILY_BATCH) and not has_custom_daily:
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
 
     if symbols_override:
@@ -365,11 +237,9 @@ def sync_and_persist_index_daily(
             batch_size=None,
             start_time=start_time,
             end_time=end_time,
-            asset_type="index",
         )
         if raw.is_empty():
             continue
-        raw = _validate_index_daily_with_crosscheck(raw)
 
         repo.append_index_daily(raw)
         enriched = compute_enriched(raw, factors=None, instruments=None)
@@ -427,10 +297,7 @@ def sync_and_persist_etf_daily(
     """同步 ETF 日K到独立 kline_etf_* parquet,并计算 ETF enriched。
     on_chunk_done(current, total) 每个批次完成后回调。
     """
-    has_custom_daily = kline_sync._provider_has_dataset(
-        preferences.get_daily_data_provider(), "daily"
-    )
-    if not capset.has(Cap.KLINE_DAILY_BATCH) and not has_custom_daily:
+    if not capset.has(Cap.KLINE_DAILY_BATCH):
         return 0
 
     if symbols_override:
@@ -463,7 +330,6 @@ def sync_and_persist_etf_daily(
             batch_size=None,
             start_time=start_time,
             end_time=end_time,
-            asset_type="etf",
         )
         if raw.is_empty():
             continue

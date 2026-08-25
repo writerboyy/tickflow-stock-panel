@@ -1,10 +1,10 @@
 """enriched 表计算流水线(§7.5 / §7.7 Step 2)。
 
 存储层 (enriched parquet):
-  仅存储基础行情窄表 (17 列), 指标和信号由各服务即时计算。
+  仅存储基础行情窄表 (14 列), 指标和信号由各服务即时计算。
 
   存储列: symbol, date, OHLCV(前复权), volume, amount,
-          raw_close, raw_high, raw_low, turnover_rate, total_shares, float_shares,
+          raw_close, raw_high, raw_low, turnover_rate,
           consecutive_limit_ups, consecutive_limit_downs
 
 设计:
@@ -15,18 +15,17 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import json
 import logging
-import os
-import shutil
 from collections.abc import Callable
 from pathlib import Path
-from uuid import uuid4
 
 import polars as pl
 
 from app.config import settings
+from app.enriched_generation import (
+    EnrichedPublication,
+    enriched_publication_incomplete,
+)
 from app.market_time import cn_today
 from app.parquet import scan_daily_parquet, scan_enriched_parquet, scan_parquet_compat
 from app.price_limits import (
@@ -34,54 +33,9 @@ from app.price_limits import (
     polars_limit_price,
     polars_price_limit_pct,
 )
-from app.share_capital import apply_point_in_time_shares, load_share_history
-from app.services.source_snapshot import capture_source_snapshot
+from app.share_capital import apply_historical_float_shares, load_share_history
 
 logger = logging.getLogger(__name__)
-
-
-def _write_enriched_metadata(
-    data_dir: Path,
-    *,
-    mode: str,
-    written: int,
-    output_dir: Path | None = None,
-) -> None:
-    target = (output_dir or data_dir / "kline_daily_enriched") / "metadata.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    previous: dict = {}
-    if target.exists():
-        try:
-            previous = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            previous = {}
-    metadata = {
-        "schema_version": 1,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "mode": mode,
-        "written_rows": written,
-        "source_snapshots": capture_source_snapshot(
-            data_dir,
-            [
-                "kline_daily",
-                "adj_factor/all.parquet",
-                "instruments",
-                "financials/shares/part.parquet",
-                "instrument_name_history/part.parquet",
-            ],
-            previous=previous.get("source_snapshots"),
-        ),
-    }
-    temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(temporary, target)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 # ── 自定义信号缓存 ─────────────────────────────────────
@@ -133,14 +87,13 @@ def invalidate_custom_signals() -> None:
     _custom_signal_exprs_today = None
 
 
-# enriched parquet 仅存储的列 (17 列)
+# enriched parquet 仅存储的列 (14 列)
 ENRICHED_STORAGE_COLS = [
     "symbol", "date",
     "open", "high", "low", "close",          # 前复权
     "volume", "amount",
     "raw_close", "raw_high", "raw_low",       # 不复权原始价
     "turnover_rate",                           # 依赖当时的 float_shares, 不可回推
-    "total_shares", "float_shares",           # 当时已公告且已生效的股本
     "consecutive_limit_ups",                   # 递推状态, 需从历史 cum_sum
     "consecutive_limit_downs",
     "quote_ts",                                # 行情时间戳(ms): 盘后校验/量比折算/跨天完整性
@@ -166,8 +119,6 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "raw_high":                "原始最高价(未复权)",
     "raw_low":                 "原始最低价(未复权)",
     "turnover_rate":           "换手率",
-    "total_shares":            "当时总股本",
-    "float_shares":            "当时流通股本",
     "consecutive_limit_ups":   "连板数",
     "consecutive_limit_downs": "连跌数",
     # ── 基础指标 ─────────────────────────────────────────
@@ -213,6 +164,10 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "momentum_20d":            "20日动量",
     "momentum_30d":            "30日动量",
     "momentum_60d":            "60日动量",
+    # ── 异动偏离 (运行时由 repository 附着, 不落盘) ────────
+    "deviate_3d":              "3日涨跌幅偏离值(vs对应指数, 小数)",
+    "deviate_10d":             "10日涨跌幅偏离值",
+    "deviate_30d":             "30日涨跌幅偏离值",
     # ── 波动率 ───────────────────────────────────────────
     "annual_vol_20d":          "20日年化波动率",
     # ── RSI ──────────────────────────────────────────────
@@ -259,6 +214,7 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "volume":   ["vol_ma5", "vol_ma10", "vol_ratio_5d"],
     "extremes": ["high_60d", "low_60d"],
     "momentum": ["momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d"],
+    "deviation": ["deviate_3d", "deviate_10d", "deviate_30d"],
     "volatility": ["annual_vol_20d"],
     "rsi":      ["rsi_6", "rsi_14", "rsi_24"],
     "signals":  [k for k in ENRICHED_COLUMNS if k.startswith("signal_")],
@@ -407,7 +363,6 @@ def compute_indicators(
     df: pl.DataFrame,
     needed: set[str] | None = None,
     *,
-    keep_recursive_state: bool = False,
     assume_sorted: bool = False,
 ) -> pl.DataFrame:
     """从 OHLCV 数据计算全套技术指标。
@@ -429,8 +384,7 @@ def compute_indicators(
 
     want = _resolve_needed(needed)
 
-    if not assume_sorted:
-        df = df.sort(["symbol", "date"])
+    df = df if assume_sorted else df.sort(["symbol", "date"])
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
@@ -510,11 +464,9 @@ def compute_indicators(
 
     # Pass 3: KDJ
     if "kdj_k" in want:
-        kdj_range = pl.col("_kdj_hn") - pl.col("_kdj_ln")
         _kdj_rsv = (
-            pl.when(kdj_range == 0)
-            .then(50.0)
-            .otherwise(100 * (pl.col("close") - pl.col("_kdj_ln")) / kdj_range)
+            100 * (pl.col("close") - pl.col("_kdj_ln"))
+            / (pl.col("_kdj_hn") - pl.col("_kdj_ln")).fill_null(1e-12)
         )
         df = df.with_columns([
             _kdj_rsv.ewm_mean(alpha=1.0 / 3, adjust=False).over("symbol").alias("kdj_k"),
@@ -607,16 +559,7 @@ def compute_indicators(
                   "_rsi_avg_gain_6", "_rsi_avg_loss_6",
                   "_rsi_avg_gain_14", "_rsi_avg_loss_14",
                   "_rsi_avg_gain_24", "_rsi_avg_loss_24"]
-    recursive_state_cols = {
-        "_ema12", "_ema26",
-        "_rsi_avg_gain_6", "_rsi_avg_loss_6",
-        "_rsi_avg_gain_14", "_rsi_avg_loss_14",
-        "_rsi_avg_gain_24", "_rsi_avg_loss_24",
-    }
-    df = df.drop([
-        c for c in _temp_cols
-        if c in df.columns and not (keep_recursive_state and c in recursive_state_cols)
-    ])
+    df = df.drop([c for c in _temp_cols if c in df.columns])
 
     _elapsed = (_time.perf_counter() - _t0) * 1000
     import logging as _logging
@@ -732,7 +675,6 @@ def compute_limit_signals(
     instruments: pl.DataFrame,
     needed: set[str] | None = None,
     historical_shares: pl.DataFrame | None = None,
-    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """计算涨跌停相关信号。
 
@@ -742,7 +684,7 @@ def compute_limit_signals(
       signal_limit_down_recovery (跌停翘板)
       signal_broken_limit_up (炸板: 最高价触及涨停价但收盘未封住)
 
-    输入必须包含: symbol, date, raw_close, raw_high, open, high, low, close,
+    输入必须包含: symbol, date, raw_close, raw_high, raw_low, open, high, low, close,
                   change_pct, vol_ratio_5d。
     """
     if df.is_empty():
@@ -751,15 +693,6 @@ def compute_limit_signals(
     want = set(LIMIT_SIGNAL_OUTPUTS) if needed is None else set(needed) & set(LIMIT_SIGNAL_OUTPUTS)
     if not want:
         return df
-
-    # Older callers provide only adjusted OHLC; raw aliases are equivalent when
-    # no corporate-action data is available.
-    defaults = []
-    for raw, source in (("raw_close", "close"), ("raw_high", "high"), ("raw_low", "low")):
-        if raw not in df.columns and source in df.columns:
-            defaults.append(pl.col(source).alias(raw))
-    if defaults:
-        df = df.with_columns(defaults)
 
     need_up = bool(want & {"signal_limit_up", "consecutive_limit_ups", "signal_broken_limit_up"})
     need_down = bool(want & {"signal_limit_down", "consecutive_limit_downs", "signal_limit_down_recovery"})
@@ -772,83 +705,36 @@ def compute_limit_signals(
         instrument_needs.add("name")
     if "turnover_rate" in want:
         instrument_needs.add("float_shares")
-        instrument_needs.add("total_shares")
     if need_up:
         instrument_needs.add("limit_up")
     if need_down:
         instrument_needs.add("limit_down")
-    for c in ["name", "total_shares", "float_shares", "limit_up", "limit_down"]:
+    for c in ["name", "float_shares", "limit_up", "limit_down"]:
         if c not in instrument_needs:
             continue
         if c in instruments.columns:
             inst_cols.append(c)
-    if (
-        need_price_limits or instrument_needs & {"total_shares", "float_shares"}
-    ) and "as_of" in instruments.columns:
+    if need_price_limits and "as_of" in instruments.columns:
         inst_cols.append(
             pl.col("as_of").cast(pl.Date, strict=False).alias("_instrument_as_of")
         )
     inst_subset = instruments.select(inst_cols).unique(subset=["symbol"])
 
+    if need_price_limits and "name" in instruments.columns:
+        st_flag = (
+            instruments
+            .select(
+                "symbol",
+                polars_is_risk_warning_name(pl.col("name")).alias("_is_st"),
+            )
+            .unique(subset=["symbol"])
+        )
+        inst_subset = inst_subset.join(st_flag, on="symbol", how="left")
+
     df = df.join(inst_subset, on="symbol", how="left", suffix="_inst")
 
-    point_in_time_names = False
-    if need_price_limits:
-        if historical_names is not None and not historical_names.is_empty():
-            required = {"symbol", "change_date", "before_name", "after_name"}
-            if required <= set(historical_names.columns):
-                changes = (
-                    historical_names
-                    .select(
-                        pl.col("symbol").cast(pl.String),
-                        pl.col("change_date").cast(pl.Date, strict=False),
-                        pl.col("before_name").cast(pl.String, strict=False),
-                        pl.col("after_name").cast(pl.String, strict=False),
-                    )
-                    .drop_nulls(["symbol", "change_date"])
-                    .sort(["symbol", "change_date"])
-                    .unique(subset=["symbol", "change_date"], keep="last")
-                )
-                first_names = (
-                    changes
-                    .group_by("symbol", maintain_order=True)
-                    .agg(pl.col("before_name").first().alias("_historical_before_name"))
-                )
-                events = changes.select(
-                    "symbol",
-                    pl.col("change_date").alias("_historical_change_date"),
-                    pl.col("after_name").alias("_historical_after_name"),
-                )
-                df = (
-                    df.sort(["symbol", "date"])
-                    .join_asof(
-                        events.sort(["symbol", "_historical_change_date"]),
-                        left_on="date",
-                        right_on="_historical_change_date",
-                        by="symbol",
-                        strategy="backward",
-                        check_sortedness=False,
-                    )
-                    .join(first_names, on="symbol", how="left")
-                )
-                current_name = pl.col("name") if "name" in df.columns else pl.lit(None, dtype=pl.String)
-                df = df.with_columns(
-                    pl.coalesce(
-                        pl.col("_historical_after_name"),
-                        pl.col("_historical_before_name"),
-                        current_name,
-                    ).alias("_effective_name"),
-                )
-                df = df.with_columns(pl.col("_effective_name").alias("name"))
-                point_in_time_names = True
-        name_col = "_effective_name" if "_effective_name" in df.columns else "name"
-        if name_col in df.columns:
-            df = df.with_columns(
-                polars_is_risk_warning_name(pl.col(name_col)).alias("_is_st")
-            )
-
     if "turnover_rate" in want:
-        df = apply_point_in_time_shares(df, historical_shares, today=cn_today())
+        df = apply_historical_float_shares(df, historical_shares, today=cn_today())
 
     # 计算换手率(%) = volume(手) * 10000 / float_shares(股)
     if "turnover_rate" in want and "float_shares" in df.columns and "volume" in df.columns:
@@ -865,7 +751,7 @@ def compute_limit_signals(
     # 仅在 adj_factor 发生变化（除权除息 XD/DR）时使用前复权昨收作为交易所参考价;
     # 否则使用原始 raw_close.shift(1) 以避免浮点精度误差。
     if not need_price_limits:
-        cleanup = [c for c in ("name", "limit_up", "limit_down", "_instrument_as_of") if c in df.columns]
+        cleanup = [c for c in ("name", "float_shares", "limit_up", "limit_down") if c in df.columns]
         return df.drop(cleanup)
 
     _adj_today = pl.col("close") / pl.col("raw_close")
@@ -1010,7 +896,7 @@ def compute_limit_signals(
             & (pl.col("raw_low") > 0)
         ).then(
             (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
-            & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停
+            & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停(原始价口径, 跌停价为原始价基准)
             & (pl.col("close") > pl.col("open"))                          # 收阳
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down_recovery")
@@ -1035,19 +921,15 @@ def compute_limit_signals(
     cleanup = ["_prev_raw_close", "_limit_pct",
                "_theoretical_limit_up", "_theoretical_limit_down",
                "_effective_limit_up", "_effective_limit_down",
-               "_grp_up", "_grp_down", "_instrument_as_of",
-               "_historical_change_date", "_historical_after_name",
-               "_historical_before_name", "_effective_name"]
+               "_grp_up", "_grp_down", "_instrument_as_of"]
     if "_is_st" in df.columns:
         cleanup.append("_is_st")
     # 清理 join 产生的重复列
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
-    # name / limit_up / limit_down 只用于计算, 不存入 enriched
-    for c in ["name", "limit_up", "limit_down"]:
-        if c == "name" and point_in_time_names:
-            continue
+    # name / float_shares / limit_up / limit_down 只用于计算, 不存入 enriched
+    for c in ["name", "float_shares", "limit_up", "limit_down"]:
         if c in df.columns and c != "turnover_rate":
             cleanup.append(c)
     internal_outputs = {"signal_limit_up", "signal_limit_down"} - want
@@ -1061,7 +943,6 @@ def compute_all(
     df: pl.DataFrame,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
-    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """从 OHLCV 计算全套指标 + 信号。一站式调用。
 
@@ -1070,12 +951,7 @@ def compute_all(
     df = compute_indicators(df)
     df = compute_signals(df)
     if instruments is not None and not instruments.is_empty():
-        df = compute_limit_signals(
-            df,
-            instruments,
-            historical_shares=historical_shares,
-            historical_names=historical_names,
-        )
+        df = compute_limit_signals(df, instruments, historical_shares=historical_shares)
 
     # 清理 NaN / Inf
     float_cols = [c for c in df.columns if df[c].dtype.is_float()]
@@ -1112,7 +988,6 @@ def compute_enriched(
     factors: pl.DataFrame | None = None,
     instruments: pl.DataFrame | None = None,
     historical_shares: pl.DataFrame | None = None,
-    historical_names: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """对原始日 K 应用前复权 + 全量计算指标 + 信号, 产出完整 enriched (含全部指标列)。
 
@@ -1148,77 +1023,139 @@ def compute_enriched(
         df,
         instruments=instruments,
         historical_shares=historical_shares,
-        historical_names=historical_names,
     )
 
     return df
 
 
 def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
-    """写入 parquet 前裁剪到存储列 (17 列)。"""
+    """写入 parquet 前裁剪到存储列 (14 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     return df.select(cols)
 
 
+# ================================================================
+# 异动偏离列 (deviate_3d/10d/30d)
+#
+# N 日涨跌幅偏离值 = 个股 N 日累计涨跌幅 - 对应指数同期涨跌幅,
+# 是交易所「异常波动 / 严重异常波动」规则的量化口径 (如主板 3日±20%,
+# 10日+100%, 30日+200%)。不属于 compute_indicators 的纯函数范围
+# (需要指数数据), 因此在 repository 读取路径上附着, 不随 parquet 落盘。
+# ================================================================
+
 DEVIATION_WINDOWS: tuple[int, ...] = (3, 10, 30)
-_BENCHMARK_PREFERENCE = {
-    "SH": ["000002.SH", "000001.SH"],
-    "SZ": ["399107.SZ", "399001.SZ"],
-    "BJ": ["899050.BJ", "000001.SH"],
+
+# 各交易所基准指数 (偏离值规则的「对应指数」近似): 优先分类指数, 缺失时回退
+_BENCHMARK_PREFERENCE: dict[str, list[str]] = {
+    "SH": ["000002.SH", "000001.SH"],   # 上证A指 → 上证指数
+    "SZ": ["399107.SZ", "399001.SZ"],   # 深证A指 → 深证成指
+    "BJ": ["899050.BJ", "000001.SH"],   # 北证50 → 上证指数
 }
+
 _benchmark_cache: dict[str, tuple[float, pl.DataFrame | None]] = {}
-
-
-def _bench_exchange_expr() -> pl.Expr:
-    return pl.col("symbol").str.slice(-2).str.to_uppercase().replace(
-        {key: key for key in _BENCHMARK_PREFERENCE}, default=None, return_dtype=pl.Utf8,
-    )
+_BENCHMARK_CACHE_TTL = 600.0
 
 
 def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
-    import time
+    """读取指数日K, 计算各基准指数的滚动 N 日涨跌幅。
+
+    返回长表: date, bench_exchange, bench_close, bench_mom3d, bench_mom10d, bench_mom30d。
+    bench_close 供盘中路径外推今日基准动量 (benchmark_momentum_today)。
+    无可用指数数据时返回 None (偏离列置 null, 不阻塞主流程)。
+    进程内按 data_dir 缓存 (TTL 10 分钟)。
+    """
+    import time as _time
+
+    now = _time.monotonic()
     key = str(Path(data_dir).resolve())
-    now = time.monotonic()
     cached = _benchmark_cache.get(key)
-    if cached is not None and now - cached[0] < 600:
+    if cached is not None and now - cached[0] < _BENCHMARK_CACHE_TTL:
         return cached[1]
-    result = None
+
+    frame: pl.DataFrame | None = None
     try:
-        glob = str(Path(data_dir) / "kline_index_daily" / "**" / "*.parquet")
-        symbols = [symbol for values in _BENCHMARK_PREFERENCE.values() for symbol in values]
-        frame = (scan_daily_parquet(glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
-                 .filter(pl.col("symbol").is_in(symbols))
-                 .select(["symbol", "date", "close"]).sort(["symbol", "date"]).collect())
-        if not frame.is_empty():
-            available = set(frame["symbol"].to_list())
-            pairs = []
-            for exchange, choices in _BENCHMARK_PREFERENCE.items():
-                hit = next((symbol for symbol in choices if symbol in available), None)
-                if hit is None and available:
-                    hit = next(iter(available))
-                if hit:
+        index_glob = str(Path(data_dir) / "kline_index_daily" / "**" / "*.parquet")
+        wanted: list[str] = []
+        bench_of: dict[str, str] = {}
+        for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+            for sym in candidates:
+                if sym not in bench_of:
+                    wanted.append(sym)
+                    bench_of[sym] = exchange
+        lf = scan_daily_parquet(
+            index_glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float")
+        )
+        df_idx = (
+            lf.filter(pl.col("symbol").is_in(wanted))
+            .select(["symbol", "date", "close"])
+            .sort(["symbol", "date"])
+            .collect()
+        )
+        if not df_idx.is_empty():
+            available = set(df_idx["symbol"].to_list())
+            picked = [s for s in wanted if s in available]
+            # 每个交易所取优先级最高的可用基准; 全缺时回退到任一可用基准。
+            # 同一基准可服务多个交易所 (如北证50 缺失时北交所回退上证指数)。
+            pairs: list[tuple[str, str]] = []
+            for exchange, candidates in _BENCHMARK_PREFERENCE.items():
+                hit = next((s for s in candidates if s in available), None)
+                if hit is None and picked:
+                    hit = picked[0]
+                if hit is not None:
                     pairs.append((hit, exchange))
-            selected = frame.filter(pl.col("symbol").is_in([p[0] for p in pairs])).with_columns([
-                (pl.col("close") / pl.col("close").shift(window).over("symbol") - 1).alias(f"bench_mom{window}d")
-                for window in DEVIATION_WINDOWS
-            ])
-            mapping = pl.DataFrame({"symbol": [p[0] for p in pairs], "bench_exchange": [p[1] for p in pairs]})
-            result = (selected.join(mapping, on="symbol").select(
-                ["date", "bench_exchange", pl.col("close").alias("bench_close"),
-                 *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
-                .unique(["date", "bench_exchange"]))
+            df_bench = df_idx.filter(pl.col("symbol").is_in([p[0] for p in pairs]))
+            if not df_bench.is_empty():
+                df_bench = df_bench.with_columns(
+                    pl.col("close").cast(pl.Float64, strict=False)
+                ).with_columns([
+                    (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"_bm{n}")
+                    for n in DEVIATION_WINDOWS
+                ]).rename({f"_bm{n}": f"bench_mom{n}d" for n in DEVIATION_WINDOWS})
+                exchange_map = pl.DataFrame({
+                    "symbol": [p[0] for p in pairs],
+                    "bench_exchange": [p[1] for p in pairs],
+                })
+                frame = (
+                    df_bench.join(exchange_map, on="symbol", how="inner")
+                    .select(["date", "bench_exchange", "close",
+                             *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+                    .rename({"close": "bench_close"})
+                    .unique(subset=["date", "bench_exchange"])
+                )
     except Exception as exc:  # noqa: BLE001
         logger.warning("基准指数偏离数据加载失败: %s", exc)
-    _benchmark_cache[key] = (now, result)
-    return result
+        frame = None
+
+    _benchmark_cache[key] = (now, frame)
+    return frame
+
+
+def _bench_exchange_expr() -> pl.Expr:
+    """symbol 后缀 → 交易所 (SH/SZ/BJ), 无法识别时 null。"""
+    return (
+        pl.col("symbol").str.slice(-2).str.to_uppercase().replace(
+            {ex: ex for ex in _BENCHMARK_PREFERENCE},
+            default=None,
+            return_dtype=pl.Utf8,
+        )
+    )
 
 
 def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
-    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
+    """为已含 momentum_Nd 的 enriched 帧附着 deviate_Nd 偏离列 (全量/冷路径)。
+
+    缺失的动量列 (如 momentum_3d 不在指标全集里) 就地按 close 补算,
+    与 compute_indicators 在同一帧上的 shift 语义一致。
+    基准按 symbol 后缀分交易所匹配, join 不上的行 (新上市/基准缺失) 置 null。
+    """
     if df.is_empty():
         return df
     bench = load_benchmark_momentum(data_dir)
-    if bench is None or bench.is_empty() or "close" not in df.columns:
+    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
+    if bench is None or bench.is_empty():
+        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols])
+    if "close" not in df.columns:
+        logger.warning("偏离列附着跳过: 缺少 close 列")
         return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols])
     missing = [n for n in DEVIATION_WINDOWS if f"momentum_{n}d" not in df.columns]
     if missing:
@@ -1226,63 +1163,127 @@ def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
             (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"momentum_{n}d")
             for n in missing
         ])
-    return (df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
+    out = (
+        df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
         .join(bench, left_on=["_bench_ex", "date"], right_on=["bench_exchange", "date"], how="left")
-        .with_columns([(pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
-                       for n in DEVIATION_WINDOWS])
-        .drop(["_bench_ex", "bench_close", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]]))
+        .with_columns([
+            (pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
+            for n in DEVIATION_WINDOWS
+        ])
+        .drop(["_bench_ex", "bench_close", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+    )
+    return out
 
 
-def benchmark_momentum_today(data_dir: Path, index_quotes: pl.DataFrame | None = None) -> pl.DataFrame | None:
+def _bench_rt_pct_of(index_quotes: pl.DataFrame | None, candidates: list[str]) -> float:
+    """从实时指数行情取某交易所首选基准的今日涨跌, 缺数据时 0。"""
+    if index_quotes is None or index_quotes.is_empty():
+        return 0.0
+    df = index_quotes.filter(pl.col("symbol").is_in(candidates))
+    if df.is_empty():
+        return 0.0
+    # 候选按优先级排序, 取第一个有有效涨跌的
+    by_sym = {r["symbol"]: r for r in df.iter_rows(named=True)}
+    for sym in candidates:
+        row = by_sym.get(sym)
+        if row is None:
+            continue
+        for col in ("change_pct", "pct", "pct_change"):
+            v = row.get(col)
+            if v is not None:
+                return float(v)
+        if row.get("close") is not None and row.get("prev_close") is not None and row["prev_close"]:
+            return float(row["close"] / row["prev_close"] - 1)
+    return 0.0
+
+
+def benchmark_momentum_today(
+    data_dir: Path,
+    index_quotes: pl.DataFrame | None = None,
+) -> pl.DataFrame | None:
+    """各交易所基准指数的「今日」N 日动量 (盘中实时外推)。
+
+    基准日K parquet 盘中不含今日, 今日基准收盘 = 昨收 × (1 + 实时涨跌)。
+    N 日动量 = 今日基准收盘 / N 个交易日前的收盘 - 1; 交易所与
+    load_benchmark_momentum 的选基逻辑一致 (同一 TTL 缓存帧)。
+    返回小表: bench_exchange, bench_mom3d, bench_mom10d, bench_mom30d。
+    无基准数据时 None。
+    """
     bench = load_benchmark_momentum(data_dir)
     if bench is None or bench.is_empty():
         return None
-    bench = bench.filter(pl.col("date") < cn_today())
-    rows = []
-    quote_map = {row["symbol"]: row for row in index_quotes.iter_rows(named=True)} if index_quotes is not None else {}
-    # Keep output order stable; the source scan may return partitions in any order.
-    available_exchanges = set(bench["bench_exchange"].unique().to_list())
-    for exchange in _BENCHMARK_PREFERENCE:
-        if exchange not in available_exchanges:
-            continue
-        sub = bench.filter(pl.col("bench_exchange") == exchange).sort("date")
+    # 指数监控 (mode=all) 盘中会向 kline_index_daily 写入今日行;
+    # 「昨收」必须排除今日, 否则实时涨跌被重复叠加
+    today = cn_today()
+    bench = bench.filter(pl.col("date") < today)
+    if bench.is_empty():
+        return None
+    rows: list[dict[str, float | str]] = []
+    for ex in sorted(bench["bench_exchange"].unique().to_list()):
+        sub = bench.filter(pl.col("bench_exchange") == ex).sort("date")
         closes = sub["bench_close"]
-        if not closes.len():
+        if closes.len() == 0:
             continue
-        choices = _BENCHMARK_PREFERENCE.get(exchange, [])
-        quote = next((quote_map.get(symbol) for symbol in choices if quote_map.get(symbol)), None)
-        rt = float((quote or {}).get("change_pct") or 0.0)
-        row = {"bench_exchange": exchange}
+        yesterday_close = closes[-1]
+        rt = _bench_rt_pct_of(index_quotes, _BENCHMARK_PREFERENCE.get(ex, []))
+        row: dict[str, float | str] = {
+            "bench_exchange": ex,
+        }
         for n in DEVIATION_WINDOWS:
-            base = closes[-n] if closes.len() >= n else None
-            row[f"bench_mom{n}d"] = ((closes[-1] * (1 + rt) / base - 1) if base and base > 0 else None)
+            base = closes[-n] if closes.len() >= n else None  # N 个交易日前 (不含今日)
+            row[f"bench_mom{n}d"] = (
+                (yesterday_close * (1.0 + rt)) / base - 1.0
+                if base is not None and yesterday_close is not None and base > 0
+                else None
+            )
         rows.append(row)
-    return pl.DataFrame(rows) if rows else None
+    if not rows:
+        return None
+    schema = {"bench_exchange": pl.Utf8, **{f"bench_mom{n}d": pl.Float64 for n in DEVIATION_WINDOWS}}
+    return pl.DataFrame(rows, schema=schema)
 
 
-def attach_deviation_columns_today(df: pl.DataFrame, data_dir: Path, index_quotes: pl.DataFrame | None = None) -> pl.DataFrame:
+def attach_deviation_columns_today(
+    df: pl.DataFrame,
+    data_dir: Path,
+    index_quotes: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """为盘中单日 enriched 帧附着 deviate_Nd 偏离列 (增量热路径)。
+
+    与 attach_deviation_columns 的区别: 入参是「仅今日」的单日帧, 无法用
+    shift 补算动量, 直接使用帧上已有的 momentum_Nd (compute_enriched_today
+    产出); 基准动量用 benchmark_momentum_today 的实时外推值。
+    缺失动量的窗口 (如全量回退路径无 momentum_3d) 置 null, 不阻塞主流程。
+    """
+    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
     if df.is_empty():
         return df
     bench = benchmark_momentum_today(data_dir, index_quotes)
-    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
     if bench is None or bench.is_empty():
-        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols if c not in df.columns])
-    exprs = [(pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
-             if f"momentum_{n}d" in df.columns else pl.lit(None, dtype=pl.Float64).alias(f"deviate_{n}d")
-             for n in DEVIATION_WINDOWS]
-    return (df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
+        return df.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols if c not in df.columns
+        ])
+    exprs = [
+        (pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
+        if f"momentum_{n}d" in df.columns
+        else pl.lit(None, dtype=pl.Float64).alias(f"deviate_{n}d")
+        for n in DEVIATION_WINDOWS
+    ]
+    return (
+        df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
         .join(bench, left_on="_bench_ex", right_on="bench_exchange", how="left")
-        .with_columns(exprs).drop(["_bench_ex", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]]))
+        .with_columns(exprs)
+        .drop(["_bench_ex", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+    )
 
 
 def run_pipeline(data_dir: Path | None = None,
                  symbols: list[str] | None = None,
                  new_dates_only: bool = False,
-                 on_batch_done: Callable[[int, int], None] | None = None,
-                 keep_backup: bool = False) -> int:
+                 on_batch_done: Callable[[int, int], None] | None = None) -> int:
     """运行盘后管道:读 kline_daily + adj_factor → 前复权 + 计算存储列 → 写 enriched。
 
-    enriched 表仅存储 17 列基础行情窄表（含按时点解析的总股本和流通股本）。
+    enriched 表仅存储 14 列基础行情窄表 (OHLCV + raw_close/high/low + turnover_rate + 连板数)。
 
     模式:
       - 全量 (symbols=None, new_dates_only=False):
@@ -1302,6 +1303,11 @@ def run_pipeline(data_dir: Path | None = None,
     t0 = _t.perf_counter()
 
     d = Path(data_dir or settings.data_dir)
+    if enriched_publication_incomplete(d, "stock"):
+        logger.warning("检测到未完成的 enriched 发布,改为全量重建")
+        symbols = None
+        new_dates_only = False
+    publication = EnrichedPublication(d, "stock", recover=True)
     daily_dir = d / "kline_daily"
     enriched_base = d / "kline_daily_enriched"
     factor_path = d / "adj_factor" / "all.parquet"
@@ -1322,13 +1328,6 @@ def run_pipeline(data_dir: Path | None = None,
     except Exception as e:  # noqa: BLE001
         logger.warning("instruments 读取失败: %s", e)
     historical_shares = load_share_history(d)
-    historical_names = pl.DataFrame()
-    name_history_path = d / "instrument_name_history" / "part.parquet"
-    if name_history_path.exists():
-        try:
-            historical_names = pl.read_parquet(name_history_path)
-        except (OSError, pl.exceptions.PolarsError) as e:
-            logger.warning("instrument name history 读取失败: %s", e)
 
     if new_dates_only:
         # ── 向后增量模式 ──
@@ -1376,7 +1375,6 @@ def run_pipeline(data_dir: Path | None = None,
                 factors=factors,
                 instruments=instruments,
                 historical_shares=historical_shares,
-                historical_names=historical_names,
             )
 
             # 只保留新日期的行
@@ -1399,7 +1397,7 @@ def run_pipeline(data_dir: Path | None = None,
                     out = enriched_base / f"date={ds}" / "part.parquet"
                     out.parent.mkdir(parents=True, exist_ok=True)
                     date_df = _select_storage_cols(date_df).sort(["symbol"])
-                    date_df.write_parquet(out)
+                    publication.write_parquet(date_df, out)
                     written += date_df.height
                 t_write_new = _t.perf_counter()
                 logger.info("增量写入: %.2fs, %d 行", t_write_new - t_new, written)
@@ -1414,13 +1412,11 @@ def run_pipeline(data_dir: Path | None = None,
                 factors_sym = factors.filter(pl.col("symbol").is_in(list(sym_set))) if not factors.is_empty() else factors
                 inst_sym = instruments.filter(pl.col("symbol").is_in(list(sym_set))) if not instruments.is_empty() else instruments
                 shares_sym = historical_shares.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_shares.is_empty() else historical_shares
-                names_sym = historical_names.filter(pl.col("symbol").is_in(list(sym_set))) if not historical_names.is_empty() else historical_names
                 enriched_sym = compute_enriched(
                     raw_sym,
                     factors=factors_sym,
                     instruments=inst_sym,
                     historical_shares=shares_sym,
-                    historical_names=names_sym,
                 )
                 for date_df in enriched_sym.partition_by("date"):
                     dt = date_df["date"][0]
@@ -1433,13 +1429,13 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = existing.filter(~pl.col("symbol").is_in(list(sym_set)))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                     date_df_storage = date_df_storage.sort(["symbol"])
-                    date_df_storage.write_parquet(out)
+                    publication.write_parquet(date_df_storage, out)
                     written += date_df.height
                 logger.info("除权重算: %d 只, 共写入 %d 行", len(sym_set), written)
 
+        publication.commit()
         t_done = _t.perf_counter()
         logger.info("增量管道完成: %.2fs, %d 行", t_done - t0, written)
-        _write_enriched_metadata(d, mode="new_dates" if not symbols else "new_dates+symbols", written=written)
         return written
 
     # ── 全量 或 除权因子增量 模式 ──
@@ -1512,10 +1508,6 @@ def run_pipeline(data_dir: Path | None = None,
             historical_shares.filter(pl.col("symbol").is_in(batch_syms))
             if not historical_shares.is_empty() else historical_shares
         )
-        batch_names = (
-            historical_names.filter(pl.col("symbol").is_in(batch_syms))
-            if not historical_names.is_empty() else historical_names
-        )
 
         # 计算
         enriched = compute_enriched(
@@ -1523,7 +1515,6 @@ def run_pipeline(data_dir: Path | None = None,
             factors=batch_factors,
             instruments=batch_inst,
             historical_shares=batch_shares,
-            historical_names=batch_names,
         )
 
         if not enriched.is_empty():
@@ -1540,7 +1531,7 @@ def run_pipeline(data_dir: Path | None = None,
                         existing = existing.filter(~pl.col("symbol").is_in(batch_syms))
                         date_df_storage = pl.concat([existing, date_df_storage], how="diagonal_relaxed")
                     date_df_storage = date_df_storage.sort(["symbol"])
-                    date_df_storage.write_parquet(out)
+                    publication.write_parquet(date_df_storage, out)
                     written += date_df_storage.height
             else:
                 # 全量模式: 缓冲到 date_buffers, 最后一次性写入
@@ -1550,7 +1541,7 @@ def run_pipeline(data_dir: Path | None = None,
                     date_buffers[ds].append(_select_storage_cols(date_df).sort(["symbol"]))
                     written += date_df.height
 
-        del raw, enriched, batch_factors, batch_inst, batch_shares, batch_names
+        del raw, enriched, batch_factors, batch_inst, batch_shares
         gc.collect()
 
         logger.info("symbol 批次 %d/%d (%s ~ %s), 已处理 %d 行",
@@ -1575,61 +1566,22 @@ def run_pipeline(data_dir: Path | None = None,
             sample = ", ".join(sorted(missing_dates)[:5])
             raise RuntimeError(f"全量重建结果缺少已有日期分区,拒绝覆盖: {sample}")
 
-        staging = d / f".kline_daily_enriched.{uuid4().hex}.tmp"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True)
-        if base.exists():
-            for child in base.iterdir():
-                if child.name.startswith("date=") or child.name == "metadata.json":
-                    continue
-                target = staging / child.name
-                if child.is_dir():
-                    shutil.copytree(child, target)
-                else:
-                    shutil.copy2(child, target)
+        base.mkdir(parents=True, exist_ok=True)
 
         for ds, dfs in date_buffers.items():
-            out = staging / f"date={ds}" / "part.parquet"
+            out = base / f"date={ds}" / "part.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
             merged = pl.concat(dfs, how="diagonal_relaxed").sort(["symbol"])
-            merged.write_parquet(out)
-
-        staged_parts = list(staging.glob("date=*/part.parquet"))
-        staged_rows = sum(
-            pl.scan_parquet(path).select(pl.len()).collect().item()
-            for path in staged_parts
-        )
-        if staged_rows != written or len(staged_parts) != len(rebuilt_dates):
-            shutil.rmtree(staging)
-            raise RuntimeError("enriched 影子重建行数或分区数校验失败，拒绝切换")
-        _write_enriched_metadata(d, mode="full", written=written, output_dir=staging)
-
-        backup = d / (
-            f".kline_daily_enriched.pre-rebuild-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-            if keep_backup
-            else f".kline_daily_enriched.{uuid4().hex}.backup"
-        )
-        if base.exists():
-            os.replace(base, backup)
-        try:
-            os.replace(staging, base)
-        except Exception:
-            if backup.exists():
-                os.replace(backup, base)
-            raise
-        if backup.exists() and not keep_backup:
-            shutil.rmtree(backup)
+            publication.write_parquet(merged, out)
 
         date_buffers.clear()
         gc.collect()
 
+    publication.commit()
     t_done = _t.perf_counter()
     adj_label = "含复权" if not factors.is_empty() else "无复权"
     logger.info("enriched 完成 [%s]: %.2fs, 共 %d 行, %s",
                 mode, t_done - t0, written, adj_label)
-    if symbols:
-        _write_enriched_metadata(d, mode=mode, written=written)
     return written
 
 
@@ -1651,12 +1603,13 @@ def _load_recent_history(enriched_base: Path, symbols: list[str], days: int) -> 
     """
     from datetime import date, timedelta
     cutoff = date.today() - timedelta(days=days + 30)  # 多读 30 天余量
-    cast_options = pl.ScanCastOptions(integer_cast="allow-float")
 
+    cast_options = pl.ScanCastOptions(integer_cast="allow-float")
     try:
         lf = (
             scan_enriched_parquet(
-                str(enriched_base / "**" / "*.parquet"), cast_options=cast_options
+                str(enriched_base / "**" / "*.parquet"),
+                cast_options=cast_options,
             )
             .filter(
                 (pl.col("symbol").is_in(symbols))
@@ -1726,7 +1679,6 @@ def compute_enriched_today(
     live_state = live_agg.with_columns(pl.lit(True).alias("_has_history_state"))
     df = today_ohlcv.join(live_state, on="symbol", how="left")
     has_history_state = pl.col("_has_history_state").fill_null(False)
-    history_len = pl.col("_window_len").fill_null(0)
 
     # ---- 前复权: 保存原始价 → 调整 OHLCV ----
     df = df.with_columns([
@@ -1795,39 +1747,34 @@ def compute_enriched_today(
 
     # ---- MA (用部分和) ----
     df = df.with_columns([
-        pl.when(history_len >= 4).then((pl.col("_ma5_partial_sum") + pl.col("close")) / 5).otherwise(None).alias("ma5"),
-        pl.when(history_len >= 9).then((pl.col("_ma10_partial_sum") + pl.col("close")) / 10).otherwise(None).alias("ma10"),
-        pl.when(history_len >= 19).then((pl.col("_ma20_partial_sum") + pl.col("close")) / 20).otherwise(None).alias("ma20"),
-        pl.when(history_len >= 29).then((pl.col("_ma30_partial_sum") + pl.col("close")) / 30).otherwise(None).alias("ma30"),
-        pl.when(history_len >= 59).then((pl.col("_ma60_partial_sum") + pl.col("close")) / 60).otherwise(None).alias("ma60"),
+        ((pl.col("_ma5_partial_sum") + pl.col("close")) / 5).alias("ma5"),
+        ((pl.col("_ma10_partial_sum") + pl.col("close")) / 10).alias("ma10"),
+        ((pl.col("_ma20_partial_sum") + pl.col("close")) / 20).alias("ma20"),
+        ((pl.col("_ma30_partial_sum") + pl.col("close")) / 30).alias("ma30"),
+        ((pl.col("_ma60_partial_sum") + pl.col("close")) / 60).alias("ma60"),
     ])
 
     # ---- Bollinger ----
     boll_sum = pl.col("_boll_partial_sum") + pl.col("close")
     boll_sq_sum = pl.col("_boll_partial_sq_sum") + pl.col("close") ** 2
     boll_ma = boll_sum / 20
-    boll_var = (boll_sq_sum - boll_sum ** 2 / 20) / 19
-    boll_std = pl.max_horizontal(boll_var, pl.lit(0.0)).sqrt()
+    boll_var = boll_sq_sum / 20 - boll_ma ** 2
+    boll_std = pl.when(boll_var > 0).then(boll_var.sqrt()).otherwise(0.0)
     df = df.with_columns([
-        pl.when(history_len >= 19).then(boll_ma + 2 * boll_std).otherwise(None).alias("boll_upper"),
-        pl.when(history_len >= 19).then(boll_ma - 2 * boll_std).otherwise(None).alias("boll_lower"),
+        (boll_ma + 2 * boll_std).alias("boll_upper"),
+        (boll_ma - 2 * boll_std).alias("boll_lower"),
     ])
 
     # ---- KDJ (递推) ----
     kdj_ln = pl.min_horizontal(pl.col("_kdj_8d_low"), pl.col("low"))
     kdj_hn = pl.max_horizontal(pl.col("_kdj_8d_high"), pl.col("high"))
-    kdj_range = kdj_hn - kdj_ln
-    rsv = pl.when(kdj_range == 0).then(50.0).otherwise((pl.col("close") - kdj_ln) / kdj_range * 100)
-    k_today = pl.when(pl.col("kdj_k").is_null()).then(rsv).otherwise(
-        rsv / 3 + pl.col("kdj_k") * 2 / 3
-    )
-    d_today = pl.when(pl.col("kdj_d").is_null()).then(k_today).otherwise(
-        k_today / 3 + pl.col("kdj_d") * 2 / 3
-    )
+    rsv = (pl.col("close") - kdj_ln) / (kdj_hn - kdj_ln).fill_null(1e-12) * 100
+    k_today = rsv / 3 + pl.col("kdj_k") * 2 / 3
+    d_today = k_today / 3 + pl.col("kdj_d") * 2 / 3
     df = df.with_columns([
-        pl.when(history_len >= 8).then(k_today).otherwise(None).alias("kdj_k"),
-        pl.when(history_len >= 8).then(d_today).otherwise(None).alias("kdj_d"),
-        pl.when(history_len >= 8).then(3 * k_today - 2 * d_today).otherwise(None).alias("kdj_j"),
+        k_today.alias("kdj_k"),
+        d_today.alias("kdj_d"),
+        (3 * k_today - 2 * d_today).alias("kdj_j"),
     ])
 
     # ---- ATR (递推) ----
@@ -1868,41 +1815,48 @@ def compute_enriched_today(
     else:
         time_factor = 1.0  # 盘后/无效时间: 不折算(此时 volume 已是全天量)
     df = df.with_columns([
-        pl.when(history_len >= 4).then(vol_ma5).otherwise(None).alias("vol_ma5"),
-        pl.when(history_len >= 9).then(vol_ma10).otherwise(None).alias("vol_ma10"),
-        pl.when(history_len >= 5).then((pl.col("volume") * time_factor) / vol_ma5_prev).otherwise(None).alias("vol_ratio_5d"),
+        vol_ma5.alias("vol_ma5"),
+        vol_ma10.alias("vol_ma10"),
+        ((pl.col("volume") * time_factor) / vol_ma5_prev).alias("vol_ratio_5d"),
     ])
 
     # ---- 极值 60 日 ----
     df = df.with_columns([
-        pl.when(has_history_state & (history_len >= 59))
-          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("close")))
+        pl.when(has_history_state)
+          .then(pl.max_horizontal(pl.col("_high_59d"), pl.col("high")))
           .otherwise(None)
           .alias("high_60d"),
-        pl.when(has_history_state & (history_len >= 59))
-          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("close")))
+        pl.when(has_history_state)
+          .then(pl.min_horizontal(pl.col("_low_59d"), pl.col("low")))
           .otherwise(None)
           .alias("low_60d"),
     ])
 
     # ---- 动量 (5d/10d/20d/30d/60d) ----
     df = df.with_columns([
-        pl.when(history_len >= 5).then(pl.col("close") / pl.col("_close_5d_ago") - 1).otherwise(None).alias("momentum_5d"),
-        pl.when(history_len >= 10).then(pl.col("close") / pl.col("_close_10d_ago") - 1).otherwise(None).alias("momentum_10d"),
-        pl.when(history_len >= 20).then(pl.col("close") / pl.col("_close_20d_ago") - 1).otherwise(None).alias("momentum_20d"),
-        pl.when(history_len >= 30).then(pl.col("close") / pl.col("_close_30d_ago") - 1).otherwise(None).alias("momentum_30d"),
-        pl.when(history_len >= 60).then(pl.col("close") / pl.col("_close_60d_ago") - 1).otherwise(None).alias("momentum_60d"),
+        (pl.col("close") / pl.col("_close_5d_ago") - 1).alias("momentum_5d"),
+        (pl.col("close") / pl.col("_close_10d_ago") - 1).alias("momentum_10d"),
+        (pl.col("close") / pl.col("_close_20d_ago") - 1).alias("momentum_20d"),
+        (pl.col("close") / pl.col("_close_30d_ago") - 1).alias("momentum_30d"),
+        (pl.col("close") / pl.col("_close_60d_ago") - 1).alias("momentum_60d"),
     ])
+
+    # ---- 动量 3d (异动偏离 deviate_3d 用; 旧 live_agg 未带该状态时跳过, 偏离列自然置 null) ----
+    if "_close_3d_ago" in df.columns:
+        df = df.with_columns(
+            (pl.col("close") / pl.col("_close_3d_ago") - 1).alias("momentum_3d")
+        )
 
     # ---- 年化波动率 20d (递推) ----
     # 用 Welford 简化: sum + sum_sq of 19 historical returns + today's return
     today_ret = pl.col("close") / pl.col("prev_close") - 1
     total_sum = pl.col("_vol_19d_pct_sum").fill_null(0.0) + today_ret
     total_sq_sum = pl.col("_vol_19d_pct_sq_sum").fill_null(0.0) + today_ret ** 2
-    vol_var = (total_sq_sum - total_sum ** 2 / 20) / 19
+    vol_mean = total_sum / 20
+    vol_var = total_sq_sum / 20 - vol_mean ** 2
     df = df.with_columns(
-        pl.when(has_history_state & (history_len >= 20))
-          .then(pl.max_horizontal(vol_var, pl.lit(0.0)).sqrt() * (252 ** 0.5))
+        pl.when(has_history_state & (vol_var > 0))
+          .then(vol_var.sqrt() * (252 ** 0.5))
           .otherwise(None)
           .alias("annual_vol_20d"),
     )
@@ -2018,7 +1972,7 @@ def compute_enriched_today(
 def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) -> pl.DataFrame:
     """盘中增量版的涨跌停/换手率/炸板/连板计算。"""
     inst_cols = ["symbol"]
-    for c in ["total_shares", "float_shares", "limit_up", "limit_down"]:
+    for c in ["float_shares", "limit_up", "limit_down"]:
         if c in instruments.columns:
             inst_cols.append(c)
     if "as_of" in instruments.columns:
@@ -2135,10 +2089,10 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
         # 跌停翘板
         pl.when(no_price_limit)
           .then(False)
-          .when(valid_prev_raw | has_authoritative_down)
+          .when((valid_prev_raw | has_authoritative_down) & (pl.col("raw_low") > 0))
           .then(
               (~is_limit_down.fill_null(True))
-              & (pl.col("low") <= effective_limit_down + 0.005)
+              & (pl.col("raw_low") <= effective_limit_down + 0.005)
               & (pl.col("close") > pl.col("open"))
           ).otherwise(None).cast(pl.Boolean)
           .alias("signal_limit_down_recovery"),
@@ -2177,7 +2131,7 @@ def _compute_limit_signals_today(df: pl.DataFrame, instruments: pl.DataFrame) ->
     for c in df.columns:
         if c.endswith("_inst"):
             cleanup.append(c)
-    for c in ["name"]:
+    for c in ["name", "float_shares"]:
         if c in df.columns:
             cleanup.append(c)
     df = df.drop([c for c in cleanup if c in df.columns])

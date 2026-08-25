@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -33,7 +33,7 @@ from app.enriched_generation import (
     get_enriched_generation,
 )
 from app.market_time import cn_today
-from app.parquet import scan_enriched_parquet, scan_parquet_compat
+from app.parquet import scan_enriched_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +320,6 @@ class KlineRepository:
         self._live_agg_cache_date: date | None = None
         self._live_agg_check_date: date | None = None          # 上次跨日校验时的 today (快路径节流)
         self._instruments_cache: pl.DataFrame | None = None
-        self._instruments_mtime_ns: int | None = None
         self._historical_shares_cache: pl.DataFrame | None = None
         self._historical_shares_mtime_ns: int | None = None
         # 完整 enriched 历史 (含所有指标, 供 filter_history 策略使用)
@@ -499,7 +498,6 @@ class KlineRepository:
         self._live_agg_cache_date = None
         self._live_agg_check_date = None
         self._instruments_cache = None
-        self._instruments_mtime_ns = None
         self._index_instruments_cache = None
         self._etf_enriched_cache = None
         self._etf_enriched_cache_date = None
@@ -743,9 +741,6 @@ class KlineRepository:
         if self._enriched_history_cache is not None and not self._enriched_history_cache.is_empty():
             hist_all = self._enriched_history_cache
             if "date" in hist_all.columns and hist_all["date"].min() <= start_60d:
-                # 窗口聚合只需近期数据，但 EMA/MACD/RSI 必须从完整缓存递推，
-                # 否则每次建 live_agg 都会因截断起点改变指标值。
-                state_hist = hist_all
                 # 从历史缓存中提取所需列 (历史缓存已有指标列)
                 base_cols = [
                     "symbol", "date", "open", "high", "low", "close", "volume",
@@ -777,11 +772,9 @@ class KlineRepository:
             else:
                 df_hist = pl.DataFrame()
                 agg_a = pl.DataFrame()
-                state_hist = df_hist
         else:
             # 降级: 读 parquet + compute_indicators
             df_hist, agg_a = self._build_live_agg_from_parquet(latest, start_60d)
-            state_hist = df_hist
 
         if df_hist.is_empty():
             self._live_agg_cache = pl.DataFrame()
@@ -799,7 +792,7 @@ class KlineRepository:
         step = time.perf_counter()
         logger.info("live agg step start: ema state")
         df_ema = _last_available_rows(
-            state_hist.sort(["symbol", "date"]).with_columns([
+            df_hist.sort(["symbol", "date"]).with_columns([
                 pl.col("close").ewm_mean(alpha=_ema_alpha(12), adjust=False).over("symbol").alias("_ema12"),
                 pl.col("close").ewm_mean(alpha=_ema_alpha(26), adjust=False).over("symbol").alias("_ema26"),
             ]).select("symbol", "date", "_ema12", "_ema26"),
@@ -812,7 +805,7 @@ class KlineRepository:
         # 单独计算 RSI 状态列 (compute_indicators 内部会 drop 掉)
         step = time.perf_counter()
         logger.info("live agg step start: rsi state")
-        df_rsi_base = state_hist.sort(["symbol", "date"]).with_columns(
+        df_rsi_base = df_hist.sort(["symbol", "date"]).with_columns(
             pl.col("close").diff().over("symbol").alias("_daily_delta")
         )
         gain = pl.when(pl.col("_daily_delta") > 0).then(pl.col("_daily_delta")).otherwise(0.0)
@@ -909,9 +902,8 @@ class KlineRepository:
                 pl.col("close").tail(19).sum().alias("_boll_partial_sum"),
                 (pl.col("close").tail(19) ** 2).sum().alias("_boll_partial_sq_sum"),
 
-                # high_60d/low_60d 的批量口径是收盘价滚动极值。
-                pl.col("close").tail(59).max().alias("_high_59d"),
-                pl.col("close").tail(59).min().alias("_low_59d"),
+                pl.col("high").tail(59).max().alias("_high_59d"),
+                pl.col("low").tail(59).min().alias("_low_59d"),
 
                 # 异动偏离 deviate_3d 用 (与 5d/10d/30d 同语义: 尾部第 N 个收盘)
                 pl.col("close").tail(3).first().alias("_close_3d_ago"),
@@ -929,9 +921,7 @@ class KlineRepository:
                 pl.col("low").tail(8).min().alias("_kdj_8d_low"),
                 pl.col("high").tail(8).max().alias("_kdj_8d_high"),
 
-                # 60 日动量需要今日之前完整的 60 个收盘价；
-                # 其余 partial sum 仍按各自窗口单独取尾部。
-                pl.col("close").tail(60).len().alias("_window_len"),
+                pl.col("close").tail(59).len().alias("_window_len"),
             ])
         )
 
@@ -1082,18 +1072,9 @@ class KlineRepository:
     def _refresh_instruments(self) -> None:
         """加载 instruments 到内存。"""
         try:
-            paths = sorted(Path(self.store.data_dir / "instruments").glob("**/*.parquet"))
-            mtime_ns = max((path.stat().st_mtime_ns for path in paths), default=None)
-            if self._instruments_cache is not None and mtime_ns == self._instruments_mtime_ns:
-                return
-            if not paths:
-                self._instruments_cache = None
-                self._instruments_mtime_ns = None
-                return
-            df = scan_parquet_compat([str(path) for path in paths]).collect()
+            df = pl.scan_parquet(self._inst_glob).collect()
             if not df.is_empty():
                 self._instruments_cache = df
-                self._instruments_mtime_ns = mtime_ns
                 self._name_map_cache = None
                 logger.info("instruments 缓存已加载: %d 只", len(df))
         except Exception as e:  # noqa: BLE001
@@ -1284,8 +1265,9 @@ class KlineRepository:
         return self._live_agg_cache
 
     def get_instruments(self) -> pl.DataFrame:
-        """返回缓存的 instruments DataFrame，并在源文件变化后自动刷新。"""
-        self._refresh_instruments()
+        """返回缓存的 instruments DataFrame。如无缓存则懒加载。"""
+        if self._instruments_cache is None:
+            self._refresh_instruments()
         if self._instruments_cache is None:
             return pl.DataFrame()
         return self._instruments_cache
@@ -1556,213 +1538,6 @@ class KlineRepository:
             return self.get_etf_daily(symbol, start, end, columns)
         return pl.DataFrame()
 
-    def get_daily_asset_batch(
-        self,
-        asset_type: str,
-        symbols: list[str],
-        start: date,
-        end: date,
-        columns: list[str] | None = None,
-    ) -> pl.DataFrame:
-        """批量读取资产日K，保留旧的显式资产查询入口。"""
-        if not symbols:
-            return pl.DataFrame()
-        if asset_type == "stock":
-            return self.get_daily_batch(symbols, start, end, columns)
-        if asset_type not in {"etf", "index"}:
-            return pl.DataFrame()
-        pattern = self._etf_enriched_glob if asset_type == "etf" else self._index_enriched_glob
-        try:
-            frame = scan_enriched_parquet(pattern)
-            available = set(frame.collect_schema().names())
-            selected = [name for name in (columns or available) if name in available]
-            if "symbol" not in selected:
-                selected.insert(0, "symbol")
-            return (
-                frame.filter(
-                    pl.col("symbol").is_in(symbols)
-                    & (pl.col("date") >= start)
-                    & (pl.col("date") <= end)
-                )
-                .select(selected)
-                .sort(["date", "symbol"])
-                .collect(engine="streaming")
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("批量%s日K查询失败: %s", asset_type, exc)
-            return pl.DataFrame()
-
-    def _minute_parts(self, asset_type: str, start: date, end: date) -> list[str]:
-        root = self.store.data_dir / ("kline_etf_minute" if asset_type == "etf" else "kline_minute")
-        parts: list[str] = []
-        current = start
-        while current <= end:
-            path = root / f"date={current.isoformat()}" / "part.parquet"
-            if path.exists():
-                parts.append(str(path))
-            current += timedelta(days=1)
-        return parts
-
-    def _second_parts(self, start: date, end: date) -> list[str]:
-        root = self.store.data_dir / "kline_second"
-        parts: list[str] = []
-        current = start
-        while current <= end:
-            path = root / f"date={current.isoformat()}" / "part.parquet"
-            if path.exists():
-                parts.append(str(path))
-            current += timedelta(days=1)
-        return parts
-
-    def _tick_parts(self, start: date, end: date) -> list[str]:
-        root = self.store.data_dir / "tick"
-        parts: list[str] = []
-        current = start
-        while current <= end:
-            path = root / f"date={current.isoformat()}" / "part.parquet"
-            if path.exists():
-                parts.append(str(path))
-            current += timedelta(days=1)
-        return parts
-
-    @staticmethod
-    def _tick_columns(frame: pl.LazyFrame) -> tuple[list[str], bool] | None:
-        available = set(frame.collect_schema().names())
-        if not {"symbol", "datetime"}.issubset(available):
-            return None
-        price_column = "last_price" if "last_price" in available else "close" if "close" in available else None
-        if price_column is None:
-            return None
-        columns = [
-            name for name in (
-                "symbol", "datetime", price_column, "prev_close", "open", "high", "low",
-                "volume", "amount", "limit_up", "limit_down", "suspended",
-                "source", "sequence", "trade_id", "source_order",
-            ) if name in available
-        ]
-        return columns, price_column == "last_price"
-
-    def get_tick_range(
-        self,
-        symbols: list[str],
-        start: date,
-        end: date,
-        asset_type: str = "stock",
-        *,
-        after: datetime | None = None,
-        until: datetime | None = None,
-    ) -> pl.DataFrame:
-        """读取原始 tick，不从分钟K或其他K线降级。"""
-        if asset_type != "stock" or not symbols:
-            return pl.DataFrame()
-        parts = self._tick_parts(start, end)
-        if not parts:
-            return pl.DataFrame()
-        try:
-            frame = scan_parquet_compat(parts)
-            tick_info = self._tick_columns(frame)
-            if tick_info is None:
-                return pl.DataFrame()
-            columns, uses_last_price = tick_info
-            predicate = (
-                pl.col("symbol").is_in(symbols)
-                & (pl.col("datetime").dt.date() >= start)
-                & (pl.col("datetime").dt.date() <= end)
-            )
-            if after is not None:
-                predicate &= pl.col("datetime") > after
-            if until is not None:
-                predicate &= pl.col("datetime") <= until
-            result = frame.select(columns).filter(predicate)
-            result = result.with_columns(
-                (pl.col("last_price").alias("close") if uses_last_price
-                 else pl.col("close").alias("last_price"))
-            )
-            for field in ("open", "high", "low"):
-                if field not in result.collect_schema().names():
-                    result = result.with_columns(pl.col("last_price").alias(field))
-            sort_columns = [
-                column for column in ("datetime", "symbol", "source_order", "sequence", "trade_id")
-                if column in result.collect_schema().names()
-            ]
-            return result.sort(sort_columns, maintain_order=True).collect(engine="streaming")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("tick行情查询失败: %s", exc)
-            return pl.DataFrame()
-
-    def get_tick_snapshot(self, symbols: list[str], at: datetime, asset_type: str = "stock") -> pl.DataFrame:
-        frame = self.get_tick_range(symbols, at.date(), at.date(), asset_type, until=at)
-        if frame.is_empty():
-            return frame
-        sort_columns = [column for column in ("symbol", "datetime", "source_order", "sequence", "trade_id") if column in frame.columns]
-        return frame.sort(sort_columns, maintain_order=True).group_by("symbol", maintain_order=True).tail(1).sort(["datetime", "symbol"], maintain_order=True)
-
-    def get_tick_next(self, symbols: list[str], after: datetime, until: datetime, asset_type: str = "stock") -> pl.DataFrame:
-        frame = self.get_tick_range(symbols, after.date(), until.date(), asset_type, after=after, until=until)
-        if frame.is_empty():
-            return frame
-        sort_columns = [column for column in ("symbol", "datetime", "source_order", "sequence", "trade_id") if column in frame.columns]
-        return frame.sort(sort_columns, maintain_order=True).group_by("symbol", maintain_order=True).head(1).sort(["datetime", "symbol"], maintain_order=True)
-
-    def get_tick_symbols(self, start: date, end: date) -> set[str]:
-        parts = self._tick_parts(start, end)
-        if not parts:
-            return set()
-        try:
-            frame = scan_parquet_compat(parts)
-            if "symbol" not in frame.collect_schema().names():
-                return set()
-            return set(frame.select("symbol").unique().collect(engine="streaming")["symbol"].to_list())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("tick标的查询失败: %s", exc)
-            return set()
-
-    def get_second_range(
-        self,
-        symbols: list[str],
-        start: date,
-        end: date,
-        asset_type: str = "stock",
-        *,
-        after: datetime | None = None,
-        until: datetime | None = None,
-    ) -> pl.DataFrame:
-        if asset_type != "stock" or not symbols:
-            return pl.DataFrame()
-        parts = self._second_parts(start, end)
-        if not parts:
-            return pl.DataFrame()
-        try:
-            frame = scan_parquet_compat(parts)
-            available = set(frame.collect_schema().names())
-            columns = [name for name in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if name in available]
-            required = {"symbol", "datetime", "open", "high", "low", "close"}
-            if not required.issubset(columns):
-                return pl.DataFrame()
-            predicate = pl.col("symbol").is_in(symbols) & (pl.col("datetime").dt.date() >= start) & (pl.col("datetime").dt.date() <= end)
-            if after is not None:
-                predicate &= pl.col("datetime") > after
-            if until is not None:
-                predicate &= pl.col("datetime") <= until
-            return frame.select(columns).filter(predicate).sort(["datetime", "symbol"]).collect(engine="streaming")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("秒K行情查询失败: %s", exc)
-            return pl.DataFrame()
-
-    def get_second_snapshot(self, symbols: list[str], at: datetime, asset_type: str = "stock") -> pl.DataFrame:
-        frame = self.get_second_range(symbols, at.date(), at.date(), asset_type, until=at)
-        if frame.is_empty():
-            return frame
-        return frame.sort(["symbol", "datetime"]).group_by("symbol", maintain_order=True).tail(1).sort(["datetime", "symbol"])
-
-    def get_second_next(self, symbols: list[str], after: datetime, until: datetime, asset_type: str = "stock") -> pl.DataFrame:
-        frame = self.get_second_range(symbols, after.date(), until.date(), asset_type, after=after, until=until)
-        if frame.is_empty():
-            return frame
-        if "volume" in frame.columns:
-            frame = frame.filter(pl.col("volume") > 0)
-        return frame.sort(["symbol", "datetime"]).group_by("symbol", maintain_order=True).head(1).sort(["datetime", "symbol"])
-
     def _minute_glob_for(self, asset_type: str) -> str:
         """按资产类型选择分钟K parquet glob。ETF 分钟数据独立存储于 kline_etf_minute。"""
         return self._etf_minute_glob if asset_type == "etf" else self._minute_glob
@@ -1775,7 +1550,7 @@ class KlineRepository:
     ) -> pl.DataFrame:
         """分钟K查询 — Polars scan_parquet + predicate pushdown。"""
         try:
-            return scan_parquet_compat(self._minute_glob_for(asset_type)).filter(
+            return pl.scan_parquet(self._minute_glob_for(asset_type)).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort("datetime").collect()
@@ -1797,7 +1572,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            return scan_parquet_compat(self._minute_glob_for(asset_type)).filter(
+            return pl.scan_parquet(self._minute_glob_for(asset_type)).filter(
                 pl.col("symbol").is_in(symbols)
                 & (pl.col("datetime").dt.date() == trade_date)
             ).sort(["symbol", "datetime"]).collect()
@@ -1820,10 +1595,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            parts = self._minute_parts(asset_type, start, end)
-            if not parts:
-                return pl.DataFrame()
-            lf = scan_parquet_compat(parts)
+            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             return (
@@ -1868,7 +1640,7 @@ class KlineRepository:
         if not parts:
             return pl.DataFrame()
         try:
-            lf = scan_parquet_compat(parts)
+            lf = pl.scan_parquet(parts)
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             return (
@@ -1880,90 +1652,6 @@ class KlineRepository:
         except Exception as e:  # noqa: BLE001
             logger.warning("分钟K按日期查询失败: %s", e)
             return pl.DataFrame()
-
-    def get_minute_snapshot(
-        self,
-        symbols: list[str],
-        at: datetime,
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
-        if not symbols:
-            return pl.DataFrame()
-        parts = self._minute_parts(asset_type, at.date(), at.date())
-        if not parts:
-            return pl.DataFrame()
-        try:
-            frame = scan_parquet_compat(parts)
-            available = set(frame.collect_schema().names())
-            columns = [name for name in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if name in available]
-            return (
-                frame.select(columns)
-                .filter(pl.col("symbol").is_in(symbols) & (pl.col("datetime") <= at))
-                .with_columns(pl.col("volume").sum().over("symbol").alias("session_volume"))
-                .sort(["symbol", "datetime"])
-                .group_by("symbol", maintain_order=True)
-                .tail(1)
-                .sort(["datetime", "symbol"])
-                .collect(engine="streaming")
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("分钟K时点快照查询失败: %s", exc)
-            return pl.DataFrame()
-
-    def get_minute_next(
-        self,
-        symbols: list[str],
-        after: datetime,
-        until: datetime,
-        asset_type: str = "stock",
-    ) -> pl.DataFrame:
-        if not symbols or until <= after:
-            return pl.DataFrame()
-        parts = self._minute_parts(asset_type, after.date(), until.date())
-        if not parts:
-            return pl.DataFrame()
-        try:
-            frame = scan_parquet_compat(parts)
-            available = set(frame.collect_schema().names())
-            columns = [name for name in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if name in available]
-            return (
-                frame.select(columns)
-                .filter(
-                    pl.col("symbol").is_in(symbols)
-                    & (pl.col("datetime") > after)
-                    & (pl.col("datetime") <= until)
-                    & (pl.col("volume") > 0)
-                )
-                .sort(["symbol", "datetime"])
-                .group_by("symbol", maintain_order=True)
-                .head(1)
-                .sort(["datetime", "symbol"])
-                .collect(engine="streaming")
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("下一根分钟K查询失败: %s", exc)
-            return pl.DataFrame()
-
-    def get_minute_symbols(self, asset_type: str, start: date, end: date) -> set[str]:
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
-        parts = []
-        for offset in range((end - start).days + 1):
-            day = start + timedelta(days=offset)
-            path = f"{base}/date={day.isoformat()}/part.parquet"
-            if Path(path).exists():
-                parts.append(path)
-        if not parts:
-            return []
-        try:
-            return set(
-                scan_parquet_compat(parts)
-                .select("symbol")
-                .unique()
-                .collect(engine="streaming")["symbol"]
-                .to_list()
-            )
-        except Exception:  # noqa: BLE001
-            return []
 
     # ================================================================
     # Polars 查询内部方法
@@ -2017,26 +1705,9 @@ class KlineRepository:
             df = df.select(existing)
         return df.sort(["symbol", "date"])
 
-    def _enriched_parts(self, start: date, end: date) -> list[str]:
-        root = self.store.data_dir / "kline_daily_enriched"
-        parts: list[str] = []
-        current = start
-        while current <= end:
-            path = root / f"date={current.isoformat()}" / "part.parquet"
-            if path.exists():
-                parts.append(str(path))
-            current += timedelta(days=1)
-        if parts:
-            return parts
-        # Legacy single-file stores have no date partition to enumerate.
-        return [str(path) for path in root.glob("*.parquet")]
-
     def _scan_daily_symbol(self, symbol: str, start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            parts = self._enriched_parts(start, end)
-            if not parts:
-                return pl.DataFrame()
-            lf = scan_enriched_parquet(parts,
+            lf = scan_enriched_parquet(self._enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol") == symbol)
                 & (pl.col("date") >= start)
@@ -2053,10 +1724,7 @@ class KlineRepository:
 
     def _scan_daily_batch(self, symbols: list[str], start: date, end: date, columns: list[str] | None) -> pl.DataFrame:
         try:
-            parts = self._enriched_parts(start, end)
-            if not parts:
-                return pl.DataFrame()
-            lf = scan_enriched_parquet(parts,
+            lf = scan_enriched_parquet(self._enriched_glob,
                                  cast_options=pl.ScanCastOptions(integer_cast="allow-float")).filter(
                 (pl.col("symbol").is_in(symbols))
                 & (pl.col("date") >= start)

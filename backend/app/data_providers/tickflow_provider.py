@@ -9,12 +9,11 @@ import polars as pl
 
 from app.data_providers.base import AssetType, ProviderCapabilities
 from app.data_providers.normalizer import normalize_adj_factors, normalize_daily, normalize_instruments
-from app.tickflow.catalog import DEFAULT_CN_EXCHANGES, list_cn_exchanges
 from app.tickflow.client import get_client
 
 logger = logging.getLogger(__name__)
 
-_EXCHANGES = list(DEFAULT_CN_EXCHANGES)
+_EXCHANGES = ["SH", "SZ", "BJ"]
 
 
 class TickFlowProvider:
@@ -24,7 +23,6 @@ class TickFlowProvider:
         daily=True,
         adj_factor=True,
         minute=True,
-        tick=False,
         realtime=True,
         financial=True,
     )
@@ -33,7 +31,7 @@ class TickFlowProvider:
         tf = get_client()
         instrument_type = "stock" if asset_type == "stock" else asset_type
         rows: list[dict] = []
-        for ex in list_cn_exchanges(tf, tuple(_EXCHANGES)):
+        for ex in _EXCHANGES:
             try:
                 items = tf.exchanges.get_instruments(ex, instrument_type=instrument_type)
                 rows.extend([it for it in (items or []) if isinstance(it, dict)])
@@ -122,13 +120,3 @@ class TickFlowProvider:
         else:
             return pl.DataFrame()
         return pl.DataFrame(resp or [])
-
-    def get_tick(
-        self,
-        symbols: list[str],  # noqa: ARG002
-        start_time: datetime | None,  # noqa: ARG002
-        end_time: datetime | None,  # noqa: ARG002
-        asset_type: AssetType,  # noqa: ARG002
-    ) -> pl.DataFrame:
-        """TickFlow provider currently has no canonical historical Tick endpoint."""
-        return pl.DataFrame()

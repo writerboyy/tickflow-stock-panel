@@ -14,8 +14,6 @@ def _make_svc(engine_rules: dict) -> QuoteService:
     svc._app_state = MagicMock()
     svc._repo = MagicMock()
     svc._lock = MagicMock()
-    svc._symbol_consumers = {}
-    svc._latest_quotes = {}
 
     engine = MagicMock()
     engine.rules = engine_rules

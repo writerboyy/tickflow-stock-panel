@@ -12,7 +12,7 @@ export function getOcrInstallHint(): string {
       'OCR 引擎不可用：请安装 Tesseract 后重试。',
       '',
       'Windows：',
-      '• 下载 UB Mannheim 发行版并安装（勾选简体中文语言和 PATH）',
+      '• 下载 UB Mannheim 发行版并安装（勾选将 tesseract 加入 PATH）',
       '• 或执行：choco install tesseract',
       '',
       '安装后重启应用。',
@@ -24,7 +24,7 @@ export function getOcrInstallHint(): string {
       'OCR 引擎不可用：请安装 Tesseract 后重试。',
       '',
       'macOS：',
-      '• 执行：brew install tesseract tesseract-lang',
+      '• 执行：brew install tesseract',
       '',
       '安装后重启应用。',
     ].join('\n')
@@ -33,7 +33,7 @@ export function getOcrInstallHint(): string {
   return [
     'OCR 引擎不可用：请安装 Tesseract 后重试。',
     '',
-    'Linux：安装 tesseract-ocr、tesseract-ocr-chi-sim（包名以发行版为准）',
+    'Linux：安装 tesseract-ocr（及语言包）',
     'Docker：官方镜像已内置，请确认使用对应镜像。',
     '',
     '安装后重启应用。',

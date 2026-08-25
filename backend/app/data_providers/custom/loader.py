@@ -1,4 +1,4 @@
-"""Load approved built-in data source plugins."""
+"""Load custom data source definitions from user data files."""
 from __future__ import annotations
 
 import importlib
@@ -16,6 +16,8 @@ from app.data_providers.custom.config import (
     DEFAULT_TIMEOUT,
     MAX_TIMEOUT,
     CustomSourceConfig,
+    config_from_dict,
+    load_config,
 )
 from app.data_providers.custom.provider import GenericHTTPProvider
 
@@ -41,7 +43,7 @@ def data_sources_dir() -> Path:
 
 
 def load_all(path: Path | None = None) -> None:
-    """Load approved built-in plugins into process memory."""
+    """Load all custom provider YAML files into process memory."""
     global _PROVIDERS, _LOAD_ERRORS
     for provider in _PROVIDERS.values():
         provider.close()
@@ -50,8 +52,21 @@ def load_all(path: Path | None = None) -> None:
 
     base = path or data_sources_dir()
     base.mkdir(parents=True, exist_ok=True)
+    for file in sorted([*base.glob("*.yaml"), *base.glob("*.yml")]):
+        try:
+            config = load_config(file)
+            provider = GenericHTTPProvider(config)
+            errors = provider.validate()
+            if errors:
+                _LOAD_ERRORS.append({"path": str(file), "name": config.name, "errors": errors})
+                provider.close()
+                continue
+            _PROVIDERS[config.name] = provider
+        except Exception as e:  # noqa: BLE001
+            logger.warning("custom data source load failed %s: %s", file, e)
+            _LOAD_ERRORS.append({"path": str(file), "errors": [str(e)]})
 
-    # 内置可选插件 (plugins/ 目录)。缺依赖只记状态不报错。
+    # 内置可选插件 (plugins/ 目录)。与用户 YAML 源独立, 缺依赖只记状态不报错。
     _load_builtin_plugins()
 
 
@@ -152,7 +167,7 @@ def install_plugin(name: str) -> tuple[bool, str]:
             # 装错环境并 exit 2 (访问拒绝)。--python 锁定后端自身 venv, 与 pip
             # 回退路径 (sys.executable -m pip) 的目标一致。
             # uv 容错: 用户全局 uv.toml 配置错误时 exit 2, 回退 --no-config 重试。
-            # UV_HTTP_TIMEOUT=300: 部分依赖包较大，默认 30s 不够。
+            # UV_HTTP_TIMEOUT=300: akshare 等含大包(如 mini-racer 14MB), 默认 30s 不够。
             req = pdir / "requirements.txt"
             if not req.exists():
                 return False, "Python 型插件需要 requirements.txt"
@@ -273,8 +288,14 @@ def get_provider(name: str) -> GenericHTTPProvider:
 
 
 def create_provider(config: dict) -> GenericHTTPProvider:
-    """Reject temporary user-defined HTTP providers."""
-    raise ValueError("user custom HTTP data sources are disabled")
+    """Build a validated temporary provider without writing or registering it."""
+    parsed = config_from_dict(_sanitize_for_yaml(config))
+    provider = GenericHTTPProvider(parsed)
+    errors = provider.validate()
+    if errors:
+        provider.close()
+        raise ValueError("; ".join(errors))
+    return provider
 
 
 def is_custom_provider(name: str) -> bool:
@@ -337,17 +358,35 @@ def _config_to_dict(config: CustomSourceConfig) -> dict:
 
 
 def save_config(name: str, config: dict) -> Path:
-    """Reject persisted user-defined HTTP providers."""
+    """把一份配置 dict 写成 data/data_sources/{name}.yaml, 返回写入路径。"""
     if is_builtin(name):
         raise ValueError(f"'{name}' 是内置插件, 不可编辑")
-    raise ValueError("user custom HTTP data sources are disabled")
+    if not _NAME_RE.match(name or ""):
+        raise ValueError(f"invalid data source name: {name!r} (only lowercase a-z 0-9 _ allowed)")
+    base = data_sources_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    path = (base / f"{name}.yaml").resolve()
+    if not path.is_relative_to(base.resolve()):
+        raise ValueError("invalid data source name: path escape detected")
+    cleaned = _sanitize_for_yaml(config)
+    path.write_text(yaml.safe_dump(cleaned, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path
 
 
 def delete_config(name: str) -> bool:
-    """Reject deletion through the disabled user-defined HTTP provider path."""
+    """删除 data/data_sources/{name}.yaml。返回是否真的删除了。"""
     if is_builtin(name):
         raise ValueError(f"'{name}' 是内置插件, 不可删除")
-    raise ValueError("user custom HTTP data sources are disabled")
+    if not _NAME_RE.match(name or ""):
+        raise ValueError(f"invalid data source name: {name!r}")
+    base = data_sources_dir().resolve()
+    path = (base / f"{name}.yaml").resolve()
+    if not path.is_relative_to(base):
+        raise ValueError("invalid data source name: path escape detected")
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
 
 
 def _sanitize_for_yaml(config: dict) -> dict:

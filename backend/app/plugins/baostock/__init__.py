@@ -1,1 +1,0 @@
-"""BaoStock supplemental reference collectors."""

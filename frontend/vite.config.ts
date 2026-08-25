@@ -10,8 +10,6 @@ const backendTarget = `http://${proxyHost}:${backendPort}`
 export default defineConfig({
   plugins: [react()],
   resolve: {
-    // Keep hooks from dependencies on the same React runtime as the app.
-    dedupe: ['react', 'react-dom'],
     alias: {
       '@': path.resolve(__dirname, './src'),
     },

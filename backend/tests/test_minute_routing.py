@@ -12,17 +12,15 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 from __future__ import annotations
 
 from datetime import date, datetime
-import json
+from threading import Lock
 from unittest.mock import MagicMock
 
 import httpx
 import polars as pl
-import pytest
 
 from app.plugins.stocksdk import provider as sp
 from app.plugins.stocksdk.provider import StockSDKProvider
 from app.services import kline_sync
-from app.tickflow.repository import DataStore, KlineRepository
 
 
 # ---------- 辅助 ----------
@@ -61,170 +59,6 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
         "app.data_providers.custom.get_provider",
         lambda name: provider,
     )
-
-
-def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
-    """TickFlow epoch 01:35 UTC 必须以 09:35 北京时间存储。"""
-    raw = pl.DataFrame({
-        "symbol": ["510300.SH"],
-        "timestamp": [1779327300000],
-        "open": [4.0], "high": [4.1], "low": [3.9], "close": [4.05],
-        "volume": [100.0], "amount": [405.0],
-    })
-    normalized = kline_sync._normalize_minute(raw)
-    value = normalized["datetime"][0]
-    assert (value.hour, value.minute) == (9, 35)
-
-
-def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path):
-    minute_dir = tmp_path / "kline_etf_minute"
-    frame = pl.DataFrame({
-        "symbol": ["510300.SH", "159509.SZ"],
-        "datetime": [datetime(2026, 7, 21, 9, 30), datetime(2026, 7, 21, 9, 30)],
-        "open": [4.0, None],
-        "high": [4.05 - 1e-13, None],
-        "low": [4.0 + 1e-13, None],
-        "close": [4.05, None],
-        "volume": [100.0, 100.0],
-        "amount": [405.0, 0.0],
-    })
-
-    written = kline_sync._write_minute_partition(frame, minute_dir)
-    stored = pl.read_parquet(minute_dir / "date=2026-07-21" / "part.parquet")
-
-    assert written == 1
-    assert stored["symbol"].to_list() == ["510300.SH"]
-    assert stored["high"][0] == 4.05
-    assert stored["low"][0] == 4.0
-    coverage = json.loads(
-        (minute_dir / "_coverage" / "date=2026-07-21.json").read_text(encoding="utf-8")
-    )
-    assert coverage["symbols"] == 1
-    assert coverage["complete_symbols"] == 0
-    assert coverage["incoming_rows"] == 2
-    assert coverage["rejected_rows"] == 1
-    assert coverage["groups"] == [
-        {"bars": 1, "complete": False, "symbol": "510300.SH"}
-    ]
-
-
-def test_write_minute_partition_records_all_rejected_day_without_fake_rows(tmp_path):
-    minute_dir = tmp_path / "kline_minute"
-    frame = pl.DataFrame({
-        "symbol": ["600000.SH"],
-        "datetime": [datetime(2026, 7, 21, 9, 31)],
-        "open": [None],
-        "high": [None],
-        "low": [None],
-        "close": [None],
-        "volume": [0.0],
-        "amount": [0.0],
-    })
-
-    assert kline_sync._write_minute_partition(frame, minute_dir) == 0
-    assert not (minute_dir / "date=2026-07-21" / "part.parquet").exists()
-    coverage = json.loads(
-        (minute_dir / "_coverage" / "date=2026-07-21.json").read_text(encoding="utf-8")
-    )
-    assert coverage["incoming_rows"] == 1
-    assert coverage["rejected_rows"] == 1
-    assert coverage["complete_symbols"] == 0
-
-
-def test_write_minute_partition_cleans_existing_rows_when_merging(tmp_path):
-    minute_dir = tmp_path / "kline_etf_minute"
-    partition = minute_dir / "date=2026-07-21" / "part.parquet"
-    partition.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["159509.SZ"],
-        "datetime": [datetime(2026, 7, 21, 9, 30)],
-        "open": [None], "high": [None], "low": [None], "close": [None],
-        "volume": [0.0], "amount": [0.0],
-    }).write_parquet(partition)
-
-    written = kline_sync._write_minute_partition(
-        _mock_minute_df("510300.SH").with_columns(
-            pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
-        ),
-        minute_dir,
-    )
-    stored = pl.read_parquet(partition)
-
-    assert written == 1
-    assert stored["symbol"].to_list() == ["510300.SH"]
-
-
-def test_write_minute_partition_merges_columns_by_name(tmp_path):
-    minute_dir = tmp_path / "kline_etf_minute"
-    partition = minute_dir / "date=2026-07-21" / "part.parquet"
-    partition.parent.mkdir(parents=True)
-    existing = _mock_minute_df("510300.SH").with_columns(
-        pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
-    )
-    existing.write_parquet(partition)
-    incoming = _mock_minute_df("159509.SZ").with_columns(
-        pl.lit(datetime(2026, 7, 21, 9, 31)).alias("datetime"),
-    ).select(sorted(existing.columns))
-
-    written = kline_sync._write_minute_partition(incoming, minute_dir)
-    stored = pl.read_parquet(partition)
-
-    assert written == 2
-    assert stored["symbol"].to_list() == ["159509.SZ", "510300.SH"]
-    assert stored.select(existing.columns).columns == existing.columns
-
-
-def test_scheduled_minute_queries_read_only_explicit_date_partitions(tmp_path, monkeypatch):
-    rows = pl.DataFrame({
-        "symbol": ["600519.SH", "600519.SH", "600519.SH", "600519.SH", "000001.SZ"],
-        "datetime": [
-            datetime(2026, 1, 15, 9, 59),
-            datetime(2026, 1, 15, 10, 0),
-            datetime(2026, 1, 15, 10, 1),
-            datetime(2026, 1, 15, 10, 2),
-            datetime(2026, 1, 15, 10, 0),
-        ],
-        "open": [99.0, 100.0, 101.0, 102.0, 10.0],
-        "high": [99.0, 100.0, 101.0, 102.0, 10.0],
-        "low": [99.0, 100.0, 101.0, 102.0, 10.0],
-        "close": [99.0, 100.0, 101.0, 102.0, 10.0],
-        "volume": [40.0, 60.0, 0.0, 100.0, 100.0],
-        "amount": [3_960.0, 6_000.0, 0.0, 10_200.0, 1_000.0],
-    })
-    target = tmp_path / "kline_minute" / "date=2026-01-15" / "part.parquet"
-    target.parent.mkdir(parents=True)
-    rows.write_parquet(target)
-    repo = KlineRepository(DataStore(tmp_path))
-    unrelated = tmp_path / "kline_minute" / "date=2026-01-16" / "part.parquet"
-    unrelated.parent.mkdir(parents=True)
-    unrelated.write_bytes(b"")
-
-    scanned: list[list[str]] = []
-    original_scan = pl.scan_parquet
-
-    def recording_scan(source, *args, **kwargs):
-        values = [str(item) for item in source] if isinstance(source, list) else [str(source)]
-        scanned.append(values)
-        return original_scan(source, *args, **kwargs)
-
-    monkeypatch.setattr(pl, "scan_parquet", recording_scan)
-
-    available = repo.get_minute_symbols("stock", date(2026, 1, 15), date(2026, 1, 15))
-    snapshot = repo.get_minute_snapshot(
-        ["600519.SH"], datetime(2026, 1, 15, 10, 0, 30), "stock",
-    )
-    following = repo.get_minute_next(
-        ["600519.SH"],
-        datetime(2026, 1, 15, 10, 0),
-        datetime(2026, 1, 15, 10, 3),
-        "stock",
-    )
-
-    assert available == {"600519.SH", "000001.SZ"}
-    assert snapshot["close"].to_list() == [100.0]
-    assert snapshot["session_volume"].to_list() == [100.0]
-    assert following["close"].to_list() == [102.0]
-    assert scanned == [[str(target)], [str(target)], [str(target)]]
 
 
 # ---------- 测试 1: 自定义源成功返回 1 分钟 K ----------
@@ -534,82 +368,6 @@ def test_sync_minute_batch_custom_empty_df_skips_on_segment(monkeypatch):
     assert df.is_empty()
 
 
-def test_sync_minute_batch_stops_before_fetch_when_cancelled(monkeypatch):
-    """取消信号必须阻止下一批请求,避免已失败任务继续后台取数。"""
-    monkeypatch.setattr(kline_sync, "_try_custom_minute", lambda *a, **kw: (None, True))
-    client = MagicMock()
-    monkeypatch.setattr(kline_sync, "get_client", lambda: client)
-
-    with pytest.raises(kline_sync.MinuteSyncCancelled):
-        kline_sync.sync_minute_batch(
-            ["600519.SH"],
-            start_time=datetime(2025, 1, 1),
-            end_time=datetime(2025, 1, 2),
-            batch_size=1,
-            should_cancel=lambda: True,
-        )
-
-    client.klines.batch.assert_not_called()
-
-
-def test_minute_segment_progress_label_includes_year(monkeypatch):
-    """跨年补历史时日志必须显示年份,避免把不同年份误认成重复区间。"""
-    monkeypatch.setattr(kline_sync, "_try_custom_minute", lambda *a, **kw: (None, True))
-    client = MagicMock()
-    client.klines.batch.return_value = None
-    monkeypatch.setattr(kline_sync, "get_client", lambda: client)
-    labels = []
-
-    kline_sync.sync_minute_batch(
-        ["600519.SH"],
-        start_time=datetime(2025, 1, 1),
-        end_time=datetime(2025, 1, 2),
-        batch_size=1,
-        on_chunk_done=lambda _done, _total, label: labels.append(label),
-    )
-
-    assert labels == ["2025-01-01~2025-01-02"]
-
-
-def test_one_year_minute_request_uses_trading_days():
-    """UI 旧请求 days=365 应归一为约一年的 250 个交易日。"""
-    from app.api import kline as kline_api
-
-    assert kline_api._normalize_minute_sync_request(365, False) == (250, True)
-    assert kline_api._normalize_minute_sync_request(20, True) == (20, True)
-    assert kline_api._normalize_minute_sync_request(5, False) == (5, False)
-
-
-def test_latest_year_minute_sync_uses_latest_trade_date(monkeypatch, tmp_path):
-    """最近一年必须以最新交易日回溯 365 天,不从本地最早分钟数据继续向前。"""
-    monkeypatch.setattr(kline_sync.preferences, "get_minute_data_provider", lambda: "tickflow")
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
-    monkeypatch.setattr(
-        kline_sync,
-        "resolve_limit",
-        lambda *args, **kwargs: MagicMock(batch=100, rpm=30),
-    )
-    monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
-    sync_spy = MagicMock(return_value=pl.DataFrame())
-    monkeypatch.setattr(kline_sync, "sync_minute_batch", sync_spy)
-
-    repo = MagicMock()
-    repo.latest_daily_date.return_value = date(2026, 7, 24)
-    repo.store.data_dir = tmp_path
-    capset = MagicMock()
-    capset.has.return_value = True
-
-    written = kline_sync.sync_and_persist_minute(
-        ["600519.SH"], repo, capset, latest_year=True,
-    )
-
-    assert written == 0
-    kwargs = sync_spy.call_args.kwargs
-    assert kwargs["start_time"] == datetime(2025, 7, 24)
-    assert kwargs["end_time"] == datetime(2026, 7, 25)
-
-
 # ---------- 测试 12: sync_and_persist_minute + custom provider 端到端落盘 (Issue 1) ----------
 
 def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
@@ -622,9 +380,9 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
     # mock sync_and_persist_minute 内部依赖 (通过 monkeypatch kline_sync 模块属性)
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda *args: None)
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
 
@@ -654,40 +412,36 @@ def test_sync_and_persist_minute_custom_persists(monkeypatch, tmp_path):
     get_client_spy.assert_not_called()
 
 
-def test_sync_and_persist_etf_minute_uses_separate_storage(monkeypatch, tmp_path):
-    """ETF 分钟K必须写入 kline_etf_minute，且向数据源透传 asset_type。"""
-    expected_df = _mock_minute_df("510300.SH")
+def test_sync_and_persist_minute_holds_repository_write_lock(monkeypatch, tmp_path):
+    expected_df = _mock_minute_df()
     mock_provider = MagicMock()
     mock_provider.get_minute.return_value = expected_df
     _setup_custom_provider(monkeypatch, mock_provider, has_dataset=True)
 
-    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda *args: None)
-    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *args, **kwargs: MagicMock(batch=100, rpm=30))
+    monkeypatch.setattr(kline_sync, "_cleanup_null_datetime_minute", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_migrate_symbol_to_date_partition", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "_latest_minute_datetime", lambda repo: None)
+    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **kw: MagicMock(batch=100, rpm=30))
     monkeypatch.setattr(kline_sync.preferences, "get_minute_sync_segment_days", lambda: 20)
 
-    written_paths = []
+    write_lock = Lock()
 
-    def write_partition(df, path):
-        written_paths.append(path)
+    def assert_locked(df, minute_dir):
+        assert not write_lock.acquire(blocking=False)
         return df.height
 
-    monkeypatch.setattr(kline_sync, "_write_minute_partition", write_partition)
+    monkeypatch.setattr(kline_sync, "_write_minute_partition", assert_locked)
 
-    repo = MagicMock()
-    repo.store.data_dir = tmp_path
-    capset = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.store.data_dir = tmp_path
+    mock_repo.db.execute = MagicMock()
+    mock_repo._write_lock = write_lock
 
     written = kline_sync.sync_and_persist_minute(
-        ["510300.SH"], repo, capset, asset_type="etf",
+        ["600519.SH"], mock_repo, MagicMock(),
     )
 
     assert written == expected_df.height
-    assert written_paths == [tmp_path / "kline_etf_minute"]
-    _, kwargs = mock_provider.get_minute.call_args
-    assert kwargs["asset_type"] == "etf"
-    assert "kline_etf_minute" in repo.db.execute.call_args.args[0]
 
 
 # ---------- 测试 13: get_provider 异常时 fall through TickFlow (Issue 2) ----------
@@ -768,17 +522,6 @@ def _make_minute_config(**extra) -> CustomSourceConfig:
     )
 
 
-def _make_financial_config(**extra) -> CustomSourceConfig:
-    """构造带 financial dataset 的最小 CustomSourceConfig。"""
-    return CustomSourceConfig(
-        name="test_src",
-        display_name="Test Source",
-        datasets={"financial": DatasetConfig(
-            url="http://example.com/financial", field_map={"symbol": "symbol"}, **extra,
-        )},
-    )
-
-
 def _capture_request_rows(provider):
     """替换 _request_rows 为捕获 spy, 返回 captured dict。"""
     captured: dict = {}
@@ -828,17 +571,6 @@ def test_generic_http_get_minute_omits_params_when_not_configured():
     # override 为 None (空 dict → `override or None`), 不传上游
     assert captured["override_params"] is None
     assert captured["override_body"] is None
-
-
-def test_generic_http_get_financials_passes_latest_for_statement_tables():
-    """历史回测需要 custom financial 源能接收 latest=False。"""
-    provider = GenericHTTPProvider(_make_financial_config())
-    captured = _capture_request_rows(provider)
-
-    provider.get_financials("income", ["600519.SH"], latest_only=False)
-
-    assert captured["override_params"] == {"table": "income", "latest": False}
-    assert captured["override_body"] == {"table": "income", "latest": False}
 
 
 # ---------- 测试 18: sync_and_persist_minute resolver 异常时优雅返回 0 (观察项加固) ----------

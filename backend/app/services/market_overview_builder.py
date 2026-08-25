@@ -34,7 +34,6 @@ CORE_INDEX_NAMES = {
 CORE_INDEX_SYMBOLS = tuple(CORE_INDEX_NAMES.keys())
 
 _DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
-_OVERVIEW_INDUSTRY_CONFIG_ID = "ext_hy_ths"
 
 
 # ================================================================
@@ -94,8 +93,7 @@ def _quote_status(quote_service) -> dict:
 
 def _index_quotes(repo, quote_service, as_of: date | None = None) -> list[dict]:
     rows: list[dict] = []
-    has_fresh = getattr(quote_service, "has_fresh_index_quotes", lambda: True) if quote_service else None
-    if quote_service and as_of is None and has_fresh():
+    if quote_service and as_of is None:
         df = quote_service.get_index_quotes(list(CORE_INDEX_SYMBOLS))
         if not df.is_empty():
             rows = df.to_dicts()
@@ -261,8 +259,6 @@ def _dimension_rank(rows: list[dict], repo, kind: str, limit: int = 5, level: in
     store = ExtConfigStore(repo.store.data_dir)
     groups: dict[str, dict[str, dict]] = {}
     for config in store.load_all():
-        if kind == "industry" and config.id != _OVERVIEW_INDUSTRY_CONFIG_ID:
-            continue
         field = _dimension_field(config, kind)
         if not field:
             continue

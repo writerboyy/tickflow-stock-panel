@@ -22,7 +22,6 @@ class ProviderCapabilities:
     daily: bool = False
     adj_factor: bool = False
     minute: bool = False
-    tick: bool = False
     realtime: bool = False
     financial: bool = False
 
@@ -74,12 +73,3 @@ class MarketDataProvider(Protocol):
         symbols: list[str] | None = None,
     ) -> pl.DataFrame:
         """Return normalized realtime quotes. Implementations may return empty."""
-
-    def get_tick(
-        self,
-        symbols: list[str],
-        start_time: datetime | None,
-        end_time: datetime | None,
-        asset_type: AssetType,
-    ) -> pl.DataFrame:
-        """Return normalized stock ticks without aggregating to minute bars."""

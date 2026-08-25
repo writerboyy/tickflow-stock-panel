@@ -8,7 +8,6 @@ from functools import lru_cache
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field, model_validator
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
@@ -19,37 +18,6 @@ from app.services import kline_sync
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
-
-MINUTE_TRADING_DAYS_PER_YEAR = 250
-
-
-class EtfDataCheckWrite(BaseModel):
-    symbols: list[str] = Field(default_factory=list, max_length=2_000)
-    start: date
-    end: date
-    require_minute: bool = True
-    persist_scan: bool = True
-
-    @model_validator(mode="after")
-    def validate_range(self):
-        if self.start > self.end:
-            raise ValueError("开始日期不能晚于结束日期")
-        if (self.end - self.start).days > 1_095:
-            raise ValueError("单次最多检查三年数据")
-        return self
-
-
-class EtfDataRepairWrite(BaseModel):
-    scan_id: str = Field(min_length=1, max_length=32)
-    issue_ids: list[str] = Field(min_length=1, max_length=200)
-
-
-def _normalize_minute_sync_request(days: int, extend: object) -> tuple[int, bool]:
-    normalized = max(1, int(days))
-    extend_backward = bool(extend) or normalized >= 365
-    if normalized == 365:
-        normalized = MINUTE_TRADING_DAYS_PER_YEAR
-    return normalized, extend_backward
 
 
 def _minute_allowed(capset) -> bool:
@@ -1287,110 +1255,6 @@ async def repair_daily(request: Request):
     except Exception as e:
         logger.error("repair_daily error: %s\n%s", e, _tb.format_exc())
         raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-@router.post("/etf-data/check")
-async def check_etf_backtest_data(req: EtfDataCheckWrite, request: Request):
-    """Read-only ETF daily/minute/factor inspection."""
-    import asyncio
-
-    from app.services.etf_data_repair import inspect_etf_data
-
-    try:
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            _long_task_executor,
-            lambda: inspect_etf_data(
-                request.app.state.repo,
-                req.symbols,
-                req.start,
-                req.end,
-                require_minute=req.require_minute,
-                persist_scan=req.persist_scan,
-            ),
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@router.get("/etf-data/repairs")
-def etf_data_repair_history(request: Request, limit: int = Query(30, ge=1, le=100)):
-    from app.services.etf_data_repair import list_repair_records
-
-    return {"records": list_repair_records(request.app.state.repo.store.data_dir, limit)}
-
-
-@router.post("/etf-data/repair")
-async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
-    """Repair persisted ETF minute gaps through the configured data source."""
-    import asyncio
-
-    from app.api.data import invalidate_storage_cache
-    from app.services.etf_data_repair import repair_etf_data, validate_repair_request
-    from app.services.pipeline_jobs import (
-        LONG_JOB_TIMEOUT_S,
-        job_store,
-        release_run_slot,
-        try_acquire_run_slot,
-    )
-
-    repo = request.app.state.repo
-    if not _minute_allowed(request.app.state.capabilities):
-        raise HTTPException(status_code=403, detail="当前数据源不支持分钟K补齐")
-    try:
-        validate_repair_request(repo.store.data_dir, req.scan_id, req.issue_ids)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S, long_running=True)
-    if not is_new:
-        return {"status": "reused", "job_id": job_id}
-
-    async def task() -> None:
-        if not try_acquire_run_slot(job_id):
-            job_store.fail(job_id, "已有数据任务在运行，请稍后再试")
-            return
-        loop = asyncio.get_event_loop()
-        quote_service = getattr(request.app.state, "quote_service", None)
-
-        def progress(done: int, total: int, message: str) -> None:
-            pct = 10 + int(done / max(total, 1) * 80)
-            job_store.progress(job_id, "repair_etf_data", pct, message)
-
-        def run_repair():
-            operation = lambda: repair_etf_data(
-                repo,
-                req.scan_id,
-                req.issue_ids,
-                on_progress=progress,
-                should_cancel=lambda: not job_store.is_active(job_id),
-            )
-            if quote_service:
-                with quote_service.paused():
-                    return operation()
-            return operation()
-
-        try:
-            job_store.start(job_id)
-            job_store.progress(job_id, "repair_etf_data", 5, "正在连接当前分钟数据源")
-            result = await loop.run_in_executor(_long_task_executor, run_repair)
-            from app.jobs.daily_pipeline import _refresh_single_view
-
-            _refresh_single_view(repo, "kline_etf_minute")
-            repo.refresh_cache()
-            job_store.succeed(job_id, {**result, "repair_type": "etf_data"})
-            invalidate_storage_cache()
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("ETF data repair failed: job_id=%s", job_id)
-            job_store.fail(job_id, str(exc))
-            invalidate_storage_cache()
-        finally:
-            release_run_slot(job_id)
-
-    asyncio.create_task(task())
-    return {"status": "started", "job_id": job_id}
 
 
 @router.post("/rebuild_enriched")

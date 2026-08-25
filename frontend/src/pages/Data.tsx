@@ -17,9 +17,9 @@ import {
   Info,
   WandSparkles,
 } from 'lucide-react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
-import { api, type ExtDataConfig, type PitReferenceTableStatus } from '@/lib/api'
+import { api, type ExtDataConfig } from '@/lib/api'
 import {
   useCapabilities,
   useSettings,
@@ -29,18 +29,19 @@ import {
   useDataStatus,
 } from '@/lib/useSharedQueries'
 import { useToggleRealtimeQuotes, useUpdateQuoteInterval } from '@/lib/useSharedMutations'
+import { MissingCapChip } from '@/lib/capability-labels'
 import { QK } from '@/lib/queryKeys'
 import { PageHeader } from '@/components/PageHeader'
 import { formatScheduleDatePart, formatScheduleTimePart, isToday } from '@/lib/format'
 
 // 拆分出的子组件
-import { Pill, StatCard, type FieldTab } from '@/components/data/StatCard'
+import { StatCard, type FieldTab } from '@/components/data/StatCard'
 import { ActiveJobCard } from '@/components/data/ActiveJobCard'
 import { SectionTitle, HistoryRow } from '@/components/data/SectionTitle'
 import { SettingsModal } from '@/components/data/SettingsModal'
 import { ScheduleEditor } from '@/components/data/ScheduleEditor'
 import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
-import { RepairDataPanel } from '@/components/data/RepairDataPanel'
+import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
 import { RegimeConfigCard } from '@/components/data/RegimeConfigCard'
@@ -52,19 +53,8 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
-import { TushareCapabilityMatrixPanel } from '@/components/data/TushareCapabilityMatrix'
-
-type ExtPlatform = 'easytdx' | 'kaipanla' | 'other'
-
-function extPlatform(config: ExtDataConfig): ExtPlatform {
-  const id = config.id.toLowerCase()
-  if (id.startsWith('ext_kpl_')) return 'kaipanla'
-  if (id.startsWith('ext_tdx_') || id.includes('_tdx')) return 'easytdx'
-  return 'other'
-}
 
 export function Data() {
-  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const startTime = useRef<number | null>(null)
@@ -82,24 +72,12 @@ export function Data() {
     },
   })
 
-  const tushareMatrix = useQuery({
-    queryKey: QK.tushareCapabilityMatrix,
-    queryFn: api.tushareCapabilityMatrix,
-    refetchInterval: 60_000,
-  })
-
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
   // 同步任务完成后刷新一次; 平时 30s 轮询与 status 对齐。
   const regimeCoverage = useQuery({
     queryKey: QK.regimeCoverage,
     queryFn: () => api.regimeCoverage(),
     refetchInterval: activeJobId ? false : 30_000,
-  })
-
-  const pitReference = useQuery({
-    queryKey: QK.pitReferenceStatus,
-    queryFn: api.pitReferenceStatus,
-    refetchInterval: activeJobId ? 2_000 : 60_000,
   })
 
   const history = useQuery({
@@ -165,7 +143,7 @@ export function Data() {
   const [schemaTable, setSchemaTable] = useState<string | null>(null)
   const [showEndpointTest, setShowEndpointTest] = useState(false)
   const [showCreateExt, setShowCreateExt] = useState(false)
-  const [showRepair, setShowRepair] = useState(() => searchParams.get('repair') === 'etf')
+  const [showRepair, setShowRepair] = useState(false)
   const [editingExt, setEditingExt] = useState<ExtDataConfig | null>(null)
   const [indexBatchInput, setIndexBatchInput] = useState('100')
 
@@ -189,14 +167,6 @@ export function Data() {
     },
   })
 
-  const syncPitReference = useMutation({
-    mutationFn: api.syncPitReferenceSnapshots,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
-      qc.invalidateQueries({ queryKey: QK.dataStatus })
-    },
-  })
-
   const prefs = usePreferences()
 
   // 数据源列表 + 当前数据源 (顶部"切换数据源"按钮展示)
@@ -206,26 +176,21 @@ export function Data() {
     staleTime: 60_000,
   })
   const activeProvider = prefs.data?.daily_data_provider || 'tickflow'
-  const selectableSources = [
-    ...(dataSources.data?.builtin ?? []),
-    ...(dataSources.data?.plugins ?? []),
-    ...(dataSources.data?.custom ?? []),
-  ]
-  const activeDataSource = selectableSources.find(source => source.name === activeProvider)
-  const activeDataSourceName = activeDataSource?.display_name || activeProvider
+  const activeDataSourceName = activeProvider === 'tickflow'
+    ? 'TickFlow'
+    : (dataSources.data?.custom?.find(s => s.name === activeProvider)?.display_name || activeProvider)
 
   // tierKey → 自定义数据集名映射 (用于数据画像 CapBadge 显示数据源名而非 TickFlow 档位)
   const TIERKEY_TO_DATASET: Record<string, string> = {
     daily: 'daily',
     adj_factor: 'adj_factor',
-    etf_daily: 'daily',
-    etf_minute: 'minute',
+    etf: 'daily',        // ETF 复用日K能力
     minute: 'minute',
     financials: 'financial',
   }
   // 当前 custom 源支持的数据集集合
   const activeCustomDatasets = activeProvider !== 'tickflow'
-    ? new Set(activeDataSource?.datasets || [])
+    ? new Set(dataSources.data?.custom?.find(s => s.name === activeProvider)?.datasets || [])
     : new Set<string>()
   // 给定 tierKey, 返回 custom provider 显示名 (走 custom 时) 或 null (走 TickFlow)
   const getCustomProviderName = (tierKey: string): string | null => {
@@ -276,23 +241,18 @@ export function Data() {
   const quoteStatus = useQuoteStatus()
   const toggleQuote = useToggleRealtimeQuotes()
 
-  const hasAdjCap = !!caps.data?.capabilities?.['adj_factor'] || activeCustomDatasets.has('adj_factor')
+  const hasAdjCap = !!caps.data?.capabilities?.['adj_factor']
   const hasDailyBatchCap = !!caps.data?.capabilities?.['kline.daily.batch']
-  const minuteProvider = prefs.data?.minute_data_provider || 'tickflow'
-  const minuteSource = selectableSources.find(source => source.name === minuteProvider)
-  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch'] || !!minuteSource?.datasets.includes('minute')
+  const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
   const indexAuto = prefs.data?.pipeline_pull_index ?? true
   const etfAuto = prefs.data?.pipeline_pull_etf ?? false
-  const etfMinuteAuto = prefs.data?.etf_minute_sync_enabled ?? false
   const pipelineSteps = [
     '日K',
     ...(hasAdjCap ? ['复权'] : []),
     '指标',
     ...(indexAuto ? ['指数'] : []),
     ...(etfAuto ? ['ETF'] : []),
-    'PIT快照',
     ...((hasMinuteCap && minuteAuto) ? ['分钟K'] : []),
-    ...((hasMinuteCap && etfMinuteAuto) ? ['ETF分钟K'] : []),
   ]
 
   // 数据画像卡片显隐(由页面设置弹窗控制,存 localStorage)
@@ -309,12 +269,17 @@ export function Data() {
   useEffect(() => {
     if (job.data && (job.data.status === 'succeeded' || job.data.status === 'failed')) {
       qc.invalidateQueries({ queryKey: QK.dataStatus })
-      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      // 同步重写了指数日K/enriched/日K → 失效消费这些数据的查询。
+      // 侧边栏指数查询挂在 Layout 常驻不重挂载 (refetchOnWindowFocus 已关),
+      // 不失效会一直显示同步前的旧值; 自选相关查询在页面正打开时同理。
       if (job.data.status === 'succeeded') {
-        qc.invalidateQueries({ queryKey: ['stock-premium-gene'] })
+        qc.invalidateQueries({ queryKey: QK.indexQuotes })
+        qc.invalidateQueries({ queryKey: ['index-daily'] })
+        qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
+        qc.invalidateQueries({ queryKey: ['kline-batch'] })
       }
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
@@ -347,26 +312,14 @@ export function Data() {
     symbols_covered: s.index_daily?.symbols_covered ?? s.index_instruments?.rows ?? 0,
     trading_days: s.index_daily?.trading_days ?? s.index_enriched?.trading_days ?? 0,
   } : null
-  const hasEtfData = !!(s?.etf_instruments?.rows || s?.etf_daily?.rows || s?.etf_minute?.trading_days)
-  const pitSummary = pitReference.data?.summary
-  const pitStats = pitSummary ? {
-    rows: pitSummary.rows,
-    earliest_date: pitSummary.earliest_date,
-    latest_date: pitSummary.latest_date,
-    symbols_covered: Math.max(
-      0,
-      ...Object.values(pitReference.data?.history ?? {}).map(item => item.symbols_covered ?? 0),
-      ...Object.values(pitReference.data?.snapshots ?? {}).map(item => item.symbols_covered ?? 0),
-    ),
-    trading_days: 0,
+  // ETF 统计(后端已按 asset_type='etf' 从 index 存储中拆分)
+  const etfOverviewStats = s ? {
+    rows: 0,
+    earliest_date: s.etf_daily?.earliest_date ?? s.etf_enriched?.earliest_date ?? null,
+    latest_date: s.etf_daily?.latest_date ?? s.etf_enriched?.latest_date ?? null,
+    symbols_covered: s.etf_daily?.symbols_covered ?? s.etf_instruments?.rows ?? 0,
+    trading_days: s.etf_daily?.trading_days ?? s.etf_enriched?.trading_days ?? 0,
   } : null
-  const pitHint = pitSummary?.latest_snapshot_date
-    ? `BaoStock 历史 · HiThink 日快照 · ${pitSummary.latest_snapshot_date}`
-    : '统一历史成分表 · 尚无数据'
-  const pitSubLabel = pitSummary ? '指数历史成分 · 股票生命周期' : undefined
-  const pitBadgeSuffix = pitSummary
-    ? (pitSummary.strict_index_membership_usable ? '严格校验通过' : '严格校验未通过')
-    : undefined
   const indexOverviewLabel = s ? '日 · 维表 · 日K · 指标' : undefined
   const indexEarliestDate = s?.index_daily?.earliest_date ?? s?.index_enriched?.earliest_date ?? null
   const indexOffsetDays = indexExtendUnit === 'month' ? indexExtendValue * 30 : indexExtendValue * 365
@@ -389,11 +342,8 @@ export function Data() {
     compute_enriched: 'enriched',
     rebuild_enriched: 'enriched',
     sync_index: 'index_daily',
-    sync_etf: 'etf_daily',
-    sync_pit_reference: 'pit_reference',
     sync_minute: 'minute',
     extend_minute: 'minute',
-    sync_etf_minute: 'etf_minute',
     compute_regime: 'regime',
     // regime 软失败时入 skipped_stages 的是 'regime'(非 stage 名), 也映射到该卡片
     regime: 'regime',
@@ -418,9 +368,6 @@ export function Data() {
     }
     prevStageRef.current = stage
     qc.invalidateQueries({ queryKey: QK.dataStatus })
-    if (STAGE_CARD[stage] === 'pit_reference') {
-      qc.invalidateQueries({ queryKey: QK.pitReferenceStatus })
-    }
   }, [job.data?.stage])
 
   useEffect(() => {
@@ -454,7 +401,6 @@ export function Data() {
             stagePct={activeCard === 'instruments' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="instruments"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             auto
             onShowFields={() => setSchemaTable('instruments')}
           />
@@ -472,7 +418,6 @@ export function Data() {
             stagePct={activeCard === 'daily' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="daily"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('daily')}
             auto
             onShowFields={() => setSchemaTable('daily')}
@@ -493,7 +438,6 @@ export function Data() {
             stagePct={activeCard === 'adj_factor' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="adj_factor"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('adj_factor')}
             auto
             onShowFields={() => setSchemaTable('adj_factor')}
@@ -512,7 +456,6 @@ export function Data() {
             stagePct={activeCard === 'enriched' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="enriched"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             auto
             subLabel={status.data?.indicators_ready === false ? '字段 · 指标计算中…' : '字段 · 指标 · 信号'}
             localBadgeSuffix={`${prefs.data?.enriched_batch_size ?? 1000}只/批`}
@@ -534,7 +477,6 @@ export function Data() {
             stagePct={activeCard === 'index_daily' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="daily"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             auto={indexAuto}
             subLabel={indexOverviewLabel}
             fieldTabs={[
@@ -547,103 +489,24 @@ export function Data() {
             settingsOpen={openSettings === 'index'}
           />
         )
-      case 'pit_reference':
+      case 'etf':
         return (
           <StatCard
-            title="PIT Reference"
-            hint={pitHint}
-            stats={pitStats}
-            loading={pitReference.isLoading}
-            active={activeCard === 'pit_reference'}
-            done={doneStages.has('pit_reference')}
-            skipped={skippedCards.has('pit_reference')}
-            stagePct={activeCard === 'pit_reference' ? (job.data?.stage_pct ?? 0) : 0}
-            tierKey="pit_reference"
+            title="ETF"
+            hint="场内基金 · 独立存储"
+            stats={etfOverviewStats}
+            loading={isLoading}
+            tierKey="etf"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
-            auto
-            localBadgeSuffix={pitBadgeSuffix}
-            subLabel={pitSubLabel}
+            customProvider={getCustomProviderName('etf')}
+            auto={etfAuto}
+            subLabel="维表 · 日K · 指标"
             fieldTabs={[
-              { label: '指数成分', table: 'pit_index_membership_history' },
-              { label: '行业历史', table: 'pit_industry_membership_history' },
-              { label: '生命周期', table: 'pit_instrument_lifecycle_events' },
+              { label: '维表', table: 'etf_instruments' },
+              { label: '日K', table: 'etf_daily' },
+              { label: '指标', table: 'etf_enriched' },
             ] as FieldTab[]}
-            onShowFields={(t) => setSchemaTable(t ?? 'pit_index_membership_history')}
-            onSettings={() => setOpenSettings(v => v === 'pit-reference' ? null : 'pit-reference')}
-            settingsOpen={openSettings === 'pit-reference'}
-          />
-        )
-      case 'etf_instruments':
-        return (
-          <StatCard
-            title="ETF 维表"
-            hint="场内基金 · 元数据"
-            stats={s?.etf_instruments}
-            isInstrument
-            loading={isLoading}
-            tierKey="etf_instruments"
-            capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
-            auto={etfAuto}
-            onShowFields={() => setSchemaTable('etf_instruments')}
-          />
-        )
-      case 'etf_daily':
-        return (
-          <StatCard
-            title="ETF 日 K"
-            hint="场内基金 · 日线"
-            stats={s?.etf_daily}
-            loading={isLoading}
-            tierKey="etf_daily"
-            capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
-            customProvider={getCustomProviderName('etf_daily')}
-            auto={etfAuto}
-            active={activeCard === 'etf_daily'}
-            done={doneStages.has('etf_daily')}
-            skipped={skippedCards.has('etf_daily')}
-            stagePct={activeCard === 'etf_daily' ? (job.data?.stage_pct ?? 0) : 0}
-            subLabel="日 · ETF标的 · 日线"
-            onShowFields={() => setSchemaTable('etf_daily')}
-          />
-        )
-      case 'etf_enriched':
-        return (
-          <StatCard
-            title="ETF Enriched"
-            hint="ETF 复权 OHLCV + 技术指标"
-            stats={s?.etf_enriched}
-            loading={isLoading}
-            tierKey="etf_enriched"
-            capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
-            auto={etfAuto}
-            subLabel="字段 · ETF指标 · 信号"
-            onShowFields={() => setSchemaTable('etf_enriched')}
-          />
-        )
-      case 'etf_minute':
-        return (
-          <StatCard
-            title="ETF 分钟 K"
-            hint="场内基金 · 分钟线"
-            stats={s?.etf_minute}
-            loading={isLoading}
-            tierKey="etf_minute"
-            capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
-            customProvider={getCustomProviderName('etf_minute')}
-            auto={etfMinuteAuto}
-            active={activeCard === 'etf_minute'}
-            done={doneStages.has('etf_minute')}
-            skipped={skippedCards.has('etf_minute')}
-            stagePct={activeCard === 'etf_minute' ? (job.data?.stage_pct ?? 0) : 0}
-            subLabel="日 · ETF标的 · 分钟级"
-            onShowFields={() => setSchemaTable('etf_minute')}
-            onSettings={hasEtfData ? () => setOpenSettings(v => v === 'etf-minute' ? null : 'etf-minute') : undefined}
-            settingsOpen={openSettings === 'etf-minute'}
+            onShowFields={(t) => setSchemaTable(t ?? 'etf_daily')}
           />
         )
       case 'minute':
@@ -659,7 +522,6 @@ export function Data() {
             stagePct={activeCard === 'minute' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="minute"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('minute')}
             auto={minuteAuto}
             onShowFields={() => setSchemaTable('minute')}
@@ -668,7 +530,7 @@ export function Data() {
           />
         )
       case 'financials': {
-        const valuationRows = s?.financials?.tables?.valuation_daily?.rows ?? 0
+        const historicalShareRows = s?.financials?.tables?.shares?.rows ?? 0
         return (
           <StatCard
             title="财务数据"
@@ -677,10 +539,8 @@ export function Data() {
             loading={isLoading}
             tierKey="financials"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             customProvider={getCustomProviderName('financials')}
-            subLabel={`日度估值 · ${valuationRows.toLocaleString()} 条`}
-            onShowFields={valuationRows > 0 ? () => setSchemaTable('valuation_daily') : undefined}
+            subLabel={`历史股本 · ${historicalShareRows.toLocaleString()} 条`}
             onSettings={hasData ? () => setOpenSettings(v => v === 'financials' ? null : 'financials') : undefined}
             settingsOpen={openSettings === 'financials'}
           />
@@ -699,7 +559,6 @@ export function Data() {
             stagePct={activeCard === 'regime' ? (job.data?.stage_pct ?? 0) : 0}
             tierKey="regime"
             capLimits={caps.data?.capabilities}
-            tierLabel={caps.data?.label}
             auto={prefs.data?.pipeline_regime_enabled === true}
             subLabel="状态 · 综合分 · 指标"
             onSettings={hasData ? () => setOpenSettings(v => v === 'regime' ? null : 'regime') : undefined}
@@ -711,90 +570,6 @@ export function Data() {
     }
   }
 
-  const visibleCardKeys = getCardOrder().filter(k => cardVisible[k])
-  const extItems = extConfigs.data?.items ?? []
-  const easyTdxExt = extItems.filter(ext => extPlatform(ext) === 'easytdx')
-  const kaipanlaExt = extItems.filter(ext => extPlatform(ext) === 'kaipanla')
-  const otherExt = extItems.filter(ext => extPlatform(ext) === 'other')
-  const renderExtCard = (ext: ExtDataConfig) => (
-    <ExtDataStatCard
-      key={ext.id}
-      config={ext}
-      onDelete={() => deleteExt.mutate(ext.id)}
-      deleting={deleteExt.isPending}
-      onEdit={() => setEditingExt(ext)}
-    />
-  )
-
-  const pitHistoryEntries = Object.entries(pitReference.data?.history ?? {}) as [string, PitReferenceTableStatus][]
-  const pitLifecycle = pitReference.data?.history?.instrument_lifecycle_events?.lifecycle_completeness
-  const renderPitRows = (
-    entries: [string, PitReferenceTableStatus][],
-    mode: 'history' | 'snapshot',
-  ) => (
-    <div className="divide-y divide-border/60 rounded-btn border border-border overflow-hidden">
-      {entries.map(([key, item]) => {
-        const quality = item.membership_validation
-          ? (item.membership_validation.usable ? '严格可用' : '严格不完整')
-          : item.industry_join
-              ? '需选单一行业标准'
-              : item.lifecycle_completeness
-                ? (item.lifecycle_completeness.complete_lifecycle ? '生命周期完整' : '生命周期部分')
-                : null
-        const qualityClass = item.membership_validation?.usable === false
-          || item.lifecycle_completeness?.complete_lifecycle === false
-          ? 'text-warning'
-          : 'text-muted'
-        return (
-          <div key={key} className="grid grid-cols-[1fr_auto_auto] gap-3 px-3 py-2 text-[11px]">
-            <div className="min-w-0">
-              <div className="font-medium text-foreground truncate">{item.label}</div>
-              <div className="mt-0.5 text-muted font-mono truncate">{key}</div>
-              {quality && <div className={`mt-0.5 truncate ${qualityClass}`}>{quality}</div>}
-            </div>
-            <div className="text-right">
-              <div className="text-muted">行数</div>
-              <div className="font-mono text-secondary tabular-nums">{item.rows.toLocaleString()}</div>
-            </div>
-            <div className="text-right">
-              <div className="text-muted">{mode === 'history' ? '区间' : '快照日'}</div>
-              <div className="font-mono text-secondary tabular-nums">
-                {mode === 'history'
-                  ? `${item.earliest_date ?? '—'} ~ ${item.latest_date ?? '—'}`
-                  : (item.latest_snapshot_date ?? '—')}
-              </div>
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-
-  const renderPlatformSection = (
-    title: string,
-    hint: string,
-    count: number,
-    children: React.ReactNode,
-  ) => {
-    if (!count) return null
-    return (
-      <div className="rounded-card border border-border/70 bg-base/20 p-3">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <div className="text-xs font-semibold text-foreground">{title}</div>
-            <div className="mt-0.5 text-[10px] text-muted">{hint}</div>
-          </div>
-          <span className="shrink-0 rounded bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-muted">
-            {count} 项
-          </span>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-stretch">
-          {children}
-        </div>
-      </div>
-    )
-  }
-
   return (
     <>
       <div ref={topRef} />
@@ -802,7 +577,7 @@ export function Data() {
         title="数据"
         subtitle="本地数据画像 · 同步状态 · 历史记录"
         right={
-          <div className="flex min-w-max items-center gap-3 whitespace-nowrap">
+          <div className="flex items-center gap-3">
             {!hasData && !isLoading && (
               <span className="text-xs text-accent animate-pulse">首次使用请点击右侧按钮同步数据</span>
             )}
@@ -831,7 +606,7 @@ export function Data() {
               className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-secondary hover:text-accent hover:bg-accent/8 text-xs transition-colors duration-150 disabled:opacity-40 disabled:pointer-events-none"
             >
               <WandSparkles className="h-3.5 w-3.5" />
-              检查与修复
+              修正数据
             </button>
             <div className="w-px h-4 bg-border" />
             <div className="flex items-center gap-1.5">
@@ -878,18 +653,18 @@ export function Data() {
         }
       />
 
-      <div className="max-w-6xl space-y-6 px-4 py-5 sm:px-8 sm:py-6">
-        {/* None 档提示 —— 非阻断: 无需 Key 也可获取历史日K, 仅实时行情等扩展能力受限 */}
+      <div className="px-8 py-6 space-y-6 max-w-6xl">
+        {/* 无 Key 提示 —— 非阻断: 历史日K走免费通道, 实时等能力取决于所选数据源 */}
         {isNoKey && (
           <div className="flex items-center gap-2 rounded-card border border-border bg-elevated/40 px-3 py-2 text-xs">
             <Info className="h-4 w-4 shrink-0 text-muted" />
             <span className="text-secondary leading-relaxed">
-              当前为 None 档,将使用免费数据源获取历史日K(无需注册)。
-              配置 API Key 可解锁实时行情监控等扩展能力,前往
-              <Link to="/settings?tab=account" className="mx-0.5 font-medium text-accent hover:underline">
-                配置
+              当前无需 API Key,历史日K将使用免费通道获取。
+              实时行情、分钟K等能力取决于所选数据源,可在
+              <Link to="/settings?tab=data-sources" className="mx-0.5 font-medium text-accent hover:underline">
+                数据源设置
               </Link>
-              。
+              中配置。
             </span>
           </div>
         )}
@@ -1086,8 +861,6 @@ export function Data() {
                 { label: 'Enriched', files: s?.storage.enriched_files,    size: s?.storage.enriched_size_mb },
                 { label: '分钟 K',   files: s?.storage.minute_files,      size: s?.storage.minute_size_mb },
                 { label: '财务数据', files: s?.storage.financials_files,   size: s?.storage.financials_size_mb },
-                { label: '日度估值', files: s?.storage.valuation_daily_files, size: s?.storage.valuation_daily_size_mb },
-                { label: 'PIT Reference', files: s?.storage.pit_reference_files, size: s?.storage.pit_reference_size_mb },
               ].map((item) => (
                 <div key={item.label} className="flex items-center justify-between text-[11px]">
                   <span className="text-muted">{item.label}</span>
@@ -1116,43 +889,19 @@ export function Data() {
         {/* 数据画像 */}
         <div>
           <SectionTitle icon={Database}>数据画像</SectionTitle>
-          <div className="mt-3 space-y-4">
-            {renderPlatformSection(
-              'TickFlow',
-              '主行情 / 复权 / 指标 / 分钟 / 财务',
-              visibleCardKeys.length,
-              visibleCardKeys.map((k: CardKey) => <Fragment key={k}>{renderStatCard(k)}</Fragment>),
-            )}
-            {renderPlatformSection(
-              'EasyTdx',
-              'F10 文本 / 行业口径 / 分红参考',
-              easyTdxExt.length,
-              easyTdxExt.map(renderExtCard),
-            )}
-            {renderPlatformSection(
-              '开盘啦',
-              '竞价 / 龙虎榜 / 监管 / 北向 / 股东结构',
-              kaipanlaExt.length,
-              kaipanlaExt.map(renderExtCard),
-            )}
-            {renderPlatformSection(
-              '其他扩展',
-              '非主口径辅助数据',
-              otherExt.length,
-              otherExt.map(renderExtCard),
-            )}
-          </div>
-        </div>
-
-        <div>
-          <SectionTitle icon={Database}>Tushare 缺口补齐</SectionTitle>
-          <div className="mt-3">
-            <TushareCapabilityMatrixPanel
-              matrix={tushareMatrix.data}
-              isLoading={tushareMatrix.isLoading}
-              isError={tushareMatrix.isError}
-              onRetry={() => { void tushareMatrix.refetch() }}
-            />
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 items-stretch">
+            {getCardOrder().filter(k => cardVisible[k]).map((k: CardKey) => (
+              <Fragment key={k}>{renderStatCard(k)}</Fragment>
+            ))}
+            {(extConfigs.data?.items ?? []).map((ext) => (
+              <ExtDataStatCard
+                key={ext.id}
+                config={ext}
+                onDelete={() => deleteExt.mutate(ext.id)}
+                deleting={deleteExt.isPending}
+                onEdit={() => setEditingExt(ext)}
+              />
+            ))}
           </div>
         </div>
 
@@ -1235,17 +984,12 @@ export function Data() {
 
       <AnimatePresence>
         {showRepair && (
-          <SettingsModal title="数据检查与修复" onClose={() => setShowRepair(false)} panelClassName="max-w-5xl">
-            <RepairDataPanel
+          <SettingsModal title="日 K · 修正 / 补数据" onClose={() => setShowRepair(false)}>
+            <RepairDailyPanel
               caps={caps.data}
               isRunning={!!activeJobId}
               latestDate={s?.daily?.latest_date ?? null}
-              initialStrategyId={searchParams.get('strategy_id') ?? ''}
-              initialStart={searchParams.get('start') ?? undefined}
-              initialEnd={searchParams.get('end') ?? undefined}
-              initialTimeframe={(['1d', '30m', '5m', '1m'].includes(searchParams.get('timeframe') ?? '') ? searchParams.get('timeframe') : '1m') as '1d' | '30m' | '5m' | '1m'}
-              onDailyStart={() => setShowRepair(false)}
-              onJobStart={(jobId) => { setActiveJobId(jobId); setShowRepair(false) }}
+              onStart={() => setShowRepair(false)}
             />
           </SettingsModal>
         )}
@@ -1295,67 +1039,6 @@ export function Data() {
         {openSettings === 'page-settings' && (
           <SettingsModal title="页面设置 · 数据画像卡片" onClose={() => setOpenSettings(null)}>
             <PageSettingsModal caps={caps.data?.capabilities} />
-          </SettingsModal>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {openSettings === 'pit-reference' && (
-          <SettingsModal title="PIT Reference · 统一历史表" onClose={() => setOpenSettings(null)}>
-            <div className="space-y-4">
-              <div className="rounded-card border border-border bg-base/30 p-4 space-y-3">
-                <div>
-                  <div className="text-sm font-medium text-foreground">指数成分盘后同步</div>
-                  <div className="text-[11px] text-muted mt-1">
-                    HiThink 同步四个指数，BaoStock 核对中证300/500；数据只写统一历史成分表。
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <Pill label="历史总行数" value={(pitReference.data?.summary.history_rows ?? 0).toLocaleString()} />
-                  <Pill label="指数日期" value={(pitReference.data?.history?.index_membership_history?.membership_validation?.snapshot_dates ?? 0).toLocaleString()} />
-                  <Pill label="最新日期" value={pitReference.data?.summary.latest_snapshot_date ?? '—'} />
-                </div>
-                {pitReference.data && !pitReference.data.summary.strict_index_membership_usable && (
-                  <div className="rounded-btn border border-warning/30 bg-warning/8 px-3 py-2 text-[11px] text-warning/90">
-                    统一历史成分表尚未通过逐日成分数与重复键校验，严格 PIT 回测继续关闭。
-                  </div>
-                )}
-                <button
-                  onClick={() => syncPitReference.mutate()}
-                  disabled={syncPitReference.isPending || !!activeJobId}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
-                >
-                  {syncPitReference.isPending ? (
-                    <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      同步中…
-                    </>
-                  ) : (
-                    <>同步指数成分</>
-                  )}
-                </button>
-                {syncPitReference.data?.status === 'skipped' && (
-                  <div className="text-[11px] text-warning/90">
-                    已跳过：{syncPitReference.data.reason ?? syncPitReference.data.message ?? '暂无可同步数据'}
-                  </div>
-                )}
-                {syncPitReference.data?.status === 'failed' && (
-                  <div className="text-[11px] text-danger">
-                    同步失败：{(syncPitReference.data.errors ?? []).join('; ') || '未知错误'}
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <div className="text-xs font-medium text-foreground">PIT 历史表</div>
-                {renderPitRows(pitHistoryEntries, 'history')}
-                {pitLifecycle && !pitLifecycle.complete_lifecycle && (
-                  <div className="text-[11px] text-warning/90">
-                    生命周期表为部分覆盖：缺少 {pitLifecycle.missing_event_types.join(', ') || '部分原因字段'}。
-                  </div>
-                )}
-              </div>
-            </div>
           </SettingsModal>
         )}
       </AnimatePresence>
@@ -1453,9 +1136,7 @@ export function Data() {
                   )}
                 </button>
                 {!hasDailyBatchCap && (
-                  <span className="text-[10px] text-warning/80 bg-warning/8 rounded px-1.5 py-px font-medium">
-                    需 Starter+ / Pro 批量日 K 权限
-                  </span>
+                  <MissingCapChip capKey="kline.daily.batch" />
                 )}
               </div>
             </div>
@@ -1467,14 +1148,6 @@ export function Data() {
         {openSettings === 'minute' && (
           <SettingsModal title="分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
             <MinuteSyncConfig caps={caps.data} onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
-          </SettingsModal>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {openSettings === 'etf-minute' && (
-          <SettingsModal title="ETF 分钟 K · 同步设置" onClose={() => setOpenSettings(null)}>
-            <MinuteSyncConfig caps={caps.data} assetType="etf" onJobStart={(jobId) => { setActiveJobId(jobId); setOpenSettings(null) }} />
           </SettingsModal>
         )}
       </AnimatePresence>
@@ -1509,8 +1182,8 @@ export function Data() {
                   </p>
                   <ul className="mt-2 text-[11px] text-muted leading-relaxed space-y-0.5">
                     <li>· 个股维表、日 K、除权因子</li>
-	                    <li>· Enriched 指标数据、分钟 K</li>
-	                    <li>· 财务数据、指数、ETF、PIT Reference</li>
+                    <li>· Enriched 指标数据、分钟 K</li>
+                    <li>· 财务数据、指数、ETF</li>
                   </ul>
                   <p className="mt-2 text-[11px] text-danger/90">
                     操作不可恢复，需重新执行同步才能恢复数据。

@@ -6,9 +6,6 @@ SSE 推送四种事件 (使用标准 SSE event 字段):
   - strategy_results_updated: 策略监控已写入最新结果，前端刷新策略个股列表
   - strategy_alert: 策略监控/告警触发，前端弹通知
   - depth_updated: 五档盘口修正完成，前端刷新连板梯队/看板封单数据
-  - large_orders_updated: 实时大单聚合完成，前端刷新榜单
-  - position_risk_updated: 持仓风控状态或触发更新
-  - limit_board_updated: 打板专区候选或状态更新
 """
 from __future__ import annotations
 
@@ -108,11 +105,7 @@ def index_quotes(
     if not qs:
         rows = _fallback_index_quotes_from_daily(request, symbol_list)
         return {"rows": rows, "count": len(rows), "source": "index_daily"}
-    has_fresh = getattr(qs, "has_fresh_index_quotes", lambda: True)
-    df = qs.get_index_quotes(symbol_list) if has_fresh() else None
-    if df is None:
-        rows = _fallback_index_quotes_from_daily(request, symbol_list)
-        return {"rows": rows, "count": len(rows), "source": "index_daily"}
+    df = qs.get_index_quotes(symbol_list)
     rows = df.to_dicts() if not df.is_empty() else []
     if not rows:
         rows = _fallback_index_quotes_from_daily(request, symbol_list)
@@ -192,21 +185,6 @@ async def quote_stream(request: Request):
                         "data": json.dumps({
                             "ts": int(time.time() * 1000),
                         }),
-                    }
-                if data["large_orders_updated"]:
-                    yield {
-                        "event": "large_orders_updated",
-                        "data": json.dumps({"ts": int(time.time() * 1000)}),
-                    }
-                if data["position_risk_updated"]:
-                    yield {
-                        "event": "position_risk_updated",
-                        "data": json.dumps({"ts": int(time.time() * 1000)}),
-                    }
-                if data["limit_board_updated"]:
-                    yield {
-                        "event": "limit_board_updated",
-                        "data": json.dumps({"ts": int(time.time() * 1000)}),
                     }
         finally:
             qs.unsubscribe(sub)

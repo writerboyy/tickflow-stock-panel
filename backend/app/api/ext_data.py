@@ -200,44 +200,16 @@ def _read_ext_dataframe(
 
     if snapshot_date:
         path = base / f"date={snapshot_date}" / "part.parquet"
-        if path.exists():
-            return pl.read_parquet(path), snapshot_date
-        files = sorted(base.rglob("*.parquet"))
-        if not files:
+        if not path.exists():
             return pl.DataFrame(), snapshot_date
-        frame = pl.read_parquet(files)
-        logical_date = next(
-            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
-            None,
-        )
-        if logical_date is None:
-            return pl.DataFrame(), snapshot_date
-        return frame.filter(
-            pl.col(logical_date).cast(pl.String) == snapshot_date
-        ), snapshot_date
+        return pl.read_parquet(path), snapshot_date
 
     partitions = sorted(
         d for d in base.iterdir()
         if d.is_dir() and d.name.startswith("date=") and (d / "part.parquet").exists()
     )
     if not partitions:
-        files = sorted(base.rglob("*.parquet"))
-        if not files:
-            return pl.DataFrame(), None
-        frame = pl.read_parquet(files)
-        logical_date = next(
-            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
-            None,
-        )
-        if logical_date is None:
-            return frame, None
-        values = frame[logical_date].drop_nulls().cast(pl.String)
-        if values.is_empty():
-            return pl.DataFrame(schema=frame.schema), None
-        latest_date = values.max()
-        return frame.filter(
-            pl.col(logical_date).cast(pl.String) == latest_date
-        ), latest_date
+        return pl.DataFrame(), None
 
     latest = partitions[-1]
     latest_date = latest.name[5:]
@@ -295,11 +267,13 @@ def _latest_sync_from_partitions(base: Path) -> str | None:
     from datetime import datetime
     latest_ts: float = 0
     latest_date: str | None = None
-    for f in base.rglob("*.parquet"):
-        mtime = f.stat().st_mtime
-        if mtime > latest_ts:
-            latest_ts = mtime
-            latest_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    for d in base.iterdir():
+        if d.is_dir() and d.name.startswith("date="):
+            for f in d.glob("*.parquet"):
+                mtime = f.stat().st_mtime
+                if mtime > latest_ts:
+                    latest_ts = mtime
+                    latest_date = d.name[5:]
     if latest_date and latest_ts > 0:
         ts = datetime.fromtimestamp(latest_ts).strftime("%H:%M:%S")
         return f"{latest_date} {ts}"
@@ -321,19 +295,7 @@ def _date_range(config: ExtConfig, data_dir: Path) -> list[str] | None:
         if d.is_dir() and d.name.startswith("date="):
             dates.append(d.name[5:])
     if len(dates) < 1:
-        files = sorted(base.rglob("*.parquet"))
-        if not files:
-            return None
-        frame = pl.read_parquet(files)
-        logical_date = next(
-            (column for column in ("record_date", "report_date", "announcement_date", "date") if column in frame.columns),
-            None,
-        )
-        if logical_date is None:
-            return None
-        dates = frame[logical_date].drop_nulls().cast(pl.String).unique().to_list()
-        if not dates:
-            return None
+        return None
     dates.sort()
     return [dates[0], dates[-1]]
 
@@ -354,10 +316,11 @@ def list_configs(request: Request):
 
 @router.post("/presets/{config_id}/fetch")
 async def fetch_preset_data(request: Request, config_id: str):
-    """手动触发内置预设 (概念/行业/资金流向) 的数据拉取。
+    """手动触发内置预设 (概念/行业) 的数据拉取。
 
     注意: 必须在 /{config_id}/... 动态路由之前声明, 否则 'presets' 会被当成 config_id。
-    与通用 pull/run 相同: 走 ext_presets 的结构转换, 保证 schema 与现有数据一致。
+    与通用 pull/run 不同: 走 ext_presets 的结构转换 (接口的 concepts/industries
+    数组 → 拼接成字符串), 保证 schema 与现有数据一致。
     """
     from app.services.ext_presets import fetch_preset
 

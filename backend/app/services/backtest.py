@@ -118,21 +118,6 @@ _SIGNAL_COLS: dict[SignalKind, str] = {
 }
 
 
-def _add_max_hold_exits(entries: pd.DataFrame, max_hold_days: int) -> pd.DataFrame:
-    """Build forced exits in one NumPy-backed pass at the vectorbt boundary."""
-    exits = entries.to_numpy(dtype=bool, copy=True)
-    if exits.size == 0:
-        return pd.DataFrame(exits, index=entries.index, columns=entries.columns)
-
-    last_row = exits.shape[0] - 1
-    for column_index in range(exits.shape[1]):
-        entry_rows = np.flatnonzero(exits[:, column_index])
-        exit_rows = np.minimum(entry_rows + max_hold_days, last_row)
-        valid = exit_rows > entry_rows
-        exits[exit_rows[valid], column_index] = True
-    return pd.DataFrame(exits, index=entries.index, columns=entries.columns)
-
-
 class BacktestService:
     def __init__(self, repo: KlineRepository) -> None:
         self.repo = repo
@@ -287,7 +272,13 @@ class BacktestService:
             if config.max_hold_days is not None:
                 # vectorbt 没有内置 max-hold;用时间退出近似:
                 # 在 max_hold_days 后强制 exit
-                exits_idx = _add_max_hold_exits(entries, config.max_hold_days)
+                exits_idx = entries.copy()
+                for col in entries.columns:
+                    entry_rows = np.where(entries[col].values)[0]
+                    for i in entry_rows:
+                        end_i = min(i + config.max_hold_days, len(entries) - 1)
+                        if end_i > i:
+                            exits_idx.iloc[end_i][col] = True
                 pf_kwargs["exits"] = (exits | exits_idx).astype(bool)
 
             pf = vbt.Portfolio.from_signals(**pf_kwargs)

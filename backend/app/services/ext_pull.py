@@ -90,14 +90,16 @@ def _apply_field_map(rows: list[dict], field_map: dict[str, str]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _apply_preset_flatten(config_id: str, rows: list[dict]) -> list[dict]:
-    """对内置预设应用结构转换, 与 fetch_preset 保持一致。
+    """对内置预设 (概念/行业) 应用结构转换, 与 fetch_preset 保持一致。
 
     延迟导入避免与 ext_presets 形成循环依赖。
     非预设 id 原样返回。
     """
-    from app.services.ext_presets import _flatten_preset_rows
-
-    return _flatten_preset_rows(config_id, rows)
+    if config_id not in ("ext_gn_ths", "ext_hy_ths"):
+        return rows
+    from app.services.ext_presets import _flatten_concept_rows, _flatten_industry_rows
+    flatten = _flatten_concept_rows if config_id == "ext_gn_ths" else _flatten_industry_rows
+    return flatten(rows)
 
 
 async def fetch_and_ingest(
@@ -136,7 +138,7 @@ async def fetch_and_ingest(
     if not rows:
         raise ValueError("提取到的行数为 0")
 
-    # 内置预设: 应用结构转换, 让产出 schema 与分析页一致。
+    # 内置预设 (概念/行业): 应用结构转换, 让产出 schema 与分析页一致。
     # 否则 raw 接口列 (concepts/industries 数组、name) 会直接覆盖正确的 part.parquet,
     # 导致分析页因找不到维度字段 (所属概念/所属同花顺行业) 而"数据消失"。
     # 见 ext_presets._flatten_* —— 手动拉取 / 定时拉取都必须走同一套转换。
@@ -180,13 +182,11 @@ class PullScheduler:
         self._tasks: dict[str, asyncio.Task] = {}
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._run_immediately = True
 
-    def start(self, data_dir, *, run_immediately: bool = True) -> None:
+    def start(self, data_dir) -> None:
         """启动调度（在 lifespan startup 调用，主事件循环内）。"""
         self._running = True
         self._data_dir = data_dir
-        self._run_immediately = run_immediately
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -260,9 +260,6 @@ class PullScheduler:
         这样用户中途修改间隔也能立即生效 (无需重启)。
         """
         try:
-            if not self._run_immediately:
-                interval = max(config.pull.schedule_minutes * 60, 60)
-                await asyncio.sleep(interval)
             while self._running:
                 # 每轮重读最新配置 — 用户可能修改了 url / interval / enabled
                 store = ExtConfigStore(self._data_dir)

@@ -18,7 +18,6 @@ from app.backtest.matrix import (
     MatrixStrategyPipeline,
     RealtimeMarketDataMatrix,
     apply_time_masks,
-    build_basic_filter_mask,
     build_market_data_matrix,
     build_matrix_score,
     load_market_data_matrix_from_parquet,
@@ -368,8 +367,6 @@ def test_direct_parquet_matrix_reports_actionable_error_when_enriched_is_empty(t
 
 def test_direct_parquet_matrix_matches_panel_builder_and_reuses_mmap(tmp_path):
     market_root = tmp_path / "kline_daily_enriched"
-    (market_root / "metadata.json").parent.mkdir(parents=True)
-    (market_root / "metadata.json").write_text("{}", encoding="utf-8")
     days = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
     rows = []
     closes = {
@@ -941,31 +938,6 @@ def test_matrix_pipeline_applies_basic_filter_and_candidate_scoring():
 
     assert signals.entry.tolist() == [[0, 1]]
     assert signals.score.tolist() == [[0.0, 50.0]]
-
-
-def test_market_cap_filter_uses_unadjusted_close():
-    panel = pl.DataFrame({
-        "symbol": ["000001.SZ"],
-        "date": [date(2024, 1, 2)],
-        "open": [20.0],
-        "high": [20.0],
-        "low": [20.0],
-        "close": [20.0],
-        "raw_close": [10.0],
-        "volume": [1_000.0],
-        "total_shares": [100_000_000.0],
-    })
-    market = build_market_data_matrix(
-        panel,
-        field_columns={"raw_close", "total_shares"},
-    )
-
-    mask = build_basic_filter_mask(
-        market,
-        {"enabled": True, "market_cap_min": 1_500_000_000.0},
-    )
-
-    assert not mask[0, 0]
 
 
 def test_signal_matrix_validation_rejects_mutable_strategy_output():

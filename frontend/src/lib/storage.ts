@@ -21,9 +21,6 @@ function kv<T>(key: string) {
 }
 
 export const storage = {
-  /** 桌面端全局侧边栏收起状态 */
-  layoutSidebarCollapsed: kv<boolean>('layout-sidebar-collapsed'),
-
   /** 查询轮询 / SSE 配置 */
   queryConfig:          kv<unknown>('tf-stocks-query-config'),
 
@@ -80,9 +77,6 @@ export const storage = {
 
   /** 连板梯队板块筛选 */
   limitLadderBoard:     kv<string[]>('limit-ladder-board-filter'),
-
-  /** 连板梯队状态筛选全选默认值已迁移 */
-  limitLadderStatusDefaultV2: kv<boolean>('limit-ladder-status-default-v2'),
 
   /** 连板梯队 ext 字段配置 */
   limitLadderExtFields: kv<Record<string, any>>('limit-ladder-ext-fields'),

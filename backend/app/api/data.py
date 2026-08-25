@@ -1,7 +1,6 @@
 """数据画像 API —— 让前端知道"我们本地有什么数据"。"""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -10,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
 from app.enriched_generation import EnrichedPublication
 from app.indicators.pipeline import ENRICHED_COLUMNS
@@ -18,85 +17,6 @@ from app.indicators.pipeline import ENRICHED_COLUMNS
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
-
-
-def _load_latest_tushare_capability_matrix(data_dir: Path) -> dict[str, Any]:
-    root = data_dir / "backfill_state" / "tushare_proxy"
-    try:
-        candidates = [path for path in root.glob("*/capability_matrix.json") if path.is_file()]
-    except OSError as exc:
-        raise ValueError("Tushare capability matrix directory is unreadable") from exc
-
-    empty = {
-        "available": False,
-        "generated_at": None,
-        "schema_version": 1,
-        "run_id": None,
-        "run_ids": [],
-        "run_count": 0,
-        "source": "tushare_proxy",
-        "runtime_source": "local_parquet_only",
-        "history_start": None,
-        "history_end": None,
-        "datasets": {},
-        "formal_publish": {},
-        "legacy_phases": {},
-    }
-    if not candidates:
-        return empty
-
-    try:
-        candidates.sort(key=lambda item: item.stat().st_mtime_ns)
-        loaded: list[tuple[dict[str, Any], float]] = []
-        for path in candidates:
-            modified_at = path.stat().st_mtime
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or not isinstance(payload.get("datasets"), dict):
-                raise ValueError("latest Tushare capability matrix has an invalid schema")
-            loaded.append((payload, modified_at))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("latest Tushare capability matrix is unreadable") from exc
-
-    populated = [(payload, modified_at) for payload, modified_at in loaded if payload["datasets"]]
-    chosen_runs = populated or loaded[-1:]
-    if not chosen_runs:  # candidates was non-empty, but keep the response fail-closed.
-        raise ValueError("latest Tushare capability matrix is unreadable")
-    latest, modified_at = chosen_runs[-1]
-    datasets: dict[str, Any] = {}
-    formal_publish: dict[str, Any] = {}
-    legacy_phases: dict[str, Any] = {}
-    run_ids: list[str] = []
-    history_starts: list[str] = []
-    history_ends: list[str] = []
-    for payload, _ in chosen_runs:
-        datasets.update(payload["datasets"])
-        formal_publish.update(payload.get("formal_publish") or {})
-        legacy_phases.update(payload.get("legacy_phases") or {})
-        run_id = payload.get("run_id")
-        if run_id and str(run_id) not in run_ids:
-            run_ids.append(str(run_id))
-        if isinstance(payload.get("history_start"), str):
-            history_starts.append(payload["history_start"])
-        if isinstance(payload.get("history_end"), str):
-            history_ends.append(payload["history_end"])
-
-    return {
-        "available": True,
-        "generated_at": datetime.fromtimestamp(modified_at, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-        "schema_version": latest.get("schema_version", 1),
-        "run_id": latest.get("run_id"),
-        "run_ids": run_ids,
-        "run_count": len(run_ids),
-        "source": latest.get("source", "tushare_proxy"),
-        "runtime_source": latest.get("runtime_source", "local_parquet_only"),
-        "history_start": min(history_starts) if history_starts else latest.get("history_start"),
-        "history_end": max(history_ends) if history_ends else latest.get("history_end"),
-        "datasets": datasets,
-        "formal_publish": formal_publish,
-        "legacy_phases": legacy_phases,
-    }
 
 # ===== 缓存:storage(文件扫描) + 每张表 aggregate 各自缓存 =====
 # 同步期间前端 2s 轮一次 status,每张表 aggregate 全表 count + min/max + distinct
@@ -107,7 +27,7 @@ _TABLE_TTL_LARGE = 120.0  # 大表(分钟K等)单独 TTL，避免多分区聚合
 _STORAGE_TTL = 60.0  # storage 文件扫描独立 TTL,stage 写完不触发重算
 
 # 聚合慢的大表（分区数多、行数多），使用更长的 TTL
-_LARGE_TABLES = {"minute", "etf_minute"}
+_LARGE_TABLES = {"minute"}
 
 _storage_cache: dict[str, Any] | None = None
 _storage_cache_ts: float = 0.0
@@ -122,7 +42,6 @@ _table_cache: dict[str, dict | None] = {
     "etf_daily": None,
     "etf_enriched": None,
     "etf_instruments": None,
-    "etf_minute": None,
     "minute": None,
     "adj_factor": None,
     "instruments": None,
@@ -458,13 +377,13 @@ def _safe_aggregate_adj_factor(repo) -> dict | None:
         return None
 
 
-def _safe_aggregate_minute(repo, directory: str = "kline_minute") -> dict | None:
-    """分钟K统计 — 从分区目录名获取交易日数，跳过全表扫描。
+def _safe_aggregate_minute(repo) -> dict | None:
+    """kline_minute 统计 — 从分区目录名获取交易日数，跳过全表扫描。
 
     分钟 K 按 date=YYYY-MM-DD 分区存储，直接数目录即可，
     无需 count(*) / count(DISTINCT ...) 等昂贵查询。
     """
-    minute_dir = repo.store.data_dir / directory
+    minute_dir = repo.store.data_dir / "kline_minute"
     if not minute_dir.exists():
         return None
 
@@ -507,16 +426,6 @@ def _safe_aggregate_financials(repo) -> dict | None:
                 tables_info[table] = {"rows": 0, "symbols": 0}
         else:
             tables_info[table] = {"rows": 0, "symbols": 0}
-
-    from app.services.daily_valuation import load_daily_valuation_metadata
-
-    metadata = load_daily_valuation_metadata(data_dir)
-    valuation_info = {
-        "rows": int(metadata.get("rows") or 0),
-        "symbols": int(metadata.get("symbols") or 0),
-    }
-    tables_info["valuation_daily"] = valuation_info
-    total_rows += valuation_info["rows"]
 
     if total_rows == 0:
         return None
@@ -583,13 +492,10 @@ def _compute_storage(data_dir: Path) -> dict:
         "etf_enriched": data_dir / "kline_etf_enriched",
         "etf_instruments": data_dir / "instruments_etf",
         "etf_adj_factor": data_dir / "adj_factor_etf",
-        "etf_minute": data_dir / "kline_etf_minute",
         "minute": data_dir / "kline_minute",
         "adj_factor": data_dir / "adj_factor",
         "instruments": data_dir / "instruments",
         "ext_data": data_dir / "ext_data",
-        "valuation_daily": data_dir / "valuation_daily",
-        "pit_reference": data_dir / "pit_reference",
     }
     stats = {}
     total_size = 0
@@ -689,7 +595,6 @@ def status(request: Request) -> dict:
     "etf_daily":         _get_table_stats("etf_daily",         lambda: _safe_aggregate_etf_daily(repo)),
     "etf_enriched":      _get_table_stats("etf_enriched",      lambda: _safe_aggregate_etf_enriched(repo)),
     "etf_instruments":   _get_table_stats("etf_instruments",   lambda: _safe_aggregate_etf_instruments(repo)),
-    "etf_minute":        _get_table_stats("etf_minute",        lambda: _safe_aggregate_minute(repo, "kline_etf_minute")),
     "minute":      _get_table_stats("minute",      lambda: _safe_aggregate_minute(repo)),
         "adj_factor":  _get_table_stats("adj_factor",  lambda: _safe_aggregate_adj_factor(repo)),
         "instruments": _get_table_stats("instruments", lambda: _safe_aggregate_instruments(repo)),
@@ -707,16 +612,6 @@ def status(request: Request) -> dict:
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }
-
-
-@router.get("/tushare-capability-matrix")
-def tushare_capability_matrix(request: Request) -> dict[str, Any]:
-    data_dir = request.app.state.repo.store.data_dir
-    try:
-        return _load_latest_tushare_capability_matrix(data_dir)
-    except ValueError as exc:
-        logger.warning("failed to load Tushare capability matrix: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/clear")
@@ -739,8 +634,7 @@ def clear_data(request: Request):
         "kline_daily", "kline_daily_enriched", "kline_index_daily", "kline_index_enriched",
         "kline_etf_daily", "kline_etf_enriched", "kline_etf_minute", "kline_minute",
         "adj_factor", "adj_factor_etf", "instruments", "instruments_index", "instruments_etf", "pools", "financials",
-        "valuation_daily",
-        "backtest_results", "screener_results", "ai_cache", "pit_reference",
+        "backtest_results", "screener_results", "ai_cache",
     ):
         d = data_dir / sub
         if not d.exists():
@@ -823,30 +717,6 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "amount": "成交额",
     },
     "kline_enriched": ENRICHED_COLUMNS,
-    "valuation_daily": {
-        "symbol": "股票代码",
-        "date": "交易日期",
-        "raw_close": "当日未复权收盘价",
-        "total_shares": "当日有效总股本",
-        "float_shares": "当日有效流通股本",
-        "market_cap": "总市值(元)",
-        "float_market_cap": "流通市值(元)",
-        "float_share_ratio": "流通股本占比",
-        "income_announce_date": "利润表公告日",
-        "income_period_end": "利润表报告期",
-        "net_income_ttm": "归母净利润TTM(元)",
-        "revenue_ttm": "营业收入TTM(元)",
-        "balance_announce_date": "资产负债表公告日",
-        "balance_period_end": "资产负债表报告期",
-        "equity_attributable": "归母净资产(元)",
-        "cash_flow_announce_date": "现金流量表公告日",
-        "cash_flow_period_end": "现金流量表报告期",
-        "operating_cash_flow_ttm": "经营现金流TTM(元)",
-        "pe_ttm": "滚动市盈率",
-        "pb": "市净率",
-        "ps_ttm": "滚动市销率",
-        "pcf_ttm": "滚动市现率",
-    },
     "kline_index_daily": {
         "symbol": "指数代码",
         "date": "交易日期",
@@ -893,11 +763,6 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "region": "地区",
         "type": "证券类型",
         "listing_date": "上市日期",
-        "list_date": "上市日期(PIT lifecycle 派生)",
-        "delist_date": "退市日期(PIT lifecycle 派生, 为空表示未见退市事件)",
-        "status": "生命周期状态(active/delisted)",
-        "asset_type": "资产类型(stock)",
-        "source": "维表或生命周期补充来源",
         "total_shares": "总股本",
         "float_shares": "流通股本",
         "tick_size": "最小价格变动单位",
@@ -918,52 +783,12 @@ _TABLE_FIELD_DESC: dict[str, dict[str, str]] = {
         "asset_type": "资产类型(etf)",
         "source": "数据源",
     },
-    "pit_index_membership_history": {
-        "index_symbol": "指数代码",
-        "index_name": "指数名称",
-        "member_symbol": "成分证券代码",
-        "member_code": "成分证券纯数字代码",
-        "member_name": "成分证券名称",
-        "snapshot_date": "成分快照交易日",
-        "source_update_date": "来源更新时间",
-        "source": "原始来源",
-        "provenance": "来源口径,逐日历史为 dated_snapshot",
-        "snapshot_hash": "来源快照哈希",
-    },
-    "pit_industry_membership_history": {
-        "member_symbol": "证券代码",
-        "member_code": "证券纯数字代码",
-        "member_name": "证券名称",
-        "industry_standard": "行业分类标准",
-        "industry_standard_code": "行业分类标准编码",
-        "industry_level": "行业级别",
-        "industry_code": "行业代码",
-        "industry_name": "行业名称",
-        "effective_from": "PIT 生效开始日期(含)",
-        "effective_to": "PIT 生效结束日期(不含,为空表示仍有效)",
-        "source": "原始来源",
-        "provenance": "来源口径,历史事件为 historical_event",
-        "raw_hash": "原始行哈希",
-    },
-    "pit_instrument_lifecycle_events": {
-        "symbol": "证券代码",
-        "name": "证券名称",
-        "exchange": "交易所",
-        "event_date": "生命周期事件日期",
-        "event_type": "事件类型(listed/suspended/delisted 等)",
-        "event_status": "生命周期状态分组",
-        "reason": "退市或暂停原因",
-        "source": "原始来源",
-        "provenance": "来源口径,历史事件为 historical_event",
-        "raw_hash": "原始行哈希",
-    },
 }
 
 # view 名 → DuckDB 视图名
 _SCHEMA_VIEWS: dict[str, str] = {
     "daily": "kline_daily",
     "enriched": "kline_enriched",
-    "valuation_daily": "valuation_daily",
     "index_daily": "kline_index_daily",
     "index_enriched": "kline_index_enriched",
     "index_instruments": "instruments_index",
@@ -973,9 +798,6 @@ _SCHEMA_VIEWS: dict[str, str] = {
     "minute": "kline_minute",
     "adj_factor": "adj_factor",
     "instruments": "instruments",
-    "pit_index_membership_history": "pit_index_membership_history",
-    "pit_industry_membership_history": "pit_industry_membership_history",
-    "pit_instrument_lifecycle_events": "pit_instrument_lifecycle_events",
 }
 
 

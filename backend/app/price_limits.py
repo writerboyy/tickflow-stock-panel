@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
-import math
 
 import numpy as np
 import polars as pl
@@ -82,14 +81,6 @@ def polars_limit_price(previous: pl.Expr, limit_pct: pl.Expr, *, up: bool) -> pl
     sign = 1 if up else -1
     numerator = ((1 + sign * limit_pct) * 100).round(0).cast(pl.Int64)
     cents = (previous * 100 + 0.5).floor().cast(pl.Int64)
-    return ((cents * numerator + 50) // 100) / 100
-
-
-def limit_price(previous: float, limit_pct: float, *, up: bool) -> float:
-    """Calculate one exchange limit price with half-up cent rounding."""
-    sign = 1 if up else -1
-    numerator = math.floor((1 + sign * limit_pct) * 100 + 0.5)
-    cents = math.floor(previous * 100 + 0.5)
     return ((cents * numerator + 50) // 100) / 100
 
 

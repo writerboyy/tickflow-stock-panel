@@ -1,12 +1,14 @@
 import math
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.api.settings import (
+    CustomSourceIn,
     CustomSourceTestIn,
     DatasetConfigIn,
 )
@@ -274,31 +276,51 @@ def test_duplicate_dynamic_parameter_names_are_rejected(dataset):
         })
 
 
-def test_data_source_trial_api_is_disabled():
-    with pytest.raises(HTTPException) as exc_info:
-        run_data_source_test(CustomSourceTestIn(provider="draft", dataset="daily"))
+def test_data_source_trial_uses_unsaved_config_and_closes_provider(monkeypatch):
+    from app.data_providers import custom as custom_sources
 
-    assert exc_info.value.status_code == 410
-    assert "自定义 HTTP 数据源已禁用" in exc_info.value.detail
-
-
-def test_user_yaml_sources_are_not_loaded(monkeypatch, tmp_path: Path):
-    from app.data_providers.custom import loader
-
-    (tmp_path / "external.yaml").write_text(
-        "\n".join([
-            "name: external",
-            "datasets:",
-            "  daily:",
-            "    url: https://example.test/daily",
-        ]),
-        encoding="utf-8",
+    provider = Mock()
+    provider.test_dataset.return_value = {
+        "provider": "draft",
+        "dataset": "realtime",
+        "rows": 0,
+        "columns": [],
+        "preview": [],
+    }
+    create_provider = Mock(return_value=provider)
+    monkeypatch.setattr(custom_sources, "create_provider", create_provider)
+    config = CustomSourceIn(
+        name="draft",
+        datasets={
+            "daily": DatasetConfigIn(url="https://unfinished.test"),
+            "realtime": DatasetConfigIn(url="https://example.test/realtime"),
+        },
     )
 
-    with monkeypatch.context() as scoped:
-        scoped.setattr(loader, "_load_builtin_plugins", lambda: None)
-        loader.load_all(tmp_path)
-        assert loader.list_sources() == []
-        assert "external" not in loader.names()
+    result = run_data_source_test(CustomSourceTestIn(
+        provider="draft",
+        dataset="realtime",
+        config=config,
+    ))
 
-    loader.load_all()
+    assert result["provider"] == "draft"
+    tested = create_provider.call_args.args[0]
+    assert list(tested["datasets"]) == ["realtime"]
+    provider.test_dataset.assert_called_once_with("realtime", None)
+    provider.close.assert_called_once_with()
+
+
+def test_data_source_trial_wraps_missing_saved_provider_as_http_400(monkeypatch):
+    from app.data_providers import custom as custom_sources
+
+    monkeypatch.setattr(
+        custom_sources,
+        "get_provider",
+        Mock(side_effect=ValueError("not found")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        run_data_source_test(CustomSourceTestIn(provider="missing", dataset="daily"))
+
+    assert exc_info.value.status_code == 400
+    assert "not found" in exc_info.value.detail

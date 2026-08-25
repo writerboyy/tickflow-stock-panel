@@ -4,10 +4,8 @@
 
 端点:
   GET  /levels?symbol=         11 类关键价位(图表 markLine 数据源)
-  GET  /premium-gene?symbol=   近 200 个交易日溢价基因统计
   POST /analyze                AI 流式四维分析(NDJSON)
   GET  /reports                历史报告列表
-  GET  /reports/latest         指定标的最新报告
   POST /reports                保存一条报告
   DELETE /reports/{report_id}  删除一条报告
 """
@@ -23,7 +21,6 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.indicators.levels import compute_levels, summarize_levels
-from app.services import premium_gene
 from app.services import stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
 
@@ -148,18 +145,6 @@ def get_levels(
     }
 
 
-@router.get("/premium-gene")
-async def get_premium_gene(
-    request: Request,
-    symbol: str = Query(..., description="标的代码,如 000001.SZ"),
-):
-    """返回个股近 200 个交易日的涨停/溢价基因统计。"""
-    symbol = symbol.strip()
-    if not symbol:
-        raise HTTPException(400, "symbol 不能为空")
-    return await premium_gene.get_for_symbol_async(request.app.state.repo, symbol)
-
-
 class AnalyzeRequest(BaseModel):
     """AI 个股分析请求。"""
     symbol: str
@@ -178,23 +163,9 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
 
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
-    position_service = getattr(request.app.state, "position_risk_service", None)
-    holding = None
-    if position_service is not None:
-        portfolio = position_service.store.load()
-        requested_symbol = req.symbol.strip().upper()
-        holding = next(
-            (dict(row) for row in portfolio.get("positions", [])
-             if str(row.get("symbol") or "").strip().upper() == requested_symbol),
-            None,
-        )
 
     async def stream_gen():
-        if holding is None:
-            stream = analyze_stock_stream(repo, data_dir, req.symbol, req.focus)
-        else:
-            stream = analyze_stock_stream(repo, data_dir, req.symbol, req.focus, holding=holding)
-        async for chunk in stream:
+        async for chunk in analyze_stock_stream(repo, data_dir, req.symbol, req.focus):
             yield chunk + "\n"
 
     return StreamingResponse(
@@ -223,16 +194,6 @@ class SaveReportRequest(BaseModel):
 def list_reports(request: Request):
     """获取全部历史报告(按时间降序,后端已裁剪到上限)。"""
     return {"reports": stock_reports.list_reports()}
-
-
-@router.get("/reports/latest")
-def latest_reports(
-    request: Request,
-    symbols: str = Query("", description="逗号分隔的标的代码"),
-):
-    """返回指定标的各自最新的一份报告。"""
-    requested = [item.strip() for item in symbols.split(",") if item.strip()]
-    return {"reports": stock_reports.latest_reports(requested)}
 
 
 @router.post("/reports")

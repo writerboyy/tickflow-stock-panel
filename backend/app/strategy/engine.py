@@ -201,20 +201,6 @@ class StrategyDef:
     composite: CompositeSpec | None = None  # 仅 backend=="composite" 时非空
 
 
-# Older custom strategy factories passed a top-level ``alerts`` argument. The
-# upstream contract removed that field; accept and discard it without
-# reintroducing the public attribute.
-_strategy_def_init = StrategyDef.__init__
-
-
-def _strategy_def_init_compat(self, *args, **kwargs):
-    kwargs.pop("alerts", None)
-    _strategy_def_init(self, *args, **kwargs)
-
-
-StrategyDef.__init__ = _strategy_def_init_compat
-
-
 @dataclass
 class StrategyResult:
     """策略执行结果"""

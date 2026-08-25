@@ -23,10 +23,6 @@ logger = logging.getLogger(__name__)
 
 JobStatus = Literal["pending", "running", "succeeded", "failed"]
 
-
-def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat(timespec="microseconds") + "Z"
-
 # 卡死判定阈值(秒)。语义是「进度停滞」而非「总时长」:
 # running 期间只要 progress() 还在上报(每个分块都会回调), 就永远不算卡死 ——
 # 慢带宽/高延迟环境下的冷启动全市场拉取可能远超 20 分钟, 但只要分块在推进,

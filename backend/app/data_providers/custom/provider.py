@@ -209,8 +209,9 @@ class GenericHTTPProvider:
             # 把 table 注入到请求参数 (上游据此区分财务表)
             extra_params = {**cfg.params, "table": table}
             extra_body = {**cfg.body, "table": table}
-            extra_params["latest"] = latest_only
-            extra_body["latest"] = latest_only
+            if table == "shares":
+                extra_params["latest"] = latest_only
+                extra_body["latest"] = latest_only
             rows = self._request_rows(
                 cfg, symbols=chunk,
                 override_params=extra_params, override_body=extra_body,

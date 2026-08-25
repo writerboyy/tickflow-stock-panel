@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle, Check, Crosshair } from 'lucide-react'
+import { RefreshCw, ChevronDown, Flame, Settings2, X, Bell, BellOff, AlertCircle } from 'lucide-react'
 import { DatePicker } from '@/components/DatePicker'
 import { api, type LimitLadderTier, type LimitLadderStock, type MonitorRule } from '@/lib/api'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -220,7 +220,7 @@ function useSealedDegrade(asOf: string, latestDate: string | undefined, sealedRe
 
 // ===== 单只股票卡片 =====
 
-const StockCard = React.memo(function StockCard({ stock, extFields, direction, sealMode, monitored, monitorRule, onMonitorChange, hasDepth, onClick, onDimensionClick, inPool, poolBusy, poolAvailable, onAddToPool }: {
+const StockCard = React.memo(function StockCard({ stock, extFields, direction, sealMode, monitored, monitorRule, onMonitorChange, hasDepth, onClick, onDimensionClick }: {
   stock: LimitLadderStock
   extFields: ExtFieldConfig
   direction: Direction
@@ -231,10 +231,6 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   hasDepth: boolean
   onClick: (symbol: string, name?: string) => void
   onDimensionClick: (kind: DimensionKind, value: string, sourceField?: string) => void
-  inPool: boolean
-  poolBusy: boolean
-  poolAvailable: boolean
-  onAddToPool: () => void
 }) {
   const [showMonitorMenu, setShowMonitorMenu] = useState(false)
   const [menuAnchor, setMenuAnchor] = useState<DOMRect | null>(null)
@@ -266,38 +262,20 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
   // 有五档盘口能力的用户正常设置; 无能力时保存按钮禁用 + 显示能力提示。
   return (
     <div className="relative group w-full">
-      {/* 卡片操作按钮 (右上角): 不能嵌在卡片 button 内 */}
-      <div className="absolute top-1 right-1 z-20 flex items-center gap-1">
-        <button
-          onClick={e => {
-            e.stopPropagation()
-            setMenuAnchor(e.currentTarget.getBoundingClientRect())
-            setShowMonitorMenu(v => !v)
-          }}
-          title={monitored ? '封单监控已开启' : '开启封单监控'}
-          aria-label={monitored ? '封单监控已开启' : '开启封单监控'}
-          className={`p-0.5 rounded transition-opacity cursor-pointer ${
-            monitored ? 'opacity-100 text-amber-400' : 'opacity-0 group-hover:opacity-70 text-muted hover:!opacity-100'
-          }`}
-        >
-          {monitored ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
-        </button>
-        {direction === 'up' ? (
-          <button
-            type="button"
-            disabled={inPool || poolBusy || !poolAvailable}
-            title={inPool ? '已在打板池' : poolBusy ? '加入中' : poolAvailable ? '加入打板池' : '打板池配置尚未加载'}
-            aria-label={inPool ? '已在打板池' : poolBusy ? '加入打板池' : '加入打板池'}
-            onClick={event => {
-              event.stopPropagation()
-              onAddToPool()
-            }}
-            className={`inline-flex h-5 w-5 items-center justify-center rounded transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${inPool ? 'text-bear' : 'text-muted hover:bg-accent/10 hover:text-accent'}`}
-          >
-            {inPool ? <Check className="h-3.5 w-3.5" /> : <Crosshair className="h-3.5 w-3.5" />}
-          </button>
-        ) : null}
-      </div>
+      {/* 监控设置按钮 (右上角): 不能嵌在卡片 button 内 */}
+      <button
+        onClick={e => {
+          e.stopPropagation()
+          setMenuAnchor(e.currentTarget.getBoundingClientRect())
+          setShowMonitorMenu(v => !v)
+        }}
+        title={monitored ? '封单监控已开启' : '开启封单监控'}
+        className={`absolute top-1 right-1 z-20 p-0.5 rounded transition-opacity cursor-pointer ${
+          monitored ? 'opacity-100 text-amber-400' : 'opacity-0 group-hover:opacity-70 text-muted hover:!opacity-100'
+        }`}
+      >
+        {monitored ? <Bell className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
+      </button>
       {/* 监控菜单 */}
       {showMonitorMenu && menuAnchor && (
         <MonitorMenu
@@ -332,7 +310,7 @@ const StockCard = React.memo(function StockCard({ stock, extFields, direction, s
       }}
     >
       {/* 名称行 */}
-      <div className="flex items-center gap-1.5 w-full min-w-0 pr-12">
+      <div className="flex items-center gap-1.5 w-full min-w-0 pr-4">
         <span className={`${style.nameCls} font-medium truncate`}>{stock.name}</span>
         {stock.is_one_word && (
           <span className={`shrink-0 rounded-sm border px-1 py-px text-[9px] font-medium leading-none ${
@@ -741,27 +719,13 @@ function filterTiers(tiers: LimitLadderTier[], keys: Set<FilterKey>, bf?: Broken
 
 // ===== 过滤持久化 =====
 
-const DEFAULT_BOARD_FILTERS: FilterKey[] = ['main', 'chinext', 'star', 'bj']
+const DEFAULT_FILTERS = new Set<FilterKey>(['limit_up', 'main', 'chinext', 'star', 'bj'])
 
-function defaultFilterKeys(direction: Direction): FilterKey[] {
-  return [...statusTabs(direction).map(tab => tab.key), ...DEFAULT_BOARD_FILTERS]
-}
-
-function loadFilterKeys(direction: Direction): Set<FilterKey> {
+function loadFilterKeys(): Set<FilterKey> {
   const arr = storage.limitLadderBoard.get([])
-  const allTabs = [...statusTabs(direction), ...BOARD_TABS]
+  const allTabs = [...STATUS_TABS_UP, ...BOARD_TABS]
   const valid = arr.filter((k): k is FilterKey => allTabs.some(t => t.key === k))
-  const legacyDefaults: FilterKey[] = [direction === 'down' ? 'limit_down' : 'limit_up', ...DEFAULT_BOARD_FILTERS]
-  const isLegacyDefault = valid.length === legacyDefaults.length
-    && legacyDefaults.every(key => valid.includes(key))
-  if (storage.limitLadderStatusDefaultV2.get(false)) {
-    return valid.length > 0 ? new Set(valid) : new Set(defaultFilterKeys(direction))
-  }
-  storage.limitLadderStatusDefaultV2.set(true)
-  if (valid.length > 0 && !isLegacyDefault) return new Set(valid)
-  const defaults = defaultFilterKeys(direction)
-  storage.limitLadderBoard.set(defaults)
-  return new Set(defaults)
+  return valid.length > 0 ? new Set(valid) : new Set(DEFAULT_FILTERS)
 }
 
 // ===== 梯队颜色 =====
@@ -960,7 +924,7 @@ function TagStats({ title, tiers, extFields, fieldKey, color, selectedTag, onSel
 
 // ===== 梯队分组 =====
 
-function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth, poolSymbols, poolBusy, poolAvailable, onAddToPool }: {
+function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick, selectedTag, onSelectTag, onDimensionClick, direction, sealMode, monitoredSymbols, ladderRules, onMonitorChange, hasDepth }: {
   tier: LimitLadderTier
   defaultOpen: boolean
   extFields: ExtFieldConfig
@@ -976,10 +940,6 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
   ladderRules: Map<string, MonitorRule>
   onMonitorChange: () => void
   hasDepth: boolean
-  poolSymbols: Set<string>
-  poolBusy: boolean
-  poolAvailable: boolean
-  onAddToPool: (stock: LimitLadderStock) => void
 }) {
   const isDarkTheme = useTheme() === 'dark'
   const [open, setOpen] = useState(defaultOpen)
@@ -1169,10 +1129,6 @@ function TierGroup({ tier, defaultOpen, extFields, filterKeys, bf, onStockClick,
                   hasDepth={hasDepth}
                   onClick={onStockClick}
                   onDimensionClick={onDimensionClick}
-                  inPool={poolSymbols.has(s.symbol)}
-                  poolBusy={poolBusy}
-                  poolAvailable={poolAvailable}
-                  onAddToPool={() => onAddToPool(s)}
                 />
               ))}
             </div>
@@ -1475,43 +1431,15 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 
 // ===== 主页面 =====
 
-export function LimitUpLadder({
-  headerContent,
-  onAddToPool: onAddToPoolFromParent,
-}: {
-  headerContent?: React.ReactNode
-  onAddToPool?: (stock: LimitLadderStock) => void
-} = {}) {
-  const queryClient = useQueryClient()
+export function LimitUpLadder() {
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
   const [sealMode, setSealMode] = useState<'vol' | 'amount'>(() => storage.limitLadderSealMode.get('vol'))
-  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(() => loadFilterKeys(direction))
+  const [filterKeys, setFilterKeys] = useState<Set<FilterKey>>(loadFilterKeys)
   const [extFields, setExtFields] = useState<ExtFieldConfig>(loadExtFields)
   const [showExtConfig, setShowExtConfig] = useState(false)
   const [showConcept, setShowConcept] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).concept)
   const [showIndustry, setShowIndustry] = useState(() => storage.limitLadderShowExt.get({ concept: true, industry: true }).industry)
-
-  const limitBoardView = useQuery({
-    queryKey: QK.limitBoard,
-    queryFn: api.limitBoard,
-    staleTime: 5_000,
-    placeholderData: previous => previous,
-  })
-  const addToPool = useMutation({
-    mutationFn: (stock: LimitLadderStock) => {
-      const revision = limitBoardView.data?.revision
-      if (revision == null) throw new Error('打板池配置尚未加载')
-      return api.limitBoardPoolAdd(stock.symbol, 'manual', revision)
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: QK.limitBoard })
-    },
-  })
-  const poolSymbols = useMemo(
-    () => new Set((limitBoardView.data?.board_pool ?? []).map(row => row.symbol)),
-    [limitBoardView.data?.board_pool],
-  )
 
   // 连板梯队封单监控规则 (type=ladder): {symbol → rule} 映射
   const { data: monitorRulesData, refetch: refetchMonitorRules } = useQuery({
@@ -1535,9 +1463,13 @@ export function LimitUpLadder({
     setDirection(d)
     storage.limitLadderDirection.set(d)
     // 切换方向时重置状态筛选为该方向默认集(避免涨跌状态键错配)
-    const defaults = defaultFilterKeys(d)
-    setFilterKeys(new Set(defaults))
-    storage.limitLadderBoard.set(defaults)
+    const defaultKeys = d === 'down'
+      ? ['limit_down', 'main', 'chinext', 'star', 'bj']
+      : ['limit_up', 'main', 'chinext', 'star', 'bj']
+    const allTabs = [...statusTabs(d), ...BOARD_TABS]
+    const valid = defaultKeys.filter(k => allTabs.some(t => t.key === k)) as FilterKey[]
+    setFilterKeys(new Set(valid))
+    storage.limitLadderBoard.set(valid)
   }, [])
 
   const toggleConcept = useCallback(() => {
@@ -1618,7 +1550,6 @@ export function LimitUpLadder({
     return (
       <div className="flex flex-col h-full">
         <PageHeader title={direction === 'down' ? '连跌梯队' : '连板梯队'} />
-        {headerContent}
         <EmptyState icon={Flame} title={direction === 'down' ? '暂无连跌数据' : '暂无连板数据'} hint={direction === 'down' ? '该日期无跌停股或 enriched 数据未就绪' : '该日期无涨停股或 enriched 数据未就绪'} />
       </div>
     )
@@ -1769,8 +1700,6 @@ export function LimitUpLadder({
         }
       />
 
-      {headerContent}
-
       {/* 总览条 + 日期 */}
       <OverviewBar tiers={tiers} dateValue={dateValue} onDateChange={setAsOf} filterKeys={filterKeys} bf={extFields.bf} direction={direction} />
 
@@ -1823,16 +1752,6 @@ export function LimitUpLadder({
             ladderRules={ladderRules}
             onMonitorChange={refetchMonitorRules}
             hasDepth={sealedDegrade.hasDepth}
-            poolSymbols={poolSymbols}
-            poolBusy={addToPool.isPending}
-            poolAvailable={limitBoardView.data != null}
-            onAddToPool={stock => {
-              if (onAddToPoolFromParent) {
-                onAddToPoolFromParent(stock)
-                return
-              }
-              addToPool.mutate(stock)
-            }}
           />
         ))}
       </div>

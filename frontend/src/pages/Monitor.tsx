@@ -40,8 +40,6 @@ const SOURCE_BADGE_STYLE: Record<string, string> = {
   sector:   'bg-cyan-500/10 text-cyan-700 border-cyan-500/20 dark:text-cyan-300',
   abnormal: 'bg-orange-500/10 text-orange-500 border-orange-500/20 dark:text-orange-400',
 }
-const ALERT_PAGE_SIZE = 50
-const ALERT_TAG_LIMIT = 6
 
 /**
  * 渲染策略类消息 — 策略名黄色、进入红/移出绿 (A 股红涨绿跌惯例)、其余白色。
@@ -91,12 +89,9 @@ function AlertExtTags({ ev, fields, onTagClick }: {
   const conceptTags = getExtTags(ev, fields.concept)
   const industryTags = getExtTags(ev, fields.industry)
   if (conceptTags.length === 0 && industryTags.length === 0) return null
-  const visibleIndustryTags = industryTags.slice(0, ALERT_TAG_LIMIT)
-  const visibleConceptTags = conceptTags.slice(0, Math.max(0, ALERT_TAG_LIMIT - visibleIndustryTags.length))
-  const hiddenCount = industryTags.length + conceptTags.length - visibleIndustryTags.length - visibleConceptTags.length
   return (
     <div className="mt-1 flex flex-wrap items-center gap-1 pl-0.5">
-      {visibleIndustryTags.map((t, i) => (
+      {industryTags.map((t, i) => (
         <button
           key={`i${i}`}
           onClick={event => { event.stopPropagation(); onTagClick('industry', t, fields.industry?.field) }}
@@ -105,7 +100,7 @@ function AlertExtTags({ ev, fields, onTagClick }: {
           {t}
         </button>
       ))}
-      {visibleConceptTags.map((t, i) => (
+      {conceptTags.map((t, i) => (
         <button
           key={`c${i}`}
           onClick={event => { event.stopPropagation(); onTagClick('concept', t, fields.concept?.field) }}
@@ -114,7 +109,6 @@ function AlertExtTags({ ev, fields, onTagClick }: {
           {t}
         </button>
       ))}
-      {hiddenCount > 0 && <span className="text-[9px] text-muted">+{hiddenCount}</span>}
     </div>
   )
 }
@@ -236,7 +230,7 @@ export function Monitor() {
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto p-3.5">
-              <AlertsList alertsQuery={alertsQuery} resetKey={`${filter}|${extColumnsParam ?? ''}`} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} />
+              <AlertsList alertsQuery={alertsQuery} confirmClear={confirmClear} setConfirmClear={setConfirmClear} total={total} enterTs={enterTsRef.current} monitorExtFields={monitorExtFields} />
             </div>
           </section>
 
@@ -310,9 +304,8 @@ function SectionHeader({ icon: Icon, title }: { icon: any; title: string }) {
 }
 
 // ── 触发记录列表 ──────────────────────────────────────
-function AlertsList({ alertsQuery, resetKey, confirmClear, setConfirmClear, total, enterTs, monitorExtFields }: {
+function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs, monitorExtFields }: {
   alertsQuery: ReturnType<typeof useQuery>
-  resetKey: string
   confirmClear: boolean
   setConfirmClear: (v: boolean) => void
   total: number
@@ -326,7 +319,6 @@ function AlertsList({ alertsQuery, resetKey, confirmClear, setConfirmClear, tota
   const [previewEv, setPreviewEv] = useState<AlertEvent | null>(null)
   const [memberPreview, setMemberPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
-  const [visibleCount, setVisibleCount] = useState(ALERT_PAGE_SIZE)
 
   const clearMut = useMutation({
     mutationFn: api.alertsClear,
@@ -352,12 +344,7 @@ function AlertsList({ alertsQuery, resetKey, confirmClear, setConfirmClear, tota
     }
   }
 
-  const events: AlertEvent[] = (alertsQuery.data as any)?.alerts ?? []
-  const visibleEvents = events.slice(0, visibleCount)
-
-  useEffect(() => {
-    setVisibleCount(ALERT_PAGE_SIZE)
-  }, [resetKey])
+  const events = (alertsQuery.data as any)?.alerts ?? []
 
   return (
     <div className="space-y-3">
@@ -375,7 +362,7 @@ function AlertsList({ alertsQuery, resetKey, confirmClear, setConfirmClear, tota
         />
       ) : (
         <div className="space-y-2">
-          {visibleEvents.map((ev: any, i: number) => {
+              {events.map((ev: any, i: number) => {
             const sev = SEVERITY_CONFIG[ev.severity ?? 'info'] ?? SEVERITY_CONFIG.info
             const SevIcon = sev.icon
             const isNew = ev.ts > enterTs
@@ -595,14 +582,6 @@ function AlertsList({ alertsQuery, resetKey, confirmClear, setConfirmClear, tota
               </motion.div>
             )
           })}
-          {visibleCount < events.length && (
-            <button
-              onClick={() => setVisibleCount(count => Math.min(count + ALERT_PAGE_SIZE, events.length))}
-              className="w-full rounded-lg border border-border/60 bg-surface px-3 py-2 text-xs text-muted transition-colors hover:border-accent/40 hover:text-accent"
-            >
-              加载更多（已显示 {visibleEvents.length} / {events.length}）
-            </button>
-          )}
         </div>
       )}
 

@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
 from functools import lru_cache
 from io import BytesIO
 
-from PIL import Image, ImageEnhance, ImageOps, ImageStat
+from PIL import Image, ImageEnhance, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -31,31 +30,6 @@ class OcrProvider(ABC):
     @abstractmethod
     def available(self) -> bool:
         """运行时依赖是否就绪（二进制/模型等）。"""
-
-    def supports_language(self, language: str) -> bool:
-        """当前 provider 是否支持指定语言；非 Tesseract provider 默认自行处理语言。"""
-        return True
-
-    def extract_tokens(self, image_bytes: bytes) -> list[dict]:
-        """返回带坐标和置信度的 OCR token；旧 provider 自动降级为逐行文本。"""
-        rows = []
-        for line_num, text in enumerate(self.extract_text(image_bytes).splitlines(), start=1):
-            if text.strip():
-                rows.append(asdict(OcrToken(text.strip(), 0, line_num * 24, 1, 20, 100.0, 1, 1, line_num)))
-        return rows
-
-
-@dataclass(frozen=True, slots=True)
-class OcrToken:
-    text: str
-    left: int
-    top: int
-    width: int
-    height: int
-    confidence: float
-    block_num: int = 0
-    par_num: int = 0
-    line_num: int = 0
 
 
 def preprocess_for_ocr(image_bytes: bytes) -> Image.Image:
@@ -81,10 +55,9 @@ def preprocess_for_ocr(image_bytes: bytes) -> Image.Image:
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
     gray = ImageOps.grayscale(img)
-    # 暗底白字需要反相；浅色主题保持白底，统一给 Tesseract 黑字白底输入。
-    sample = gray.resize((64, 64), Image.Resampling.BOX)
-    normalized = ImageOps.invert(gray) if ImageStat.Stat(sample).mean[0] < 128 else gray
-    contrasted = ImageEnhance.Contrast(normalized).enhance(1.8)
+    # 暗底白字 → 白底黑字，Tesseract 更稳
+    inverted = ImageOps.invert(gray)
+    contrasted = ImageEnhance.Contrast(inverted).enhance(1.8)
     # 小字适度放大
     w, h = contrasted.size
     if w < _MIN_WIDTH:
@@ -106,15 +79,6 @@ class TesseractOcrProvider(OcrProvider):
             return True
         except Exception as e:  # noqa: BLE001
             logger.debug("tesseract unavailable: %s", e)
-            return False
-
-    def supports_language(self, language: str) -> bool:
-        try:
-            import pytesseract
-
-            return language in set(pytesseract.get_languages(config=""))
-        except Exception as e:  # noqa: BLE001
-            logger.debug("tesseract languages unavailable: %s", e)
             return False
 
     def extract_text(self, image_bytes: bytes) -> str:
@@ -139,50 +103,6 @@ class TesseractOcrProvider(OcrProvider):
         if last_err:
             raise RuntimeError(f"Tesseract OCR 失败: {last_err}") from last_err
         return ""
-
-    def extract_tokens(self, image_bytes: bytes) -> list[dict]:
-        import pytesseract
-
-        img = preprocess_for_ocr(image_bytes)
-        last_err: Exception | None = None
-        for lang in ("chi_sim+eng", "eng"):
-            try:
-                data = pytesseract.image_to_data(
-                    img,
-                    lang=lang,
-                    config="--psm 6",
-                    output_type=pytesseract.Output.DICT,
-                )
-                out: list[dict] = []
-                for idx, raw_text in enumerate(data.get("text", [])):
-                    text = str(raw_text or "").strip()
-                    if not text:
-                        continue
-                    try:
-                        confidence = float(data["conf"][idx])
-                    except (KeyError, TypeError, ValueError):
-                        confidence = -1.0
-                    if confidence < 0:
-                        continue
-                    out.append(asdict(OcrToken(
-                        text=text,
-                        left=int(data["left"][idx]),
-                        top=int(data["top"][idx]),
-                        width=int(data["width"][idx]),
-                        height=int(data["height"][idx]),
-                        confidence=confidence,
-                        block_num=int(data.get("block_num", [0] * len(data["text"]))[idx]),
-                        par_num=int(data.get("par_num", [0] * len(data["text"]))[idx]),
-                        line_num=int(data.get("line_num", [0] * len(data["text"]))[idx]),
-                    )))
-                if out:
-                    return out
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                logger.debug("tesseract structured lang=%s failed: %s", lang, e)
-        if last_err:
-            raise RuntimeError(f"Tesseract OCR 失败: {last_err}") from last_err
-        return []
 
 
 @lru_cache(maxsize=1)

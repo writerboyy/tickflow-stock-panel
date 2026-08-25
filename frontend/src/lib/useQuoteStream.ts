@@ -19,7 +19,6 @@ const _statusListeners = new Set<() => void>()
 const FAILS_BEFORE_TOAST = 3
 // 指数退避上限
 const BACKOFF_CAP_MS = 60_000
-const MONITOR_RULE_SOURCES = new Set(['strategy', 'signal', 'price', 'market', 'ladder', 'sector'])
 
 function _emitStatus() {
   _statusListeners.forEach((fn) => fn())
@@ -83,9 +82,14 @@ export function useQuoteStream(
   pagesRef.current = sseRefreshPages
 
   const handleAlerts = useCallback((alerts: StrategyAlertEvent[]) => {
-    const strategyAlerts = alerts.filter(
-      alert => MONITOR_RULE_SOURCES.has(alert.source) && Boolean(alert.rule_id),
-    )
+    // depth 系统接管通知: 单独处理, 不走 strategy 回调
+    const depthAlerts = alerts.filter(a => a.source === 'depth')
+    const strategyAlerts = alerts.filter(a => a.source !== 'depth')
+
+    // depth 通知直接 toast(防刷屏: 后端已在状态切换时才推)
+    for (const a of depthAlerts.slice(0, 1)) {
+      toast(a.message, 'success')
+    }
 
     // 监控告警: 用专用 AlertToast (整批只响一声, 每条都弹, 受 maxVisible 上限保护)
     if (strategyAlerts.length > 0) {
@@ -119,10 +123,6 @@ export function useQuoteStream(
         failCount = 0
         toastFired = false
         _setStatus('connected')
-        qc.invalidateQueries({ queryKey: QK.quoteStatus })
-        if (enabledRef.current) {
-          qc.invalidateQueries({ queryKey: QK.indexQuotes })
-        }
       }
 
       // sse-starlette ping 心跳走 SSE comment，不会到达这里
@@ -178,20 +178,6 @@ export function useQuoteStream(
         // 不受实时行情开关限制 — 修正轮询独立于行情轮询, 用户开了修正就想看实时封单。
         qc.invalidateQueries({ queryKey: ['limit-ladder'] })
         qc.invalidateQueries({ queryKey: ['overview-market'] })
-      })
-
-      es.addEventListener('large_orders_updated', () => {
-        qc.invalidateQueries({ queryKey: QK.largeOrders })
-      })
-
-      es.addEventListener('position_risk_updated', () => {
-        qc.invalidateQueries({ queryKey: QK.positionRisk })
-        qc.invalidateQueries({ queryKey: QK.positionRiskFeatures() })
-        qc.invalidateQueries({ queryKey: QK.positionRiskEvents })
-      })
-
-      es.addEventListener('limit_board_updated', () => {
-        qc.invalidateQueries({ queryKey: QK.limitBoard, exact: true })
       })
 
       es.addEventListener('strategy_alert', (e: MessageEvent) => {

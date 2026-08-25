@@ -74,7 +74,6 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         "kline_minute": f"{d}/kline_minute/**/*.parquet",
         "adj_factor": f"{d}/adj_factor/**/*.parquet",
         "instruments": f"{d}/instruments/**/*.parquet",
-        "valuation_daily": f"{d}/valuation_daily/**/*.parquet",
     }
     path = paths.get(name)
     if not path:
@@ -199,17 +198,11 @@ def run_extend_history(
     from app.indicators.pipeline import run_pipeline
     written_enriched = run_pipeline()
 
-    from app.services.daily_valuation import build_daily_valuation
-
-    valuation = build_daily_valuation(repo.store.data_dir)
-
     enriched_dir = repo.store.data_dir / "kline_daily_enriched"
     enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
     emit("extend_history", 92, f"enriched 完成,覆盖 {enriched_days} 天")
     logger.info("extend_history: enriched done, %d days", enriched_days)
-    logger.info("extend_history: valuation_daily done, %d rows", valuation["rows"])
     _refresh_single_view(repo, "kline_enriched")
-    _refresh_single_view(repo, "valuation_daily")
     _invalidate("enriched")
 
     # 6. 刷新视图

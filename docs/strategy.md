@@ -6,25 +6,6 @@
 
 ---
 
-## 默认策略归档位置
-
-用户提出或研究产出的可执行策略，默认在侧边栏 **自定义 → 量化策略** (`/free-strategy`) 中创建和维护。每个策略独立保存为：
-
-```text
-data/free_strategies/<strategy_id>/strategy.py
-```
-
-同目录的 `manifest.json` 保存策略名称、版本和运行参数。**回测页 (`/backtest`) 只负责历史验证和展示结果，不作为策略源码的默认归档位置。**
-
-只有需求明确属于选股卡片、全市场策略扫描或策略监控时，才使用本文后续介绍的选股策略文件 `data/strategies/custom/*.py`。两类文件不可互相代替：
-
-| 页面/用途 | 默认源码位置 |
-| :--- | :--- |
-| 自定义 → 量化策略（交易、回测、模拟） | `data/free_strategies/<strategy_id>/strategy.py` |
-| 策略页（选股卡片、扫描、监控） | `data/strategies/custom/<strategy_id>.py` |
-
----
-
 ## 内置策略
 
 **18 个内置策略**,每个策略一个独立 Python 文件,基于 Polars 表达式向量化实现(`backend/app/strategy/builtin/`):

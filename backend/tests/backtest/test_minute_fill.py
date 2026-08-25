@@ -17,11 +17,9 @@ from datetime import date, datetime
 
 import numpy as np
 import polars as pl
-import pytest
 
 from app.backtest.engine import BacktestEngine
 from app.backtest.minute_trigger import build_minute_exit_reference
-from app.services.minute_quality import MinuteCoverageError
 
 NUMERIC_COLS = BacktestEngine._MINUTE_NUMERIC_COLS  # open/high/low/close/volume/amount
 
@@ -38,7 +36,7 @@ def _sample_minute_df(symbol: str = "000001.SZ") -> pl.DataFrame:
         "low": [9.9, 10.4, 10.7, 10.5],
         "close": [10.2, 10.6, 10.85, 10.65],
         "volume": [100, 200, 150, 120],
-        "amount": [102_000.0, 212_000.0, 162_700.0, 127_800.0],
+        "amount": [1020.0, 2120.0, 1627.0, 1278.0],
     })
 
 
@@ -75,21 +73,12 @@ def test_resolve_minute_fill_sell_cross_below_ref():
     assert BacktestEngine._resolve_minute_fill(arr, 10.5, "sell") == 10.0
 
 
-def test_resolve_minute_fill_vwap_converts_lots_to_shares():
-    """无参考线 → VWAP = 总成交额 / (总成交量手数 * 100)。"""
+def test_resolve_minute_fill_vwap():
+    """无参考线 → VWAP = 总成交额 / 总成交量。"""
     arr = _to_compact_arr(_sample_minute_df())
-    total_amt = 102_000.0 + 212_000.0 + 162_700.0 + 127_800.0
+    total_amt = 1020.0 + 2120.0 + 1627.0 + 1278.0
     total_vol = 100 + 200 + 150 + 120
-    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == total_amt / (total_vol * 100)
-
-
-def test_resolve_minute_fill_rejects_raw_vwap_outside_adjusted_price_range():
-    arr = np.array([
-        [5.0, 5.1, 4.9, 5.0, 100, 100_000],
-        [5.0, 5.1, 4.9, 5.0, 100, 100_000],
-    ], dtype=np.float64)
-
-    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == 5.0
+    assert BacktestEngine._resolve_minute_fill(arr, None, "buy") == total_amt / total_vol
 
 
 def test_resolve_minute_fill_empty_returns_none():
@@ -173,16 +162,3 @@ def test_load_minute_for_fills_handles_missing_dates():
         repo, ["000001.SZ"], {"2024-01-02", "2024-01-03"}, "stock",
     )
     assert result == {}
-
-
-def test_load_minute_for_fills_fails_closed_when_required_session_is_incomplete():
-    repo = _FakeRepo(_sample_minute_df())
-
-    with pytest.raises(MinuteCoverageError, match="缺失或不完整"):
-        BacktestEngine._load_minute_for_fills(
-            repo,
-            ["000001.SZ"],
-            {"2024-01-02"},
-            "stock",
-            required_keys={("000001.SZ", "2024-01-02")},
-        )

@@ -237,8 +237,7 @@ def _quote_status(request: Request) -> dict:
 def _index_quotes(request: Request, as_of: date | None = None) -> list[dict]:
     qs = getattr(request.app.state, "quote_service", None)
     rows: list[dict] = []
-    has_fresh = getattr(qs, "has_fresh_index_quotes", lambda: True) if qs else None
-    if qs and as_of is None and has_fresh():
+    if qs and as_of is None:
         df = qs.get_index_quotes(list(CORE_INDEX_SYMBOLS))
         if not df.is_empty():
             rows = df.to_dicts()

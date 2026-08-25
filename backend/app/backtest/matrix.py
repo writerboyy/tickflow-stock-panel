@@ -724,15 +724,8 @@ def load_market_data_matrix_from_parquet(
         pa.schema([("date", pa.date32())]),
         flavor="hive",
     )
-    parquet_files = sorted(
-        path
-        for path in root.glob("date=*/**/*.parquet")
-        if path.is_file()
-    )
-    if not parquet_files:
-        raise ValueError("本地指标数据为空，请先在数据页面同步日K并完成指标计算")
     dataset = pads.dataset(
-        [str(path) for path in parquet_files],
+        str(root),
         format="parquet",
         partitioning=partitioning,
     )
@@ -3621,14 +3614,13 @@ def _build_basic_filter_mask_uncached(market: MarketDataMatrix, config: dict) ->
 
     mask = np.ones(market.shape, dtype=bool)
     close = market.close
-    market_price = market.fields.get("raw_close", close)
     if config.get("price_min") is not None:
         mask &= close >= float(config["price_min"])
     if config.get("price_max") is not None:
         mask &= close <= float(config["price_max"])
 
-    _apply_bound(mask, market_price * _optional_field(market, "total_shares"), config, "market_cap")
-    _apply_bound(mask, market_price * _optional_field(market, "float_shares"), config, "float_cap")
+    _apply_bound(mask, close * _optional_field(market, "total_shares"), config, "market_cap")
+    _apply_bound(mask, close * _optional_field(market, "float_shares"), config, "float_cap")
     _apply_bound(mask, _required_field_for_bound(market, config, "amount"), config, "amount")
     _apply_bound(mask, _optional_field(market, "turnover_rate"), config, "turnover")
 

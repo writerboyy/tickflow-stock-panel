@@ -28,23 +28,6 @@ def cn_today() -> date:
     return datetime.now(CN_TZ).date()
 
 
-def cn_naive_now() -> datetime:
-    """当前北京墙钟时间，供内部无时区行情模型使用。"""
-    return cn_now().replace(tzinfo=None)
-
-
-def cn_naive_from_timestamp(timestamp: int | float) -> datetime:
-    """把 Unix 秒时间戳显式转换为北京墙钟时间。"""
-    return datetime.fromtimestamp(float(timestamp), tz=CN_TZ).replace(tzinfo=None)
-
-
-def as_cn_naive(value: datetime) -> datetime:
-    """把带时区时间转换为北京墙钟时间；无时区值按既有北京口径保留。"""
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(CN_TZ).replace(tzinfo=None)
-
-
 def trading_minutes_elapsed_from_dt(dt: datetime) -> float:
     """根据北京时间 datetime 计算当日已交易分钟数。
 
@@ -93,3 +76,4 @@ def trading_minutes_elapsed_from_ts(ts_ms: int | float | None) -> float:
     except (ValueError, TypeError, OSError):
         return float(_TRADING_TOTAL_MINUTES)
     return trading_minutes_elapsed_from_dt(dt)
+
