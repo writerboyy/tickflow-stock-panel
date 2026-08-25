@@ -454,6 +454,7 @@ class QmtTradingService:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            cached_account = dict(self._last_snapshot.get("account") or {}) if self._last_snapshot else None
             status = {
                 "configured": self.client.configured,
                 "trade_authorized": self.trade_authorized,
@@ -467,6 +468,7 @@ class QmtTradingService:
                 "auto_sync_interval_seconds": self.auto_sync_interval,
                 "last_probe_at": self._last_status.get("last_probe_at"),
                 "last_sync_at": self._last_snapshot.get("synced_at") if self._last_snapshot else None,
+                "account": cached_account or None,
                 "state": self._last_status.get("state", "not_configured" if not self.client.configured else "unknown"),
                 "reason": self._last_status.get("reason") or self.client.configuration_reason,
                 "latency_ms": self._last_status.get("latency_ms"),

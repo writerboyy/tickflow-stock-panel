@@ -911,6 +911,25 @@ def test_qmt_runtime_trade_switch_defaults_to_authorized_state_and_requires_sync
     assert unauthorized.status()["trade_enabled"] is False
 
 
+def test_qmt_status_exposes_cached_account_snapshot(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+    assert service.status()["account"] is None
+
+    service._last_snapshot = {
+        "account": {
+            "cash": 3_800.52,
+            "fin_enbuy_balance": 215_788.37,
+            "fin_enable_quota": 215_788.37,
+        },
+        "synced_at": "2026-08-14T00:00:00+00:00",
+    }
+
+    status = service.status()
+    assert status["account"] == service._last_snapshot["account"]
+    status["account"]["cash"] = 0
+    assert service._last_snapshot["account"]["cash"] == 3_800.52
+
+
 def test_qmt_auto_sync_starts_immediately_and_stops(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings())
     called = Event()

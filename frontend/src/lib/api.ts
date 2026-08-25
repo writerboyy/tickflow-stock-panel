@@ -996,6 +996,20 @@ export interface QmtStatus {
   state: 'not_configured' | 'unknown' | 'ready' | 'error'
   reason: string
   latency_ms?: number
+  account?: {
+    cash?: number | null
+    total_asset?: number | null
+    market_value?: number | null
+    account_type?: string | null
+    assure_enbuy_balance?: number | null
+    credit_assure_buying_power?: number | null
+    fin_enbuy_balance?: number | null
+    credit_financing_buying_power?: number | null
+    fin_enable_balance?: number | null
+    fin_enable_quota?: number | null
+    financing_available_amount?: number | null
+    [key: string]: number | string | null | undefined
+  } | null
 }
 
 export interface QmtOrder {

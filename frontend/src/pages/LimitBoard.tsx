@@ -314,15 +314,36 @@ function LimitBoardAllocationDialog({
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
   const creditBuy = String(qmt.data?.account_type || '').toUpperCase() === 'CREDIT'
+  const cachedAccount = qmt.data?.account
+  const cachedBuyingPower = creditBuy
+    ? creditBuyMode === 'financing'
+      ? cachedAccount?.fin_enbuy_balance ?? cachedAccount?.credit_financing_buying_power
+      : cachedAccount?.assure_enbuy_balance ?? cachedAccount?.credit_assure_buying_power
+    : cachedAccount?.cash
+  const cachedBasisLabel = creditBuy
+    ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
+    : '可用资金'
+  const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
+    ?? cachedAccount?.fin_enable_quota
+    ?? cachedAccount?.financing_available_amount
   const validPrice = price != null && Number.isFinite(price) && price > 0
+  const geneDetail = row.candidate_score_detail?.premium_gene
+  const localGeneReady = Boolean(
+    geneDetail
+    && geneDetail.limit_up_count != null
+    && geneDetail.next_day_red_rate != null
+    && geneDetail.first_board_broken_rate != null,
+  )
   const premiumGeneQuery = useQuery({
     queryKey: QK.stockPremiumGene(row.symbol),
     queryFn: () => api.stockAnalysisPremiumGene(row.symbol),
-    enabled: kind === 'board' && Boolean(row.symbol),
+    // Limit-board rows already carry the latest computed gene snapshot. Avoid
+    // an extra live request when that detail is complete; it delayed the dialog
+    // without changing the displayed score.
+    enabled: kind === 'board' && Boolean(row.symbol) && !localGeneReady,
     staleTime: 60_000,
     retry: false,
   })
-  const geneDetail = row.candidate_score_detail?.premium_gene
   const geneData: PremiumGene | undefined = premiumGeneQuery.data?.available ? premiumGeneQuery.data : undefined
   const geneScore = geneData?.score ?? geneDetail?.score
   const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
@@ -355,9 +376,6 @@ function LimitBoardAllocationDialog({
   const estimatedAmount = mode !== 'volume' && mode !== 'global'
     ? previewOrder?.actual_amount ?? null
     : price != null && estimatedVolume > 0 ? price * estimatedVolume : null
-  const targetAmount = mode === 'volume'
-    ? estimatedAmount
-    : previewOrder?.target_amount ?? null
   const validValue = ratioMode || mode === 'lot' || (Number.isFinite(value) && value > 0)
   const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
   const previewRequired = kind !== 'edit'
@@ -435,15 +453,11 @@ function LimitBoardAllocationDialog({
         disabled={pending}
         options={allocationOptions}
         disabledModes={{ available: !qmtReady }}
-        basisLabel={previewOrder?.basis_label}
-        basisAmount={previewOrder?.basis_amount}
+        basisLabel={previewOrder?.basis_label ?? cachedBasisLabel}
+        basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
         accountType={qmt.data?.account_type}
-        cashAmount={previewOrder?.cash_amount}
-        financingAvailableAmount={previewOrder?.financing_available_amount}
-        buyingPowerAmount={previewOrder?.buying_power_amount}
-        targetAmount={targetAmount}
-        actualAmount={estimatedAmount}
-        volume={estimatedVolume}
+        cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
+        financingAvailableAmount={previewOrder?.financing_available_amount ?? cachedFinancingAvailable}
         previewState={allocationPreviewState}
         previewMessage={allocationPreviewMessage}
       />

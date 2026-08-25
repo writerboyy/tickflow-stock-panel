@@ -52,10 +52,6 @@ export function QmtTradeAllocationControls({
   accountType,
   cashAmount,
   financingAvailableAmount,
-  buyingPowerAmount,
-  targetAmount,
-  actualAmount,
-  volume,
   previewState = 'idle',
   previewMessage,
   showQuickPresets = true,
@@ -75,10 +71,6 @@ export function QmtTradeAllocationControls({
   accountType?: string | null
   cashAmount?: number | null
   financingAvailableAmount?: number | null
-  buyingPowerAmount?: number | null
-  targetAmount?: number | null
-  actualAmount?: number | null
-  volume?: number | null
   previewState?: PreviewState
   previewMessage?: string | null
   showQuickPresets?: boolean
@@ -98,15 +90,6 @@ export function QmtTradeAllocationControls({
   const basisText = basisAmount != null && Number.isFinite(basisAmount) ? `${MONEY.format(basisAmount)} 元` : '—'
   const cashText = cashAmount != null && Number.isFinite(cashAmount) ? `${MONEY.format(cashAmount)} 元` : '—'
   const financingText = financingAvailableAmount != null && Number.isFinite(financingAvailableAmount) ? `${MONEY.format(financingAvailableAmount)} 元` : '—'
-  const buyingPowerText = buyingPowerAmount != null && Number.isFinite(buyingPowerAmount) ? `${MONEY.format(buyingPowerAmount)} 元` : basisText
-  const targetText = targetAmount != null && Number.isFinite(targetAmount) ? `${MONEY.format(targetAmount)} 元` : '—'
-  const calculated = previewState === 'ready'
-  const actualText = calculated && actualAmount != null && Number.isFinite(actualAmount)
-    ? `${MONEY.format(Math.max(0, actualAmount))} 元`
-    : '—'
-  const volumeText = calculated && volume != null && Number.isFinite(volume)
-    ? `${Math.max(0, volume).toLocaleString('zh-CN')} 股`
-    : '—'
   const availableDisabled = disabled || disabledModes?.available === true
 
   return <div className={cn('space-y-3', className)}>
@@ -153,21 +136,17 @@ export function QmtTradeAllocationControls({
         value={value || ''}
         disabled={disabled}
         onChange={event => onValueChange(Number(event.target.value))}
-        className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-right font-mono text-xs outline-none focus:border-accent disabled:opacity-50"
+        className="mt-1 h-8 w-full rounded border border-accent/50 bg-accent/5 px-2 text-right font-mono text-xs font-semibold text-foreground outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 disabled:opacity-50"
       />
     </label> : null}
 
     {showSummary ? <div className="border-y border-accent/25 bg-accent/5 px-3 py-2 text-[10px] leading-4 text-secondary">
       <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-        <div><span className="text-muted">{displayedBasisLabel}</span><div className="mt-0.5 font-mono text-foreground">{basisText}</div></div>
-        <div><span className="text-muted">{qmtAllocationLabel(action, mode)}</span><div className="mt-0.5 font-mono text-foreground">{targetText}</div></div>
+        {!(creditAccount && action === 'BUY') ? <div><span className="text-muted">{displayedBasisLabel}</span><div className="mt-0.5 font-mono text-foreground">{basisText}</div></div> : null}
         {creditAccount && action === 'BUY' ? <>
           <div><span className="text-muted">现金可用</span><div className="mt-0.5 font-mono text-foreground">{cashText}</div></div>
           <div><span className="text-muted">融资可用</span><div className="mt-0.5 font-mono text-foreground">{financingText}</div></div>
-          <div><span className="text-muted">当前可买额度</span><div className="mt-0.5 font-mono text-foreground">{buyingPowerText}</div></div>
         </> : null}
-        <div><span className="text-muted">预计委托数量</span><div className="mt-0.5 font-mono text-foreground">{volumeText}</div></div>
-        <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualText}</div></div>
       </div>
       {previewState === 'loading' ? <div className="mt-2 border-t border-accent/20 pt-2 text-muted">正在读取账户可用金额并计算委托…</div> : previewMessage ? <div className={cn('mt-2 border-t border-accent/20 pt-2', previewState === 'error' ? 'text-warning' : 'text-muted')}>{previewMessage}</div> : null}
     </div> : null}

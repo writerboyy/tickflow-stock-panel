@@ -144,6 +144,22 @@ export function QmtTradePanel({
   const referencePrice = tradePriceType === 'LATEST' ? Number(instrument.price) : limitPrice
   const backendPriceType = tradePriceType === 'LATEST' ? 'LATEST' : 'LIMIT'
   const creditBuy = tradeAction === 'BUY' && String(qmt.data?.account_type || '').toUpperCase() === 'CREDIT'
+  const cachedAccount = qmt.data?.account
+  const cachedBuyingPower = tradeAction === 'BUY'
+    ? creditBuy
+      ? creditBuyMode === 'financing'
+        ? cachedAccount?.fin_enbuy_balance ?? cachedAccount?.credit_financing_buying_power
+        : cachedAccount?.assure_enbuy_balance ?? cachedAccount?.credit_assure_buying_power
+      : cachedAccount?.cash
+    : null
+  const cachedBasisLabel = tradeAction === 'BUY'
+    ? creditBuy
+      ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
+      : '可用资金'
+    : null
+  const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
+    ?? cachedAccount?.fin_enable_quota
+    ?? cachedAccount?.financing_available_amount
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
   const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
   const previewRequestMode = allocationMode === 'fixed' ? 'fixed' : 'quarter'
@@ -314,15 +330,11 @@ export function QmtTradePanel({
             onModeChange={next => { if (next !== 'lot' && next !== 'volume') setAllocationMode(next) }}
             onValueChange={setAllocationValue}
             disabled={tradeMutation.isPending}
-            basisLabel={serverPreview?.basis_label}
-            basisAmount={serverPreview?.basis_amount}
+            basisLabel={serverPreview?.basis_label ?? cachedBasisLabel}
+            basisAmount={serverPreview?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
-            cashAmount={serverPreview?.cash_amount}
-            financingAvailableAmount={serverPreview?.financing_available_amount}
-            buyingPowerAmount={serverPreview?.buying_power_amount}
-            targetAmount={serverPreview?.target_amount}
-            actualAmount={actualAmount}
-            volume={tradeVolume}
+            cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
+            financingAvailableAmount={serverPreview?.financing_available_amount ?? cachedFinancingAvailable}
             previewState={allocationPreviewState}
             previewMessage={allocationPreviewMessage}
             disabledModes={{ available: !qmtReady }}
