@@ -2177,6 +2177,9 @@ export interface WecomBotStatus {
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
+  watchlist_groups_in_nav?: boolean
+  data_source_job_timeout_s?: number
+  data_source_long_job_timeout_s?: number
   minute_sync_enabled: boolean
   etf_minute_sync_enabled: boolean
   minute_sync_days: number
@@ -2867,6 +2870,20 @@ export const api = {
         asset_type: assetType,
       }),
     }),
+  updateDataSourceJobTimeouts: (dataSourceJobTimeoutS: number, dataSourceLongJobTimeoutS: number) =>
+    request<Pick<Preferences, 'data_source_job_timeout_s' | 'data_source_long_job_timeout_s'>>(
+      '/api/settings/preferences/data-source-job-timeouts', {
+        method: 'PUT',
+        body: JSON.stringify({
+          data_source_job_timeout_s: dataSourceJobTimeoutS,
+          data_source_long_job_timeout_s: dataSourceLongJobTimeoutS,
+        }),
+      }),
+  updateWatchlistGroupsInNav: (enabled: boolean) =>
+    request<{ watchlist_groups_in_nav: boolean }>('/api/settings/preferences/watchlist-groups-in-nav', {
+      method: 'PUT',
+      body: JSON.stringify({ watchlist_groups_in_nav: enabled }),
+    }),
   updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
     request<{
       pipeline_pull_a_share: boolean
@@ -3347,10 +3364,10 @@ export const api = {
         asset_type: assetType,
       }),
     }),
-  syncMinuteSingle: (symbol: string, assetType: 'stock' | 'etf' = 'stock') =>
+  syncMinuteSingle: (symbol: string, assetType: 'stock' | 'etf' = 'stock', days?: number) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
-      body: JSON.stringify({ symbol, asset_type: assetType }),
+      body: JSON.stringify({ symbol, asset_type: assetType, ...(days != null ? { days } : {}) }),
     }),
   clearMinute: (assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {

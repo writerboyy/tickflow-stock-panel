@@ -142,6 +142,27 @@ def run_now(
     # 管道末尾若非空则抛 PipelineStageError, 让任务终态如实标记为 failed(而非误报成功)。
     stage_errors: list[str] = []
 
+    # A盘中快照可能让全局最新日期看起来完整，进而只刷新今天并把坏的
+    # enriched 分区永久保留下来。检查并在自动修复窗口内把日K拉取起点回退到最早坏日。
+    integrity_issues: list = []
+    integrity_repair_from: date | None = None
+    try:
+        from app.services.data_integrity import (
+            earliest_issue_day,
+            prune_enriched_partitions,
+            scan_recent_integrity,
+            within_auto_repair_window,
+        )
+
+        integrity_issues = scan_recent_integrity(repo.store.data_dir)
+        candidate = earliest_issue_day(integrity_issues, ("kline_daily",))
+        if within_auto_repair_window(candidate):
+            integrity_repair_from = candidate
+            prune_enriched_partitions(repo.store.data_dir, candidate)
+            logger.warning("daily pipeline integrity repair from %s", candidate)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("daily pipeline integrity scan failed: %s", exc)
+
     # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
     emit("sync_instruments", 2, "同步个股维表…")
     inst_rows = instrument_sync.sync_instruments(repo.store.data_dir)
@@ -194,6 +215,25 @@ def run_now(
         new_daily_days = gap_days
         emit("sync_daily", 45, f"日K 完成,覆盖 {gap_days} 天")
         logger.info("sync_daily: [%s ~ %s] done, %d days", start_date, today, gap_days)
+    elif integrity_repair_from is not None:
+        # 修复盘中快照时必须走 batch 范围拉取，不能让实时行情分支再次覆写坏分区。
+        start_date = min(latest_daily or integrity_repair_from, integrity_repair_from)
+        daily_range_start = start_date
+        emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
+        logger.info("sync_daily: [%s ~ %s] integrity repair", start_date, today)
+
+        def _daily_chunk_progress(cur: int, tot: int) -> None:
+            emit("sync_daily", 12 + int(33 * cur / tot),
+                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+
+        written_daily = kline_sync.sync_and_persist_daily_batch(
+            universe, repo, capset,
+            start_date=_dt.combine(start_date, _dt.min.time()),
+            end_date=_dt.combine(today, _dt.min.time()),
+            on_chunk_done=_daily_chunk_progress,
+        )
+        new_daily_days = (today - start_date).days
+        emit("sync_daily", 45, f"日K 完成,覆盖 {new_daily_days} 天")
     elif today_exists and capset.has(Cap.QUOTE_POOL) and _prefs.get_daily_data_provider() == "tickflow":
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
@@ -736,6 +776,10 @@ def run_now(
         "regime_days": regime_days,
         "premium_gene_rows": premium_gene_rows,
         "lagging_symbols": len(lagging_symbols),
+        "integrity_repair_from": (
+            integrity_repair_from.isoformat() if integrity_repair_from is not None else None
+        ),
+        "integrity_issues": len(integrity_issues),
         "skipped_stages": skipped,
         "stage_errors": stage_errors,
     }
@@ -809,7 +853,7 @@ def _refresh_instruments_view(repo: KlineRepository) -> None:
         logger.warning("refresh instruments view failed: %s", e)
 
 
-def _run_tracked(fn, job_label: str) -> None:
+def _run_tracked(fn, job_label: str) -> bool:
     """调度触发时包装 JobStore 跟踪，确保同步历史有记录。
 
     单飞: 若已有活跃(pending∨running)任务(手动同步中), 本次调度直接跳过, 不并发。
@@ -820,11 +864,11 @@ def _run_tracked(fn, job_label: str) -> None:
     job_id, is_new = job_store.create()
     if not is_new:
         logger.info("scheduled %s 跳过: 已有活跃任务在运行 (job_id=%s)", job_label, job_id)
-        return
+        return False
     if not try_acquire_run_slot():
         logger.warning("scheduled %s 跳过: 重任务执行槽被占用(疑似上次任务卡死)", job_label)
         job_store.fail(job_id, f"scheduled {job_label} skipped: 已有数据任务在运行")
-        return
+        return False
 
     def progress(stage: str, pct: int, msg: str, stage_pct: int | None = None,
                  skip_log: bool = False) -> None:
@@ -835,11 +879,26 @@ def _run_tracked(fn, job_label: str) -> None:
         result = fn(on_progress=progress)
         job_store.succeed(job_id, result)
         logger.info("scheduled %s completed: job_id=%s", job_label, job_id)
+        return True
     except Exception:
         logger.exception("scheduled %s failed: job_id=%s", job_label, job_id)
         job_store.fail(job_id, f"scheduled {job_label} failed")
+        return False
     finally:
         release_run_slot()
+
+
+def _scheduled_pipeline_task(fn) -> None:
+    """Run the daily pipeline and enqueue weekly mining only after success."""
+    succeeded = _run_tracked(fn, "daily_pipeline")
+    if not succeeded:
+        return
+    try:
+        from app.services.mining_schedule import run_weekly_mining
+
+        run_weekly_mining(_get_app_state())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scheduled weekly mining enqueue failed: %s", exc)
 
 
 # ================================================================
@@ -1197,7 +1256,7 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         return result
 
     scheduler.add_job(
-        lambda: _run_tracked(_pipeline_then_refresh, "daily_pipeline"),
+        lambda: _scheduled_pipeline_task(_pipeline_then_refresh),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),

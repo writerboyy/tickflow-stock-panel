@@ -408,6 +408,7 @@ def compute_indicators(
     needed: set[str] | None = None,
     *,
     keep_recursive_state: bool = False,
+    assume_sorted: bool = False,
 ) -> pl.DataFrame:
     """从 OHLCV 数据计算全套技术指标。
 
@@ -428,7 +429,8 @@ def compute_indicators(
 
     want = _resolve_needed(needed)
 
-    df = df.sort(["symbol", "date"])
+    if not assume_sorted:
+        df = df.sort(["symbol", "date"])
 
     # Pass 1: 均线 + EMA + MACD 基础 + BOLL 基础 + KDJ 基础 + ATR 基础 + 量价 + 极值
     prev_close = pl.col("close").shift(1).over("symbol")
@@ -750,6 +752,15 @@ def compute_limit_signals(
     if not want:
         return df
 
+    # Older callers provide only adjusted OHLC; raw aliases are equivalent when
+    # no corporate-action data is available.
+    defaults = []
+    for raw, source in (("raw_close", "close"), ("raw_high", "high"), ("raw_low", "low")):
+        if raw not in df.columns and source in df.columns:
+            defaults.append(pl.col(source).alias(raw))
+    if defaults:
+        df = df.with_columns(defaults)
+
     need_up = bool(want & {"signal_limit_up", "consecutive_limit_ups", "signal_broken_limit_up"})
     need_down = bool(want & {"signal_limit_down", "consecutive_limit_downs", "signal_limit_down_recovery"})
     need_price_limits = need_up or need_down
@@ -996,9 +1007,10 @@ def compute_limit_signals(
         pl.when(
             pl.col("_prev_raw_close").is_not_null()
             & (pl.col("_prev_raw_close") > 0)
+            & (pl.col("raw_low") > 0)
         ).then(
             (~pl.col("signal_limit_down").fill_null(False))              # 最终没跌停
-            & (pl.col("low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停
+            & (pl.col("raw_low") <= pl.col("_effective_limit_down") + 0.005)  # 曾触及跌停
             & (pl.col("close") > pl.col("open"))                          # 收阳
         ).otherwise(None).cast(pl.Boolean)
         .alias("signal_limit_down_recovery")
@@ -1146,6 +1158,121 @@ def _select_storage_cols(df: pl.DataFrame) -> pl.DataFrame:
     """写入 parquet 前裁剪到存储列 (17 列)。"""
     cols = [c for c in ENRICHED_STORAGE_COLS if c in df.columns]
     return df.select(cols)
+
+
+DEVIATION_WINDOWS: tuple[int, ...] = (3, 10, 30)
+_BENCHMARK_PREFERENCE = {
+    "SH": ["000002.SH", "000001.SH"],
+    "SZ": ["399107.SZ", "399001.SZ"],
+    "BJ": ["899050.BJ", "000001.SH"],
+}
+_benchmark_cache: dict[str, tuple[float, pl.DataFrame | None]] = {}
+
+
+def _bench_exchange_expr() -> pl.Expr:
+    return pl.col("symbol").str.slice(-2).str.to_uppercase().replace(
+        {key: key for key in _BENCHMARK_PREFERENCE}, default=None, return_dtype=pl.Utf8,
+    )
+
+
+def load_benchmark_momentum(data_dir: Path) -> pl.DataFrame | None:
+    import time
+    key = str(Path(data_dir).resolve())
+    now = time.monotonic()
+    cached = _benchmark_cache.get(key)
+    if cached is not None and now - cached[0] < 600:
+        return cached[1]
+    result = None
+    try:
+        glob = str(Path(data_dir) / "kline_index_daily" / "**" / "*.parquet")
+        symbols = [symbol for values in _BENCHMARK_PREFERENCE.values() for symbol in values]
+        frame = (scan_daily_parquet(glob, cast_options=pl.ScanCastOptions(integer_cast="allow-float"))
+                 .filter(pl.col("symbol").is_in(symbols))
+                 .select(["symbol", "date", "close"]).sort(["symbol", "date"]).collect())
+        if not frame.is_empty():
+            available = set(frame["symbol"].to_list())
+            pairs = []
+            for exchange, choices in _BENCHMARK_PREFERENCE.items():
+                hit = next((symbol for symbol in choices if symbol in available), None)
+                if hit is None and available:
+                    hit = next(iter(available))
+                if hit:
+                    pairs.append((hit, exchange))
+            selected = frame.filter(pl.col("symbol").is_in([p[0] for p in pairs])).with_columns([
+                (pl.col("close") / pl.col("close").shift(window).over("symbol") - 1).alias(f"bench_mom{window}d")
+                for window in DEVIATION_WINDOWS
+            ])
+            mapping = pl.DataFrame({"symbol": [p[0] for p in pairs], "bench_exchange": [p[1] for p in pairs]})
+            result = (selected.join(mapping, on="symbol").select(
+                ["date", "bench_exchange", pl.col("close").alias("bench_close"),
+                 *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]])
+                .unique(["date", "bench_exchange"]))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("基准指数偏离数据加载失败: %s", exc)
+    _benchmark_cache[key] = (now, result)
+    return result
+
+
+def attach_deviation_columns(df: pl.DataFrame, data_dir: Path) -> pl.DataFrame:
+    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
+    if df.is_empty():
+        return df
+    bench = load_benchmark_momentum(data_dir)
+    if bench is None or bench.is_empty() or "close" not in df.columns:
+        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols])
+    missing = [n for n in DEVIATION_WINDOWS if f"momentum_{n}d" not in df.columns]
+    if missing:
+        df = df.sort(["symbol", "date"]).with_columns([
+            (pl.col("close") / pl.col("close").shift(n).over("symbol") - 1).alias(f"momentum_{n}d")
+            for n in missing
+        ])
+    return (df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
+        .join(bench, left_on=["_bench_ex", "date"], right_on=["bench_exchange", "date"], how="left")
+        .with_columns([(pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
+                       for n in DEVIATION_WINDOWS])
+        .drop(["_bench_ex", "bench_close", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]]))
+
+
+def benchmark_momentum_today(data_dir: Path, index_quotes: pl.DataFrame | None = None) -> pl.DataFrame | None:
+    bench = load_benchmark_momentum(data_dir)
+    if bench is None or bench.is_empty():
+        return None
+    bench = bench.filter(pl.col("date") < cn_today())
+    rows = []
+    quote_map = {row["symbol"]: row for row in index_quotes.iter_rows(named=True)} if index_quotes is not None else {}
+    # Keep output order stable; the source scan may return partitions in any order.
+    available_exchanges = set(bench["bench_exchange"].unique().to_list())
+    for exchange in _BENCHMARK_PREFERENCE:
+        if exchange not in available_exchanges:
+            continue
+        sub = bench.filter(pl.col("bench_exchange") == exchange).sort("date")
+        closes = sub["bench_close"]
+        if not closes.len():
+            continue
+        choices = _BENCHMARK_PREFERENCE.get(exchange, [])
+        quote = next((quote_map.get(symbol) for symbol in choices if quote_map.get(symbol)), None)
+        rt = float((quote or {}).get("change_pct") or 0.0)
+        row = {"bench_exchange": exchange}
+        for n in DEVIATION_WINDOWS:
+            base = closes[-n] if closes.len() >= n else None
+            row[f"bench_mom{n}d"] = ((closes[-1] * (1 + rt) / base - 1) if base and base > 0 else None)
+        rows.append(row)
+    return pl.DataFrame(rows) if rows else None
+
+
+def attach_deviation_columns_today(df: pl.DataFrame, data_dir: Path, index_quotes: pl.DataFrame | None = None) -> pl.DataFrame:
+    if df.is_empty():
+        return df
+    bench = benchmark_momentum_today(data_dir, index_quotes)
+    dev_cols = [f"deviate_{n}d" for n in DEVIATION_WINDOWS]
+    if bench is None or bench.is_empty():
+        return df.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in dev_cols if c not in df.columns])
+    exprs = [(pl.col(f"momentum_{n}d") - pl.col(f"bench_mom{n}d")).alias(f"deviate_{n}d")
+             if f"momentum_{n}d" in df.columns else pl.lit(None, dtype=pl.Float64).alias(f"deviate_{n}d")
+             for n in DEVIATION_WINDOWS]
+    return (df.with_columns(_bench_exchange_expr().alias("_bench_ex"))
+        .join(bench, left_on="_bench_ex", right_on="bench_exchange", how="left")
+        .with_columns(exprs).drop(["_bench_ex", *[f"bench_mom{n}d" for n in DEVIATION_WINDOWS]]))
 
 
 def run_pipeline(data_dir: Path | None = None,

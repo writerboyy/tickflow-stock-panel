@@ -42,7 +42,12 @@ from app.indicators.pipeline import (
     get_signal_dependencies,
 )
 from app.strategy.engine import StrategyDataContext, StrategyDef, StrategyEngine
-from app.strategy.scoring import scoring_dependencies, scoring_value_expr
+from app.strategy.scoring import (
+    effective_scoring,
+    effective_scoring_directions,
+    scoring_dependencies,
+    scoring_value_expr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,14 +121,16 @@ class StrategyDependencyResolver:
         exit_signals: list[str],
         overrides: dict | None = None,
         minute_fill: bool = False,
+        asset_type: str = "stock",
     ) -> ResolvedFeaturePlan:
         overrides = overrides or {}
         if strategy.execution_backend == "matrix_native":
             return self._resolve_matrix_native(
                 strategy,
                 params=params,
-                basic_filter=basic_filter,
+                basic_filter=_asset_basic_filter(basic_filter, asset_type),
                 overrides=overrides,
+                asset_type=asset_type,
             )
 
         required_features = set(strategy.required_features)
@@ -141,7 +148,7 @@ class StrategyDependencyResolver:
         if order_by and order_by != "score":
             required_features.add(str(order_by))
 
-        required_features.update(_basic_filter_dependencies(basic_filter))
+        required_features.update(_basic_filter_dependencies(_asset_basic_filter(basic_filter, asset_type)))
         filter_features, filter_resolved = _filter_dependencies(strategy, params)
         required_features.update(filter_features)
         embedded_signals = {
@@ -208,6 +215,7 @@ class StrategyDependencyResolver:
         params: dict,
         basic_filter: dict,
         overrides: dict,
+        asset_type: str = "stock",
     ) -> ResolvedFeaturePlan:
         if strategy.matrix_strategy is None:
             raise ValueError(
@@ -217,7 +225,7 @@ class StrategyDependencyResolver:
 
         required_features = set(strategy.required_features)
         required_features.update(strategy.matrix_strategy.required_fields())
-        required_features.update(_basic_filter_dependencies(basic_filter))
+        required_features.update(_basic_filter_dependencies(_asset_basic_filter(basic_filter, asset_type)))
         scoring = dict(strategy.meta.get("scoring", {}) or {})
         scoring.update(overrides.get("scoring") or {})
         required_features.update(scoring_dependencies(scoring))
@@ -295,6 +303,7 @@ def build_matrix_cache_profile(
             exit_signals=strategy.exit_signals,
             overrides={},
             minute_fill=False,
+            asset_type=asset_type,
         ))
         forward_bars = max(forward_bars, int(strategy.max_hold_days or 0))
 
@@ -430,6 +439,16 @@ def _basic_filter_dependencies(config: dict) -> set[str]:
     if config.get("exclude_st"):
         dependencies.add("name")
     return dependencies
+
+
+def _asset_basic_filter(config: dict, asset_type: str) -> dict:
+    """ETF/index instruments do not carry stock share-capital fields."""
+    if asset_type == "stock":
+        return config
+    normalized = dict(config or {})
+    for key in ("market_cap_min", "market_cap_max", "float_cap_min", "float_cap_max"):
+        normalized.pop(key, None)
+    return normalized
 
 
 def _resolve_base_columns(features: set[str]) -> frozenset[str]:
@@ -600,6 +619,7 @@ class StrategyBacktestService:
             config.holding_days,
             config.minute_fill,
             json.dumps(config.overrides or {}, sort_keys=True, ensure_ascii=False, default=str),
+            json.dumps(config.regime_filter or {}, sort_keys=True, ensure_ascii=False, default=str),
         )
 
     def _resolve_composite_feature_plan(
@@ -774,6 +794,7 @@ class StrategyBacktestService:
                 exit_signals=exit_signals,
                 overrides=overrides,
                 minute_fill=config.minute_fill,
+                asset_type=config.asset_type,
             ))
         feature_plan = _merge_resolved_feature_plans(plans)
 
@@ -1347,6 +1368,27 @@ class StrategyBacktestService:
             panel = self._apply_score(panel, s, overrides, universe_mask=candidate_mask)
             formal_candidate_mask = candidate_mask & formal_range
             entry_mask = self._build_entry_mask_from_candidate(panel, candidate_mask, s, entry_signals)
+            if config.regime_filter:
+                date_labels = tuple(
+                    str(value)
+                    for value in panel.select("date").unique().sort("date")["date"].to_list()
+                )
+                regime_mask = self._build_regime_mask(
+                    date_labels,
+                    config.regime_filter,
+                    getattr(getattr(self.engine.repo, "store", None), "data_dir", None),
+                    required_start=config.start,
+                    required_end=config.end,
+                )
+                if regime_mask is not None:
+                    allowed_by_date = dict(zip(date_labels, regime_mask, strict=True))
+                    regime_row_mask = panel["date"].cast(pl.String).replace_strict(
+                        allowed_by_date,
+                        default=False,
+                        return_dtype=pl.Boolean,
+                    )
+                    entry_mask = entry_mask & regime_row_mask
+                    formal_candidate_mask = formal_candidate_mask & regime_row_mask
             entry_mask = entry_mask & formal_range
             raw_exit_mask = self._build_signal_mask(panel, exit_signals, "_exit")
             exit_range = self._date_range_mask(panel, config.start, load_end) if config.mode == "full" else formal_range
@@ -1649,6 +1691,9 @@ class StrategyBacktestService:
         timestamp_labels: tuple[str, ...],
         regime_filter: dict | None,
         data_dir: Path | None,
+        *,
+        required_start: date | None = None,
+        required_end: date | None = None,
     ) -> np.ndarray | None:
         """构造逐日 regime mask。强制 T-1 防未来函数: regime[T-1] 决定 entry[T]。
 
@@ -1669,7 +1714,7 @@ class StrategyBacktestService:
         if regime_df.is_empty():
             return None
 
-        # 构建 date(ISO) → (state, score) 映射
+        # 统一走 regime_alignment 的 T-1 对齐和缺口校验。
         regime_map: dict[str, tuple[str, int]] = {}
         for r in regime_df.iter_rows(named=True):
             d = r.get("date")
@@ -1677,22 +1722,14 @@ class StrategyBacktestService:
             if ds:
                 regime_map[ds] = (str(r.get("state", "")), int(r.get("score", 0) or 0))
 
-        # 对每个 label, 找它的前一交易日的 regime(timestamp_labels 顺序里的前一天)
-        n = len(timestamp_labels)
-        mask = np.ones(n, dtype=bool)  # 默认允许
-        for i in range(1, n):
-            prev_label = timestamp_labels[i - 1][:10]
-            entry = regime_map.get(prev_label)
-            if entry is None:
-                continue  # 无前一日环境数据 → 允许(不阻断)
-            state, score = entry
-            ok = True
-            if allowed_states and state not in allowed_states:
-                ok = False
-            if min_score is not None and score < min_score:
-                ok = False
-            mask[i] = ok
-        return mask
+        from app.backtest.regime_alignment import build_regime_filter_mask
+        return build_regime_filter_mask(
+            timestamp_labels,
+            regime_filter,
+            regime_map,
+            required_start=required_start,
+            required_end=required_end,
+        )
 
     def _build_candidate_filter_mask(
         self,
@@ -1975,6 +2012,7 @@ class StrategyBacktestService:
             "mode": c.mode,
             "holding_days": c.holding_days,
             "minute_fill": c.minute_fill,
+            "regime_filter": c.regime_filter,
         }
 
     @staticmethod
@@ -1984,10 +2022,8 @@ class StrategyBacktestService:
         overrides: dict | None,
         universe_mask: pl.Series | None = None,
     ) -> pl.DataFrame:
-        scoring = s.meta.get("scoring", {})
-        scoring_overrides = (overrides or {}).get("scoring")
-        if scoring_overrides:
-            scoring = {**scoring, **scoring_overrides}
+        scoring = effective_scoring(s.meta.get("scoring", {}), overrides)
+        directions = effective_scoring_directions(overrides)
 
         work = panel
         has_universe = universe_mask is not None and len(universe_mask) == len(panel)
@@ -2004,14 +2040,14 @@ class StrategyBacktestService:
 
         if scoring:
             executable = [
-                (value, weight)
+                (str(col), value, weight)
                 for col, weight in scoring.items()
                 if weight and (value := scoring_value_expr(work.columns, str(col))) is not None
             ]
-            total_weight = sum(weight for _, weight in executable)
+            total_weight = sum(weight for _, _, weight in executable)
             if total_weight > 0:
                 score_parts: list[pl.Expr] = []
-                for score_value, weight in executable:
+                for (col, score_value, weight) in executable:
                     w = weight / total_weight
                     value = _value_in_universe(score_value)
                     col_min = value.min().over("date")
@@ -2020,6 +2056,8 @@ class StrategyBacktestService:
                     normalized = pl.when(col_range > 0).then(
                         (score_value - col_min) / col_range
                     ).otherwise(pl.lit(0.5))
+                    if directions.get(str(col)) == "low":
+                        normalized = 1.0 - normalized
                     if has_universe:
                         normalized = pl.when(pl.col("_score_universe")).then(normalized).otherwise(0.0)
                     score_parts.append(normalized * w)

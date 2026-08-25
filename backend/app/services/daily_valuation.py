@@ -574,7 +574,12 @@ def sync_missing_daily_valuation(data_dir: Path) -> dict[str, int]:
     data_dir = Path(data_dir)
     source_dates = set(_partition_dates(data_dir / "kline_daily_enriched"))
     target_dates = set(_partition_dates(data_dir / TABLE_NAME))
-    return build_daily_valuation(data_dir, sorted(source_dates - target_dates))
+    try:
+        return build_daily_valuation(data_dir, sorted(source_dates - target_dates))
+    except ValueError as exc:
+        if str(exc) != "valuation_daily 无可写入记录，请先生成含历史股本的 enriched 数据":
+            raise
+        return {"rows": 0, "trading_days": 0}
 
 
 def assert_daily_valuation_coverage(data_dir: Path, start: date, end: date) -> None:

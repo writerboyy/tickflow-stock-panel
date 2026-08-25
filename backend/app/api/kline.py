@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
 from app.market_time import cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
-from app.db_safe import is_valid_ext_ident, quote_ident
+from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
 
 logger = logging.getLogger(__name__)
@@ -45,11 +45,6 @@ class EtfDataRepairWrite(BaseModel):
 
 
 def _normalize_minute_sync_request(days: int, extend: object) -> tuple[int, bool]:
-    """归一化手动分钟同步范围。
-
-    历史前端把“一年”发送为 365,而后端的 extend days 语义是交易日,会再次按
-    7/5 放大。兼容旧请求并按约 250 个交易日处理。
-    """
     normalized = max(1, int(days))
     extend_backward = bool(extend) or normalized >= 365
     if normalized == 365:
@@ -212,21 +207,28 @@ def instruments_names(request: Request, symbols: list[str]):
 
 
 def _get_stock_info(repo, symbol: str) -> dict:
-    """从 instruments 视图查标的名称 + 股本。"""
+    """从 instruments 内存缓存查标的名称 + 股本。
+
+    该接口在个股弹窗打开时每秒被调用 (SSE invalidate 触发重拉), 走
+    repo.get_instruments() 的 Polars 内存缓存按 symbol 过滤, 不再每请求
+    DuckDB 扫 instruments parquet。列缺失时返回空 dict, 与旧 SQL 报错路径一致。
+    """
+    import polars as pl
     try:
-        row = repo.execute_one(
-            "SELECT name, total_shares, float_shares FROM instruments WHERE symbol = ? LIMIT 1",
-            [symbol],
-        )
+        df = repo.get_instruments()
+        needed = ("symbol", "name", "total_shares", "float_shares")
+        if df.is_empty() or not all(c in df.columns for c in needed):
+            return {}
+        hit = df.filter(pl.col("symbol") == symbol).head(1)
+        if hit.is_empty():
+            return {}
+        return {
+            "name": hit["name"][0],
+            "total_shares": hit["total_shares"][0],
+            "float_shares": hit["float_shares"][0],
+        }
     except Exception:  # noqa: BLE001
         return {}
-    if not row:
-        return {}
-    return {
-        "name": row[0],
-        "total_shares": row[1],
-        "float_shares": row[2],
-    }
 
 
 def _get_asset_info(repo, symbol: str, asset_type: str) -> dict:
@@ -305,6 +307,47 @@ def _get_price_limit_info(
     return info
 
 
+def _get_previous_closes(
+    repo,
+    symbol: str,
+    trade_dates: list[date],
+    asset_type: str,
+) -> dict[date, float | None]:
+    """Return the previous trading day's adjusted close for each session."""
+    if not trade_dates:
+        return {}
+    start = min(trade_dates) - timedelta(days=45)
+    end = max(trade_dates)
+    try:
+        daily = repo.get_daily_asset(
+            asset_type,
+            symbol,
+            start,
+            end,
+            columns=["date", "close"],
+        ).sort("date")
+    except Exception:
+        daily = None
+    if daily is None or daily.is_empty():
+        return {trade_date: None for trade_date in trade_dates}
+
+    closes: list[tuple[date, float]] = []
+    for daily_date, close in daily.select(["date", "close"]).iter_rows():
+        if close is None:
+            continue
+        numeric = float(close)
+        if math.isfinite(numeric) and numeric > 0:
+            closes.append((daily_date, numeric))
+
+    result: dict[date, float | None] = {}
+    for trade_date in trade_dates:
+        result[trade_date] = next(
+            (close for daily_date, close in reversed(closes) if daily_date < trade_date),
+            None,
+        )
+    return result
+
+
 @router.get("/daily")
 def get_daily(
     request: Request,
@@ -373,7 +416,8 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     """按 ext_columns 规格为单只股票 LEFT JOIN 扩展数据，平铺到 stock_info['ext']。
 
     key 形如 "{config_id}__{field_name}"，与自选列表 enriched 接口保持一致。
-    JOIN 逻辑参考 watchlist.watchlist_enriched；任何 ext 表/字段缺失都静默跳过。
+    委托 screener._load_ext_value_maps 取值: 复用其 (路径,mtime) 签名缓存,
+    个股弹窗每秒重拉时不再重复读 ext parquet; 任何 ext 表/字段缺失都静默跳过。
     """
     if not ext_columns or not ext_columns.strip():
         return resp
@@ -390,43 +434,17 @@ def _attach_ext(resp: dict, repo, symbol: str, ext_columns: Optional[str]) -> di
     if not specs:
         return resp
 
-    import polars as pl
-    data_dir = repo.store.data_dir
     try:
-        from app.services.ext_data import ExtConfigStore
-        from app.api.ext_data import _read_ext_dataframe
-        ext_store = ExtConfigStore(data_dir)
-        configs = {c.id: c for c in ext_store.load_all()}
+        from app.api.screener import _load_ext_value_maps
+        value_maps = _load_ext_value_maps(repo, ext_columns)
     except Exception:  # noqa: BLE001
-        configs = {}
+        value_maps = {}
 
     ext_values: dict = {}
     for config_id, field_name in specs:
         ext_col_name = f"{config_id}__{field_name}"
-        value = None
-        try:
-            cfg = configs.get(config_id)
-            if cfg:
-                ext_df, _ = _read_ext_dataframe(cfg, data_dir)
-            else:
-                ext_df = pl.from_arrow(
-                    repo.store.db.query(
-                        f"SELECT symbol, {quote_ident(field_name)} FROM ext_{config_id}"
-                    ).arrow()
-                )
-            if not ext_df.is_empty() and "symbol" in ext_df.columns and field_name in ext_df.columns:
-                # 时序表取最新分区，避免一个 symbol 多行
-                row = (
-                    ext_df
-                    .select(["symbol", field_name])
-                    .unique(subset=["symbol"], keep="last")
-                    .filter(pl.col("symbol") == symbol)
-                )
-                if not row.is_empty():
-                    value = row[field_name][0]
-        except Exception as e:  # noqa: BLE001
-            logger.debug("kline ext join failed for %s.%s: %s", config_id, field_name, e)
-        ext_values[ext_col_name] = value
+        vmap = value_maps.get(ext_col_name) or {}
+        ext_values[ext_col_name] = vmap.get(symbol)
 
     stock_info = dict(resp.get("stock_info") or {})
     stock_info["ext"] = ext_values
@@ -571,12 +589,13 @@ def get_daily_batch(request: Request, body: dict):
         return {"data": {}}
     df = pl.concat(frames, how="diagonal_relaxed")
 
-    # 按 symbol 分组, 每只取最近 N 条
+    # 按 symbol 分组, 每只取最近 N 条。
+    # partition_by 一次切分, 避免 N 只自选时对同一批数据做 N 次全帧过滤。
     result: dict[str, list[dict]] = {}
-    for sym in symbols:
-        sub = df.filter(pl.col("symbol") == sym).sort("date").tail(days)
+    for part in df.partition_by("symbol", maintain_order=True):
+        sub = part.sort("date").tail(days)
         if not sub.is_empty():
-            result[sym] = sub.to_dicts()
+            result[sub["symbol"][0]] = sub.to_dicts()
 
     return {"data": result}
 
@@ -658,14 +677,15 @@ def get_minute_batch(request: Request, body: dict):
     else:
         expected = 240
 
-    # 按 symbol 分组, 判定哪些不完整需要补拉
+    # 按 symbol 分组, 判定哪些不完整需要补拉 (partition_by 一次切分, 同 daily-batch)
     result: dict[str, list[dict]] = {}
     incomplete: list[str] = []
+    local_parts: dict[str, pl.DataFrame] = {}
+    if not df_local.is_empty():
+        for part in df_local.partition_by("symbol", maintain_order=True):
+            local_parts[part["symbol"][0]] = part.sort("datetime")
     for sym in symbols:
-        if df_local.is_empty():
-            sub = pl.DataFrame()
-        else:
-            sub = df_local.filter(pl.col("symbol") == sym).sort("datetime")
+        sub = local_parts.get(sym, pl.DataFrame())
         if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
             incomplete.append(sym)
         elif not sub.is_empty():
@@ -708,12 +728,83 @@ def get_minute_batch(request: Request, body: dict):
                 live_parts.append(df_e)
         if live_parts:
             live_df = pl.concat(live_parts, how="diagonal_relaxed")
+            live_map: dict[str, pl.DataFrame] = {
+                part["symbol"][0]: part.sort("datetime")
+                for part in live_df.partition_by("symbol", maintain_order=True)
+            }
             for sym in incomplete:
-                sub = live_df.filter(pl.col("symbol") == sym).sort("datetime")
-                if not sub.is_empty():
+                sub = live_map.get(sym)
+                if sub is not None and not sub.is_empty():
                     result[sym] = sub.to_dicts()
 
     return {"data": result}
+
+
+@router.get("/minute-range")
+def get_minute_range(
+    request: Request,
+    symbol: str = Query(..., description="标的代码"),
+    days: int = Query(10, ge=1, le=20, description="最近交易日数量"),
+):
+    """读取单只标的最近 N 个已落库交易日的分钟 K。"""
+    import polars as pl
+
+    repo = request.app.state.repo
+    asset_type = repo.resolve_asset_type(symbol)
+    stock_info = (
+        _get_stock_info(repo, symbol)
+        if asset_type == "stock"
+        else _get_asset_info(repo, symbol, asset_type)
+    )
+    base_response = {
+        "symbol": symbol,
+        "name": stock_info.get("name"),
+        "asset_type": asset_type,
+        "requested_days": days,
+    }
+
+    # 指数分钟 K 不落本地仓库, 最新分时仍由 /api/index/minute 实时读取。
+    if asset_type == "index":
+        return {**base_response, "sessions": [], "source": "none"}
+
+    end = cn_today()
+    start = end - timedelta(days=days * 3 + 20)
+    minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
+    if minute.is_empty() or "datetime" not in minute.columns:
+        return {**base_response, "sessions": [], "source": "none"}
+
+    minute = minute.with_columns(
+        pl.col("datetime").dt.date().alias("_trade_date"),
+    )
+    trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
+    previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
+    row_columns = [
+        column
+        for column in (
+            "datetime", "open", "high", "low", "close", "volume", "amount"
+        )
+        if column in minute.columns
+    ]
+    sessions = []
+    for trade_date in trade_dates:
+        rows = (
+            minute.filter(pl.col("_trade_date") == trade_date)
+            .sort("datetime")
+            .select(row_columns)
+            .to_dicts()
+        )
+        if rows:
+            sessions.append({
+                "date": trade_date.isoformat(),
+                "prev_close": previous_closes.get(trade_date),
+                "rows": rows,
+            })
+
+    return {
+        **base_response,
+        "sessions": sessions,
+        "source": "local" if sessions else "none",
+    }
 
 
 @router.get("/minute")
@@ -758,13 +849,20 @@ def get_minute(
         price_limit = _get_price_limit_info(
             repo, symbol, trade_date, asset_type, stock_name,
         )
+        prev_close = _get_previous_closes(
+            repo, symbol, [trade_date], asset_type,
+        ).get(trade_date)
         return {
             "symbol": symbol, "name": stock_name, "stock_info": stock_info,
             "date": str(trade_date), "rows": df.to_dicts(), "source": "live",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
+    prev_close = _get_previous_closes(
+        repo, symbol, [trade_date], asset_type,
+    ).get(trade_date)
     price_limit = _get_price_limit_info(
         repo, symbol, trade_date, asset_type, stock_name,
     )
@@ -795,6 +893,7 @@ def get_minute(
             "date": str(trade_date), "rows": df.to_dicts(), "source": "local",
             "asset_type": asset_type,
             "price_limit": price_limit,
+            "prev_close": prev_close,
         }
 
     # 本地不完整或无数据 → 从 TickFlow 实时拉取
@@ -805,6 +904,7 @@ def get_minute(
         "source": "live" if not live_df.is_empty() else "none",
         "asset_type": asset_type,
         "price_limit": price_limit,
+        "prev_close": prev_close,
     }
 
 
@@ -846,14 +946,14 @@ def refresh_views(request: Request):
 async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
-    body 可选: { "days": int, "extend": bool, "latest_year": bool,
-    "asset_type": "stock" | "etf" }。
+    body 可选: { "days": int } — 指定拉取天数 (不传则用偏好设置)。
     """
     import asyncio
 
-    from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot, LONG_JOB_TIMEOUT_S
+    from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
+    from app.tickflow.capabilities import Cap
     from app.tickflow.pools import get_pool
 
     repo = request.app.state.repo
@@ -862,8 +962,8 @@ async def sync_minute(request: Request):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    # days: 拉取天数; extend: 从最早数据往前补;
-    # latest_year: 按最新交易日回溯一年并补齐整个窗口。
+    # 可选 body: { "days": int, "extend": bool }
+    # days: 拉取天数; extend: 向前扩展模式 (从最早数据往前补)
     body = {}
     try:
         body = await request.json()
@@ -871,18 +971,14 @@ async def sync_minute(request: Request):
         pass
     override_days = body.get("days")
     extend_flag = body.get("extend")
-    latest_year = bool(body.get("latest_year"))
-    asset_type = str(body.get("asset_type", "stock")).lower()
-    if asset_type not in ("stock", "etf"):
-        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
 
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
-    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    job_id, is_new = job_store.create(long_running=True)
     if not is_new:
         return {"status": "reused", "job_id": job_id}
 
     async def task() -> None:
-        if not try_acquire_run_slot():
+        if not try_acquire_run_slot(job_id):
             job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
             return
         loop = asyncio.get_event_loop()
@@ -892,79 +988,55 @@ async def sync_minute(request: Request):
 
         try:
             job_store.start(job_id)
-            stage = "sync_etf_minute" if asset_type == "etf" else "sync_minute"
-            label = "ETF分钟K" if asset_type == "etf" else "分钟K"
-            progress(stage, 5, "解析标的池…")
-            if asset_type == "etf":
-                etf_instruments = repo.get_etf_instruments()
-                universe = (
-                    sorted({str(symbol) for symbol in etf_instruments["symbol"].to_list() if symbol})
-                    if not etf_instruments.is_empty() and "symbol" in etf_instruments.columns
-                    else []
-                )
-                if not universe:
-                    job_store.fail(job_id, "没有可同步的 ETF 标的，请先同步 ETF 基础数据")
-                    return
-            else:
-                universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
-                # 补充 instruments 全量标的，覆盖北交所、新股等
-                inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
-                if inst_path.exists():
-                    try:
-                        import polars as pl
-                        inst = pl.read_parquet(inst_path, columns=["symbol"])
-                        universe = sorted(set(universe) | set(inst["symbol"].to_list()))
-                    except Exception:  # noqa: BLE001
-                        pass
-                # 指数分钟K无本地存储，不能写入股票分钟表。
-                index_set = repo.get_index_symbol_set()
-                universe = [symbol for symbol in universe if symbol not in index_set]
-            progress(stage, 10, f"标的池 {len(universe)} 只")
+            progress("sync_minute", 5, "解析标的池…")
+            universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
+            # 补充 instruments 全量标的，覆盖北交所、新股等
+            inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
+            if inst_path.exists():
+                try:
+                    import polars as pl
+                    inst = pl.read_parquet(inst_path, columns=["symbol"])
+                    universe = sorted(set(universe) | set(inst["symbol"].to_list()))
+                except Exception:  # noqa: BLE001
+                    pass
+            # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
+            index_set = repo.get_index_symbol_set()
+            universe = [s for s in universe if s not in index_set]
+            progress("sync_minute", 10, f"标的池 {len(universe)} 只")
 
-            requested_days = override_days if override_days else get_minute_sync_days()
-            days, extend_backward = _normalize_minute_sync_request(
-                requested_days,
-                extend_flag,
-            )
+            days = override_days if override_days else get_minute_sync_days()
+            # extend=1 → 向前扩展; days>=365 也自动向前扩展
+            extend_backward = bool(extend_flag) or days >= 365
 
             def _on_chunk(done: int, total: int, seg_label: str) -> None:
                 # 进度映射: 10% (标的池解析完) → 95%, 留 5% 给写入+刷新
                 pct = 10 + int((done / max(total, 1)) * 85)
-                progress(stage, pct, f"拉取{label}… {done}/{total} 批 [{seg_label}]")
+                progress("sync_minute", pct, f"拉取分钟K… {done}/{total} 批 [{seg_label}]")
 
             def _run():
                 return kline_sync.sync_and_persist_minute(
                     universe, repo, capset, days=days,
                     extend_backward=extend_backward,
                     on_chunk_done=_on_chunk,
-                    should_cancel=lambda: not job_store.is_active(job_id),
-                    latest_year=latest_year,
-                    asset_type=asset_type,
                 )
 
             written = await loop.run_in_executor(_long_task_executor, _run)
-            if not job_store.is_active(job_id):
-                return
 
             # 刷新视图
             from app.jobs.daily_pipeline import _refresh_single_view
-            _refresh_single_view(repo, "kline_etf_minute" if asset_type == "etf" else "kline_minute")
+            _refresh_single_view(repo, "kline_minute")
 
-            progress("done", 100, f"{label}同步完成,{written} 行")
-            job_store.succeed(job_id, {
-                "minute_rows": written,
-                "universe_size": len(universe),
-                "asset_type": asset_type,
-            })
+            progress("done", 100, f"分钟 K 同步完成,{written} 行")
+            job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
             invalidate_storage_cache()
-        except kline_sync.MinuteSyncCancelled:
-            if job_store.is_active(job_id):
-                job_store.fail(job_id, "分钟 K 同步已取消")
+        except JobCancelledError:
+            # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+            invalidate_storage_cache()
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
             invalidate_storage_cache()
         finally:
-            release_run_slot()
+            release_run_slot(job_id)
 
     asyncio.create_task(task())
     return {"status": "started", "job_id": job_id}
@@ -972,22 +1044,25 @@ async def sync_minute(request: Request):
 
 @router.post("/sync_minute_single")
 async def sync_minute_single(request: Request, body: dict):
-    """手动拉取单只股票或 ETF 的分钟K并落库 (前复权)。
+    """手动拉取单只股票的分钟K并落库 (前复权)。
 
-    body: { "symbol": "000001.SZ", "asset_type": "stock" | "etf" }
+    body: { "symbol": "000001.SZ" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
     """
     import asyncio
 
     from app.services.preferences import get_minute_sync_days
-    from app.tickflow.capabilities import Cap
 
     symbol = body.get("symbol", "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol 不能为空")
-    asset_type = str(body.get("asset_type", "stock")).lower()
-    if asset_type not in ("stock", "etf"):
-        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
+
+    requested_days = body.get("days")
+    if requested_days is not None:
+        if isinstance(requested_days, bool) or not isinstance(requested_days, int):
+            raise HTTPException(status_code=400, detail="days 必须是整数")
+        if requested_days < 1 or requested_days > 30:
+            raise HTTPException(status_code=400, detail="days 必须在 1 到 30 之间")
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
@@ -1000,63 +1075,57 @@ async def sync_minute_single(request: Request, body: dict):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    days = get_minute_sync_days()
+    days = requested_days if requested_days is not None else get_minute_sync_days()
     loop = asyncio.get_event_loop()
 
     def _run():
-        return kline_sync.sync_and_persist_minute(
-            [symbol], repo, capset, days=days, asset_type=asset_type,
-        )
+        return kline_sync.sync_and_persist_minute([symbol], repo, capset, days=days, force_full_days=True)
 
     written = await loop.run_in_executor(_long_task_executor, _run)
 
     # 刷新视图
     from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, "kline_etf_minute" if asset_type == "etf" else "kline_minute")
+    _refresh_single_view(repo, "kline_minute")
 
-    return {"status": "ok", "symbol": symbol, "rows": written, "asset_type": asset_type}
+    return {"status": "ok", "symbol": symbol, "rows": written}
 
 
 @router.post("/clear_minute")
 async def clear_minute(request: Request):
-    """清空指定资产的分钟K数据，不影响其他数据。
+    """清空全部分钟K数据 (仅 kline_minute, 不影响其他数据)。
 
-    删除相应分钟K目录下所有分区 parquet, 刷新视图。
-    需二次确认: body { "confirm": true, "asset_type": "stock" | "etf" }。
+    删除 data/kline_minute/ 下所有分区 parquet, 刷新视图。
+    需二次确认: body { "confirm": true }。
     """
     import shutil
 
     body = await request.json() if request.method == "POST" else {}
     if not body.get("confirm"):
         raise HTTPException(status_code=400, detail="需传 confirm: true 以确认清空")
-    asset_type = str(body.get("asset_type", "stock")).lower()
-    if asset_type not in ("stock", "etf"):
-        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
 
     repo = request.app.state.repo
-    minute_table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
-    minute_dir = repo.store.data_dir / minute_table
+    minute_dir = repo.store.data_dir / "kline_minute"
 
     # 统计待删除行数 (用于返回)
     removed = 0
     if minute_dir.exists():
         try:
-            result = repo.db.execute(f"SELECT COUNT(*) AS cnt FROM {minute_table}").fetchone()
+            result = repo.db.execute("SELECT COUNT(*) AS cnt FROM kline_minute").fetchone()
             removed = result[0] if result else 0
         except Exception:  # noqa: BLE001
             pass
-        # 仅删对应分钟K目录, 绝不触碰其他目录
+        # 仅删 kline_minute 目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)
 
     # 刷新视图 (重建空视图)
     from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, minute_table)
+    _refresh_single_view(repo, "kline_minute")
 
     from app.api.data import invalidate_storage_cache
     invalidate_storage_cache()
 
-    logger.info("%s minute K cleared: %d rows removed", asset_type, removed)
-    return {"status": "ok", "removed": removed, "asset_type": asset_type}
+    logger.info("minute K cleared: %d rows removed", removed)
+    return {"status": "ok", "removed": removed}
 
 
 @router.post("/extend_history")
@@ -1085,7 +1154,7 @@ async def extend_history(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.extend_history import run_extend_history
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1093,7 +1162,7 @@ async def extend_history(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1114,12 +1183,15 @@ async def extend_history(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("extend_history failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1164,7 +1236,7 @@ async def repair_daily(request: Request):
             raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
 
         from app.services.repair_daily import run_repair_daily
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1172,7 +1244,7 @@ async def repair_daily(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1198,12 +1270,15 @@ async def repair_daily(request: Request):
                 else:
                     job_store.succeed(job_id, result)
                 invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
+                invalidate_storage_cache()
             except Exception as e:
                 logger.exception("repair_daily failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}
@@ -1263,22 +1338,18 @@ async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
     if not _minute_allowed(request.app.state.capabilities):
         raise HTTPException(status_code=403, detail="当前数据源不支持分钟K补齐")
     try:
-        validate_repair_request(
-            repo.store.data_dir,
-            req.scan_id,
-            req.issue_ids,
-        )
+        validate_repair_request(repo.store.data_dir, req.scan_id, req.issue_ids)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S, long_running=True)
     if not is_new:
         return {"status": "reused", "job_id": job_id}
 
     async def task() -> None:
-        if not try_acquire_run_slot():
+        if not try_acquire_run_slot(job_id):
             job_store.fail(job_id, "已有数据任务在运行，请稍后再试")
             return
         loop = asyncio.get_event_loop()
@@ -1316,7 +1387,7 @@ async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
             job_store.fail(job_id, str(exc))
             invalidate_storage_cache()
         finally:
-            release_run_slot()
+            release_run_slot(job_id)
 
     asyncio.create_task(task())
     return {"status": "started", "job_id": job_id}
@@ -1332,7 +1403,7 @@ async def rebuild_enriched(request: Request):
     try:
         repo = request.app.state.repo
 
-        from app.services.pipeline_jobs import job_store, release_run_slot, try_acquire_run_slot
+        from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
         from app.api.data import invalidate_storage_cache
 
         job_id, is_new = job_store.create()
@@ -1340,7 +1411,7 @@ async def rebuild_enriched(request: Request):
             return {"status": "reused", "job_id": job_id}
 
         async def task() -> None:
-            if not try_acquire_run_slot():
+            if not try_acquire_run_slot(job_id):
                 job_store.fail(job_id, "已有数据任务在运行(或上一次任务卡死未结束),请稍后再试")
                 return
             loop = asyncio.get_event_loop()
@@ -1366,14 +1437,6 @@ async def rebuild_enriched(request: Request):
                     lambda: run_pipeline(on_batch_done=_batch_progress),
                 )
 
-                progress("rebuild_valuation", 96, "重建日度估值…")
-                from app.services.daily_valuation import build_daily_valuation
-
-                valuation = await loop.run_in_executor(
-                    _long_task_executor,
-                    lambda: build_daily_valuation(repo.store.data_dir),
-                )
-
                 enriched_dir = repo.store.data_dir / "kline_daily_enriched"
                 enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
 
@@ -1381,7 +1444,6 @@ async def rebuild_enriched(request: Request):
                 d = repo.store.data_dir.as_posix()
                 for view_name, glob in [
                     ("kline_enriched", f"{d}/kline_daily_enriched/**/*.parquet"),
-                    ("valuation_daily", f"{d}/valuation_daily/**/*.parquet"),
                 ]:
                     try:
                         repo.db.execute(
@@ -1395,15 +1457,17 @@ async def rebuild_enriched(request: Request):
                 job_store.succeed(job_id, {
                     "enriched_days": enriched_days,
                     "enriched_rows": written,
-                    "valuation_rows": valuation["rows"],
                 })
+                invalidate_storage_cache()
+            except JobCancelledError:
+                # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
                 invalidate_storage_cache()
             except Exception as e:
                 logger.exception("rebuild_enriched failed: job_id=%s", job_id)
                 job_store.fail(job_id, str(e))
                 invalidate_storage_cache()
             finally:
-                release_run_slot()
+                release_run_slot(job_id)
 
         asyncio.create_task(task())
         return {"status": "started", "job_id": job_id}

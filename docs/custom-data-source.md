@@ -4,15 +4,17 @@
 
 ## 支持范围
 
-当前自定义源支持三类数据:
+当前自定义源支持五类数据:
 
 | 数据集 | 配置名 | 说明 |
 | --- | --- | --- |
 | 日K | `daily` | 批量返回一组股票在指定区间内的日K |
 | 除权因子 | `adj_factor` | 批量返回一组股票的复权因子 |
 | 实时行情 | `realtime` | 返回全市场快照,用于盘中 enriched 增量计算 |
+| 分钟K | `minute` | 返回 1m 分钟K(需映射出 symbol / datetime / OHLC / 量额) |
+| 财务数据 | `financial` | 一个配置覆盖全部财务表,请求时把表名作为参数传给上游;字段由数据源决定,仅需映射出 symbol |
 
-分钟K、财务、深度盘口暂时仍走 TickFlow。
+深度盘口(depth5)暂无数据集契约,仍由 TickFlow 提供。
 
 > 这里的“自定义数据源”是后端 provider/HTTP 映射契约, 不等同于独立 StockDB 服务的浏览器 SDK。StockDB 当前不注册为项目 provider, `gp`/`bk`/`zb`/`tu` 只能在其本地服务启动且已有数据时单独调用, 具体边界见[StockDB 独立数据源接入限制](./plugin-development.md#stockdb-独立数据源接入限制)。
 
@@ -139,7 +141,7 @@ datasets:
 
 建议实时接口额外提供 `amount`、`change_pct`、`change_amount`、`amplitude`、`turnover_rate`、`name`。缺失时部分字段会由 pipeline 回算,但精度取决于可用输入。
 
-`change_pct` 和 `amplitude` 使用小数制,例如 `0.0366` 表示 `3.66%`。
+`change_pct` 和 `amplitude` 使用小数制,例如 `0.0366` 表示 `3.66%`(`turnover_rate` 同)。若接口直接返回百分数值 `3.66`,实时行情会按截面中位数自动归一为小数制,但仍建议接口直接提供小数制以避免小样本歧义。
 
 ## 请求约定
 

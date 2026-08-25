@@ -673,13 +673,32 @@ class LimitBoardService:
             "sector_strength_snapshot_at" if captured_at else "sector_strength_snapshot",
             None,
         )
+        fallback_current = bool(captured_at) and not callable(getter)
+        if fallback_current:
+            getter = getattr(collector, "sector_strength_snapshot", None)
         if not callable(getter):
             return None
         try:
-            snapshot = getter(today, captured_at) if captured_at else getter()
+            snapshot = getter() if fallback_current or not captured_at else getter(today, captured_at)
         except Exception:  # noqa: BLE001
             logger.debug("读取开盘啦实时板块强度快照失败", exc_info=True)
             return None
+        if captured_at and not fallback_current and not isinstance(snapshot, dict):
+            current_getter = getattr(collector, "sector_strength_snapshot", None)
+            if callable(current_getter):
+                try:
+                    current_snapshot = current_getter()
+                except Exception:  # noqa: BLE001
+                    logger.debug("读取开盘啦当前板块强度快照失败", exc_info=True)
+                    current_snapshot = None
+                requested_point = _quote_time(captured_at)
+                current_point = _quote_time(
+                    current_snapshot.get("refreshed_at")
+                    if isinstance(current_snapshot, dict)
+                    else None
+                )
+                if requested_point is not None and requested_point == current_point:
+                    snapshot = current_snapshot
         if (
             fallback_previous
             and captured_at is None

@@ -5,11 +5,18 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# 进程内缓存: 行情轮询线程一轮会调用 8~12 次 getter, 每次读盘+parse 是纯重复;
+# 文件仅在用户改设置时变化, 以 (mtime_ns, size) 签名判断是否重读。
+_cache: dict | None = None
+_cache_sig: tuple[int, int] | None = None
 
 
 def _path() -> Path:
@@ -19,14 +26,32 @@ def _path() -> Path:
     return p
 
 
+def _invalidate_cache() -> None:
+    global _cache, _cache_sig
+    _cache = None
+    _cache_sig = None
+
+
 def load() -> dict:
+    """读取 preferences.json (带 mtime 签名缓存)。返回深拷贝, 调用方可自由修改。"""
+    global _cache, _cache_sig
     p = _path()
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("preferences.json malformed: %s", e)
-    return {}
+    try:
+        sig = (p.stat().st_mtime_ns, p.stat().st_size)
+    except OSError:
+        return {}
+    if _cache is not None and sig == _cache_sig:
+        return copy.deepcopy(_cache)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("preferences.json malformed: %s", e)
+        return {}
+    _cache = data
+    _cache_sig = sig
+    return copy.deepcopy(_cache)
 
 
 def save(updates: dict) -> dict:
@@ -36,6 +61,7 @@ def save(updates: dict) -> dict:
     _path().write_text(
         json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
     )
+    _invalidate_cache()
     return current
 
 
@@ -54,6 +80,16 @@ def get_indices_nav_pinned() -> bool:
     """侧栏指数报价卡片是否固定显示。默认 True（常驻）。
     关闭后，卡片跟随实时行情开关（仅实时开时显示）。"""
     return load().get("indices_nav_pinned", True)
+
+
+def get_watchlist_groups_in_nav() -> bool:
+    """自选分组是否显示在侧边栏（可展开二级子菜单）。默认 False。"""
+    return load().get("watchlist_groups_in_nav", False)
+
+
+def set_watchlist_groups_in_nav(enabled: bool) -> bool:
+    save({"watchlist_groups_in_nav": bool(enabled)})
+    return bool(enabled)
 
 
 def get_realtime_quote_interval() -> float:
@@ -90,6 +126,7 @@ def set_realtime_quote_interval(interval: float) -> float:
     _path().write_text(
         json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8",
     )
+    _invalidate_cache()
     return interval
 
 
@@ -98,8 +135,7 @@ def get_minute_sync_enabled() -> bool:
 
 
 def get_etf_minute_sync_enabled() -> bool:
-    """ETF 分钟K是否随盘后管道自动同步。默认关闭。"""
-    return load().get("etf_minute_sync_enabled", False)
+    return bool(load().get("etf_minute_sync_enabled", False))
 
 
 def get_minute_intraday_refresh() -> bool:
@@ -198,6 +234,100 @@ def get_minute_sync_segment_days() -> int:
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
 _ALLOWED_DATA_PROVIDERS = {"tickflow", "baostock"}
+DATA_SOURCE_JOB_TIMEOUT_MIN_S = 60
+
+
+def get_data_source_job_timeout_s() -> int:
+    """返回普通数据后台任务的卡死判定时间(秒)。"""
+    from app.services.pipeline_jobs import DEFAULT_JOB_TIMEOUT_S
+    raw = load().get("data_source_job_timeout_s", DEFAULT_JOB_TIMEOUT_S)
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        timeout_s = DEFAULT_JOB_TIMEOUT_S
+    return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
+
+
+def get_data_source_long_job_timeout_s() -> int:
+    """返回分钟 K 全市场等长任务的卡死判定时间(秒)。"""
+    from app.services.pipeline_jobs import LONG_JOB_TIMEOUT_S
+    raw = load().get(
+        "data_source_long_job_timeout_s",
+        LONG_JOB_TIMEOUT_S,
+    )
+    try:
+        timeout_s = int(raw)
+    except (TypeError, ValueError):
+        timeout_s = LONG_JOB_TIMEOUT_S
+    return max(DATA_SOURCE_JOB_TIMEOUT_MIN_S, timeout_s)
+
+
+_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
+
+
+def get_large_orders_preferences() -> dict:
+    data = load()
+    raw = data.get("large_orders_market_segments")
+    if isinstance(raw, list):
+        segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in {str(v) for v in raw}]
+    else:
+        # 兼容 v1 的两个排除开关。缺失的旧字段保持原来的默认排除行为。
+        segments = ["main", "star", "chinext"]
+        if data.get("large_orders_exclude_bse") is False:
+            segments.append("bse")
+        if data.get("large_orders_exclude_st") is False:
+            segments.append("st")
+    def bounded(key, default, low, high, cast=int):
+        try:
+            value = cast(data.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(low, min(high, value))
+    return {
+        "enabled": bool(data.get("large_orders_enabled", True)),
+        "score_threshold": bounded("large_orders_score_threshold", 75, 50, 100),
+        "cooldown_seconds": bounded("large_orders_cooldown_seconds", 120, 30, 3600),
+        "deep_dive_interval_seconds": bounded("large_orders_deep_dive_interval_seconds", 60, 15, 600),
+        "max_deep_dive_symbols": bounded("large_orders_max_deep_dive_symbols", 3, 0, 10),
+        "candidate_limit": bounded("large_orders_candidate_limit", 50, 10, 200),
+        "min_limit_up_gap_pct": bounded("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10, float),
+        "market_segments": segments,
+        "exclude_bse": "bse" not in segments,
+        "exclude_st": "st" not in segments,
+        "version": "large_orders_v2",
+    }
+
+
+def set_large_orders_preferences(updates: dict) -> dict:
+    mapping = {
+        "enabled": "large_orders_enabled", "score_threshold": "large_orders_score_threshold",
+        "cooldown_seconds": "large_orders_cooldown_seconds",
+        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
+        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
+        "candidate_limit": "large_orders_candidate_limit",
+        "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
+    }
+    saved = {mapping[key]: value for key, value in updates.items() if key in mapping and value is not None}
+    if updates.get("market_segments") is not None:
+        saved["large_orders_market_segments"] = [v for v in updates["market_segments"] if v in _LARGE_ORDER_MARKET_SEGMENTS]
+    elif "exclude_bse" in updates or "exclude_st" in updates:
+        # 首次通过旧字段写入时，同时 materialize 新字段，完成配置迁移。
+        migrated = get_large_orders_preferences()["market_segments"]
+        for key, segment in (("exclude_bse", "bse"), ("exclude_st", "st")):
+            if key not in updates:
+                continue
+            if bool(updates[key]) and segment in migrated:
+                migrated.remove(segment)
+            elif not bool(updates[key]) and segment not in migrated:
+                migrated.append(segment)
+        saved["large_orders_market_segments"] = migrated
+    if "exclude_bse" in updates:
+        saved["large_orders_exclude_bse"] = bool(updates["exclude_bse"])
+    if "exclude_st" in updates:
+        saved["large_orders_exclude_st"] = bool(updates["exclude_st"])
+    if saved:
+        save(saved)
+    return get_large_orders_preferences()
 
 
 def _allowed_data_providers() -> set[str]:
@@ -295,6 +425,92 @@ def get_regime_warmup_days() -> int:
         return max(_REGIME_WARMUP_DAYS_MIN, min(_REGIME_WARMUP_DAYS_MAX, int(v)))
     except (TypeError, ValueError):
         return 40
+
+
+# ── 市场主线(概念/行业涨停梯队)过滤 ──
+# 宽基/风格标签(融资融券 ~7700 成分、深股通/沪股通 ~3300-3700、国企改革 ~2900)
+# 会按"家数"霸占主线榜首, 但它们不是可操作的题材主线。默认按成分股数上限过滤。
+# 标定(2026-08 THS 概念): 成员 >600 的 55 个概念几乎全是此类风格标签,
+# 真实题材(华为概念 2006/人工智能 2166/固态电池等)均在 600 以下或可自行调整。
+_MAINLINE_MAX_MEMBERS_MIN = 50
+_MAINLINE_MAX_MEMBERS_MAX = 5000
+_MAINLINE_MIN_MEMBERS_MIN = 1
+_MAINLINE_MIN_MEMBERS_MAX = 200
+
+
+def get_mainline_max_members() -> int:
+    """主线维度成员数上限, 超过视为宽基/风格标签被过滤。默认 600。"""
+    v = load().get("mainline_max_members", 600)
+    try:
+        return max(_MAINLINE_MAX_MEMBERS_MIN, min(_MAINLINE_MAX_MEMBERS_MAX, int(v)))
+    except (TypeError, ValueError):
+        return 600
+
+
+def get_mainline_min_members() -> int:
+    """主线维度成员数下限, 过滤微型标签。默认 4。"""
+    v = load().get("mainline_min_members", 4)
+    try:
+        return max(_MAINLINE_MIN_MEMBERS_MIN, min(_MAINLINE_MIN_MEMBERS_MAX, int(v)))
+    except (TypeError, ValueError):
+        return 4
+
+
+def get_mainline_blacklist() -> list[str]:
+    """用户自定义屏蔽的维度成员名(不论成员数大小)。默认空。
+
+    保存时接受 list 或逗号/顿号/分号/空白分隔的字符串。
+    """
+    v = load().get("mainline_blacklist", [])
+    if isinstance(v, str):
+        v = [part for part in re.split(r"[,，、;；\s]+", v) if part]  # noqa: RUF001
+    if not isinstance(v, list):
+        return []
+    return [str(x).strip() for x in v if str(x).strip()]
+
+
+def get_sentiment_exclude_st() -> bool:
+    """市场环境/主线统计是否剔除风险警示(ST)股。默认 True。
+
+    口径: 主板 ST 在 2026-07 前享 5% 涨跌幅(封板成本减半), 且 ST 是跨行业的
+    状态桶而非投资题材, 混入会系统性抬高涨停宽度/高度(弱市尤甚)。剔除后
+    涨跌家数等宽度占比几乎不受影响。修改后需重算 regime 与主线生效。
+    """
+    return bool(load().get("sentiment_exclude_st", True))
+
+
+def set_sentiment_exclude_st(v: bool) -> bool:
+    save({"sentiment_exclude_st": bool(v)})
+    return get_sentiment_exclude_st()
+
+
+def get_mainline_filter_config() -> dict:
+    """主线过滤配置汇总(供 API 返回与计算读取)。"""
+    return {
+        "min_members": get_mainline_min_members(),
+        "max_members": get_mainline_max_members(),
+        "blacklist": get_mainline_blacklist(),
+        "exclude_st": get_sentiment_exclude_st(),
+    }
+
+
+def set_mainline_filter_config(cfg: dict) -> dict:
+    """保存主线过滤配置(白名单字段, 部分更新)。修改后需重算主线生效。"""
+    updates: dict = {}
+    if "min_members" in cfg and cfg["min_members"] is not None:
+        updates["mainline_min_members"] = cfg["min_members"]
+    if "max_members" in cfg and cfg["max_members"] is not None:
+        updates["mainline_max_members"] = cfg["max_members"]
+    if "exclude_st" in cfg and cfg["exclude_st"] is not None:
+        updates["sentiment_exclude_st"] = bool(cfg["exclude_st"])
+    if "blacklist" in cfg and cfg["blacklist"] is not None:
+        raw = cfg["blacklist"]
+        if isinstance(raw, str):
+            raw = [part for part in re.split(r"[,，、;；\s]+", raw) if part]  # noqa: RUF001
+        updates["mainline_blacklist"] = [str(x).strip() for x in (raw or []) if str(x).strip()]
+    if updates:
+        save(updates)
+    return get_mainline_filter_config()
 
 
 _PIPELINE_PULL_KEYS = ("pipeline_pull_etf", "pipeline_pull_index")
@@ -398,11 +614,6 @@ def get_depth_polling_interval() -> float:
     return float(load().get("depth_polling_interval", 10.0))
 
 
-def get_kaipanla_raw_archive_compression() -> bool:
-    """开盘啦原始响应归档是否 gzip 压缩。默认压缩, 不删除历史文件。"""
-    return bool(load().get("kaipanla_raw_archive_compression", True))
-
-
 def set_depth_polling_interval(interval: float) -> float:
     """保存 depth 轮询间隔。套餐范围 clamp 由 depth_service 按档位做。"""
     interval = max(1.0, min(600.0, float(interval)))
@@ -459,6 +670,43 @@ def set_review_schedule(enabled: bool, hour: int, minute: int) -> dict:
         h, m = 15, 0
     save({"review_schedule": {"enabled": bool(enabled), "hour": h, "minute": m}})
     return {"enabled": bool(enabled), "hour": h, "minute": m}
+
+
+MINING_BUDGET_PROFILES = frozenset({"balanced", "strict"})
+
+
+def get_mining_schedule() -> dict:
+    """返回周度自动 mining 配置。历史配置缺字段时默认关闭。"""
+    data = load()
+    weekday = data.get("mining_schedule_weekday", 4)
+    if isinstance(weekday, bool) or not isinstance(weekday, int) or not 0 <= weekday <= 4:
+        weekday = 4
+    profile = data.get("mining_budget_profile", "balanced")
+    if not isinstance(profile, str) or profile not in MINING_BUDGET_PROFILES:
+        profile = "balanced"
+    enabled = data.get("mining_schedule_enabled", False)
+    if not isinstance(enabled, bool):
+        enabled = False
+    return {
+        "mining_schedule_enabled": enabled,
+        "mining_schedule_weekday": weekday,
+        "mining_budget_profile": profile,
+    }
+
+
+def set_mining_schedule(enabled: bool, weekday: int, profile: str) -> dict:
+    """校验并一次写入周度自动 mining 的整组配置。"""
+    if isinstance(weekday, bool) or not isinstance(weekday, int) or not 0 <= weekday <= 4:
+        raise ValueError("mining schedule weekday must be between 0 and 4")
+    if profile not in MINING_BUDGET_PROFILES:
+        raise ValueError("mining budget profile must be balanced or strict")
+    result = {
+        "mining_schedule_enabled": bool(enabled),
+        "mining_schedule_weekday": weekday,
+        "mining_budget_profile": profile,
+    }
+    save(result)
+    return result
 
 
 def get_review_push_channels() -> list[str]:
@@ -560,120 +808,6 @@ def get_realtime_quote_scope() -> dict:
         "realtime_index_mode": get_realtime_index_mode(),
         "realtime_index_symbols": get_realtime_index_symbols(),
     }
-
-
-# ===== 实时大单 =====
-
-_LARGE_ORDER_DEFAULTS = {
-    "large_orders_enabled": True,
-    "large_orders_score_threshold": 75,
-    "large_orders_cooldown_seconds": 120,
-    "large_orders_deep_dive_interval_seconds": 60,
-    "large_orders_max_deep_dive_symbols": 3,
-    "large_orders_candidate_limit": 50,
-    "large_orders_min_limit_up_gap_pct": 0.02,
-    "large_orders_market_segments": ["main", "star", "chinext"],
-    "large_orders_exclude_bse": True,
-    "large_orders_exclude_st": True,
-    "large_orders_config_version": "large_orders_v2",
-}
-_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
-
-
-def _get_large_order_market_segments(data: dict) -> list[str]:
-    raw = data.get("large_orders_market_segments")
-    if isinstance(raw, list):
-        selected = {str(item) for item in raw}
-        return [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
-
-    segments = list(_LARGE_ORDER_DEFAULTS["large_orders_market_segments"])
-    if not bool(data.get("large_orders_exclude_bse", True)):
-        segments.append("bse")
-    if not bool(data.get("large_orders_exclude_st", True)):
-        segments.append("st")
-    return segments
-
-
-def get_large_orders_preferences() -> dict:
-    data = load()
-    market_segments = _get_large_order_market_segments(data)
-
-    def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
-        try:
-            value = int(data.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return max(lower, min(upper, value))
-
-    def bounded_float(key: str, default: float, lower: float, upper: float) -> float:
-        try:
-            value = float(data.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return max(lower, min(upper, value))
-
-    return {
-        "enabled": bool(data.get("large_orders_enabled", _LARGE_ORDER_DEFAULTS["large_orders_enabled"])),
-        "score_threshold": bounded_int("large_orders_score_threshold", 75, 50, 100),
-        "cooldown_seconds": bounded_int("large_orders_cooldown_seconds", 120, 30, 3600),
-        "deep_dive_interval_seconds": bounded_int("large_orders_deep_dive_interval_seconds", 60, 15, 600),
-        "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
-        "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
-        "min_limit_up_gap_pct": bounded_float("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10),
-        "market_segments": market_segments,
-        "exclude_bse": "bse" not in market_segments,
-        "exclude_st": "st" not in market_segments,
-        "version": "large_orders_v2",
-    }
-
-
-def set_large_orders_preferences(updates: dict) -> dict:
-    allowed = {
-        "enabled": "large_orders_enabled",
-        "score_threshold": "large_orders_score_threshold",
-        "cooldown_seconds": "large_orders_cooldown_seconds",
-        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
-        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
-        "candidate_limit": "large_orders_candidate_limit",
-        "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
-    }
-    saved: dict = {}
-    for key, storage_key in allowed.items():
-        if key not in updates or updates[key] is None:
-            continue
-        if key == "enabled":
-            saved[storage_key] = bool(updates[key])
-        elif key == "min_limit_up_gap_pct":
-            saved[storage_key] = float(updates[key])
-        else:
-            saved[storage_key] = int(updates[key])
-    if updates:
-        market_segments = _get_large_order_market_segments(load())
-        if updates.get("market_segments") is not None:
-            selected = {str(item) for item in updates["market_segments"]}
-            market_segments = [
-                item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected
-            ]
-        else:
-            if updates.get("exclude_bse") is not None:
-                if bool(updates["exclude_bse"]):
-                    market_segments = [item for item in market_segments if item != "bse"]
-                elif "bse" not in market_segments:
-                    market_segments.append("bse")
-            if updates.get("exclude_st") is not None:
-                if bool(updates["exclude_st"]):
-                    market_segments = [item for item in market_segments if item != "st"]
-                elif "st" not in market_segments:
-                    market_segments.append("st")
-        selected = set(market_segments)
-        market_segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
-        saved.update({
-            "large_orders_market_segments": market_segments,
-            "large_orders_exclude_bse": "bse" not in market_segments,
-            "large_orders_exclude_st": "st" not in market_segments,
-        })
-        save(saved)
-    return get_large_orders_preferences()
 
 
 def get_sse_refresh_pages() -> dict[str, bool]:

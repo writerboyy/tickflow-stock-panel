@@ -12,14 +12,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, limit_board, market_heat, market_recap, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist, xiaoshi
+from app.api import abnormal, analysis, auth as auth_api, backtest, data, ext_data, financials, free_strategy, indices, intraday, kline, limit_board, market_heat, market_recap, mining, monitor_rules, alerts, overview, pipeline, pit_reference, position_risk, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist, xiaoshi
 from app.api.routes import router as core_router
 from app.config import settings
+from app.extensions.loader import configure_backend_extensions, current_extension_context, start_backend_extensions
 from app.jobs import daily_pipeline
 from app.plugins.kaipanla.router import router as kaipanla_router
 from app.api import large_orders
 from app.services.quote_service import QuoteService
 from app.services.large_order_service import LargeOrderService
+from app.services.mining_process_lock import MiningProcessLock
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def _application_lifespan(app: FastAPI):
     collector_bootstrap = not settings.tickflow_skip_collector_bootstrap
     logger.info(
         "TickFlow Stock Panel v%s starting (mode=%s)",
@@ -54,6 +56,16 @@ async def lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    try:
+        from app.services.mining_manager import MiningJobManager
+        mining_manager = MiningJobManager(store.data_dir)
+        recovered = mining_manager.recover_interrupted()
+        app.state.mining_manager = mining_manager
+        if recovered:
+            logger.warning("recovered %d interrupted mining runs", recovered)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mining manager not initialized: %s", e)
+        app.state.mining_manager = None
     try:
         free_strategy.cleanup_incomplete_backtests(store.data_dir)
     except Exception as e:  # noqa: BLE001
@@ -403,6 +415,13 @@ async def lifespan(app: FastAPI):
         logger.warning("limit board service not started: %s", e)
         app.state.limit_board_service = None
 
+    extension_registry = getattr(app.state, "extension_registry", None)
+    if extension_registry is not None:
+        start_backend_extensions(
+            current_extension_context(data_dir=store.data_dir, repository=repo),
+            extension_registry,
+        )
+
     yield
 
     kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
@@ -444,7 +463,21 @@ async def lifespan(app: FastAPI):
     wbot = getattr(app.state, "wecom_bot_service", None)
     if wbot:
         wbot.stop()
+    mining_manager = getattr(app.state, "mining_manager", None)
+    if mining_manager:
+        mining_manager.shutdown()
     logger.info("shutdown")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    lock = MiningProcessLock(settings.data_dir)
+    lock.acquire()
+    try:
+        async with _application_lifespan(app):
+            yield
+    finally:
+        lock.release()
 
 
 app = FastAPI(
@@ -518,11 +551,13 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
+app.include_router(mining.router)
 app.include_router(free_strategy.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
 app.include_router(overview.router)
 app.include_router(market_heat.router)
+app.include_router(abnormal.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
@@ -544,6 +579,10 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
+
+extension_registry, extension_load_errors = configure_backend_extensions(app)
+app.state.extension_registry = extension_registry
+app.state.extension_load_errors = extension_load_errors
 
 
 # 能力门控异常 → 403(而非默认 500)

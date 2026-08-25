@@ -9,7 +9,7 @@ import time
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import secrets_store
 from app.data_providers.custom.config import MAX_TIMEOUT
@@ -53,6 +53,111 @@ class TickflowKeyIn(BaseModel):
     api_key: str
 
 
+class TushareKeyIn(BaseModel):
+    api_key: str = Field(min_length=1, max_length=256)
+
+
+def _tushare_status(*, probes: dict | None = None) -> dict:
+    from app.services.tushare_history import TUSHARE_PROXY_URL, load_tushare_key
+
+    key = load_tushare_key()
+    result = {
+        "configured": bool(key),
+        "api_key_masked": secrets_store.mask(key),
+        "endpoint": TUSHARE_PROXY_URL,
+        "datasets": ["daily", "adj_factor", "minute"],
+    }
+    if probes is not None:
+        result["probes"] = probes
+    return result
+
+
+@router.get("/tushare")
+def get_tushare_status() -> dict:
+    return _tushare_status()
+
+
+@router.put("/tushare")
+def save_tushare_connection(req: TushareKeyIn) -> dict:
+    from app.data_providers import custom as custom_sources
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        save_tushare_key,
+    )
+
+    key = req.api_key.strip()
+    try:
+        client = TushareProxyClient(key, attempts=1, limiter=GlobalRateLimiter(0))
+        client.request(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": "20250102", "end_date": "20250103"},
+        )
+    except (ValueError, TusharePermissionError) as exc:
+        raise HTTPException(status_code=400, detail="Tushare Key 无效、已过期或无基础接口权限") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="Tushare Proxy 连通性验证失败") from exc
+    save_tushare_key(key)
+    custom_sources.load_all()
+    return _tushare_status()
+
+
+@router.post("/tushare/test")
+def test_tushare_connection() -> dict:
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        load_tushare_key,
+    )
+
+    key = load_tushare_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
+    client = TushareProxyClient(key, attempts=1, limiter=GlobalRateLimiter(0.2))
+    samples = {
+        "daily": ("daily", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250102"}),
+        "adj_factor": ("adj_factor", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250103"}),
+        "stock_minute": ("stk_mins", {"ts_code": "000001.SZ", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+        "etf_minute": ("etf_mins", {"ts_code": "510300.SH", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+    }
+    probes: dict[str, dict] = {}
+    for dataset, (api_name, params) in samples.items():
+        try:
+            response = client.request(api_name, params)
+            probes[dataset] = {
+                "status": "ok" if response.items else "empty",
+                "rows": len(response.items),
+                "fields": list(response.fields),
+            }
+        except TusharePermissionError:
+            probes[dataset] = {"status": "blocked", "rows": 0, "fields": []}
+        except Exception:  # noqa: BLE001
+            probes[dataset] = {"status": "error", "rows": 0, "fields": []}
+    return _tushare_status(probes=probes)
+
+
+@router.delete("/tushare")
+def clear_tushare_connection() -> dict:
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+    from app.services.tushare_history import clear_tushare_key
+
+    clear_tushare_key()
+    updates: dict[str, str] = {}
+    if preferences.get_daily_data_provider() == "tushare":
+        updates["daily_data_provider"] = "tickflow"
+    if preferences.get_adj_factor_provider() == "tushare":
+        updates["adj_factor_provider"] = "same_as_daily"
+    if preferences.get_minute_data_provider() == "tushare":
+        updates["minute_data_provider"] = "tickflow"
+    if updates:
+        preferences.save(updates)
+    custom_sources.load_all()
+    return _tushare_status()
+
+
 @router.get("")
 def get_settings() -> dict:
     """返回当前配置概况(Key 脱敏)。"""
@@ -62,7 +167,12 @@ def get_settings() -> dict:
         ai_configured,
         current_ai_model,
         current_codex_command,
+        current_codex_model,
         current_codex_reasoning_effort,
+        current_openai_model,
+        current_openai_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
     )
 
     key = secrets_store.get_tickflow_key()
@@ -85,9 +195,14 @@ def get_settings() -> dict:
         "has_ai_key": bool(secrets_store.get_ai_key()),
         "ai_configured": ai_configured(ai_provider),
         "ai_model": current_ai_model(),
+        "ai_openai_model": current_openai_model(),
+        "ai_reasoning_effort": current_openai_reasoning_effort(),
+        "ai_codex_model": current_codex_model(),
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -227,119 +342,6 @@ def clear_tickflow_key(request: Request) -> dict:
     }
 
 
-class TushareKeyIn(BaseModel):
-    api_key: str = Field(min_length=1, max_length=256)
-
-
-def _tushare_status(*, probes: dict | None = None) -> dict:
-    from app.services.tushare_history import TUSHARE_PROXY_URL, load_tushare_key
-
-    key = load_tushare_key()
-    result = {
-        "configured": bool(key),
-        "api_key_masked": secrets_store.mask(key),
-        "endpoint": TUSHARE_PROXY_URL,
-        "datasets": ["daily", "adj_factor", "minute"],
-    }
-    if probes is not None:
-        result["probes"] = probes
-    return result
-
-
-@router.get("/tushare")
-def get_tushare_status() -> dict:
-    """Return local Tushare configuration without making a network request."""
-    return _tushare_status()
-
-
-@router.put("/tushare")
-def save_tushare_connection(req: TushareKeyIn) -> dict:
-    """Validate a Tushare key against the fixed proxy, then save it locally."""
-    from app.data_providers import custom as custom_sources
-    from app.services.tushare_history import (
-        GlobalRateLimiter,
-        TusharePermissionError,
-        TushareProxyClient,
-        save_tushare_key,
-    )
-
-    key = req.api_key.strip()
-    try:
-        client = TushareProxyClient(
-            key,
-            attempts=1,
-            limiter=GlobalRateLimiter(0),
-        )
-        client.request(
-            "trade_cal",
-            {"exchange": "SSE", "start_date": "20250102", "end_date": "20250103"},
-        )
-    except (ValueError, TusharePermissionError) as exc:
-        raise HTTPException(status_code=400, detail="Tushare Key 无效、已过期或无基础接口权限") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail="Tushare Proxy 连通性验证失败") from exc
-    save_tushare_key(key)
-    custom_sources.load_all()
-    return _tushare_status()
-
-
-@router.post("/tushare/test")
-def test_tushare_connection() -> dict:
-    """Probe representative history APIs and return only redacted results."""
-    from app.services.tushare_history import (
-        GlobalRateLimiter,
-        TusharePermissionError,
-        TushareProxyClient,
-        load_tushare_key,
-    )
-
-    key = load_tushare_key()
-    if not key:
-        raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
-    client = TushareProxyClient(key, attempts=1, limiter=GlobalRateLimiter(0.2))
-    samples = {
-        "daily": ("daily", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250102"}),
-        "adj_factor": ("adj_factor", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250103"}),
-        "stock_minute": ("stk_mins", {"ts_code": "000001.SZ", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
-        "etf_minute": ("etf_mins", {"ts_code": "510300.SH", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
-    }
-    probes: dict[str, dict] = {}
-    for dataset, (api_name, params) in samples.items():
-        try:
-            response = client.request(api_name, params)
-            probes[dataset] = {
-                "status": "ok" if response.items else "empty",
-                "rows": len(response.items),
-                "fields": list(response.fields),
-            }
-        except TusharePermissionError:
-            probes[dataset] = {"status": "blocked", "rows": 0, "fields": []}
-        except Exception:  # noqa: BLE001
-            probes[dataset] = {"status": "error", "rows": 0, "fields": []}
-    return _tushare_status(probes=probes)
-
-
-@router.delete("/tushare")
-def clear_tushare_connection() -> dict:
-    """Clear the key and fail closed to TickFlow for future pulls."""
-    from app.data_providers import custom as custom_sources
-    from app.services import preferences
-    from app.services.tushare_history import clear_tushare_key
-
-    clear_tushare_key()
-    updates: dict[str, str] = {}
-    if preferences.get_daily_data_provider() == "tushare":
-        updates["daily_data_provider"] = "tickflow"
-    if preferences.get_adj_factor_provider() == "tushare":
-        updates["adj_factor_provider"] = "same_as_daily"
-    if preferences.get_minute_data_provider() == "tushare":
-        updates["minute_data_provider"] = "tickflow"
-    if updates:
-        preferences.save(updates)
-    custom_sources.load_all()
-    return _tushare_status()
-
-
 @router.post("/onboarding/complete")
 def complete_onboarding() -> dict:
     """标记首次使用向导完成。
@@ -357,9 +359,12 @@ class AiSettingsIn(BaseModel):
     base_url: str = ""
     api_key: str | None = None
     model: str = ""
+    reasoning_effort: str = Field(default="high", max_length=64)
     codex_command: str = ""
     codex_reasoning_effort: str = ""
     user_agent: str = ""
+    max_output_tokens: int | None = None   # 输出上限, 钳制所有任务的 max_tokens
+    context_window: int | None = None      # 输入上下文窗口上限 (约 token)
 
 
 @router.post("/ai")
@@ -367,12 +372,19 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 配置（全部持久化到 secrets.json）"""
     from app.config import settings
     from app.services.ai_provider import (
+        OPENAI_PROVIDER,
         ai_configured,
         current_ai_model,
         current_ai_provider,
         current_codex_command,
+        current_codex_model,
         current_codex_reasoning_effort,
+        current_openai_model,
+        current_openai_reasoning_effort,
+        current_ai_context_window,
+        current_ai_max_output_tokens,
         normalize_codex_command,
+        normalize_codex_model,
         normalize_codex_reasoning_effort,
     )
 
@@ -380,23 +392,8 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     if req.provider:
         updates["ai_provider"] = req.provider
         settings.ai_provider = req.provider
-    if req.base_url:
-        updates["ai_base_url"] = req.base_url
-        settings.ai_base_url = req.base_url
-    if req.api_key is not None:
-        if req.api_key:
-            updates["ai_api_key"] = req.api_key
-            settings.ai_api_key = req.api_key
-        else:
-            secrets_store.clear("ai_api_key")
-            settings.ai_api_key = ""
-    if req.provider == "codex_cli" and not req.model:
-        secrets_store.clear("ai_model")
-        settings.ai_model = ""
-    elif req.model:
-        updates["ai_model"] = req.model
-        settings.ai_model = req.model
     if req.provider == "codex_cli":
+        updates["ai_codex_model"] = normalize_codex_model(req.model)
         try:
             codex_command = normalize_codex_command(req.codex_command)
         except ValueError as exc:
@@ -406,9 +403,37 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         updates["ai_codex_reasoning_effort"] = codex_reasoning_effort
         settings.ai_codex_command = codex_command
         settings.ai_codex_reasoning_effort = codex_reasoning_effort
+    else:
+        if req.base_url:
+            updates["ai_base_url"] = req.base_url
+            settings.ai_base_url = req.base_url
+        if req.api_key is not None:
+            if req.api_key:
+                updates["ai_api_key"] = req.api_key
+                settings.ai_api_key = req.api_key
+            else:
+                secrets_store.clear("ai_api_key")
+                settings.ai_api_key = ""
+        if req.model:
+            updates["ai_model"] = req.model
+            settings.ai_model = req.model
+        if req.provider == OPENAI_PROVIDER:
+            updates["ai_reasoning_effort"] = req.reasoning_effort.strip()
     # user_agent 允许清空(回到默认浏览器 UA),故无条件持久化
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
+
+    # 输出上限 / 输入上下文窗口 (数值配置, 缺省保持原值)
+    if req.max_output_tokens is not None:
+        if req.max_output_tokens <= 0:
+            raise HTTPException(status_code=400, detail="输出上限必须为正整数")
+        updates["ai_max_output_tokens"] = req.max_output_tokens
+        settings.ai_max_output_tokens = req.max_output_tokens
+    if req.context_window is not None:
+        if req.context_window <= 0:
+            raise HTTPException(status_code=400, detail="上下文窗口必须为正整数")
+        updates["ai_context_window"] = req.context_window
+        settings.ai_context_window = req.context_window
 
     if updates:
         secrets_store.save(updates)
@@ -418,9 +443,14 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         "ok": True,
         "ai_provider": provider,
         "ai_model": current_ai_model(),
+        "ai_openai_model": current_openai_model(),
+        "ai_reasoning_effort": current_openai_reasoning_effort(),
+        "ai_codex_model": current_codex_model(),
         "ai_codex_command": current_codex_command(),
         "ai_codex_reasoning_effort": current_codex_reasoning_effort(),
         "ai_configured": ai_configured(provider),
+        "ai_max_output_tokens": current_ai_max_output_tokens(),
+        "ai_context_window": current_ai_context_window(),
     }
 
 
@@ -432,7 +462,17 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort")
+    secrets_store.clear(
+        "ai_provider",
+        "ai_base_url",
+        "ai_api_key",
+        "ai_model",
+        "ai_reasoning_effort",
+        "ai_codex_model",
+        "ai_codex_command",
+        "ai_codex_reasoning_effort",
+    )
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command", "ai_codex_reasoning_effort", "ai_max_output_tokens", "ai_context_window")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
@@ -440,6 +480,8 @@ def clear_ai_settings() -> dict:
     settings.ai_model = ""
     settings.ai_codex_command = "codex"
     settings.ai_codex_reasoning_effort = ""
+    settings.ai_max_output_tokens = 8192
+    settings.ai_context_window = 64000
 
     return {"ok": True}
 
@@ -457,7 +499,6 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
-    asset_type: str = "stock"
 
 
 class DataProvidersIn(BaseModel):
@@ -466,6 +507,16 @@ class DataProvidersIn(BaseModel):
     minute_data_provider: str | None = None
     realtime_data_provider: str | None = None
     financial_data_provider: str | None = None
+
+
+class PluginKeyIn(BaseModel):
+    plugin: str
+    api_key: str
+
+
+class DataSourceJobTimeoutPrefs(BaseModel):
+    data_source_job_timeout_s: int = Field(ge=60)
+    data_source_long_job_timeout_s: int = Field(ge=60)
 
 
 class LargeOrderPreferencesIn(BaseModel):
@@ -528,6 +579,14 @@ class CustomSourceTestIn(BaseModel):
     config: CustomSourceIn | None = None
 
 
+class MiningSchedulePrefs(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mining_schedule_enabled: bool
+    mining_schedule_weekday: int = Field(ge=0, le=4)
+    mining_budget_profile: Literal["balanced", "strict"]
+
+
 @router.get("/preferences")
 def get_preferences() -> dict:
     """返回用户偏好设置。"""
@@ -536,8 +595,8 @@ def get_preferences() -> dict:
         "realtime_quotes_enabled": preferences.get_realtime_quotes_enabled(),
         "realtime_allowed": _realtime_allowed(),
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
+        "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
-        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
@@ -545,6 +604,8 @@ def get_preferences() -> dict:
         "minute_data_provider": preferences.get_minute_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
+        "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
+        "data_source_long_job_timeout_s": preferences.get_data_source_long_job_timeout_s(),
         "realtime_watchlist_symbols": preferences.get_realtime_watchlist_symbols(),
         **preferences.get_realtime_quote_scope(),
         "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
@@ -584,39 +645,24 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
-        "large_orders": preferences.get_large_orders_preferences(),
+        **preferences.get_mining_schedule(),
     }
 
 
 @router.post("/preferences/large-orders")
 def save_large_order_preferences(body: LargeOrderPreferencesIn, request: Request) -> dict:
-    updates = body.model_dump(exclude_none=True)
     service = getattr(request.app.state, "large_order_service", None)
-    if service is not None:
-        return {"large_orders": service.update_preferences(updates)}
-    from app.services import preferences
-
-    return {"large_orders": preferences.set_large_orders_preferences(updates)}
+    if service is None:
+        raise HTTPException(status_code=503, detail="大单服务尚未启动")
+    return {"large_orders": service.update_preferences(body.model_dump(exclude_none=True))}
 
 
 @router.get("/data-sources")
 def list_data_sources() -> dict:
-    """列出已加载的数据源 (内置 / 插件)。"""
+    """列出已加载的数据源 (内置 / 插件 / 用户自定义)。"""
     from app.data_providers import custom as custom_sources
     return {
-        "builtin": [
-            {
-                "name": "tickflow",
-                "display_name": "TickFlow",
-                "datasets": ["daily", "adj_factor", "realtime", "minute"],
-            },
-            {
-                "name": "baostock",
-                "display_name": "BaoStock",
-                "datasets": ["minute"],
-                "notes": "股票 5/15/30/60 分钟历史 K；不提供 1 分钟路由",
-            },
-        ],
+        "builtin": [{"name": "tickflow", "display_name": "TickFlow", "datasets": ["daily", "adj_factor", "realtime", "minute"]}],
         "plugins": custom_sources.list_plugins(),
         "custom": custom_sources.list_sources(),
         "errors": custom_sources.errors(),
@@ -624,9 +670,56 @@ def list_data_sources() -> dict:
     }
 
 
+@router.post("/plugin-key")
+def save_plugin_key(req: PluginKeyIn) -> dict:
+    """保存插件 API Key(先探后存, 对齐 /tickflow-key 语义)。
+
+    流程: probe_plugin_key 用候选 Key 实探 → 有效才写 secrets.json
+    ({plugin}_api_key, 优先级高于 .env) → load_all 重扫, 插件即刻变为可切换。
+    """
+    from app.data_providers import custom as custom_sources
+
+    name = req.plugin.strip().lower()
+    key = req.api_key.strip()
+    if not key:
+        return {"ok": False, "error": "key empty"}
+    ok, message = custom_sources.probe_plugin_key(name, key)
+    if not ok:
+        return {"ok": False, "reason": "invalid", "error": message}
+    secrets_store.save({f"{name}_api_key": key})
+    custom_sources.load_all()
+    status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
+    return {
+        "ok": True,
+        "api_key_masked": secrets_store.mask(key),
+        "plugin_available": bool(status and status.get("available")),
+        "plugin": status,
+    }
+
+
+@router.delete("/plugin-key/{name}")
+def clear_plugin_key(name: str) -> dict:
+    """清除插件的界面配置 Key(secrets.json);.env 里的同名变量仍然生效。"""
+    from app.data_providers import custom as custom_sources
+
+    manifest = custom_sources.plugin_manifest(name)
+    if manifest is None or not custom_sources.is_builtin(name):
+        raise HTTPException(status_code=404, detail=f"插件 '{name}' 不存在")
+    if not manifest.get("api_key_env"):
+        raise HTTPException(status_code=400, detail=f"插件 '{name}' 不支持在界面配置 Key")
+    secrets_store.clear(f"{name.lower()}_api_key")
+    custom_sources.load_all()
+    status = next((p for p in custom_sources.list_plugins() if p["name"] == name), None)
+    return {
+        "ok": True,
+        "plugin_available": bool(status and status.get("available")),
+        "plugin": status,
+    }
+
+
 @router.post("/data-sources/reload")
 def reload_data_sources() -> dict:
-    """重新加载内置数据源插件。"""
+    """重新加载 data_sources/*.yaml。"""
     from app.data_providers import custom as custom_sources
     custom_sources.load_all()
     return list_data_sources()
@@ -680,30 +773,88 @@ def uninstall_plugin(name: str) -> dict:
 
 @router.get("/data-sources/{name}")
 def get_data_source(name: str) -> dict:
-    """用户自定义 HTTP 数据源配置入口已禁用。"""
-    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
+    """读取一个自定义数据源的完整配置(用于前端编辑回填)。"""
+    from app.data_providers import custom as custom_sources
+    cfg = custom_sources.get_config_dict(name)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail=f"数据源 '{name}' 不存在")
+    return cfg
 
 
 @router.post("/data-sources")
 def save_data_source(req: CustomSourceIn) -> dict:
-    """用户自定义 HTTP 数据源创建入口已禁用。"""
-    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
+    """创建或更新一个自定义数据源 yaml, 保存后自动 reload。"""
+    from app.data_providers import custom as custom_sources
+    config = req.model_dump()
+    config["name"] = (config.get("name") or "").lower()
+    try:
+        custom_sources.save_config(config["name"], config)
+        custom_sources.load_all()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return list_data_sources()
 
 
 @router.delete("/data-sources/{name}")
-def delete_data_source(name: str) -> dict:
-    """用户自定义 HTTP 数据源删除入口已禁用。"""
-    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
+def delete_data_source(name: str, request: Request) -> dict:
+    """删除一个自定义数据源 yaml, 保存后自动 reload。
+
+    若当前总开关选中的就是被删的源, 回退到 tickflow。
+    """
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+    try:
+        custom_sources.delete_config(name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    custom_sources.load_all()
+    # 回退被删源的偏好
+    updates: dict = {}
+    if preferences.get_daily_data_provider() == name:
+        updates["daily_data_provider"] = "tickflow"
+    if preferences.get_realtime_data_provider() == name:
+        updates["realtime_data_provider"] = "tickflow"
+    if preferences.get_financial_provider() == name:
+        updates["financial_data_provider"] = "tickflow"
+    adj = preferences.get_adj_factor_provider()
+    if adj == name:
+        updates["adj_factor_provider"] = "same_as_daily"
+    if updates:
+        preferences.save(updates)
+    # 删除源可能触发偏好回退 tickflow, 同步刷新能力快照
+    request.app.state.capabilities = detect_capabilities()
+    return list_data_sources()
 
 
 @router.post("/data-sources/test")
 def test_data_source(req: CustomSourceTestIn) -> dict:
-    """用户自定义 HTTP 数据源试拉入口已禁用。"""
+    """Deprecated: custom source trial requests are intentionally disabled."""
     raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
+    # Kept below for source compatibility with older integrations.
+    from app.data_providers import custom as custom_sources
+
+    temporary = req.config is not None
+    provider = None
+    try:
+        if req.config:
+            config = req.config.model_dump()
+            dataset_config = config["datasets"].get(req.dataset)
+            if dataset_config is None:
+                raise ValueError(f"dataset '{req.dataset}' is not configured")
+            config["datasets"] = {req.dataset: dataset_config}
+            provider = custom_sources.create_provider(config)
+        else:
+            provider = custom_sources.get_provider(req.provider)
+        return provider.test_dataset(req.dataset, req.symbols)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
+    finally:
+        if temporary and provider is not None:
+            provider.close()
 
 
 @router.put("/preferences/data-providers")
-def update_data_providers(req: DataProvidersIn) -> dict:
+def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
@@ -714,6 +865,8 @@ def update_data_providers(req: DataProvidersIn) -> dict:
             raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
     if updates:
         preferences.save(updates)
+    # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
+    request.app.state.capabilities = detect_capabilities()
     return {
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
@@ -721,6 +874,26 @@ def update_data_providers(req: DataProvidersIn) -> dict:
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
     }
+
+
+@router.put("/preferences/data-source-job-timeouts")
+def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
+    """保存普通与长数据后台任务的卡死判定时间。"""
+    from app.services import preferences
+    preferences.save(req.model_dump())
+    return req.model_dump()
+
+
+@router.put("/preferences/mining-schedule")
+def update_mining_schedule(req: MiningSchedulePrefs) -> dict:
+    """一次更新周度自动 mining 配置。"""
+    from app.services import preferences
+
+    return preferences.set_mining_schedule(
+        req.mining_schedule_enabled,
+        req.mining_schedule_weekday,
+        req.mining_budget_profile,
+    )
 
 
 @router.get("/preferences/watchlist-columns")
@@ -790,19 +963,15 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     """
     from app.services import preferences
     days = max(1, min(30, req.minute_sync_days))
-    asset_type = req.asset_type.lower()
-    if asset_type not in ("stock", "etf"):
-        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
     updates: dict = {
+        "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
     }
-    updates["etf_minute_sync_enabled" if asset_type == "etf" else "minute_sync_enabled"] = req.minute_sync_enabled
     if req.minute_sync_segment_days is not None:
         updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
     preferences.save(updates)
     return {
-        "minute_sync_enabled": preferences.get_minute_sync_enabled(),
-        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
+        "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
     }
@@ -829,6 +998,19 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     """
     from app.services import preferences
     qs = getattr(request.app.state, "quote_service", None)
+    depth_svc = getattr(request.app.state, "depth_service", None)
+
+    def _sync_depth_polling(realtime_on: bool) -> None:
+        """实时行情开关联动 depth 盘中轮询: 开→恢复(仍受监控开关/能力门控), 关→立即停。
+
+        实时行情关闭时 enriched 停留在上一交易日, depth 轮询只会反复拉陈旧名单。
+        """
+        if not depth_svc:
+            return
+        if realtime_on:
+            depth_svc.start_polling()
+        else:
+            depth_svc.stop_polling()
 
     allowed = qs.is_realtime_allowed() if qs else True
     if req.realtime_quotes_enabled and not allowed:
@@ -836,12 +1018,39 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         preferences.save({"realtime_quotes_enabled": False})
         if qs:
             qs.disable()
+        _sync_depth_polling(False)
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
         raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
+    if req.realtime_quotes_enabled:
+        # 历史完整性门禁: 检测到最近交易日的盘中快照/缺口时禁止开启 —
+        # 实时 flush 写出"今天"分区后, 盘后管道的"只刷今天"分支会让停机日的
+        # 半日快照永久留存。同时自动创建修复任务, 修完即可正常开启。
+        from app.services import data_integrity
+
+        repo = getattr(request.app.state, "repo", None)
+        if repo is not None:
+            try:
+                issues = data_integrity.scan_recent_integrity(repo.store.data_dir)
+            except Exception:  # noqa: BLE001
+                issues = []
+            earliest = data_integrity.earliest_issue_day(issues)
+            if issues and data_integrity.within_auto_repair_window(earliest):
+                job_id, is_new = data_integrity.launch_integrity_repair(
+                    request.app.state, earliest, "realtime_gate",
+                )
+                if job_id is not None:
+                    detail = (
+                        f"检测到{data_integrity.describe_issues(issues)}，"
+                        + ("已自动创建修复任务，完成后即可开启实时行情"
+                           if is_new else "修复任务正在进行中，请稍后再开启")
+                        + f"（任务 {job_id}）"
+                    )
+                    raise HTTPException(status_code=409, detail=detail)
     if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
         preferences.save({"realtime_quotes_enabled": False})
+        _sync_depth_polling(False)
         return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
 
     preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
@@ -850,6 +1059,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
             qs.enable()
         else:
             qs.disable()
+    _sync_depth_polling(req.realtime_quotes_enabled)
 
     return {"realtime_quotes_enabled": req.realtime_quotes_enabled, "realtime_allowed": allowed}
 
@@ -885,6 +1095,18 @@ def update_indices_nav_pinned(req: IndicesNavPinnedPrefs) -> dict:
     from app.services import preferences
     preferences.save({"indices_nav_pinned": req.indices_nav_pinned})
     return {"indices_nav_pinned": req.indices_nav_pinned}
+
+
+class WatchlistGroupsInNavPrefs(BaseModel):
+    watchlist_groups_in_nav: bool
+
+
+@router.put("/preferences/watchlist-groups-in-nav")
+def update_watchlist_groups_in_nav(req: WatchlistGroupsInNavPrefs) -> dict:
+    """保存自选分组是否显示在侧边栏开关。"""
+    from app.services import preferences
+    preferences.save({"watchlist_groups_in_nav": req.watchlist_groups_in_nav})
+    return {"watchlist_groups_in_nav": req.watchlist_groups_in_nav}
 
 
 class RealtimeMonitorConfigIn(BaseModel):
@@ -983,6 +1205,27 @@ def update_regime_batch_params(req: RegimeBatchParamsIn) -> dict:
 class PipelineIndexSymbolsIn(BaseModel):
     """指数自定义拉取代码(逗号/换行/空格分隔,空串表示全量)。"""
     symbols: str = ""
+
+
+class MainlineFilterIn(BaseModel):
+    """市场主线过滤配置(宽基/风格标签按成员数过滤 + 名称黑名单 + ST 剔除开关)。"""
+
+    min_members: int | None = None
+    max_members: int | None = None
+    blacklist: list[str] | str | None = None
+    exclude_st: bool | None = None
+
+
+@router.put("/preferences/mainline-filter")
+def update_mainline_filter(req: MainlineFilterIn) -> dict:
+    """更新市场主线过滤配置。部分更新; 修改后需重算主线(POST /api/regime/mainline/recompute)生效。
+
+    exclude_st 同步控制市场环境(regime)统计口径 — 切换后需全量重算 regime。
+    """
+    from app.services import preferences
+
+    payload = req.model_dump()
+    return preferences.set_mainline_filter_config(payload)
 
 
 @router.put("/preferences/pipeline-index-symbols")

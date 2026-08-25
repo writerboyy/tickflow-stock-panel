@@ -341,6 +341,23 @@ def _merge_statement_history(table: str, *frames: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _merge_report_history(*frames: pl.DataFrame) -> pl.DataFrame:
+    """Compatibility wrapper for older financial sync callers."""
+    valid = [
+        frame
+        for frame in frames
+        if not frame.is_empty() and {"symbol", "period_end"} <= set(frame.columns)
+    ]
+    if not valid:
+        return pl.DataFrame()
+    return (
+        pl.concat(valid, how="diagonal_relaxed")
+        .filter(pl.col("symbol").is_not_null() & pl.col("period_end").is_not_null())
+        .unique(subset=["symbol", "period_end"], keep="last")
+        .sort(["symbol", "period_end"])
+    )
+
+
 def _sync_statement_incremental(
     table: str,
     symbols: list[str],

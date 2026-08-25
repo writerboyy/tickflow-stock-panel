@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, Trash2, Download, Calendar } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { MissingCapChip } from '@/lib/capability-labels'
 
 export function MinuteSyncConfig({ caps, onJobStart, assetType = 'stock' }: { caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined; onJobStart?: (jobId: string) => void; assetType?: 'stock' | 'etf' }) {
   const qc = useQueryClient()
@@ -115,7 +116,7 @@ export function MinuteSyncConfig({ caps, onJobStart, assetType = 'stock' }: { ca
           </div>
           <span className="text-[10px] text-muted">天</span>
           {!hasMinuteCap && (
-            <span className="text-[10px] text-warning/80 bg-warning/8 rounded px-1.5 py-px font-medium">需 Pro+</span>
+            <MissingCapChip capKey="kline.minute.batch" />
           )}
         </div>
       </div>

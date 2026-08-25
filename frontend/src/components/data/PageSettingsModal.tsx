@@ -21,8 +21,7 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'pit_reference' | 'etf_instruments' | 'etf_daily' | 'etf_enriched' | 'etf_minute'
-  | 'minute' | 'financials' | 'regime'
+  | 'index' | 'etf' | 'minute' | 'financials' | 'regime'
 
 interface CardDef {
   key: CardKey
@@ -41,25 +40,19 @@ export const DATA_CARD_DEFS: CardDef[] = [
   { key: 'adj_factor',  label: '除权因子', desc: '复权计算因子',           defaultHiddenIfNoCap: true },
   { key: 'enriched',    label: 'Enriched', desc: '技术指标计算结果',       defaultHiddenIfNoCap: false },
   { key: 'index',       label: '指数',     desc: '主要市场指数日K',        defaultHiddenIfNoCap: false },
-  { key: 'pit_reference', label: 'PIT Reference', desc: '指数成分 / 行业历史 / 退市生命周期', defaultHiddenIfNoCap: false },
-  { key: 'etf_instruments', label: 'ETF 维表',     desc: '场内基金元数据',       defaultHiddenIfNoCap: false },
-  { key: 'etf_daily',       label: 'ETF 日 K',     desc: 'ETF 日K线数据',        defaultHiddenIfNoCap: false },
-  { key: 'etf_enriched',    label: 'ETF Enriched', desc: 'ETF 技术指标计算结果', defaultHiddenIfNoCap: false },
-  { key: 'minute',      label: '分钟 K',   desc: '分钟级K线(需 Pro+)',     defaultHiddenIfNoCap: true },
-  { key: 'etf_minute',  label: 'ETF 分钟 K', desc: 'ETF 分钟级K线(需 Pro+)', defaultHiddenIfNoCap: true },
-  { key: 'financials',  label: '财务数据', desc: '财报数据(需 Expert)',    defaultHiddenIfNoCap: true },
+  { key: 'etf',         label: 'ETF',      desc: '场内交易基金日K',         defaultHiddenIfNoCap: false, defaultHidden: true },
+  { key: 'minute',      label: '分钟 K',   desc: '分钟级K线(依赖分钟K批量数据)',  defaultHiddenIfNoCap: true },
+  { key: 'financials',  label: '财务数据', desc: '财报数据(依赖财务数据)',    defaultHiddenIfNoCap: true },
   { key: 'regime',      label: '市场环境', desc: '每日环境状态(本地计算)', defaultHiddenIfNoCap: false },
 ]
 
 const DEFAULT_ORDER = DATA_CARD_DEFS.map(d => d.key)
 /** 恢复默认时显示的卡片数量(按默认顺序取前 N 张) */
-const DEFAULT_VISIBLE_COUNT = 8
+const DEFAULT_VISIBLE_COUNT = 5
 
 const CAP_KEY_MAP: Partial<Record<CardKey, string>> = {
   adj_factor: 'adj_factor',
-  etf_daily: 'kline.daily.batch',
   minute: 'kline.minute.batch',
-  etf_minute: 'kline.minute.batch',
   financials: 'financial',
 }
 
