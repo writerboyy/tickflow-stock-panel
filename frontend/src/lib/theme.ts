@@ -55,6 +55,10 @@ export function useTheme(): Theme {
 // ================================================================
 
 export interface ChartTheme {
+  /** 系统主题强调色 */
+  accent: string
+  /** 主题强调色的弱填充 */
+  accentFill: string
   /** 轴刻度/图例等常规文字 */
   text: string
   /** 信息条/图例里的强调文字 */
@@ -82,6 +86,8 @@ export interface ChartTheme {
 }
 
 const DARK: ChartTheme = {
+  accent: '#3B82F6',
+  accentFill: 'rgba(59,130,246,0.08)',
   text: '#A1A1AA',
   textStrong: '#E4E4E7',
   grid: 'rgba(255,255,255,0.06)',
@@ -97,6 +103,8 @@ const DARK: ChartTheme = {
 }
 
 const LIGHT: ChartTheme = {
+  accent: '#3B82F6',
+  accentFill: 'rgba(59,130,246,0.08)',
   text: '#71717A',
   textStrong: '#27272A',
   grid: 'rgba(0,0,0,0.06)',

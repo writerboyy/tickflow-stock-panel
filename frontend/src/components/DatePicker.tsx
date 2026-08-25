@@ -181,7 +181,7 @@ export function DatePicker({
               exit={{ opacity: 0, y: -4, scale: 0.97 }}
               transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
               style={{ position: 'fixed', top: pos.top, left: pos.left }}
-              className="z-[9999] w-[260px] rounded-card border border-border
+              className="z-[10010] w-[260px] rounded-card border border-border
                 bg-surface shadow-[0_8px_30px_rgba(0,0,0,0.4)] p-3"
             >
             {/* 月份导航 */}

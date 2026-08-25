@@ -24,6 +24,13 @@ export function priceColorClass(v: number | null | undefined): string {
   return v > 0 ? 'text-bull' : 'text-bear'
 }
 
+export function formatInstrumentLabel(symbol: unknown, name?: string | null): string {
+  const displaySymbol = String(symbol ?? '').trim().toUpperCase()
+  if (!displaySymbol) return '—'
+  const displayName = String(name ?? '').trim()
+  return displayName ? `${displayName}(${displaySymbol})` : displaySymbol
+}
+
 export function fmtBigNum(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
   if (v >= 1_000_000_000_000) return `${(v / 1_000_000_000_000).toFixed(2)}万亿`

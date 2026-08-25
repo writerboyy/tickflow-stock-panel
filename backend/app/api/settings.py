@@ -29,6 +29,9 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 # 默认端点 —— endpoints.json 列表第一项,UI"当前使用"始终对齐此项。
 # 注意:Free 模式 SDK 实际走 free-api(免费数据通道),但 UI 显示统一用默认节点。
 DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
+CUSTOM_DATA_SOURCE_DISABLED_DETAIL = (
+    "用户自定义 HTTP 数据源已禁用；请使用 TickFlow、Tushare、BaoStock 或内置插件"
+)
 
 
 def _sync_financial_scheduler_caps(app_state, capset) -> None:
@@ -234,6 +237,119 @@ def clear_tickflow_key(request: Request) -> dict:
     }
 
 
+class TushareKeyIn(BaseModel):
+    api_key: str = Field(min_length=1, max_length=256)
+
+
+def _tushare_status(*, probes: dict | None = None) -> dict:
+    from app.services.tushare_history import TUSHARE_PROXY_URL, load_tushare_key
+
+    key = load_tushare_key()
+    result = {
+        "configured": bool(key),
+        "api_key_masked": secrets_store.mask(key),
+        "endpoint": TUSHARE_PROXY_URL,
+        "datasets": ["daily", "adj_factor", "minute"],
+    }
+    if probes is not None:
+        result["probes"] = probes
+    return result
+
+
+@router.get("/tushare")
+def get_tushare_status() -> dict:
+    """Return local Tushare configuration without making a network request."""
+    return _tushare_status()
+
+
+@router.put("/tushare")
+def save_tushare_connection(req: TushareKeyIn) -> dict:
+    """Validate a Tushare key against the fixed proxy, then save it locally."""
+    from app.data_providers import custom as custom_sources
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        save_tushare_key,
+    )
+
+    key = req.api_key.strip()
+    try:
+        client = TushareProxyClient(
+            key,
+            attempts=1,
+            limiter=GlobalRateLimiter(0),
+        )
+        client.request(
+            "trade_cal",
+            {"exchange": "SSE", "start_date": "20250102", "end_date": "20250103"},
+        )
+    except (ValueError, TusharePermissionError) as exc:
+        raise HTTPException(status_code=400, detail="Tushare Key 无效、已过期或无基础接口权限") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="Tushare Proxy 连通性验证失败") from exc
+    save_tushare_key(key)
+    custom_sources.load_all()
+    return _tushare_status()
+
+
+@router.post("/tushare/test")
+def test_tushare_connection() -> dict:
+    """Probe representative history APIs and return only redacted results."""
+    from app.services.tushare_history import (
+        GlobalRateLimiter,
+        TusharePermissionError,
+        TushareProxyClient,
+        load_tushare_key,
+    )
+
+    key = load_tushare_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
+    client = TushareProxyClient(key, attempts=1, limiter=GlobalRateLimiter(0.2))
+    samples = {
+        "daily": ("daily", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250102"}),
+        "adj_factor": ("adj_factor", {"ts_code": "000001.SZ", "start_date": "20250102", "end_date": "20250103"}),
+        "stock_minute": ("stk_mins", {"ts_code": "000001.SZ", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+        "etf_minute": ("etf_mins", {"ts_code": "510300.SH", "freq": "1min", "start_date": "2025-01-02 09:30:00", "end_date": "2025-01-02 15:00:00"}),
+    }
+    probes: dict[str, dict] = {}
+    for dataset, (api_name, params) in samples.items():
+        try:
+            response = client.request(api_name, params)
+            probes[dataset] = {
+                "status": "ok" if response.items else "empty",
+                "rows": len(response.items),
+                "fields": list(response.fields),
+            }
+        except TusharePermissionError:
+            probes[dataset] = {"status": "blocked", "rows": 0, "fields": []}
+        except Exception:  # noqa: BLE001
+            probes[dataset] = {"status": "error", "rows": 0, "fields": []}
+    return _tushare_status(probes=probes)
+
+
+@router.delete("/tushare")
+def clear_tushare_connection() -> dict:
+    """Clear the key and fail closed to TickFlow for future pulls."""
+    from app.data_providers import custom as custom_sources
+    from app.services import preferences
+    from app.services.tushare_history import clear_tushare_key
+
+    clear_tushare_key()
+    updates: dict[str, str] = {}
+    if preferences.get_daily_data_provider() == "tushare":
+        updates["daily_data_provider"] = "tickflow"
+    if preferences.get_adj_factor_provider() == "tushare":
+        updates["adj_factor_provider"] = "same_as_daily"
+    if preferences.get_minute_data_provider() == "tushare":
+        updates["minute_data_provider"] = "tickflow"
+    if updates:
+        preferences.save(updates)
+    custom_sources.load_all()
+    return _tushare_status()
+
+
 @router.post("/onboarding/complete")
 def complete_onboarding() -> dict:
     """标记首次使用向导完成。
@@ -391,6 +507,7 @@ class MinuteSyncPrefs(BaseModel):
     minute_sync_days: int = 5
     # 单段大小(交易日),None 表示不修改现有值。范围 [5, 30],默认 20。
     minute_sync_segment_days: int | None = None
+    asset_type: str = "stock"
 
 
 class DataProvidersIn(BaseModel):
@@ -476,6 +593,7 @@ def get_preferences() -> dict:
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "watchlist_groups_in_nav": preferences.get_watchlist_groups_in_nav(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
+        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
         "daily_data_provider": preferences.get_daily_data_provider(),
@@ -530,10 +648,22 @@ def get_preferences() -> dict:
 
 @router.get("/data-sources")
 def list_data_sources() -> dict:
-    """列出已加载的数据源 (内置 / 插件 / 用户自定义)。"""
+    """列出已加载的数据源 (内置 / 插件)。"""
     from app.data_providers import custom as custom_sources
     return {
-        "builtin": [{"name": "tickflow", "display_name": "TickFlow", "datasets": ["daily", "adj_factor", "realtime", "minute"]}],
+        "builtin": [
+            {
+                "name": "tickflow",
+                "display_name": "TickFlow",
+                "datasets": ["daily", "adj_factor", "realtime", "minute"],
+            },
+            {
+                "name": "baostock",
+                "display_name": "BaoStock",
+                "datasets": ["minute"],
+                "notes": "股票 5/15/30/60 分钟历史 K；不提供 1 分钟路由",
+            },
+        ],
         "plugins": custom_sources.list_plugins(),
         "custom": custom_sources.list_sources(),
         "errors": custom_sources.errors(),
@@ -590,7 +720,7 @@ def clear_plugin_key(name: str) -> dict:
 
 @router.post("/data-sources/reload")
 def reload_data_sources() -> dict:
-    """重新加载 data_sources/*.yaml。"""
+    """重新加载内置数据源插件。"""
     from app.data_providers import custom as custom_sources
     custom_sources.load_all()
     return list_data_sources()
@@ -644,26 +774,14 @@ def uninstall_plugin(name: str) -> dict:
 
 @router.get("/data-sources/{name}")
 def get_data_source(name: str) -> dict:
-    """读取一个自定义数据源的完整配置(用于前端编辑回填)。"""
-    from app.data_providers import custom as custom_sources
-    cfg = custom_sources.get_config_dict(name)
-    if cfg is None:
-        raise HTTPException(status_code=404, detail=f"数据源 '{name}' 不存在")
-    return cfg
+    """用户自定义 HTTP 数据源配置入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.post("/data-sources")
 def save_data_source(req: CustomSourceIn) -> dict:
-    """创建或更新一个自定义数据源 yaml, 保存后自动 reload。"""
-    from app.data_providers import custom as custom_sources
-    config = req.model_dump()
-    config["name"] = (config.get("name") or "").lower()
-    try:
-        custom_sources.save_config(config["name"], config)
-        custom_sources.load_all()
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return list_data_sources()
+    """用户自定义 HTTP 数据源创建入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.delete("/data-sources/{name}")
@@ -699,27 +817,8 @@ def delete_data_source(name: str, request: Request) -> dict:
 
 @router.post("/data-sources/test")
 def test_data_source(req: CustomSourceTestIn) -> dict:
-    """试拉自定义数据源，不写盘。"""
-    from app.data_providers import custom as custom_sources
-
-    temporary = req.config is not None
-    provider = None
-    try:
-        if req.config:
-            config = req.config.model_dump()
-            dataset_config = config["datasets"].get(req.dataset)
-            if dataset_config is None:
-                raise ValueError(f"dataset '{req.dataset}' is not configured")
-            config["datasets"] = {req.dataset: dataset_config}
-            provider = custom_sources.create_provider(config)
-        else:
-            provider = custom_sources.get_provider(req.provider)
-        return provider.test_dataset(req.dataset, req.symbols)
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"自定义数据源测试失败: {e}") from e
-    finally:
-        if temporary and provider is not None:
-            provider.close()
+    """用户自定义 HTTP 数据源试拉入口已禁用。"""
+    raise HTTPException(status_code=410, detail=CUSTOM_DATA_SOURCE_DISABLED_DETAIL)
 
 
 @router.put("/preferences/data-providers")
@@ -727,6 +826,11 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
     """保存数据源选择。"""
     from app.services import preferences
     updates = req.model_dump(exclude_none=True)
+    if "tushare" in updates.values():
+        from app.services.tushare_history import load_tushare_key
+
+        if not load_tushare_key():
+            raise HTTPException(status_code=400, detail="请先配置 Tushare API Key")
     if updates:
         preferences.save(updates)
     # 刷新能力快照: 当前 provider 变化会改变自定义源能力增广结果 (读缓存, 无网络请求)
@@ -827,15 +931,19 @@ def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     """
     from app.services import preferences
     days = max(1, min(30, req.minute_sync_days))
+    asset_type = req.asset_type.lower()
+    if asset_type not in ("stock", "etf"):
+        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
     updates: dict = {
-        "minute_sync_enabled": req.minute_sync_enabled,
         "minute_sync_days": days,
     }
+    updates["etf_minute_sync_enabled" if asset_type == "etf" else "minute_sync_enabled"] = req.minute_sync_enabled
     if req.minute_sync_segment_days is not None:
         updates["minute_sync_segment_days"] = max(5, min(30, req.minute_sync_segment_days))
     preferences.save(updates)
     return {
-        "minute_sync_enabled": req.minute_sync_enabled,
+        "minute_sync_enabled": preferences.get_minute_sync_enabled(),
+        "etf_minute_sync_enabled": preferences.get_etf_minute_sync_enabled(),
         "minute_sync_days": days,
         "minute_sync_segment_days": preferences.get_minute_sync_segment_days(),
     }
@@ -934,18 +1042,6 @@ def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
     from app.services import preferences
     cfg = req.model_dump(exclude_none=True)
     return preferences.set_realtime_quote_scope(cfg)
-
-
-class RealtimeWatchlistPrefs(BaseModel):
-    symbols: list[str] = []
-
-
-@router.put("/preferences/realtime-watchlist")
-def update_realtime_watchlist(req: RealtimeWatchlistPrefs) -> dict:
-    """兼容旧入口；Free 实时标的由自选页前 5 个决定。"""
-    from app.services import preferences
-    symbols = preferences.set_realtime_watchlist_symbols(req.symbols)
-    return {"realtime_watchlist_symbols": symbols}
 
 
 class IndicesNavPinnedPrefs(BaseModel):

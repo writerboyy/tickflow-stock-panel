@@ -1,0 +1,251 @@
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import polars as pl
+
+from app.services.large_order_store import LargeOrderStore
+
+
+def _event_ts(hour: int, minute: int = 1, second: int = 2) -> int:
+    value = datetime(2026, 8, 4, hour, minute, second)
+    return int(value.timestamp() * 1000)
+
+
+def test_store_writes_partitioned_events_and_compacts(tmp_path: Path):
+    day = date(2026, 8, 4)
+    store = LargeOrderStore(tmp_path, flush_interval=0.01, max_batch_rows=2)
+    store.start()
+    store.submit(
+        "proxy_flow",
+        [
+            {
+                "trade_date": day,
+                "event_ts_ms": _event_ts(9),
+                "symbol": "000001.SZ",
+                "name": "平安银行",
+                "price": 10.1,
+                "amount": 200000,
+                "volume": 1000,
+                "delta_amount": 200000,
+                "delta_volume": 1000,
+                "buy_amount": 200000,
+                "sell_amount": 0,
+                "side": 1,
+                "event_id": "flow-1",
+                "source": "tickflow_proxy",
+            },
+            {
+                "trade_date": day,
+                "event_ts_ms": _event_ts(10),
+                "symbol": "000001.SZ",
+                "name": "平安银行",
+                "price": 10.2,
+                "amount": 300000,
+                "volume": 1500,
+                "delta_amount": 300000,
+                "delta_volume": 1500,
+                "buy_amount": 0,
+                "sell_amount": 300000,
+                "side": -1,
+                "event_id": "flow-2",
+                "source": "tickflow_proxy",
+            },
+        ],
+    )
+    store.stop(compact_date=day)
+
+    result = store.query("proxy_flow", day, symbol="000001.SZ", limit=10)
+    assert result["count"] == 2
+    assert [row["event_id"] for row in result["rows"]] == ["flow-1", "flow-2"]
+    assert (tmp_path / "large_orders" / "proxy_flow" / "date=2026-08-04" / "part.parquet").exists()
+    assert store.status()["written_rows"] == 2
+
+
+def test_store_deduplicates_on_compaction_and_filters_with_truncation(tmp_path: Path):
+    day = date(2026, 8, 4)
+    store = LargeOrderStore(tmp_path, flush_interval=0.01)
+    store.start()
+    rows = [
+        {
+            "trade_date": day,
+            "event_ts_ms": _event_ts(9, second=index),
+            "symbol": "600000.SH",
+            "event_id": "same-event" if index < 2 else f"event-{index}",
+            "amount": 100 + index,
+            "volume": 10,
+            "source": "tickflow_proxy",
+        }
+        for index in range(3)
+    ]
+    store.submit("proxy_flow", rows)
+    store.flush_now()
+
+    result = store.query(
+        "proxy_flow",
+        day,
+        symbol="600000.SH",
+        from_ms=_event_ts(9, second=1),
+        to_ms=_event_ts(9, second=2),
+        limit=1,
+    )
+    assert result["count"] == 1
+    assert result["truncated"] is True
+    assert result["rows"][0]["event_id"] == "same-event"
+    store.stop(compact_date=day)
+
+
+def test_store_history_cursor_is_stable_for_same_timestamp(tmp_path: Path):
+    day = date(2026, 8, 4)
+    store = LargeOrderStore(tmp_path, flush_interval=0.01)
+    store.start()
+    timestamp = _event_ts(9)
+    store.submit(
+        "proxy_flow",
+        [
+            {
+                "trade_date": day,
+                "event_ts_ms": timestamp,
+                "symbol": "000001.SZ",
+                "event_id": f"flow-{index}",
+                "amount": 100 + index,
+            }
+            for index in range(3)
+        ],
+    )
+    store.submit(
+        "kaipanla_trade",
+        [{
+            "trade_date": day,
+            "event_ts_ms": timestamp,
+            "symbol": "000001.SZ",
+            "event_id": "trade-1",
+            "amount": 300,
+            "direction": "active_buy",
+        }],
+    )
+
+    first = store.query_events(
+        day,
+        kinds=("proxy_flow", "kaipanla_trade"),
+        limit=2,
+        order="desc",
+    )
+    second = store.query_events(
+        day,
+        kinds=("proxy_flow", "kaipanla_trade"),
+        limit=2,
+        order="desc",
+        cursor=first["next_cursor"],
+    )
+
+    event_keys = [
+        (row["event_kind"], row["event_id"])
+        for row in first["rows"] + second["rows"]
+    ]
+    assert len(event_keys) == 4
+    assert len(set(event_keys)) == 4
+    assert first["has_more"] is True
+    assert second["has_more"] is False
+    store.stop(compact_date=day)
+
+
+def test_store_history_reads_legacy_parquet_with_missing_columns(tmp_path: Path):
+    day = date(2026, 8, 4)
+    day_root = tmp_path / "large_orders" / "proxy_flow" / f"date={day}"
+    day_root.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "trade_date": [day],
+            "event_ts_ms": [_event_ts(9)],
+            "symbol": ["000001.SZ"],
+            "event_id": ["legacy-flow"],
+            "amount": [1_000.0],
+        }
+    ).write_parquet(day_root / "legacy.parquet")
+    store = LargeOrderStore(tmp_path)
+
+    result = store.query_events(day, kinds=("proxy_flow",))
+
+    assert result["count"] == 1
+    assert result["rows"][0]["event_id"] == "legacy-flow"
+    assert result["rows"][0]["buy_amount"] is None
+    assert result["rows"][0]["event_kind"] == "proxy_flow"
+
+
+def test_store_compacts_mixed_legacy_and_current_schemas(tmp_path: Path):
+    day = date(2026, 8, 4)
+    day_root = tmp_path / "large_orders" / "kaipanla_intent" / f"date={day}"
+    (day_root / "hour=09").mkdir(parents=True)
+    (day_root / "hour=10").mkdir(parents=True)
+    pl.DataFrame({
+        "trade_date": [day],
+        "event_ts_ms": [_event_ts(9)],
+        "symbol": ["000001.SZ"],
+        "event_id": ["legacy-intent"],
+        "order_id": ["order-legacy"],
+        "limit_flag": [True],
+    }).write_parquet(day_root / "hour=09" / "part-legacy.parquet")
+    pl.DataFrame({
+        "trade_date": [day],
+        "event_ts_ms": [_event_ts(10)],
+        "symbol": ["000001.SZ"],
+        "event_id": ["current-intent"],
+        "order_id": ["order-current"],
+        "limit_flag": [False],
+        "limit_flag_code": [0],
+        "cancel_flag": [False],
+        "cancel_flag_code": [0],
+    }).write_parquet(day_root / "hour=10" / "part-current.parquet")
+    store = LargeOrderStore(tmp_path)
+
+    result = store.compact(day, kind="kaipanla_intent")
+
+    assert result == {"kaipanla_intent": 2}
+    compacted = pl.read_parquet(day_root / "part.parquet").sort("event_ts_ms")
+    assert compacted.schema["limit_flag_code"] == pl.Int8
+    assert compacted["limit_flag_code"].to_list() == [None, 0]
+    assert not (day_root / "hour=09" / "part-legacy.parquet").exists()
+
+
+def test_store_persists_orderbook_snapshots(tmp_path: Path):
+    day = date(2026, 8, 4)
+    store = LargeOrderStore(tmp_path, flush_interval=0.01)
+    store.start()
+    store.submit("orderbook_snapshot", [{
+        "trade_date": day,
+        "event_ts_ms": _event_ts(10),
+        "symbol": "000001.SZ",
+        "event_id": "depth-1",
+        "bid_prices": [10.0, 9.99],
+        "bid_volumes": [1000, 800],
+        "ask_prices": [10.01, 10.02],
+        "ask_volumes": [600, 400],
+        "book_imbalance": 0.2857,
+        "ofi": 800,
+        "freshness_ms": 12,
+        "target_kind": "watchlist",
+    }])
+    store.stop(compact_date=day)
+
+    result = store.query_events(day, kinds=("orderbook_snapshot",), symbol="000001.SZ")
+
+    assert result["count"] == 1
+    row = result["rows"][0]
+    assert row["event_kind"] == "orderbook_snapshot"
+    assert row["bid_volumes"] == [1000.0, 800.0]
+    assert row["book_imbalance"] == 0.2857
+
+
+def test_store_cleans_orderbook_history_by_day_partitions(tmp_path: Path):
+    root = tmp_path / "large_orders" / "orderbook_snapshot"
+    for offset in range(22):
+        day = date(2026, 8, 4) - timedelta(days=offset)
+        (root / f"date={day}" / "hour=10").mkdir(parents=True)
+        (root / f"date={day}" / "hour=10" / "part.parquet").touch()
+    store = LargeOrderStore(tmp_path)
+
+    removed = store.cleanup_orderbook_history(today=date(2026, 8, 4))
+
+    assert removed == 2
+    assert (root / "date=2026-08-04").exists()
+    assert not (root / "date=2026-07-14").exists()

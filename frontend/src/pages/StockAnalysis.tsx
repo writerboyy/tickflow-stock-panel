@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle, X } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
@@ -8,7 +9,7 @@ import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
-import { api } from '@/lib/api'
+import { api, type PremiumGene } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -25,14 +26,34 @@ import {
  *  - AI 分析输出客观技术状态与风险提示(非买卖建议、非财务质量评级)
  *  - 报告胶囊用蓝色系,与财务分析(紫色)并存
  */
-export function StockAnalysis() {
-  const [symbol, setSymbol] = useState<string>('')
-  const [name, setName] = useState<string>('')
+interface StockAnalysisProps {
+  embedded?: boolean
+  initialSymbol?: string
+  initialName?: string
+  onClose?: () => void
+}
+
+export function StockAnalysis({ embedded = false, initialSymbol = '', initialName = '', onClose }: StockAnalysisProps = {}) {
+  const [searchParams] = useSearchParams()
+  const routeSymbol = (initialSymbol || searchParams.get('symbol') || '').trim().toUpperCase()
+  const routeName = initialName || searchParams.get('name') || ''
+  const [symbol, setSymbol] = useState<string>(routeSymbol)
+  const [name, setName] = useState<string>(routeName)
   const [checking, setChecking] = useState(false)
   const [confirmReport, setConfirmReport] = useState<{ id: string; created_at: string; focus: string } | null>(null)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [showPriceAlerts, setShowPriceAlerts] = useState(false)
   const { last: lastStock, remember: rememberStock } = useLastStock('stock-analysis')
+
+  // 嵌入持仓风控侧边栏时，直接加载指定标的的完整分析看板。
+  useEffect(() => {
+    if (!routeSymbol) return
+    setSymbol(routeSymbol)
+    setName(routeName)
+    setConfirmReport(null)
+    setShowPriceAlerts(false)
+    rememberStock(routeSymbol, routeName)
+  }, [routeName, routeSymbol, rememberStock])
 
   // 进入页面立即加载历史报告(供右侧常驻列表)。store 内部有 historyLoaded 去重, 重复调用安全。
   useEffect(() => { loadHistory() }, [])
@@ -85,11 +106,12 @@ export function StockAnalysis() {
         right={
           <div className="flex items-center gap-2">
             <LastStockChip stock={lastStock} onSelect={onSelect} />
+            {embedded && <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭完整个股分析"><X className="h-4 w-4" /></button>}
           </div>
         }
       />
 
-      <div className="w-full px-8 py-6 space-y-6">
+      <div className={`w-full space-y-6 ${embedded ? 'px-4 py-5 sm:px-5' : 'px-8 py-6'}`}>
         {/* 搜索栏 */}
         <div className="flex items-center gap-3">
           <div className="w-72">
@@ -189,6 +211,13 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
     staleTime: 60_000,
   })
 
+  const premiumGeneQ = useQuery({
+    queryKey: QK.stockPremiumGene(symbol),
+    queryFn: () => api.stockAnalysisPremiumGene(symbol),
+    enabled: !!symbol,
+    staleTime: 60_000,
+  })
+
   if (kline.isLoading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-5 w-5 animate-spin text-muted" /></div>
   }
@@ -217,34 +246,73 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
   const isUp = prev ? (last.close >= prev.close) : (last.close >= last.open)
 
   return (
-    <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
-      <div className="px-4 py-3 border-b border-border/40">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
-            <span className="text-sm font-medium text-foreground">关键价位分析</span>
-          </div>
-          <div className="flex items-baseline gap-2 shrink-0">
-            <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
-            <span className="text-[10px] text-muted/60">·</span>
-            <span className="text-[10px] text-muted">当前价</span>
-            <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
-              {curClose?.toFixed(2) ?? '—'}
-            </span>
+    <div className="space-y-3">
+      <PremiumGenePanel data={premiumGeneQ.data} loading={premiumGeneQ.isLoading} />
+      <div className="rounded-card border border-border/60 bg-surface/40 overflow-hidden">
+        <div className="px-4 py-3 border-b border-border/40">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="text-sm font-medium text-foreground">关键价位分析</span>
+            </div>
+            <div className="flex items-baseline gap-2 shrink-0">
+              <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
+              <span className="text-[10px] text-muted/60">·</span>
+              <span className="text-[10px] text-muted">当前价</span>
+              <span className={`text-base font-mono font-bold ${isUp ? 'text-bull' : 'text-bear'}`}>
+                {curClose?.toFixed(2) ?? '—'}
+              </span>
+            </div>
           </div>
         </div>
-      </div>
-      <div className="p-3">
-        <AnalysisKChart
-          rows={rows}
-          levels={levels}
-          series={levelsQ.data?.series}
-          seriesDates={levelsQ.data?.dates}
-          defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
-          height={480}
-        />
+        <div className="p-3">
+          <AnalysisKChart
+            rows={rows}
+            levels={levels}
+            series={levelsQ.data?.series}
+            seriesDates={levelsQ.data?.dates}
+            defaultLevelTypes={['sr', 'pivot', 'keltner_s']}
+            height={480}
+          />
+        </div>
       </div>
     </div>
+  )
+}
+
+function PremiumGenePanel({
+  data,
+  loading,
+}: {
+  data?: PremiumGene
+  loading: boolean
+}) {
+  const count = (value?: number) => loading ? '—' : (value == null ? '—' : String(value))
+  const rate = (value?: number) => loading ? '—' : (value == null ? '—' : `${(value * 100).toFixed(2)}%`)
+  const metrics = [
+    ['涨停次数', count(data?.limit_up_count)],
+    ['溢价5%次数', count(data?.premium_5_count)],
+    ['次日红盘率', rate(data?.next_day_red_rate)],
+    ['首板封板率', rate(data?.first_board_seal_rate)],
+    ['首板破板率', rate(data?.first_board_broken_rate)],
+    ['连板率', rate(data?.consecutive_rate)],
+  ] as const
+
+  return (
+    <section className="rounded-card border border-border/60 bg-surface/40 px-4 py-3">
+      <div className="flex items-center justify-between gap-2 mb-3">
+        <span className="text-sm font-medium text-foreground">溢价基因</span>
+        <span className="text-[10px] text-muted">近{data?.window_days ?? 200}个交易日</span>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2.5">
+        {metrics.map(([label, value]) => (
+          <div key={label} className="flex items-baseline justify-between gap-3 min-w-0">
+            <span className="text-xs text-muted truncate">{label}</span>
+            <span className="text-sm font-mono font-semibold text-bear shrink-0">{value}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
 

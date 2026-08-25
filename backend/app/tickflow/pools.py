@@ -1,13 +1,14 @@
 """标的池(Universe)定义(§6.3)。
 
 Phase 1 实现:
-  - 常用指数成份(沪深 300 / 中证 500 / 上证 50)用 TickFlow `quote.pool` 端点拉取并缓存
-  - 全 A 通过 instruments.batch 获取
+  - 常用指数成份(沪深 300 / 中证 500 / 上证 50)优先通过 TickFlow Universe 详情拉取并缓存
+  - 全 A 优先通过 Universe 详情拉取,旧 SDK 再降级到 quote.pool
   - 自选池 = 用户的 watchlist
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Literal
@@ -31,10 +32,10 @@ _POOL_NAME_HINTS = {
 }
 
 
-def _find_universe_id(hints: list[str]) -> str | None:
+def _find_universe_id(hints: list[str], tf: object | None = None) -> str | None:
     """从 universes.list() 里按 name/id 子串匹配找一个 universe id。"""
     try:
-        tf = get_client()
+        tf = tf if tf is not None else get_client()
         unis = tf.universes.list()
     except Exception as e:  # noqa: BLE001
         logger.warning("universes.list failed: %s", e)
@@ -46,6 +47,76 @@ def _find_universe_id(hints: list[str]) -> str | None:
             if h.lower() in haystack:
                 return item["id"]
     return None
+
+
+def _universe_field(value: object, field: str) -> object:
+    if isinstance(value, Mapping):
+        return value.get(field)
+    return getattr(value, field, None)
+
+
+def _detail_symbols(detail: object) -> list[str]:
+    """Extract symbols from a UniverseDetail dict or SDK model."""
+    raw_symbols = _universe_field(detail, "symbols") or []
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_symbols:
+        symbol = raw if isinstance(raw, str) else _universe_field(raw, "symbol")
+        normalized = str(symbol or "").strip().upper()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            symbols.append(normalized)
+    return symbols
+
+
+def _fetch_universe_detail_symbols(tf: object, universe_ids: list[str]) -> list[str]:
+    """Read UniverseDetail symbols, preferring batch and falling back to get."""
+    if not universe_ids:
+        return []
+    universes = getattr(tf, "universes", None)
+    details: object = None
+    batch = getattr(universes, "batch", None)
+    if callable(batch):
+        try:
+            details = batch(universe_ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("universes.batch failed (%s): %s", universe_ids, e)
+    symbols: list[str] = []
+    if isinstance(details, Mapping):
+        for universe_id in universe_ids:
+            symbols.extend(_detail_symbols(details.get(universe_id)))
+    elif len(universe_ids) == 1:
+        symbols.extend(_detail_symbols(details))
+    if symbols:
+        return list(dict.fromkeys(symbols))
+
+    get = getattr(universes, "get", None)
+    if callable(get):
+        for universe_id in universe_ids:
+            try:
+                symbols.extend(_detail_symbols(get(universe_id)))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("universes.get failed (%s): %s", universe_id, e)
+    return list(dict.fromkeys(symbols))
+
+
+def _fetch_quote_pool_symbols(tf: object, universe_ids: list[str], pool_id: str) -> list[str]:
+    quotes = getattr(tf, "quotes", None)
+    get_by_universes = getattr(quotes, "get_by_universes", None)
+    if not callable(get_by_universes):
+        return []
+    try:
+        frame = get_by_universes(universe_ids, as_dataframe=True)
+        if frame is None:
+            return []
+        if hasattr(frame, "columns") and "symbol" in frame.columns:
+            values = frame["symbol"].astype(str).tolist()
+        else:
+            values = [str(_universe_field(row, "symbol") or "") for row in frame]
+        return list(dict.fromkeys(value.strip().upper() for value in values if value.strip()))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fetch pool %s via quote.pool %s failed: %s", pool_id, universe_ids, e)
+        return []
 
 
 def _pool_cache_path(pool_id: str) -> Path:
@@ -72,32 +143,26 @@ def get_pool(pool_id: PoolId, refresh: bool = False) -> list[str]:
 def _fetch_pool(pool_id: PoolId) -> list[str]:
     """从 TickFlow 拉取池成份。
 
-    实现:先用 universes.list 找到 universe id,再 quotes.get_by_universes 拉成份。
+    实现:先用 universes.batch/get 读取池详情,旧 SDK 再降级到 quote.pool。
     """
     tf = get_client()
 
     if pool_id in _POOL_NAME_HINTS:
-        uid = _find_universe_id(_POOL_NAME_HINTS[pool_id])
+        uid = _find_universe_id(_POOL_NAME_HINTS[pool_id], tf)
         if not uid:
             logger.warning("无法在 TickFlow universes 列表里匹配到 %s", pool_id)
             return []
-        try:
-            df = tf.quotes.get_by_universes([uid], as_dataframe=True)
-            if df is not None and len(df) > 0 and "symbol" in df.columns:
-                return df["symbol"].astype(str).tolist()
-        except Exception as e:  # noqa: BLE001
-            logger.warning("fetch pool %s via universe %s failed: %s", pool_id, uid, e)
+        symbols = _fetch_universe_detail_symbols(tf, [uid])
+        return symbols or _fetch_quote_pool_symbols(tf, [uid], pool_id)
 
     if pool_id == "CN_Equity_A":
         # 全 A — 优先直接用 CN_Equity_A universe (包含沪深京三市)
-        uid = _find_universe_id(["CN_Equity_A", "沪深京A股", "全A"])
+        uid = _find_universe_id(["CN_Equity_A", "沪深京A股", "全A"], tf)
         if uid:
-            try:
-                df = tf.quotes.get_by_universes([uid], as_dataframe=True)
-                if df is not None and len(df) > 0 and "symbol" in df.columns:
-                    return sorted(set(df["symbol"].astype(str).tolist()))
-            except Exception as e:  # noqa: BLE001
-                logger.warning("fetch CN_Equity_A via universe %s failed: %s", uid, e)
+            symbols = _fetch_universe_detail_symbols(tf, [uid])
+            symbols = symbols or _fetch_quote_pool_symbols(tf, [uid], pool_id)
+            if symbols:
+                return sorted(set(symbols))
 
         # fallback: 聚合申万一级行业 (覆盖度较低, 缺北交所/新股)
         try:
@@ -112,22 +177,18 @@ def _fetch_pool(pool_id: PoolId) -> list[str]:
             if "SW1_" in uid:
                 sw1_ids.append(uid)
         if sw1_ids:
-            try:
-                df = tf.quotes.get_by_universes(sw1_ids, as_dataframe=True)
-                if df is not None and "symbol" in df.columns:
-                    return sorted(set(df["symbol"].astype(str).tolist()))
-            except Exception as e:  # noqa: BLE001
-                logger.warning("aggregate SW1 fetch failed: %s", e)
+            symbols = _fetch_universe_detail_symbols(tf, sw1_ids)
+            symbols = symbols or _fetch_quote_pool_symbols(tf, sw1_ids, pool_id)
+            if symbols:
+                return sorted(set(symbols))
 
     if pool_id == "CN_Index":
-        uid = _find_universe_id(["CN_Index", "沪深指数", "指数"])
+        uid = _find_universe_id(["CN_Index", "沪深指数", "指数"], tf)
         ids = [uid] if uid else ["CN_Index"]
-        try:
-            df = tf.quotes.get_by_universes(ids, as_dataframe=True)
-            if df is not None and len(df) > 0 and "symbol" in df.columns:
-                return sorted(set(df["symbol"].astype(str).tolist()))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("fetch CN_Index via universe %s failed: %s", ids, e)
+        symbols = _fetch_universe_detail_symbols(tf, ids)
+        symbols = symbols or _fetch_quote_pool_symbols(tf, ids, pool_id)
+        if symbols:
+            return sorted(set(symbols))
 
     return []
 

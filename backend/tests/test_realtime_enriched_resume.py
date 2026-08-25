@@ -156,6 +156,155 @@ def _previous_enriched() -> pl.DataFrame:
     })
 
 
+def _write_history_for_live_state(
+    tmp_path,
+    history: pl.DataFrame,
+) -> tuple[KlineRepository, pl.DataFrame]:
+    enriched = compute_indicators(history).with_columns(
+        pl.lit(0, dtype=pl.UInt32).alias("consecutive_limit_ups"),
+        pl.lit(0, dtype=pl.UInt32).alias("consecutive_limit_downs"),
+    )
+    target = tmp_path / "kline_daily_enriched" / "history.parquet"
+    target.parent.mkdir(parents=True)
+    enriched.write_parquet(target)
+    repo = KlineRepository(DataStore(tmp_path))
+    repo._enriched_history_cache = enriched if history.height > 90 else None
+    latest = history["date"].max()
+    repo._build_live_agg(latest)
+    return repo, enriched
+
+
+def _price_history(days: int, *, constant: bool = False) -> pl.DataFrame:
+    start = date(2024, 1, 2)
+    rows = []
+    for offset in range(days):
+        close = 10.0 if constant else 10.0 + offset * 0.01 + (offset % 7) * 0.03
+        rows.append({
+            "symbol": "600001.SH",
+            "date": start + timedelta(days=offset),
+            "open": close - 0.02,
+            "high": close + (0.0 if constant else 0.08),
+            "low": close - (0.0 if constant else 0.07),
+            "close": close,
+            "raw_close": close,
+            "raw_high": close + (0.0 if constant else 0.08),
+            "raw_low": close - (0.0 if constant else 0.07),
+            "volume": 1000.0 + offset * 3,
+            "amount": close * (1000.0 + offset * 3),
+        })
+    return pl.DataFrame(rows)
+
+
+def _assert_same_number(actual, expected, *, tolerance: float = 1e-10) -> None:
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual is not None
+        assert abs(float(actual) - float(expected)) <= tolerance
+
+
+def test_realtime_incremental_matches_full_history_batch_formulas(tmp_path):
+    history = _price_history(400)
+    repo, enriched = _write_history_for_live_state(tmp_path, history)
+    previous = enriched.tail(1)
+    previous_day = history.tail(1).row(0, named=True)
+    today_close = float(previous_day["close"]) + 0.17
+    today = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "date": [previous_day["date"] + timedelta(days=1)],
+        "open": [today_close - 0.03],
+        "high": [today_close + 0.09],
+        "low": [today_close - 0.11],
+        "close": [today_close],
+        "volume": [2500.0],
+        "amount": [today_close * 2500.0],
+    })
+
+    actual = compute_enriched_today(repo._live_agg_cache, previous, today).row(0, named=True)
+    expected = compute_indicators(
+        pl.concat([
+            history,
+            today.with_columns(
+                pl.col("close").alias("raw_close"),
+                pl.col("high").alias("raw_high"),
+                pl.col("low").alias("raw_low"),
+            ),
+        ], how="diagonal_relaxed")
+    ).tail(1).row(0, named=True)
+
+    for column in (
+        "ma5", "ma10", "ma20", "ma30", "ma60",
+        "ema5", "ema10", "ema20", "ema30", "ema60",
+        "macd_dif", "macd_dea", "macd_hist",
+        "boll_upper", "boll_lower", "kdj_k", "kdj_d", "kdj_j",
+        "atr_14", "vol_ratio_5d", "momentum_5d", "momentum_10d",
+        "momentum_20d", "momentum_30d", "momentum_60d",
+        "annual_vol_20d", "rsi_6", "rsi_14", "rsi_24",
+        "high_60d", "low_60d",
+    ):
+        _assert_same_number(actual[column], expected[column], tolerance=1e-9)
+
+
+def test_realtime_incremental_respects_unfilled_batch_windows(tmp_path):
+    history = _price_history(10)
+    repo, enriched = _write_history_for_live_state(tmp_path, history)
+    previous_day = history.tail(1).row(0, named=True)
+    today = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "date": [previous_day["date"] + timedelta(days=1)],
+        "open": [11.0], "high": [11.1], "low": [10.9], "close": [11.0],
+        "volume": [1500.0], "amount": [16_500.0],
+    })
+
+    actual = compute_enriched_today(repo._live_agg_cache, enriched.tail(1), today).row(0, named=True)
+    expected = compute_indicators(
+        pl.concat([
+            history,
+            today.with_columns(
+                pl.col("close").alias("raw_close"),
+                pl.col("high").alias("raw_high"),
+                pl.col("low").alias("raw_low"),
+            ),
+        ], how="diagonal_relaxed")
+    ).tail(1).row(0, named=True)
+
+    for column in (
+        "ma20", "ma30", "ma60", "boll_upper", "boll_lower",
+        "momentum_20d", "momentum_30d", "momentum_60d",
+        "annual_vol_20d", "high_60d", "low_60d",
+    ):
+        assert actual[column] is None
+        assert expected[column] is None
+
+
+def test_constant_price_kdj_uses_neutral_rsv_and_matches_incremental(tmp_path):
+    history = _price_history(20, constant=True)
+    repo, enriched = _write_history_for_live_state(tmp_path, history)
+    previous_day = history.tail(1).row(0, named=True)
+    today = pl.DataFrame({
+        "symbol": ["600001.SH"],
+        "date": [previous_day["date"] + timedelta(days=1)],
+        "open": [10.0], "high": [10.0], "low": [10.0], "close": [10.0],
+        "volume": [1060.0], "amount": [10_600.0],
+    })
+
+    actual = compute_enriched_today(repo._live_agg_cache, enriched.tail(1), today).row(0, named=True)
+    expected = compute_indicators(
+        pl.concat([
+            history,
+            today.with_columns(
+                pl.col("close").alias("raw_close"),
+                pl.col("high").alias("raw_high"),
+                pl.col("low").alias("raw_low"),
+            ),
+        ], how="diagonal_relaxed")
+    ).tail(1).row(0, named=True)
+
+    for column in ("kdj_k", "kdj_d", "kdj_j"):
+        _assert_same_number(actual[column], 50.0)
+        _assert_same_number(actual[column], expected[column])
+
+
 def test_realtime_enriched_keeps_rows_without_history_and_limits_technical_fields():
     today = date(2026, 7, 30)
     today_rows = pl.DataFrame({

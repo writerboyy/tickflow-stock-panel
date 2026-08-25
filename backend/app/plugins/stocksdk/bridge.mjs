@@ -14,7 +14,7 @@
  *
  * op:
  *   daily        —— 日K(adjust 默认 none), 每个 symbol 一组 bars
- *   adj          —— 除权因子: 取 hfq 与 none 收盘价, ex_factor = close_hfq / close_none
+ *   adj          —— 只读复权对照: 返回 none/hfq 收盘价及其比值
  *   minute       —— 分钟K(period 默认 5)
  *   realtime     —— 全 A 股实时快照(batch.cn)
  *   instruments  —— 全 A 股标的维表(batch.cn 提取元数据)
@@ -174,7 +174,13 @@ async function opAdj(sdk, job) {
       if (!b || !b.date) continue
       const rawClose = noneByDate.get(b.date)
       if (!rawClose || !b.close) continue
-      factors.push({ symbol: sym, trade_date: b.date, ex_factor: b.close / rawClose })
+      factors.push({
+        symbol: sym,
+        trade_date: b.date,
+        raw_close: rawClose,
+        hfq_close: b.close,
+        hfq_ratio: b.close / rawClose,
+      })
     }
     out[sym] = factors
     return factors

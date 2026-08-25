@@ -1,0 +1,96 @@
+# 开盘啦扩展数据接入
+
+## 已确认范围
+
+开盘啦仅作为辅助扩展数据源，不替换 TickFlow 或用户选择的主行情 provider，不新增一级页面，也不修改通用 `ext_data` 的配置、拉取、映射和展示行为。
+
+已接入以下接口：
+
+| 接口 | 用途 | 采集方式 |
+| --- | --- | --- |
+| `/115` | 实时竞价涨停委买额 | 交易日 09:15:05、09:20:05、09:25:05 |
+| `/30` | 历史 09:25 竞价数据 | 自动回补最近 60 个本地真实交易日缺口 |
+| `/31` | 个股竞价分时 | `/115` 的 09:25 结果自动逐股展开 |
+| `/15` | 涨停复盘和详细涨停原因 | 交易日 15:30 |
+| `/76` | 个股涨停基因六项统计 | 个股分析按需查询，不入扩展表 |
+| `/100` | 每日龙虎榜股票 | 交易日 18:00 |
+| `/101` | 龙虎榜买卖营业部明细 | `/100` 结果自动逐股展开 |
+| `/108` | 重点监控股票 | 交易日盘前、盘后快照 |
+| `/109` | 多次异动股票 | 交易日盘前、盘后快照 |
+
+资金类接口与上表分开落库，避免与竞价、龙虎榜混用：
+
+| AxData 接口 | TickFlow 表 | 粒度与采集方式 |
+| --- | --- | --- |
+| `kpl_interval_stock` | `ext_kpl_funds` | 交易日 15:06 分页拉取全市场区间主力买卖额、主力净额与连续净流入天数 |
+| `kpl_capital_net` | `ext_kpl_funds` | 对本地股票维表的全 A 股逐票拉取；保留完整分时 JSON，并映射最后采样点为日频收盘快照 |
+| `kpl_large_order_statistics` | `ext_kpl_funds` | 对本地股票维表的全 A 股逐票拉取；保存特大单、大单、中单、小单净额及 `main_net_amount_over_300k` |
+
+`main_net`（区间主力净额）、`capital_net_close`（分时大单净额末值）和
+`main_net_amount_over_300k`（特大单加大单净额）是不同上游口径。它们不映射为
+其他来源的 `net_mf_amount`，也不使用名称相同的字段做静默替换。
+
+参考数据按各自的报告期或交易日落独立表，不与资金流、竞价或通用财务指标混用：
+
+| AxData 接口 | TickFlow 表 | 粒度与采集方式 |
+| --- | --- | --- |
+| `kpl_northbound_sector_*`、`kpl_northbound_stocks_*` | `ext_kpl_northbound_sector`、`ext_kpl_northbound_stock` | 北向季度板块及板块个股持仓；板块 ID 分页展开个股持仓 |
+| `kpl_shareholder_changes` | `ext_kpl_shareholder_changes` | 指定报告期全 A 股本期、上期十大流通股东 |
+| `kpl_shareholder_count_changes_documented` | `ext_kpl_shareholder_counts` | 先读取上游 `DateList` 半月窗口，再分页采集股东人数变更 |
+| `kpl_dragon_tiger_movement`、`kpl_dragon_tiger_details` | `ext_kpl_lhb_movement`、`ext_kpl_lhb_detail` | 每日龙虎榜游资/机构动向及上榜股票营业部明细 |
+| `kpl_sector_constituents` | `ext_kpl_sector_constituents` | 按已采集北向板块 ID 拉取目标交易日的历史板块成分，主键为板块和股票 |
+
+北向数据是季度持仓，不是每日北向净买入。开盘啦板块成分也不是中证、上证等官方指数的 PIT 历史成分。当前开盘啦目录没有两融、业绩预告或业绩快报的已文档化契约；这些数据保持不可用，不接其他来源替代。
+
+错过的 09:15、09:20 实时快照不使用历史数据伪造，对应字段保持空值。
+
+## 插件边界
+
+实现位于 `backend/app/plugins/kaipanla/`，由应用显式挂载到现有 `AsyncIOScheduler`。未配置凭据、单个接口失败或响应结构变化都不得阻断应用启动、主行情、通用扩展数据及其他开盘啦任务。
+
+插件注册 12 张普通时序扩展表，配置的 `pull` 始终为空：
+
+| 扩展表 | 数据来源 | 粒度 |
+| --- | --- | --- |
+| `ext_kpl_auction` | `/115`、`/30`、`/31` | 每交易日每股票一行 |
+| `ext_kpl_limitup` | `/15` | 每交易日每股票一行 |
+| `ext_kpl_lhb` | `/100`、`/101` | 每交易日每股票一行 |
+| `ext_kpl_regulatory` | `/108`、`/109` | 每交易日每股票一行 |
+| `ext_kpl_funds` | 开盘啦资金接口 | 每交易日每股票一行 |
+| `ext_kpl_northbound_sector`、`ext_kpl_northbound_stock` | 北向季度持仓 | 每报告期板块/板块个股多行 |
+| `ext_kpl_shareholder_changes`、`ext_kpl_shareholder_counts` | 股东数据 | 每报告期多股东/每统计日每股票一行 |
+| `ext_kpl_lhb_movement`、`ext_kpl_lhb_detail` | 龙虎榜扩展明细 | 每交易日多参与者/多席位行 |
+| `ext_kpl_sector_constituents` | 历史板块成分 | 每交易日每板块每股票一行 |
+
+多检查点和逐股明细使用插件内的非空字段原子合并，重跑同一交易日不产生重复行。原始响应保存到 `data/ext_data/_kaipanla_raw/`，不注册为普通扩展表。
+
+## 凭据与请求安全
+
+设置页只接受一个完整授权 URL。后端验证 HTTPS、标准路径和以下主机白名单，然后提取 `Token`、`UserID`、`DeviceID`、`PhoneOSNew`、`VerSion`、`apiv`：
+
+- `apphwhq.longhuvip.com`
+- `apphis.longhuvip.com`
+- `apphwshhq.longhuvip.com`
+- `applhb.longhuvip.com`
+
+字段分别保存为 `secrets.json` 中的 `kaipanla_*` 项。原 URL 不落盘、不进入日志或响应；设置 API 只返回脱敏状态。客户端只允许调用代码内定义的 8 个固定主机、路径和业务参数，不能使用用户 URL 作为请求目标。
+
+文档的调用案例使用 POST 和表单请求头，因此初始端点定义采用 POST。请求方式属于每个固定端点的内部定义，必须在有授权凭据后逐接口实测；若某接口实际要求 GET，只调整该端点定义，不改变通用扩展数据或开放用户可编辑请求方式。
+
+## 数据口径
+
+- `/115`、`/30` 必须严格校验 17 列数组；只标准化文档已说明的位置，未知位置仅保留在原始响应。
+- 开盘啦返回的涨幅、换手率均为百分数值，例如 `9.96` 表示 `9.96%`，不得映射成系统小数制 `change_pct`。
+- `/31` 标准表只保存文档明确的时间、价格、成交量及开高低昨收，未知方向/状态位只留在原始响应。
+- `/15` 的重复板块归属合并到同一股票行。
+- `/31`、`/101` 明细以 JSON 字符串及数值摘要保存在所属日行内。
+- 股票代码优先通过现有 instruments 维表标准化，兜底沿用扩展数据的 SH/SZ 规则。
+
+## 验证标准
+
+- URL 白名单、必需字段、脱敏、保存和清除。
+- 已接入接口的对象、嵌套数组、定长数组、空响应和畸形响应。
+- 分页终止、有限重试、无凭据启动和接口失败隔离。
+- 09:15/09:20/09:25 非空合并、幂等和原子替换。
+- `/115 -> /31`、`/100 -> /101` 自动逐股展开。
+- 后端定向 pytest、Ruff、前端构建和 `git diff --check`。

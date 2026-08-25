@@ -12,6 +12,7 @@ export const STAGE_LABELS: Record<string, string> = {
   sync_daily: '同步日 K',
   sync_adj: '同步除权因子',
   compute_enriched: '计算技术指标',
+  compute_premium_gene: '计算溢价基因',
   sync_minute: '同步分钟 K',
   extend_history: '扩展日K历史',
   extend_minute: '扩展分钟K历史',

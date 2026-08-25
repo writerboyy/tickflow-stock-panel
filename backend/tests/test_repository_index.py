@@ -164,4 +164,3 @@ def test_merge_live_enriched_asset_index_merges_cache(repo):
     cached, dt = repo.get_enriched_latest_asset("index", refresh=False)
     assert str(dt) == "2026-07-25"
     assert set(cached["symbol"].to_list()) == {"000001.SH", "000300.SH"}
-

@@ -81,6 +81,11 @@ class Settings(BaseSettings):
 
     # TickFlow
     tickflow_api_key: str = Field(default="", description="留空启用 free 模式")
+    hithink_finance_api_key: str = Field(
+        default="",
+        description="HiThink/Fuyao supplemental data API key; never required for startup",
+    )
+    hithink_finance_base_url: str = "https://fuyao.aicubes.cn"
 
     # AI
     ai_provider: str = "openai_compat"
@@ -111,10 +116,22 @@ class Settings(BaseSettings):
     backtest_matrix_cache_max_mb: int = 512
     backtest_matrix_cache_prewarm: bool = True
     backtest_matrix_cache_prewarm_years: int = 5
+    tickflow_skip_collector_bootstrap: bool = False
 
     # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
     # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
     auth_password: str = ""
+
+    # 云端 QMT ZMQ RPC。连接地址和账户只能通过环境变量注入。
+    qmt_enabled: bool = False
+    qmt_zmq_connect_address: str = ""
+    qmt_quote_zmq_connect_address: str = ""
+    qmt_account_id: str = ""
+    qmt_rpc_timeout_seconds: float = 6.0
+    qmt_trade_enabled: bool = False
+    qmt_account_type: str = "STOCK"
+    qmt_auto_sync: bool = True
+    qmt_auto_sync_interval_seconds: float = 30.0
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)

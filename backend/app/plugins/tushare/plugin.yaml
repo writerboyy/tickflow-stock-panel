@@ -1,0 +1,8 @@
+name: tushare
+display_name: "Tushare（历史行情）"
+runtime: none
+entry: app.plugins.tushare.provider:TushareProvider
+check: app.plugins.tushare.provider:availability
+datasets: [daily, adj_factor, minute]
+description: "通过固定 HTTPS 代理拉取股票、ETF 和指数历史数据；支持日K、复权因子及股票/ETF 1分钟K，不提供实时行情。"
+install_hint: "无需安装依赖；请配置 Tushare API Key。"

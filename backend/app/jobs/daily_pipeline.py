@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -21,7 +22,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
+from app.services import index_sync, instrument_sync, kline_sync, pit_reference, preferences as _prefs, stock_reports
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -52,6 +53,22 @@ def _invalidate(table: str | None = None) -> None:
     """stage 写完调用,让 /api/data/status 只重算被影响的那张表。"""
     from app.api.data import invalidate_data_cache
     invalidate_data_cache(table)
+
+
+def _trigger_financial_incremental(app_state) -> None:
+    """盘后管道收尾后触发财务增量同步，失败不影响行情管道。"""
+    scheduler = getattr(app_state, "financial_scheduler", None)
+    if scheduler is None:
+        return
+    try:
+        result = scheduler.trigger_incremental()
+        if not result.get("started"):
+            logger.info(
+                "after-close financial sync skipped: %s",
+                result.get("reason", "not started"),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("after-close financial sync trigger failed: %s", e)
 
 
 def _resolve_universe(capset: CapabilitySet, repo=None) -> list[str]:
@@ -109,7 +126,7 @@ def run_now(
     repo: KlineRepository,
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
-    override_start_date: _date | None = None,
+    override_start_date: date | None = None,
 ) -> dict:
     """立即执行一次盘后管道,支持进度回调。
 
@@ -414,6 +431,18 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
+    from app.services.daily_valuation import sync_missing_daily_valuation
+
+    valuation_result = sync_missing_daily_valuation(repo.store.data_dir)
+    if valuation_result["trading_days"]:
+        _refresh_single_view(repo, "valuation_daily")
+        emit(
+            "compute_valuation",
+            89,
+            f"日度估值完成,{valuation_result['trading_days']} 天",
+        )
+        logger.info("valuation_daily incremental done: %s", valuation_result)
+
     # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0
     written_etf_daily = 0
@@ -423,7 +452,10 @@ def run_now(
     pull_index = _prefs.get_pipeline_pull_index()
     pull_etf = _prefs.get_pipeline_pull_etf()
 
-    if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
+    custom_daily_available = kline_sync._provider_has_dataset(
+        _prefs.get_daily_data_provider(), "daily"
+    )
+    if (capset.has(Cap.KLINE_DAILY_BATCH) or custom_daily_available) and (pull_index or pull_etf):
         _types = []
         if pull_index:
             _types.append("指数")
@@ -475,7 +507,13 @@ def run_now(
                 etf_inst = repo.get_etf_instruments()
                 if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
                     etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
-                if etf_symbols and capset.has(Cap.ADJ_FACTOR):
+                etf_adj_provider = _prefs.get_adj_factor_provider()
+                if etf_adj_provider == "same_as_daily":
+                    etf_adj_provider = _prefs.get_daily_data_provider()
+                custom_etf_adj_available = kline_sync._provider_has_dataset(
+                    etf_adj_provider, "adj_factor"
+                )
+                if etf_symbols and (capset.has(Cap.ADJ_FACTOR) or custom_etf_adj_available):
                     try:
                         emit("sync_index", 88, "同步 ETF 除权因子…")
                         from datetime import datetime, timedelta
@@ -543,12 +581,65 @@ def run_now(
     else:
         skipped.append("sync_index")
 
+    # Step 2.4: PIT Reference 同步 — HiThink 指数成分主源，BaoStock 核对及生命周期。
+    pit_reference_rows = 0
+    pit_reference_index_membership_rows = 0
+    pit_reference_crosschecked_snapshots = 0
+    pit_reference_baostock_lifecycle_rows = 0
+    pit_reference_instrument_appended_symbols = 0
+    try:
+        emit("sync_pit_reference", 89, "同步 PIT 指数成分与股票生命周期…")
+        pit_result = pit_reference.sync_pit_reference(repo.store.data_dir)
+        pit_reference_rows = int(pit_result.get("published_rows") or 0)
+        pit_reference_index_membership_rows = int(
+            pit_result.get("index_membership_rows") or 0
+        )
+        pit_reference_crosschecked_snapshots = int(
+            pit_result.get("crosschecked_snapshots") or 0
+        )
+        pit_reference_baostock_lifecycle_rows = int(
+            pit_result.get("lifecycle_rows") or 0
+        )
+        pit_reference_instrument_appended_symbols = int(
+            pit_result.get("instrument_appended_symbols") or 0
+        )
+        if pit_result.get("status") == "failed":
+            errors = "; ".join(str(item) for item in pit_result.get("errors") or [])
+            emit("sync_pit_reference", 90, f"PIT Reference 失败:{errors}")
+            stage_errors.append(f"PIT reference: {errors}")
+        else:
+            emit(
+                "sync_pit_reference",
+                90,
+                f"PIT 完成,指数成分 {pit_reference_index_membership_rows} 行,"
+                f"交叉核对 {pit_reference_crosschecked_snapshots} 组,"
+                f"生命周期 {pit_reference_baostock_lifecycle_rows} 行"
+                + (
+                    f",追加退市标的 {pit_reference_instrument_appended_symbols} 只"
+                    if pit_reference_instrument_appended_symbols else ""
+                ),
+            )
+            logger.info("sync_pit_reference done: %s", pit_result)
+        if pit_reference_rows == 0 and pit_result.get("status") != "failed":
+            skipped.append("sync_pit_reference")
+    except Exception as e:  # noqa: BLE001
+        emit("sync_pit_reference", 90, f"PIT Reference 同步失败:{e}")
+        logger.warning("sync_pit_reference failed: %s", e)
+        stage_errors.append(f"PIT reference sync: {e}")
+
     # Step 2.5: 分钟 K 同步(可选) — 未启用或无 capability 时静默跳过(不 emit)
     from app.services import preferences
     minute_on = preferences.get_minute_sync_enabled()
+    etf_minute_on = preferences.get_etf_minute_sync_enabled()
     minute_days = preferences.get_minute_sync_days()
+    minute_provider = preferences.get_minute_data_provider()
+    _, minute_fallback, minute_provider_error = kline_sync._resolve_minute_provider(minute_provider)
+    if minute_provider_error is not None:
+        logger.warning("minute provider %s resolution failed: %s", minute_provider, minute_provider_error)
+    can_sync_minute = capset.has(Cap.KLINE_MINUTE_BATCH) or not minute_fallback
     written_minute = 0
-    if minute_on and capset.has(Cap.KLINE_MINUTE_BATCH):
+    written_etf_minute = 0
+    if minute_on and can_sync_minute:
         minute_start = today - _td(days=minute_days)
         emit("sync_minute", 90, f"获取分钟K [{minute_start} ~ {today}]…")
         logger.info("sync_minute: [%s ~ %s] start", minute_start, today)
@@ -572,6 +663,66 @@ def run_now(
             logger.info("sync_minute skipped: no KLINE_MINUTE_BATCH capability")
         else:
             logger.info("sync_minute skipped: user disabled")
+    if etf_minute_on and can_sync_minute:
+        etf_minute_start = today - _td(days=minute_days)
+        emit("sync_etf_minute", 93, f"获取 ETF 分钟K [{etf_minute_start} ~ {today}]…")
+        etf_minute_symbols = _resolve_etf_minute_symbols(repo)
+        def _etf_minute_chunk_progress(cur: int, tot: int, seg_label: str = "") -> None:
+            emit(
+                "sync_etf_minute",
+                93,
+                f"ETF 分钟K 批次 {cur}/{tot}" + (f" [{seg_label}]" if seg_label else ""),
+                stage_pct=int(100 * cur / tot) if tot else 100,
+                skip_log=True,
+            )
+        written_etf_minute = kline_sync.sync_and_persist_minute(
+            etf_minute_symbols,
+            repo,
+            capset,
+            days=minute_days,
+            on_chunk_done=_etf_minute_chunk_progress,
+            asset_type="etf",
+        )
+        emit("sync_etf_minute", 94, f"ETF 分钟K完成,{written_etf_minute} 行")
+        _invalidate("etf_minute")
+    else:
+        skipped.append("sync_etf_minute")
+        if etf_minute_on:
+            logger.info("sync_etf_minute skipped: no KLINE_MINUTE_BATCH capability")
+        else:
+            logger.info("sync_etf_minute skipped: user disabled")
+
+    # 四合一的一进二封板质量只需要昨日涨停池的分钟 K。
+    # 全市场分钟同步仍由 minute_sync_enabled 控制；关闭时仅做这一个小范围补齐，
+    # 让次日 09:05 预选不因默认关闭全市场分钟 K 而失去一进二评分。
+    four_mode_minute_rows = 0
+    four_mode_minute_attempted = 0
+    four_mode_minute_unresolved: dict[str, list[str]] = {}
+    if not minute_on:
+        try:
+            from app.free_strategy.four_mode_snapshot import (
+                ensure_four_mode_minute_data,
+                four_mode_limit_up_symbols,
+            )
+
+            target_symbols = four_mode_limit_up_symbols(repo, today)
+            four_mode_minute_result = ensure_four_mode_minute_data(
+                repo,
+                capset,
+                {today: target_symbols},
+            )
+            four_mode_minute_rows = int(four_mode_minute_result.get("written_rows") or 0)
+            four_mode_minute_attempted = int(four_mode_minute_result.get("attempted_symbols") or 0)
+            four_mode_minute_unresolved = dict(four_mode_minute_result.get("unresolved") or {})
+            if four_mode_minute_attempted:
+                logger.info(
+                    "four_mode_minute: attempted=%d written=%d unresolved=%d",
+                    four_mode_minute_attempted,
+                    four_mode_minute_rows,
+                    sum(len(values) for values in four_mode_minute_unresolved.values()),
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("four_mode minute preparation failed: %s", type(exc).__name__)
 
     # Step 2.6: 市场环境(regime) 增量计算 — enriched 已就绪后聚合环境指标。
     # 双检测(缺口+stale), 自动补算遗漏/被覆写的日。软失败: 不阻断主管道。
@@ -632,6 +783,19 @@ def run_now(
     emit("refresh_views", 95, "刷新 DuckDB 视图…")
     _refresh_views(repo)
 
+    # Step 4: 盘后生成个股溢价基因快照。该指标依赖 enriched 的动态涨停信号，
+    # 因此必须放在 enriched 落盘和视图刷新之后；失败不阻断行情管道，但会在日志中可见。
+    premium_gene_rows = 0
+    try:
+        emit("compute_premium_gene", 97, "计算溢价基因…")
+        from app.services import premium_gene
+
+        premium_gene_rows = premium_gene.refresh(repo, force=True).height
+        emit("compute_premium_gene", 99, f"溢价基因完成,{premium_gene_rows} 只个股")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("compute_premium_gene failed (soft): %s", exc)
+        skipped.append("premium_gene")
+
     emit("done", 100, "完成")
     _invalidate(None)  # 兜底:全清
 
@@ -645,7 +809,16 @@ def run_now(
         "etf_count": etf_count,
         "etf_daily_rows": written_etf_daily,
         "etf_adj_factor_symbols": etf_adj_symbols,
+        "pit_reference_rows": pit_reference_rows,
+        "pit_reference_index_membership_rows": pit_reference_index_membership_rows,
+        "pit_reference_crosschecked_snapshots": pit_reference_crosschecked_snapshots,
+        "pit_reference_baostock_lifecycle_rows": pit_reference_baostock_lifecycle_rows,
+        "pit_reference_instrument_appended_symbols": pit_reference_instrument_appended_symbols,
         "minute_rows": written_minute,
+        "etf_minute_rows": written_etf_minute,
+        "four_mode_minute_rows": four_mode_minute_rows,
+        "four_mode_minute_attempted": four_mode_minute_attempted,
+        "four_mode_minute_unresolved": four_mode_minute_unresolved,
         "regime_days": regime_days,
         "mainline_rows": mainline_rows,
         "lagging_symbols": len(lagging_symbols),
@@ -685,6 +858,7 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         "instruments": f"{d}/instruments/**/*.parquet",
         "instruments_index": f"{d}/instruments_index/**/*.parquet",
         "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
+        "valuation_daily": f"{d}/valuation_daily/**/*.parquet",
     }
     path = paths.get(name)
     if not path:
@@ -701,6 +875,14 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
 def _resolve_minute_symbols(capset: CapabilitySet, repo=None) -> list[str]:
     """分钟 K 同步标的 — 与日K共用同一标的池。"""
     return _resolve_universe(capset, repo)
+
+
+def _resolve_etf_minute_symbols(repo: KlineRepository) -> list[str]:
+    """ETF 分钟K同步标的 — 仅使用已同步的 ETF 维表。"""
+    instruments = repo.get_etf_instruments()
+    if instruments.is_empty() or "symbol" not in instruments.columns:
+        return []
+    return sorted({str(symbol) for symbol in instruments["symbol"].to_list() if symbol})
 
 
 def _refresh_instruments_view(repo: KlineRepository) -> None:
@@ -868,6 +1050,99 @@ async def _run_scheduled_review(repo) -> None:
                     ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
+
+
+def _run_scheduled_stock_reports(repo, app_state) -> None:
+    """盘后为当前 QMT 持仓顺序生成最新个股分析报告。"""
+    from app import secrets_store as ss
+
+    if not ss.get_ai_key():
+        logger.info("scheduled stock reports skipped: AI key not configured")
+        return
+
+    _, enriched_date = repo.get_enriched_latest()
+    if enriched_date != date.today():
+        logger.info(
+            "scheduled stock reports skipped: enriched data is not for today (%s)",
+            enriched_date,
+        )
+        return
+
+    risk_service = getattr(app_state, "position_risk_service", None)
+    if risk_service is None:
+        logger.info("scheduled stock reports skipped: position risk service unavailable")
+        return
+
+    if not risk_service.store.get_runtime("qmt_sync"):
+        logger.info("scheduled stock reports skipped: QMT has not synced holdings")
+        return
+
+    portfolio = risk_service.store.load()
+    positions = [
+        {
+            "symbol": str(row.get("symbol") or "").strip().upper(),
+            "name": str(row.get("name") or row.get("symbol") or "").strip(),
+        }
+        for row in portfolio.get("positions") or []
+        if str(row.get("symbol") or "").strip()
+    ]
+    if not positions:
+        logger.info("scheduled stock reports skipped: QMT holdings are empty")
+        return
+
+    existing = stock_reports.latest_reports(item["symbol"] for item in positions)
+    today = date.today().isoformat()
+    pending = [
+        item for item in positions
+        if str(existing.get(item["symbol"], {}).get("created_at") or "")[:10] != today
+    ]
+    if not pending:
+        logger.info("scheduled stock reports skipped: all %d holdings already reported", len(positions))
+        return
+
+    import asyncio
+    import json
+
+    from app.services.stock_analyzer import analyze_stock_stream
+
+    async def generate(item: dict[str, str]) -> tuple[dict | None, str | None]:
+        meta: dict = {}
+        content_parts: list[str] = []
+        async for raw in analyze_stock_stream(repo, repo.store.data_dir, item["symbol"]):
+            event = json.loads(raw)
+            event_type = event.get("type")
+            if event_type == "meta":
+                meta = event
+            elif event_type == "delta":
+                content_parts.append(str(event.get("content") or ""))
+            elif event_type == "error":
+                return None, str(event.get("message") or "分析失败")
+        content = "".join(content_parts).strip()
+        if not content:
+            return None, "分析未返回内容"
+        return {
+            "symbol": item["symbol"],
+            "name": item["name"],
+            "focus": "",
+            "content": content,
+            "summary": meta.get("summary", ""),
+            "close": meta.get("close"),
+            "levels": meta.get("levels"),
+        }, None
+
+    async def generate_all() -> None:
+        for item in pending:
+            try:
+                report, error = await generate(item)
+                if error:
+                    logger.warning("scheduled stock report skipped for %s: %s", item["symbol"], error)
+                    continue
+                stock_reports.save_report(report or {})
+                logger.info("scheduled stock report saved: %s", item["symbol"])
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("scheduled stock report failed for %s: %s", item["symbol"], exc)
+
+    asyncio.run(generate_all())
 
 
 async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple[str, dict]:
@@ -1049,6 +1324,11 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             # 仍需刷进内存缓存, 否则 live_agg 基准列停留在旧交易日。放 finally 保证部分
             # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
             repo.refresh_cache()
+            _trigger_financial_incremental(app_state)
+        try:
+            _run_scheduled_stock_reports(repo, app_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("scheduled stock reports failed without blocking pipeline: %s", exc)
         return result
 
     scheduler.add_job(

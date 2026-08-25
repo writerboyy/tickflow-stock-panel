@@ -124,8 +124,10 @@ free_port frontend "$FRONTEND_PORT"
 if [ ! -d "$BACKEND_DIR/.venv" ] || [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
   if [ "${#BACKEND_EXTRA_ARGS[@]}" -gt 0 ]; then
     info "同步后端 Python 依赖，extras: $BACKEND_EXTRAS"
+    ( cd "$BACKEND_DIR" && uv sync "${BACKEND_EXTRA_ARGS[@]}" )
   else
     info "后端首次启动 — 安装 Python 依赖(约 1-2 分钟)..."
+    ( cd "$BACKEND_DIR" && uv sync )
   fi
   # macOS 自带 bash 3.2 在 set -u 下展开空数组会报 unbound variable,
   # ${arr[@]+"${arr[@]}"} 守卫:数组为空时展开为零个参数,非空时逐个带引号展开。

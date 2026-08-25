@@ -66,7 +66,14 @@ def save(updates: dict) -> dict:
 
 
 def get_realtime_quotes_enabled() -> bool:
-    return load().get("realtime_quotes_enabled", False)
+    data = load()
+    if "realtime_quotes_enabled" in data:
+        return bool(data["realtime_quotes_enabled"])
+    try:
+        from app.services.quote_service import QuoteService
+        return QuoteService.is_realtime_allowed()
+    except Exception:
+        return False
 
 
 def get_indices_nav_pinned() -> bool:
@@ -102,11 +109,6 @@ def get_realtime_watchlist_symbols() -> list[str]:
     return out
 
 
-def set_realtime_watchlist_symbols(symbols: list[str]) -> list[str]:  # noqa: ARG001
-    """兼容旧接口: Free 实时标的现在由自选页前 5 个决定。"""
-    return get_realtime_watchlist_symbols()
-
-
 def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
     current = load()
@@ -120,6 +122,11 @@ def set_realtime_quote_interval(interval: float) -> float:
 
 def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
+
+
+def get_etf_minute_sync_enabled() -> bool:
+    """ETF 分钟K是否随盘后管道自动同步。默认关闭。"""
+    return load().get("etf_minute_sync_enabled", False)
 
 
 def get_minute_intraday_refresh() -> bool:
@@ -530,6 +537,11 @@ def get_depth_polling_interval() -> float:
     return float(load().get("depth_polling_interval", 10.0))
 
 
+def get_kaipanla_raw_archive_compression() -> bool:
+    """开盘啦原始响应归档是否 gzip 压缩。默认压缩, 不删除历史文件。"""
+    return bool(load().get("kaipanla_raw_archive_compression", True))
+
+
 def set_depth_polling_interval(interval: float) -> float:
     """保存 depth 轮询间隔。套餐范围 clamp 由 depth_service 按档位做。"""
     interval = max(1.0, min(600.0, float(interval)))
@@ -724,6 +736,120 @@ def get_realtime_quote_scope() -> dict:
         "realtime_index_mode": get_realtime_index_mode(),
         "realtime_index_symbols": get_realtime_index_symbols(),
     }
+
+
+# ===== 实时大单 =====
+
+_LARGE_ORDER_DEFAULTS = {
+    "large_orders_enabled": True,
+    "large_orders_score_threshold": 75,
+    "large_orders_cooldown_seconds": 120,
+    "large_orders_deep_dive_interval_seconds": 60,
+    "large_orders_max_deep_dive_symbols": 3,
+    "large_orders_candidate_limit": 50,
+    "large_orders_min_limit_up_gap_pct": 0.02,
+    "large_orders_market_segments": ["main", "star", "chinext"],
+    "large_orders_exclude_bse": True,
+    "large_orders_exclude_st": True,
+    "large_orders_config_version": "large_orders_v2",
+}
+_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
+
+
+def _get_large_order_market_segments(data: dict) -> list[str]:
+    raw = data.get("large_orders_market_segments")
+    if isinstance(raw, list):
+        selected = {str(item) for item in raw}
+        return [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
+
+    segments = list(_LARGE_ORDER_DEFAULTS["large_orders_market_segments"])
+    if not bool(data.get("large_orders_exclude_bse", True)):
+        segments.append("bse")
+    if not bool(data.get("large_orders_exclude_st", True)):
+        segments.append("st")
+    return segments
+
+
+def get_large_orders_preferences() -> dict:
+    data = load()
+    market_segments = _get_large_order_market_segments(data)
+
+    def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
+        try:
+            value = int(data.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(lower, min(upper, value))
+
+    def bounded_float(key: str, default: float, lower: float, upper: float) -> float:
+        try:
+            value = float(data.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(lower, min(upper, value))
+
+    return {
+        "enabled": bool(data.get("large_orders_enabled", _LARGE_ORDER_DEFAULTS["large_orders_enabled"])),
+        "score_threshold": bounded_int("large_orders_score_threshold", 75, 50, 100),
+        "cooldown_seconds": bounded_int("large_orders_cooldown_seconds", 120, 30, 3600),
+        "deep_dive_interval_seconds": bounded_int("large_orders_deep_dive_interval_seconds", 60, 15, 600),
+        "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
+        "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
+        "min_limit_up_gap_pct": bounded_float("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10),
+        "market_segments": market_segments,
+        "exclude_bse": "bse" not in market_segments,
+        "exclude_st": "st" not in market_segments,
+        "version": "large_orders_v2",
+    }
+
+
+def set_large_orders_preferences(updates: dict) -> dict:
+    allowed = {
+        "enabled": "large_orders_enabled",
+        "score_threshold": "large_orders_score_threshold",
+        "cooldown_seconds": "large_orders_cooldown_seconds",
+        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
+        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
+        "candidate_limit": "large_orders_candidate_limit",
+        "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
+    }
+    saved: dict = {}
+    for key, storage_key in allowed.items():
+        if key not in updates or updates[key] is None:
+            continue
+        if key == "enabled":
+            saved[storage_key] = bool(updates[key])
+        elif key == "min_limit_up_gap_pct":
+            saved[storage_key] = float(updates[key])
+        else:
+            saved[storage_key] = int(updates[key])
+    if updates:
+        market_segments = _get_large_order_market_segments(load())
+        if updates.get("market_segments") is not None:
+            selected = {str(item) for item in updates["market_segments"]}
+            market_segments = [
+                item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected
+            ]
+        else:
+            if updates.get("exclude_bse") is not None:
+                if bool(updates["exclude_bse"]):
+                    market_segments = [item for item in market_segments if item != "bse"]
+                elif "bse" not in market_segments:
+                    market_segments.append("bse")
+            if updates.get("exclude_st") is not None:
+                if bool(updates["exclude_st"]):
+                    market_segments = [item for item in market_segments if item != "st"]
+                elif "st" not in market_segments:
+                    market_segments.append("st")
+        selected = set(market_segments)
+        market_segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
+        saved.update({
+            "large_orders_market_segments": market_segments,
+            "large_orders_exclude_bse": "bse" not in market_segments,
+            "large_orders_exclude_st": "st" not in market_segments,
+        })
+        save(saved)
+    return get_large_orders_preferences()
 
 
 def get_sse_refresh_pages() -> dict[str, bool]:

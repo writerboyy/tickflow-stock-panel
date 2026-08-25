@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,14 +21,19 @@ from app.api import (
     data,
     ext_data,
     financials,
+    free_strategy,
     indices,
     intraday,
     kline,
+    limit_board,
+    market_heat,
     market_recap,
     mining,
     monitor_rules,
     overview,
     pipeline,
+    pit_reference,
+    position_risk,
     regime,
     rps,
     screener,
@@ -35,7 +41,9 @@ from app.api import (
     stock_analysis,
     strategy,
     watchlist,
+    xiaoshi,
 )
+from app.api import large_orders
 from app.api import auth as auth_api
 from app.api import settings as settings_api
 from app.api.routes import router as core_router
@@ -47,9 +55,11 @@ from app.extensions.loader import (
     start_backend_extensions,
 )
 from app.jobs import daily_pipeline
+from app.plugins.kaipanla.router import router as kaipanla_router
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
+from app.services.large_order_service import LargeOrderService
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
@@ -85,10 +95,13 @@ if not getattr(sys, "frozen", False):
 
 @asynccontextmanager
 async def _application_lifespan(app: FastAPI):
+    collector_bootstrap = not settings.tickflow_skip_collector_bootstrap
     logger.info(
         "Tick Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
+    if not collector_bootstrap:
+        logger.info("collector bootstrap disabled by TICKFLOW_SKIP_COLLECTOR_BOOTSTRAP")
 
     # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
     # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
@@ -141,7 +154,20 @@ async def _application_lifespan(app: FastAPI):
     qs = QuoteService()
     app.state.quote_service = qs
     qs.set_repo(repo)
+    large_order_service = LargeOrderService(qs)
+    large_order_service.set_app_state(app.state)
+    app.state.large_order_service = large_order_service
+    large_order_service.start()
     qs.boot_check()
+
+    # QMT 网关按需调用；未配置或公网不可达不会阻断主应用启动。
+    try:
+        from app.services.qmt_trading import QmtTradingService
+
+        app.state.qmt_trading_service = QmtTradingService(store.data_dir, settings)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("QMT trading gateway not initialized: %s", e)
+        app.state.qmt_trading_service = None
 
     # QuoteService 需要访问 strategy_monitor 等单例
     # 先创建 strategy_monitor，再注入 app.state
@@ -150,11 +176,22 @@ async def _application_lifespan(app: FastAPI):
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
 
+    try:
+        from app.free_strategy.paper import PaperTradingSupervisor
+
+        paper_supervisor = PaperTradingSupervisor(store.data_dir, qs, repo)
+        app.state.paper_supervisor = paper_supervisor
+        paper_supervisor.recover()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("free strategy paper recovery failed: %s", e)
+        app.state.paper_supervisor = None
+
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
     depth_service = DepthService()
     depth_service.set_repo(repo)
     depth_service.set_app_state(app.state)
+    depth_service.set_snapshot_sink(large_order_service.record_depth_snapshots)
     app.state.depth_service = depth_service
 
     # 启动调度器(若 enriched 数据为空,首次启动可手动 POST /api/pipeline/run)
@@ -165,6 +202,43 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("scheduler not started: %s", e)
         app.state.scheduler = None
+
+    # Tushare 仅作为本地 Parquet 缺口补齐源，复用主调度器；未配置
+    # 0600 secrets key 时不注册任何任务。
+    try:
+        from app.services.tushare_automation import TushareAutomation
+
+        tushare_automation = TushareAutomation(store.data_dir, repo=repo)
+        tushare_automation.start(app.state.scheduler)
+        app.state.tushare_automation = tushare_automation
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Tushare automation not started: %s", e)
+        app.state.tushare_automation = None
+
+    # 开盘啦辅助扩展数据: 复用主调度器，插件失败不影响主行情与通用扩展数据。
+    try:
+        from app.plugins.kaipanla import KaipanlaCollector
+
+        kaipanla_collector = KaipanlaCollector(
+            store.data_dir,
+            realtime_interval_seconds=max(5.0, float(qs.get_min_interval())),
+        )
+        kaipanla_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
+        app.state.kaipanla_collector = kaipanla_collector
+    except Exception as e:  # noqa: BLE001
+        logger.warning("kaipanla collector not started: %s", e)
+        app.state.kaipanla_collector = None
+
+    # EasyTDX 只补充 TickFlow/开盘啦均不提供的行业代码维度。
+    try:
+        from app.plugins.easy_tdx import EasyTdxCollector
+
+        easy_tdx_collector = EasyTdxCollector(store.data_dir)
+        easy_tdx_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
+        app.state.easy_tdx_collector = easy_tdx_collector
+    except Exception as e:  # noqa: BLE001
+        logger.warning("EasyTDX collector not started: %s", e)
+        app.state.easy_tdx_collector = None
 
     # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
     try:
@@ -196,7 +270,7 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("wecom_bot_service init failed: %s", e)
 
-    # 内置扩展表 (概念/行业): 先创建 config (含拉取配置), 默认开启定时拉取。
+    # 内置扩展表 (概念/行业/资金流向): 先创建 config (含拉取配置), 默认开启定时拉取。
     # 必须在 pull_scheduler.refresh() 之前执行, 否则全新部署时 scheduler 读不到
     # 刚创建的预设, 定时任务不会启动。
     try:
@@ -207,14 +281,14 @@ async def _application_lifespan(app: FastAPI):
 
     # 扩展数据定时拉取: 在预设配置就绪后启动, 自动调度 enabled 的预设。
     from app.services.ext_pull import pull_scheduler
-    pull_scheduler.start(store.data_dir)
+    pull_scheduler.start(store.data_dir, run_immediately=collector_bootstrap)
     pull_scheduler.refresh(store.data_dir)
     app.state.pull_scheduler = pull_scheduler
 
-    # 财务数据 (需 Expert 套餐): 仅初始化调度器供 /api/financials/sync/* 手动同步,
-    # 不启动自动调度——用户在「财务分析」页点「同步」手动拉取。
+    # 财务数据 (需 Expert 套餐): 初始化同步状态供手动同步；
+    # 定时盘后管道结束后会通过 app.state 后台触发增量同步。
     from app.services.financial_sync import financial_scheduler
-    financial_scheduler.start(store.data_dir, capset)
+    financial_scheduler.start(store.data_dir, capset, repo)
     app.state.financial_scheduler = financial_scheduler
 
     # 策略引擎
@@ -283,7 +357,14 @@ async def _application_lifespan(app: FastAPI):
         if not matrix_prewarm_owner.schedule(_prewarm):
             logger.info("matrix cache prewarm already running or shutting down, skip")
 
-    repo._on_refresh_done = _schedule_matrix_cache_prewarm  # noqa: SLF001
+    def _on_repository_refresh_done() -> None:
+        _schedule_matrix_cache_prewarm()
+        board_service = getattr(app.state, "limit_board_service", None)
+        invalidate = getattr(board_service, "invalidate_instrument_limit_up_cache", None)
+        if callable(invalidate):
+            invalidate()
+
+    repo._on_refresh_done = _on_repository_refresh_done  # noqa: SLF001
     if repo.enriched_ready:
         _schedule_matrix_cache_prewarm()
 
@@ -323,6 +404,30 @@ async def _application_lifespan(app: FastAPI):
     app.state.monitor_engine = monitor_engine
     app.state.sector_monitor_service = sector_monitor_service
 
+    # 持仓风控复用模拟盘的唯一 MarketDataHub；容量不足时服务内部整体降级到轮询。
+    try:
+        from app.services.position_risk_service import PositionRiskService
+
+        position_risk_service = PositionRiskService(store.data_dir, repo, qs, app.state)
+        app.state.position_risk_service = position_risk_service
+        position_risk_service.start()
+        qmt_trading_service = getattr(app.state, "qmt_trading_service", None)
+        if qmt_trading_service and qmt_trading_service.start_auto_sync(position_risk_service):
+            logger.info("QMT automatic position sync started")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position risk service not started: %s", e)
+        app.state.position_risk_service = None
+
+    try:
+        from app.services.limit_board_service import LimitBoardService
+
+        limit_board_service = LimitBoardService(store.data_dir, repo, qs, app.state)
+        app.state.limit_board_service = limit_board_service
+        limit_board_service.start()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("limit board service not started: %s", e)
+        app.state.limit_board_service = None
+
     # 源码内二次开发启动钩子: 仅暴露稳定只读上下文, 单个扩展失败不影响核心启动。
     extension_registry = app.state.extension_registry
     start_backend_extensions(
@@ -339,6 +444,12 @@ async def _application_lifespan(app: FastAPI):
         mmanager = getattr(app.state, "mining_manager", None)
         if mmanager:
             mmanager.shutdown()
+        kaipanla_collector = getattr(app.state, "kaipanla_collector", None)
+        if kaipanla_collector:
+            kaipanla_collector.stop()
+        easy_tdx_collector = getattr(app.state, "easy_tdx_collector", None)
+        if easy_tdx_collector:
+            easy_tdx_collector.stop()
         if app.state.scheduler:
             app.state.scheduler.shutdown(wait=False)
         ps = getattr(app.state, "pull_scheduler", None)
@@ -347,6 +458,21 @@ async def _application_lifespan(app: FastAPI):
         fsc = getattr(app.state, "financial_scheduler", None)
         if fsc:
             fsc.stop()
+        qmt_trading_service = getattr(app.state, "qmt_trading_service", None)
+        if qmt_trading_service:
+            qmt_trading_service.stop()
+        position_risk_service = getattr(app.state, "position_risk_service", None)
+        if position_risk_service:
+            position_risk_service.stop()
+        limit_board_service = getattr(app.state, "limit_board_service", None)
+        if limit_board_service:
+            limit_board_service.stop()
+        paper_supervisor = getattr(app.state, "paper_supervisor", None)
+        if paper_supervisor:
+            paper_supervisor.close()
+        large_order_service = getattr(app.state, "large_order_service", None)
+        if large_order_service:
+            large_order_service.stop()
         qs = getattr(app.state, "quote_service", None)
         if qs:
             qs.stop()
@@ -449,12 +575,21 @@ app.include_router(abnormal.router)
 app.include_router(regime.router)
 app.include_router(analysis.router)
 app.include_router(pipeline.router)
+app.include_router(pit_reference.router)
 app.include_router(data.router)
 app.include_router(ext_data.router)
 app.include_router(financials.router)
 app.include_router(stock_analysis.router)
 app.include_router(market_recap.router)
 app.include_router(settings_api.router)
+app.include_router(xiaoshi.router)
+app.include_router(xiaoshi.settings_router)
+app.include_router(large_orders.router)
+app.include_router(position_risk.router)
+app.include_router(limit_board.router)
+app.include_router(kaipanla_router)
+app.include_router(free_strategy.router)
+app.include_router(market_heat.router)
 app.include_router(strategy.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)

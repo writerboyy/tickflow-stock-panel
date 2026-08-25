@@ -15,10 +15,29 @@ export const QK = {
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,
   dataSources:    ['data-sources'] as const,
+  tushare:        ['tushare'] as const,
+  kaipanla:       ['kaipanla'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
   overviewMarket: (asOf?: string) => ['overview-market', asOf ?? 'latest'] as const,
   indexQuotes:    ['index-quotes'] as const,
+  largeOrders:   ['large-orders'] as const,
+  largeOrdersAnalysis: (symbol: string) => ['large-orders', 'analysis', symbol] as const,
+  positionRisk:  ['position-risk'] as const,
+  positionRiskFeatures: (symbols?: string) => ['position-risk', 'features', symbols ?? 'all'] as const,
+  positionRiskOptions: ['position-risk', 'options'] as const,
+  positionRiskEvents: ['position-risk', 'events'] as const,
+  positionRiskQmt: ['position-risk', 'qmt'] as const,
+  positionRiskQmtOrders: ['position-risk', 'qmt-orders'] as const,
+  positionRiskQmtPriceLimit: (symbol: string) => ['position-risk', 'qmt-price-limit', symbol] as const,
+  positionRiskQmtPreview: (symbol: string, action: string, priceType: string, price: number | null, mode: string, value: number | null, creditBuyMode = 'collateral') => (
+    ['position-risk', 'qmt-preview', symbol, action, priceType, price, mode, value, creditBuyMode] as const
+  ),
+  limitBoard: ['limit-board'] as const,
+  limitBoardApproachingLimitUp: ['limit-board', 'approaching-limit-up'] as const,
+  limitBoardQuotes: (symbols: string) => ['limit-board', 'quotes', symbols] as const,
+  limitBoardSectorStrength: (capturedAt: string) => ['limit-board', 'sector-strength', capturedAt] as const,
+  limitBoardSectorConstituents: (plateId: string, capturedAt: string) => ['limit-board', 'sector-constituents', plateId, capturedAt] as const,
   indexList:      ['index-list'] as const,
 
   // Watchlist
@@ -47,6 +66,9 @@ export const QK = {
   screenerKlineBatch:   (symbols: string) => ['screener-kline-batch', symbols] as const,
   marketSnapshot:       ['market-snapshot'] as const,
   limitLadder:          (asOf?: string) => ['limit-ladder', asOf] as const,
+  marketHeatRadar:      (trendDays: number = 30) => ['market-heat-radar', trendDays] as const,
+  marketHeatRankTrend:  (thscode: string, trendDays: number = 30) => ['market-heat-rank-trend', thscode, trendDays] as const,
+  marketHeatPriceTrend: (symbols: string, days: number) => ['market-heat-price-trend', symbols, days] as const,
 
   // Backtest
   backtestStatus:       ['backtest-status'] as const,
@@ -65,8 +87,13 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
+  tushareCapabilityMatrix: ['tushare-capability-matrix'] as const,
+  pitReferenceStatus:   ['pit-reference-status'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
+  etfRepairHistory:     ['etf-repair-history'] as const,
+  freeDataHealth:       (strategyId: string, assetType?: string, start?: string, end?: string, timeframe?: string) =>
+                           ['free-data-health', strategyId, assetType, start, end, timeframe] as const,
   extData:              ['ext-data'] as const,
   extDataRows:          (id: string, date?: string, limit?: number, columns?: string) => ['ext-data-rows', id, date, limit, columns] as const,
   dimensionMembers:     (id: string, field: string, value: string, date?: string) => ['dimension-members', id, field, value, date] as const,
@@ -77,6 +104,8 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
+  stockPremiumGene:     (symbol: string) => ['stock-premium-gene', symbol] as const,
+  stockAnalysisLatest:  (symbols?: string[]) => ['stock-analysis-latest', ...(symbols ?? []).slice().sort()] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,
   klineMinuteRange:     (symbol: string, days: number) =>
@@ -132,4 +161,6 @@ export const SSE_INVALIDATE_PREFIXES = [
   'index-quotes',
   'overview-market',
   'limit-ladder',
+  'large-orders',
+  'position-risk',
 ] as const

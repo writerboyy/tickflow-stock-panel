@@ -1399,26 +1399,27 @@ class StrategyEngine:
     def _basic_filter_expr(df: pl.DataFrame, bf: dict) -> pl.Expr | None:
         """构建基础过滤表达式。回测可复用为买入候选 mask，不删除行情行。"""
         exprs: list[pl.Expr] = []
+        market_price = pl.col("raw_close") if "raw_close" in df.columns else pl.col("close")
         if bf.get("price_min") is not None:
             exprs.append(pl.col("close") >= bf["price_min"])
         if bf.get("price_max") is not None:
             exprs.append(pl.col("close") <= bf["price_max"])
         if bf.get("market_cap_min") is not None and "total_shares" in df.columns:
             exprs.append(
-                pl.col("close") * pl.col("total_shares") >= bf["market_cap_min"]
+                market_price * pl.col("total_shares") >= bf["market_cap_min"]
             )
         if bf.get("market_cap_max") is not None and "total_shares" in df.columns:
             exprs.append(
-                pl.col("close") * pl.col("total_shares") <= bf["market_cap_max"]
+                market_price * pl.col("total_shares") <= bf["market_cap_max"]
             )
         # 流通市值
         if bf.get("float_cap_min") is not None and "float_shares" in df.columns:
             exprs.append(
-                pl.col("close") * pl.col("float_shares") >= bf["float_cap_min"]
+                market_price * pl.col("float_shares") >= bf["float_cap_min"]
             )
         if bf.get("float_cap_max") is not None and "float_shares" in df.columns:
             exprs.append(
-                pl.col("close") * pl.col("float_shares") <= bf["float_cap_max"]
+                market_price * pl.col("float_shares") <= bf["float_cap_max"]
             )
         if bf.get("amount_min") is not None:
             exprs.append(pl.col("amount") >= bf["amount_min"])

@@ -32,6 +32,8 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 TIERS_YAML = str(ROOT / "tiers.yaml")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
+FIVE_FORTUNES_SOURCE = str(ROOT / "backend" / "app" / "free_strategy" / "five_fortunes.py")
+SEVEN_STARS_SOURCE = str(ROOT / "backend" / "app" / "free_strategy" / "seven_stars.py")
 # 图标按平台选: Windows 用 .ico, macOS 用 .icns (PyInstaller 对 .ico 在
 # mac 上静默忽略, 不换格式 Dock/Finder 会显示通用图标)。两者都由
 # packaging/generate_icon.py 一并生成。
@@ -115,6 +117,9 @@ datas += [(FRONTEND_DIST, "static")]
 datas += [(TIERS_YAML, ".")]
 # 内置策略 → app/strategy/builtin/ (importlib 动态加载, 不能进 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
+# 内置自由策略模板需要原始源码，以便保存可复现的完整策略快照。
+datas += [(FIVE_FORTUNES_SOURCE, "app/free_strategy")]
+datas += [(SEVEN_STARS_SOURCE, "app/free_strategy")]
 
 # ── 排除不需要的重型依赖 (主包不含 vectorbt 回测链) ──────────────────
 excludes = [

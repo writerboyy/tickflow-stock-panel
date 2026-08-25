@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 import polars as pl
+import pytest
 
 from app.backtest.engine import BacktestEngine, MatcherConfig
+from app.services.minute_quality import MinuteCoverageError
 
 
 def _panel(symbols: list[str], days: int = 4, price: float = 10.0, overrides: dict[tuple[str, int], dict] | None = None) -> pl.DataFrame:
@@ -431,6 +433,40 @@ class _MinuteRepo:
         return self.rows.filter(pl.col("symbol").is_in(symbols))
 
 
+def _full_minute_session(
+    day: date,
+    *,
+    overrides: dict[tuple[int, int], dict[str, float]] | None = None,
+) -> pl.DataFrame:
+    overrides = overrides or {}
+    times = []
+    current = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=31)
+    morning_end = current.replace(hour=11, minute=30)
+    while current <= morning_end:
+        times.append(current)
+        current += timedelta(minutes=1)
+    current = datetime.combine(day, datetime.min.time()).replace(hour=13, minute=1)
+    afternoon_end = current.replace(hour=15, minute=0)
+    while current <= afternoon_end:
+        times.append(current)
+        current += timedelta(minutes=1)
+    rows = []
+    for moment in times:
+        patch = overrides.get((moment.hour, moment.minute), {})
+        close = patch.get("close", 10.2)
+        rows.append({
+            "symbol": "A",
+            "datetime": moment,
+            "open": patch.get("open", close),
+            "high": patch.get("high", max(close, patch.get("open", close))),
+            "low": patch.get("low", min(close, patch.get("open", close))),
+            "close": close,
+            "volume": patch.get("volume", 100.0),
+            "amount": patch.get("amount", close * 100.0),
+        })
+    return pl.DataFrame(rows)
+
+
 def _minute_trigger_panel() -> tuple[pl.DataFrame, pl.Series, pl.Series]:
     panel = _panel(
         ["A"],
@@ -448,20 +484,17 @@ def _minute_trigger_panel() -> tuple[pl.DataFrame, pl.Series, pl.Series]:
 
 def test_minute_signal_exit_fills_at_next_minute_open():
     panel, entries, exits = _minute_trigger_panel()
-    minute = pl.DataFrame({
-        "symbol": ["A", "A", "A"],
-        "datetime": [
-            datetime(2024, 1, 3, 9, 31),
-            datetime(2024, 1, 3, 9, 32),
-            datetime(2024, 1, 3, 9, 33),
-        ],
-        "open": [10.2, 10.1, 9.7],
-        "high": [10.3, 10.2, 9.8],
-        "low": [10.1, 9.8, 9.6],
-        "close": [10.2, 9.9, 9.7],
-        "volume": [100.0, 100.0, 100.0],
-        "amount": [1020.0, 990.0, 970.0],
-    })
+    minute = pl.concat([
+        _full_minute_session(date(2024, 1, 2)),
+        _full_minute_session(
+            date(2024, 1, 3),
+            overrides={
+                (9, 31): {"open": 10.2, "high": 10.3, "low": 10.1, "close": 10.2},
+                (9, 32): {"open": 10.1, "high": 10.2, "low": 9.8, "close": 9.9},
+                (9, 33): {"open": 9.7, "high": 9.8, "low": 9.6, "close": 9.7},
+            },
+        ),
+    ])
 
     result = BacktestEngine(repo=_MinuteRepo(minute)).simulate_portfolio(
         panel,
@@ -485,7 +518,7 @@ def test_minute_signal_exit_fills_at_next_minute_open():
     assert result.trades[0].exit_signal_id == "signal_ma20_breakdown"
 
 
-def test_minute_signal_exit_without_next_bar_falls_back_to_next_open():
+def test_minute_signal_exit_rejects_incomplete_session():
     panel, entries, exits = _minute_trigger_panel()
     minute = pl.DataFrame({
         "symbol": ["A"],
@@ -498,23 +531,19 @@ def test_minute_signal_exit_without_next_bar_falls_back_to_next_open():
         "amount": [900.0],
     })
 
-    result = BacktestEngine(repo=_MinuteRepo(minute)).simulate_portfolio(
-        panel,
-        entries,
-        exits,
-        MatcherConfig(
-            entry_fill="open_t+1",
-            exit_fill="signal_next_minute",
-            minute_fill=True,
-            fees_pct=0,
-            slippage_bps=0,
-            max_positions=1,
-            initial_capital=100_000,
-        ),
-        exit_signal_ids=["signal_ma20_breakdown"],
-    )
-
-    assert len(result.trades) == 1
-    assert result.trades[0].exit_date == "2024-01-04"
-    assert result.trades[0].exit_price == 8.8
-    assert result.stats["execution"]["sell_minute_trigger_fallback"] == 1
+    with pytest.raises(MinuteCoverageError, match="缺失或不完整"):
+        BacktestEngine(repo=_MinuteRepo(minute)).simulate_portfolio(
+            panel,
+            entries,
+            exits,
+            MatcherConfig(
+                entry_fill="open_t+1",
+                exit_fill="signal_next_minute",
+                minute_fill=True,
+                fees_pct=0,
+                slippage_bps=0,
+                max_positions=1,
+                initial_capital=100_000,
+            ),
+            exit_signal_ids=["signal_ma20_breakdown"],
+        )

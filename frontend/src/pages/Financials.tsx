@@ -18,6 +18,7 @@ const TABLE_LABELS: Record<string, string> = {
   balance_sheet: '资产负债表',
   cash_flow: '现金流量表',
   shares: '股本表',
+  valuation_daily: '日度估值',
 }
 
 const TABLE_ICON: Record<string, typeof FileText> = {
@@ -26,6 +27,7 @@ const TABLE_ICON: Record<string, typeof FileText> = {
   balance_sheet: FileText,
   cash_flow: FileText,
   shares: ChartPie,
+  valuation_daily: Database,
 }
 
 export function Financials() {
@@ -134,7 +136,7 @@ export function Financials() {
   // 本次同步进度: 仅当 syncStartedAt 存在且 syncing 时, 按 last_sync 时间戳判断
   const isFullSync = syncing && syncStartedAt && !syncSingleTable  // 全量同步
   const isSingleSync = syncing && syncStartedAt && !!syncSingleTable  // 单表同步
-  const TABLE_ORDER = ['metrics', 'income', 'balance_sheet', 'cash_flow', 'shares'] as const
+  const TABLE_ORDER = ['metrics', 'income', 'balance_sheet', 'cash_flow', 'shares', 'valuation_daily'] as const
   const tableDoneThisRound = (key: string): boolean => {
     if (!syncStartedAt || !syncing) return false
     // 单表同步: 只判断这一张表是否完成

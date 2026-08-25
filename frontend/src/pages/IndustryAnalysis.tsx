@@ -26,6 +26,7 @@ import { resolveDimension, type DimensionGroup, type StockRow } from '@/lib/anal
 
 const KEYWORDS = ['industry', '行业', 'sector', '申万', '中信']
 const CANDIDATE_FIELDS = ['industry', '行业', 'sector', '申万', '中信', '行业名称', 'industry_name', 'sector_name']
+const PRESET_INDUSTRY_ID = 'ext_hy_ths'
 const PAGE_LIMIT = 12000
 const MAX_RENDERED_INDUSTRIES = 120
 const MAX_RENDERED_STOCKS = 160
@@ -79,6 +80,9 @@ function saveConfig(c: AnalysisFieldConfig) {
 function pickBestConfig(
   configs: { id: string; label: string; description?: string; fields: { name: string; label: string }[] }[],
 ): string {
+  // EasyTDX 行业快照只保存行业代码; 默认使用同花顺预设, 让页面展示可读的行业名称。
+  if (configs.some(c => c.id === PRESET_INDUSTRY_ID)) return PRESET_INDUSTRY_ID
+
   let best = '', bestScore = 0
   for (const c of configs) {
     const haystack = [c.id, c.label, c.description ?? '', ...c.fields.flatMap(f => [f.name, f.label])].join(' ').toLowerCase()
@@ -294,7 +298,6 @@ export function IndustryAnalysis() {
   })
 
   // 内置行业预设 (ext_hy_ths) 手动获取数据
-  const PRESET_INDUSTRY_ID = 'ext_hy_ths'
   const queryClient = useQueryClient()
   const fetchMutation = useMutation({
     mutationFn: () => api.extDataPresetFetch(PRESET_INDUSTRY_ID),

@@ -1,4 +1,4 @@
-"""内置扩展数据预设 — 概念/行业首次启动自动拉取。
+"""内置扩展数据预设 — 概念/行业/资金流向首次启动自动拉取。
 
 设计原则:
   - 扩展数据通用逻辑零改动 (ExtConfig / fetch_and_ingest / API / 前端均不动)
@@ -6,9 +6,10 @@
   - 「已存在则跳过」: 绝不覆盖用户已有数据, 老用户零影响
   - 拉取失败只记 warning, 不阻断启动 (保持「没数据也能跑」)
 
-种子数据来源 (概念/行业各自独立配置):
+种子数据来源 (各自独立配置):
   - 概念: https://shy313.com/api/plugins/market_flow/exports/ths-concepts
   - 行业: https://shy313.com/api/plugins/market_flow/exports/ths-industries
+  - 资金流向: https://shy313.com/api/plugins/market_flow/exports/money-flow
 作者更新数据只需改接口上的 JSON, 用户下次拉取自动同步, 无需发版。
 
 接入点: app.main.lifespan → ensure_builtin_presets(store.data_dir)
@@ -29,9 +30,10 @@ from app.services.ext_data import (
 
 logger = logging.getLogger(__name__)
 
-# 种子数据源 (概念/行业各自独立配置, 作者维护)
+# 种子数据源 (各自独立配置, 作者维护)
 _CONCEPT_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-concepts"
 _INDUSTRY_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/ths-industries"
+_MONEY_FLOW_DATA_URL = "https://shy313.com/api/plugins/market_flow/exports/money-flow"
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +98,41 @@ def _industry_preset() -> ExtConfig:
     )
 
 
+def _money_flow_preset() -> ExtConfig:
+    """个股资金流向 (ext_money_flow)。
+
+    接口结构: [{symbol, name, net, inflow, outflow, rank, change_pct}]
+    金额单位为元，change_pct 为百分数值。接口不含交易日期，因此按最新快照存储，
+    避免把请求自然日误当成数据交易日。
+    """
+    return ExtConfig(
+        id="ext_money_flow",
+        label="资金流向",
+        mode="snapshot",
+        fields=[
+            ExtField("symbol", "string", "标的代码"),
+            ExtField("code", "string", "代码"),
+            ExtField("name", "string", "股票简称"),
+            ExtField("net", "float", "净流入额（元）"),
+            ExtField("inflow", "float", "流入额（元）"),
+            ExtField("outflow", "float", "流出额（元）"),
+            ExtField("rank", "int", "资金流向排名"),
+            ExtField("change_pct", "float", "涨跌幅（%）"),
+        ],
+        description="个股最新资金流向 (金额单位: 元; 涨跌幅单位: 百分数值)",
+        symbol_map={"type": "mapped", "col": "symbol"},
+        code_map={"type": "computed", "from": "symbol", "method": "strip_exchange"},
+        pull=PullConfig(
+            url=_MONEY_FLOW_DATA_URL,
+            method="GET",
+            schedule_minutes=1440,
+            enabled=True,
+        ),
+    )
+
+
 def _presets() -> list[ExtConfig]:
-    return [_concept_preset(), _industry_preset()]
+    return [_concept_preset(), _industry_preset(), _money_flow_preset()]
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +196,36 @@ def _flatten_industry_rows(raw_rows: list[dict]) -> list[dict]:
     return out
 
 
+def _flatten_money_flow_rows(raw_rows: list[dict]) -> list[dict]:
+    """资金流向: 保留供应商数值口径并补充标准 code 关联键。"""
+    out: list[dict] = []
+    for r in raw_rows:
+        sym = str(r.get("symbol") or "").strip()
+        if not sym:
+            continue
+        out.append({
+            "symbol": sym,
+            "code": _symbol_to_code(sym),
+            "name": r.get("name") or "",
+            "net": r.get("net"),
+            "inflow": r.get("inflow"),
+            "outflow": r.get("outflow"),
+            "rank": r.get("rank"),
+            "change_pct": r.get("change_pct"),
+        })
+    return out
+
+
+def _flatten_preset_rows(config_id: str, raw_rows: list[dict]) -> list[dict]:
+    flatteners = {
+        "ext_gn_ths": _flatten_concept_rows,
+        "ext_hy_ths": _flatten_industry_rows,
+        "ext_money_flow": _flatten_money_flow_rows,
+    }
+    flatten = flatteners.get(config_id)
+    return flatten(raw_rows) if flatten else raw_rows
+
+
 # ---------------------------------------------------------------------------
 # 拉取执行 (复用 httpx, 不依赖 fetch_and_ingest 的 PullConfig 路径)
 # ---------------------------------------------------------------------------
@@ -204,12 +269,12 @@ async def _fetch_json(url: str) -> list[dict]:
     )
 
 
-async def _seed_one(config: ExtConfig, flatten, data_dir: Path) -> int:
+async def _seed_one(config: ExtConfig, data_dir: Path) -> int:
     """拉取 + 转换 + 写入单个预设。返回写入行数。"""
     from datetime import date
 
     raw = await _fetch_json(config.pull.url)
-    rows = flatten(raw)
+    rows = _flatten_preset_rows(config.id, raw)
     if not rows:
         raise ValueError(f"接口返回 0 行: {config.pull.url}")
     n = rows_to_parquet(rows, config, data_dir, snapshot_date=date.today())
@@ -231,8 +296,8 @@ def get_preset(config_id: str) -> ExtConfig | None:
 async def ensure_builtin_presets(data_dir: Path) -> None:
     """启动时: 为缺失的预设创建 config.json (含 pull 配置), 但【不拉取数据】。
 
-    设计: 数据获取改为用户在概念/行业页手动点「获取数据」触发, 避免启动时
-    网络请求阻塞, 也避免「自动拉取」与「用户自主控制」的预期冲突。
+    设计: 本函数不执行网络请求, 避免阻塞启动。默认启用的预设随后由
+    pull_scheduler 调度拉取, 概念/行业页也保留手动「获取数据」入口。
 
     安全保证:
       - 已存在则完全跳过 (绝不覆盖用户数据)
@@ -247,7 +312,7 @@ async def ensure_builtin_presets(data_dir: Path) -> None:
             continue
         try:
             store.upsert(config)
-            logger.info("内置扩展表 %s 配置已就绪 (待用户手动获取数据)", config.id)
+            logger.info("内置扩展表 %s 配置已就绪 (等待拉取调度)", config.id)
         except Exception as e:
             logger.warning("内置扩展表 %s 配置写入失败 (不影响启动): %s", config.id, e)
 
@@ -263,13 +328,11 @@ async def fetch_preset(config_id: str, data_dir: Path) -> int:
     if config is None:
         raise ValueError(f"未知的内置预设: {config_id}")
 
-    flatten = _flatten_concept_rows if config_id == "ext_gn_ths" else _flatten_industry_rows
-
     # 确保 config.json 存在 (用户可能从未启动过 ensure_builtin_presets)
     store = ExtConfigStore(data_dir)
     if store.get(config_id) is None:
         store.upsert(config)
 
-    n = await _seed_one(config, flatten, data_dir)
+    n = await _seed_one(config, data_dir)
     logger.info("内置扩展表 %s 手动拉取成功: %d 行", config_id, n)
     return n

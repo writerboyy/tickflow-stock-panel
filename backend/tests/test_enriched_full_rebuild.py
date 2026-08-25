@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import polars as pl
 import pytest
@@ -63,6 +64,12 @@ def test_full_rebuild_overwrites_existing_partitions_without_deleting_base(tmp_p
     assert pl.read_parquet(
         tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet"
     )["close"].to_list() == [15.0]
+    metadata = json.loads(
+        (tmp_path / "kline_daily_enriched" / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["mode"] == "full"
+    assert metadata["source_snapshots"]["kline_daily"]["files"] == 2
+    assert len(metadata["source_snapshots"]["kline_daily"]["sha256"]) == 64
 
 
 def test_full_rebuild_rejects_missing_existing_dates_before_writing(tmp_path, monkeypatch):
@@ -78,3 +85,21 @@ def test_full_rebuild_rejects_missing_existing_dates_before_writing(tmp_path, mo
         tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet"
     )
     assert existing["close"].to_list() == [1.0]
+
+
+def test_full_rebuild_can_keep_byte_identical_rollback_directory(tmp_path, monkeypatch):
+    _write_daily(tmp_path, "2026-07-15", 15.0)
+    _write_existing(tmp_path, "2026-07-15", 1.0)
+    original = (
+        tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet"
+    ).read_bytes()
+    monkeypatch.setattr(pipeline, "compute_enriched", _fake_compute_enriched)
+
+    assert pipeline.run_pipeline(data_dir=tmp_path, keep_backup=True) == 1
+
+    backups = list(tmp_path.glob(".kline_daily_enriched.pre-rebuild-*"))
+    assert len(backups) == 1
+    assert (backups[0] / "date=2026-07-15" / "part.parquet").read_bytes() == original
+    assert pl.read_parquet(
+        tmp_path / "kline_daily_enriched" / "date=2026-07-15" / "part.parquet"
+    )["close"].to_list() == [15.0]

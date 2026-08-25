@@ -21,7 +21,8 @@ import { storage } from '@/lib/storage'
 
 export type CardKey =
   | 'instruments' | 'daily' | 'adj_factor' | 'enriched'
-  | 'index' | 'etf' | 'minute' | 'financials' | 'regime'
+  | 'index' | 'pit_reference' | 'etf' | 'etf_minute'
+  | 'minute' | 'financials' | 'regime'
 
 interface CardDef {
   key: CardKey
@@ -48,11 +49,13 @@ export const DATA_CARD_DEFS: CardDef[] = [
 
 const DEFAULT_ORDER = DATA_CARD_DEFS.map(d => d.key)
 /** 恢复默认时显示的卡片数量(按默认顺序取前 N 张) */
-const DEFAULT_VISIBLE_COUNT = 5
+const DEFAULT_VISIBLE_COUNT = 8
 
 const CAP_KEY_MAP: Partial<Record<CardKey, string>> = {
   adj_factor: 'adj_factor',
+  etf: 'kline.daily.batch',
   minute: 'kline.minute.batch',
+  etf_minute: 'kline.minute.batch',
   financials: 'financial',
 }
 

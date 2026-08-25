@@ -1,21 +1,43 @@
 from __future__ import annotations
 
 from datetime import date
+import json
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import polars as pl
 import pytest
 
 from app.api import data as data_api
 from app.indicators import pipeline
+from app.share_capital import apply_point_in_time_shares
 from app.services import financial_sync
-from app.tickflow.capabilities import CapabilitySet
+from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
 
 
 def _write_instruments(data_dir, symbols: list[str]) -> None:
     path = data_dir / "instruments" / "instruments.parquet"
     path.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({"symbol": symbols}).write_parquet(path)
+
+
+def test_valuation_sync_refreshes_repository_views(tmp_path, monkeypatch):
+    from app.services import daily_valuation
+
+    repo = SimpleNamespace(rebuild_views=MagicMock())
+    scheduler = financial_sync.FinancialScheduler()
+    scheduler._data_dir = tmp_path
+    scheduler._repo = repo
+    monkeypatch.setattr(
+        daily_valuation,
+        "build_daily_valuation",
+        lambda _data_dir: {"rows": 12, "trading_days": 2},
+    )
+    monkeypatch.setattr(scheduler, "_record_sync", lambda _table: None)
+
+    assert scheduler._run_body("valuation_daily") == {"valuation_daily": 12}
+    repo.rebuild_views.assert_called_once_with()
 
 
 def test_first_share_sync_fetches_complete_history(tmp_path, monkeypatch):
@@ -108,6 +130,309 @@ def test_custom_financial_provider_receives_shares_contract(monkeypatch):
     assert received == [("shares", ["600000.SH"], False)]
 
 
+def test_statement_sync_fetches_complete_history_for_backtests(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    calls: list[tuple[str, list[str], bool]] = []
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        calls.append((table, symbols, latest_only))
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600000.SH"],
+            "period_end": ["2023-12-31", "2024-03-31"],
+            "announce_date": ["2024-04-15", "2024-04-30"],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    assert financial_sync.sync_metrics(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_income(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_balance_sheet(tmp_path, CapabilitySet()) == 2
+    assert financial_sync.sync_cash_flow(tmp_path, CapabilitySet()) == 2
+
+    assert calls == [
+        ("metrics", ["600000.SH"], False),
+        ("income", ["600000.SH"], False),
+        ("balance_sheet", ["600000.SH"], False),
+        ("cash_flow", ["600000.SH"], False),
+    ]
+
+
+def test_statement_sync_rejects_conflicting_pit_rows_without_replacing_existing(
+    tmp_path, monkeypatch
+):
+    _write_instruments(tmp_path, ["600000.SH"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2023-12-31"],
+        "announce_date": ["2024-03-30"],
+        "revenue": [100.0],
+    }).write_parquet(path)
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600000.SH"],
+            "period_end": ["2023-12-31", "2023-12-31"],
+            "announce_date": ["2024-03-30", "2024-03-30"],
+            "revenue": [100.0, 101.0],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    with pytest.raises(financial_sync.FinancialSyncError, match="PIT conflicts"):
+        financial_sync.sync_income(tmp_path, CapabilitySet())
+
+    assert pl.read_parquet(path)["revenue"].to_list() == [100.0]
+    assert not list((tmp_path / "financials_sync_backups").glob("**/*.parquet"))
+
+
+def test_statement_sync_rejects_partial_batches_before_publish(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH", "000001.SZ"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["600000.SH"], "value": [1.0]}).write_parquet(path)
+
+    monkeypatch.setattr(financial_sync, "_BATCH_SIZE", 1)
+    monkeypatch.setattr(financial_sync, "_financial_is_custom", lambda: False)
+
+    class Financials:
+        metrics = None
+        balance_sheet = None
+        cash_flow = None
+        shares = None
+
+        def income(self, symbols, latest=True):
+            if symbols == ["600000.SH"]:
+                return {
+                    "600000.SH": [{
+                        "period_end": "2024-03-31",
+                        "announce_date": "2024-04-30",
+                        "revenue": 10.0,
+                    }]
+                }
+            raise RuntimeError("upstream timeout")
+
+    financials = Financials()
+    financials.metrics = financials.income
+    financials.balance_sheet = financials.income
+    financials.cash_flow = financials.income
+    financials.shares = financials.income
+
+    monkeypatch.setattr(
+        "app.tickflow.client.get_client",
+        lambda: SimpleNamespace(financials=financials),
+    )
+
+    with pytest.raises(financial_sync.FinancialSyncError):
+        financial_sync.sync_income(
+            tmp_path,
+            CapabilitySet({Cap.FINANCIAL: CapabilityLimits()}),
+        )
+
+    assert pl.read_parquet(path)["value"].to_list() == [1.0]
+
+
+def test_statement_sync_publishes_atomic_backup_and_manifest(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"symbol": ["600000.SH"], "value": [1.0]}).write_parquet(path)
+
+    monkeypatch.setattr(
+        financial_sync,
+        "_fetch_table",
+        lambda *args, **kwargs: pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-03-31"],
+            "announce_date": ["2024-04-30"],
+            "value": [2.0],
+        }),
+    )
+
+    assert financial_sync.sync_income(tmp_path, CapabilitySet()) == 1
+
+    assert pl.read_parquet(path)["value"].to_list() == [2.0]
+    manifests = sorted((tmp_path / "financials").glob("sync-manifest-*.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    backup = Path(manifest["tables"][0]["backup_path"])
+    assert pl.read_parquet(backup)["value"].to_list() == [1.0]
+
+
+def test_all_sync_rolls_back_prior_tables_when_later_table_is_rejected(
+    tmp_path, monkeypatch
+):
+    _write_instruments(tmp_path, ["600000.SH"])
+    metrics_path = tmp_path / "financials" / "metrics" / "part.parquet"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2023-12-31"],
+        "announce_date": ["2024-03-30"],
+        "value": [1.0],
+    }).write_parquet(metrics_path)
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        if table == "metrics":
+            return pl.DataFrame({
+                "symbol": ["600000.SH"],
+                "period_end": ["2024-03-31"],
+                "announce_date": ["2024-04-30"],
+                "value": [2.0],
+            })
+        if table == "income":
+            return pl.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "period_end": ["2024-03-31", "2024-03-31"],
+                "announce_date": ["2024-04-30", "2024-04-30"],
+                "value": [3.0, 4.0],
+            })
+        raise AssertionError(f"unexpected table: {table}")
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+    capset = CapabilitySet({Cap.FINANCIAL: CapabilityLimits()})
+
+    with pytest.raises(financial_sync.FinancialSyncError, match="PIT conflicts"):
+        financial_sync.sync_all(tmp_path, capset)
+
+    assert pl.read_parquet(metrics_path)["value"].to_list() == [1.0]
+    manifests = sorted((tmp_path / "financials").glob("sync-manifest-*.json"))
+    assert len(manifests) == 1
+    assert json.loads(manifests[0].read_text(encoding="utf-8"))["status"] == "rolled_back"
+
+
+def test_sync_all_fetches_statement_history_not_latest_only(tmp_path, monkeypatch):
+    _write_instruments(tmp_path, ["600000.SH"])
+    calls: list[tuple[str, bool]] = []
+
+    def fake_fetch(table, symbols, capset, latest_only=True):
+        calls.append((table, latest_only))
+        return pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-03-31"],
+            "announce_date": ["2024-04-30"],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    capset = CapabilitySet({Cap.FINANCIAL: CapabilityLimits()})
+    result = financial_sync.sync_all(tmp_path, capset)
+
+    assert result == {
+        "metrics": 1,
+        "income": 1,
+        "balance_sheet": 1,
+        "cash_flow": 1,
+        "shares": 1,
+        "valuation_daily": 0,
+    }
+    assert calls == [
+        ("metrics", False),
+        ("income", False),
+        ("balance_sheet", False),
+        ("cash_flow", False),
+        ("shares", False),
+    ]
+
+
+def test_incremental_statement_sync_fetches_latest_and_backfills_new_symbols(
+    tmp_path, monkeypatch
+):
+    symbols = ["600000.SH", "000001.SZ"]
+    _write_instruments(tmp_path, symbols)
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "period_end": ["2023-12-31", "2024-03-31"],
+        "announce_date": ["2024-03-30", "2024-04-30"],
+        "revenue": [100.0, 110.0],
+    }).write_parquet(path)
+    calls: list[tuple[list[str], bool]] = []
+
+    def fake_fetch(table, requested, capset, latest_only=True):
+        assert table == "income"
+        calls.append((requested, latest_only))
+        if latest_only:
+            return pl.DataFrame({
+                "symbol": ["600000.SH"],
+                "period_end": ["2024-03-31"],
+                "announce_date": ["2024-04-30"],
+                "revenue": [111.0],
+            })
+        return pl.DataFrame({
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "period_end": ["2023-12-31", "2024-03-31"],
+            "announce_date": ["2024-03-29", "2024-04-29"],
+            "revenue": [200.0, 210.0],
+        })
+
+    monkeypatch.setattr(financial_sync, "_fetch_table", fake_fetch)
+
+    rows = financial_sync._sync_statement_incremental(
+        "income", symbols, tmp_path, CapabilitySet()
+    )
+
+    assert rows == 4
+    assert calls == [(["000001.SZ"], False), (["600000.SH"], True)]
+    stored = pl.read_parquet(path)
+    revised = stored.filter(
+        (pl.col("symbol") == "600000.SH")
+        & (pl.col("period_end") == "2024-03-31")
+    )
+    assert revised["revenue"].to_list() == [111.0]
+
+
+def test_incremental_statement_sync_rejects_existing_pit_conflicts(tmp_path, monkeypatch):
+    path = tmp_path / "financials" / "income" / "part.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "period_end": ["2024-03-31", "2024-03-31"],
+        "announce_date": ["2024-04-30", "2024-04-30"],
+        "revenue": [110.0, 111.0],
+    }).write_parquet(path)
+    monkeypatch.setattr(
+        financial_sync,
+        "_fetch_table",
+        lambda *args, **kwargs: pl.DataFrame({
+            "symbol": ["600000.SH"],
+            "period_end": ["2024-03-31"],
+            "announce_date": ["2024-04-30"],
+            "revenue": [112.0],
+        }),
+    )
+
+    with pytest.raises(financial_sync.FinancialSyncError, match="PIT conflicts"):
+        financial_sync._sync_statement_incremental(
+            "income", ["600000.SH"], tmp_path, CapabilitySet()
+        )
+
+    assert pl.read_parquet(path)["revenue"].to_list() == [110.0, 111.0]
+
+
+def test_scheduler_incremental_sync_records_tables_and_refreshes_views(
+    tmp_path, monkeypatch
+):
+    scheduler = financial_sync.FinancialScheduler()
+    scheduler._data_dir = tmp_path
+    scheduler._capset = CapabilitySet({Cap.FINANCIAL: CapabilityLimits()})
+    scheduler._repo = SimpleNamespace(rebuild_views=MagicMock())
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        financial_sync,
+        "sync_incremental",
+        lambda *_: {"metrics": 3, "valuation_daily": 5},
+    )
+    monkeypatch.setattr(scheduler, "_record_sync", recorded.append)
+
+    assert scheduler._run_incremental_body() == {"metrics": 3, "valuation_daily": 5}
+    assert recorded == ["metrics", "valuation_daily"]
+    scheduler._repo.rebuild_views.assert_called_once_with()
+
+
 def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
     monkeypatch.setattr(pipeline, "cn_today", lambda: date(2026, 7, 18))
     bars = pl.DataFrame({
@@ -123,12 +448,14 @@ def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
     })
     instruments = pl.DataFrame({
         "symbol": ["600000.SH"],
+        "total_shares": [400_000_000.0],
         "float_shares": [200_000_000.0],
     })
     shares = pl.DataFrame({
         "symbol": ["600000.SH", "600000.SH"],
         "period_end": ["2023-12-31", "2024-06-30"],
         "announce_date": ["2024-04-15", None],
+        "total_shares": [300_000_000.0, 350_000_000.0],
         "float_shares": [100_000_000.0, 50_000_000.0],
     })
 
@@ -139,10 +466,26 @@ def test_historical_turnover_uses_only_available_share_capital(monkeypatch):
         historical_shares=shares,
     )
 
-    assert result["turnover_rate"].to_list() == pytest.approx([0.5, 0.5, 1.0, 2.0, 0.5])
+    values = result["turnover_rate"].to_list()
+    assert values[:2] == [None, None]
+    assert values[2:] == pytest.approx([1.0, 2.0, 0.5])
+    assert result["total_shares"].to_list() == [
+        None,
+        None,
+        300_000_000.0,
+        350_000_000.0,
+        400_000_000.0,
+    ]
+    assert result["float_shares"].to_list() == [
+        None,
+        None,
+        100_000_000.0,
+        50_000_000.0,
+        200_000_000.0,
+    ]
 
 
-def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
+def test_turnover_without_share_history_does_not_use_current_shares_for_history(monkeypatch):
     monkeypatch.setattr(pipeline, "cn_today", lambda: date(2026, 7, 18))
     bars = pl.DataFrame({
         "symbol": ["600000.SH"],
@@ -160,7 +503,97 @@ def test_turnover_without_share_history_keeps_existing_behavior(monkeypatch):
         needed={"turnover_rate"},
     )
 
-    assert result["turnover_rate"][0] == pytest.approx(0.5)
+    assert result["turnover_rate"][0] is None
+
+
+def test_share_capital_waits_for_both_announcement_and_effective_date():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH"] * 3,
+        "date": [date(2024, 6, 14), date(2024, 6, 15), date(2024, 6, 30)],
+        "total_shares": [200.0] * 3,
+        "float_shares": [100.0] * 3,
+        "_instrument_as_of": [date(2026, 7, 18)] * 3,
+    })
+    shares = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "period_end": ["2023-12-31", "2024-06-30"],
+        "announce_date": ["2024-01-15", "2024-06-15"],
+        "total_shares": [80.0, 160.0],
+        "float_shares": [40.0, 80.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [80.0, 80.0, 160.0]
+    assert result["float_shares"].to_list() == [40.0, 40.0, 80.0]
+
+
+def test_share_capital_adds_columns_missing_from_instrument_snapshot():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2025, 1, 2)],
+    })
+    shares = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "period_end": ["2025-01-02"],
+        "announce_date": ["2025-01-02"],
+        "total_shares": [200.0],
+        "float_shares": [100.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result.select("total_shares", "float_shares").row(0) == (200.0, 100.0)
+
+
+def test_instrument_snapshot_is_only_used_on_or_after_its_as_of_date():
+    rows = pl.DataFrame({
+        "symbol": ["600000.SH", "600000.SH"],
+        "date": [date(2024, 5, 31), date(2024, 6, 1)],
+        "total_shares": [200.0, 200.0],
+        "float_shares": [100.0, 100.0],
+        "_instrument_as_of": [date(2024, 6, 1), date(2024, 6, 1)],
+    })
+
+    result = apply_point_in_time_shares(rows, pl.DataFrame(), today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [None, 200.0]
+    assert result["float_shares"].to_list() == [None, 100.0]
+
+
+def test_late_older_period_does_not_override_newer_share_event():
+    rows = pl.DataFrame({
+        "symbol": ["301491.SZ", "301491.SZ"],
+        "date": [date(2025, 8, 28), date(2025, 8, 29)],
+        "total_shares": [200.0, 200.0],
+        "float_shares": [100.0, 100.0],
+        "_instrument_as_of": [date(2026, 7, 18)] * 2,
+    })
+    shares = pl.DataFrame({
+        "symbol": ["301491.SZ", "301491.SZ"],
+        "period_end": ["2025-08-06", "2025-06-30"],
+        "announce_date": ["2025-08-05", "2025-08-29"],
+        "total_shares": [129.0, 96.75],
+        "float_shares": [27.0, 0.0],
+    })
+
+    result = apply_point_in_time_shares(rows, shares, today=date(2026, 7, 18))
+
+    assert result["total_shares"].to_list() == [129.0, 129.0]
+    assert result["float_shares"].to_list() == [27.0, 27.0]
+
+
+def test_enriched_storage_keeps_point_in_time_share_capital():
+    frame = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "date": [date(2024, 6, 30)],
+        "total_shares": [200.0],
+        "float_shares": [100.0],
+    })
+
+    result = pipeline._select_storage_cols(frame)
+
+    assert result.columns == ["symbol", "date", "total_shares", "float_shares"]
 
 
 def test_data_status_includes_share_history(tmp_path):
@@ -170,10 +603,17 @@ def test_data_status_includes_share_history(tmp_path):
         "symbol": ["600000.SH", "600000.SH", "000001.SZ"],
         "period_end": ["2023-12-31", "2024-06-30", "2024-06-30"],
     }).write_parquet(path)
+    valuation_dir = tmp_path / "valuation_daily"
+    valuation_dir.mkdir()
+    (valuation_dir / "metadata.json").write_text(
+        '{"rows": 2, "symbols": 1}',
+        encoding="utf-8",
+    )
 
     repo = SimpleNamespace(store=SimpleNamespace(data_dir=tmp_path))
     result = data_api._safe_aggregate_financials(repo)
 
     assert result is not None
-    assert result["rows"] == 3
+    assert result["rows"] == 5
     assert result["tables"]["shares"] == {"rows": 3, "symbols": 2}
+    assert result["tables"]["valuation_daily"] == {"rows": 2, "symbols": 1}
