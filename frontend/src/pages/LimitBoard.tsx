@@ -270,7 +270,7 @@ function financialTone(value: number | null | undefined): string {
 }
 
 type HotQuoteState = 'limit' | 'near_limit' | 'normal' | 'sharp_drop' | 'unavailable'
-type HotSortKey = 'rank' | 'change_pct' | 'rise_speed_pct'
+type HotSortKey = 'change_pct' | 'rise_speed_pct'
 
 function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undefined): {
   state: HotQuoteState
@@ -282,7 +282,7 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
   const price = quote?.last_price
   const limitUp = quote?.limit_up
   const change = quote?.change_pct
-  const changeText = financialTone(change)
+  const fallbackChangeText = financialTone(change)
   const atLimit = price != null && limitUp != null && price >= limitUp - 0.001
   const limitGap = price != null && limitUp != null && limitUp > 0
     ? (limitUp - price) / limitUp
@@ -290,10 +290,10 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
   if (atLimit) return { state: 'limit', label: '已涨停', text: 'text-danger', changeText: 'text-danger', card: 'border-danger/60 bg-danger/10' }
   if (limitGap != null && limitGap >= 0 && limitGap <= 0.005) return { state: 'near_limit', label: '临板', text: 'text-danger', changeText: 'text-danger', card: 'border-danger/60 bg-danger/10' }
   if (limitGap != null && limitGap > 0.005 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-orange-400', changeText: 'text-orange-400', card: 'border-orange-400/60 bg-orange-400/10' }
-  if (limitGap != null && limitGap > 0.01 && limitGap <= 0.03) return { state: 'near_limit', label: '接近', text: 'text-warning', changeText: 'text-warning', card: 'border-warning/60 bg-warning/10' }
-  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', text: 'text-secondary', changeText, card: 'border-border bg-surface' }
+  if (limitGap != null && limitGap > 0.01 && limitGap <= 0.03) return { state: 'near_limit', label: '接近', text: 'text-yellow-300', changeText: 'text-yellow-300', card: 'border-yellow-300/60 bg-yellow-300/10' }
+  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', text: 'text-secondary', changeText: fallbackChangeText, card: 'border-border bg-surface' }
   if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', text: 'text-muted', changeText: 'text-muted', card: 'border-border bg-surface' }
-  return { state: 'normal', label: '', text: 'text-secondary', changeText, card: 'border-border bg-surface' }
+  return { state: 'normal', label: '', text: 'text-secondary', changeText: limitGap == null ? fallbackChangeText : 'text-secondary', card: 'border-border bg-surface' }
 }
 
 function moneyValue(value: number | null | undefined): string {
@@ -785,7 +785,7 @@ function SectorStrengthTable({
   const [requestedAt, setRequestedAt] = useState<string | null>(null)
   const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
   const [selectedStockSymbol, setSelectedStockSymbol] = useState<string | null>(null)
-  const [hotSortKey, setHotSortKey] = useState<HotSortKey>('rank')
+  const [hotSortKey, setHotSortKey] = useState<HotSortKey>('change_pct')
   const [rankingWindowMinutes, setRankingWindowMinutes] = useState<5 | 30>(5)
   const [rankingOpen, setRankingOpen] = useState(false)
   const [progressClock, setProgressClock] = useState(() => Date.now())
@@ -849,7 +849,6 @@ function SectorStrengthTable({
     return roots.flatMap(row => [row, ...(children.get(row.plate_id) ?? []).sort(compare)]).concat(orphans)
   }, [activeSnapshot?.rows, descending, sortKey])
   const sortedHotRows = useMemo(() => {
-    if (hotSortKey === 'rank') return hotRows
     return [...hotRows].sort((left, right) => {
       const leftValue = hotSortKey === 'change_pct'
         ? hotQuotes[left.thscode.toUpperCase()]?.change_pct ?? left.change_pct
@@ -1030,14 +1029,14 @@ function SectorStrengthTable({
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-1 text-[8px] font-medium">
             <div className="inline-flex h-5 overflow-hidden rounded border border-border" aria-label="即将涨停排序">
-              {([['rank', '排名'], ['change_pct', '涨幅'], ['rise_speed_pct', '涨速']] as const).map(([key, label]) => <button key={key} type="button" aria-pressed={hotSortKey === key} onClick={() => setHotSortKey(key)} className={`px-1.5 ${hotSortKey === key ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{label}</button>)}
+              {([['change_pct', '涨幅'], ['rise_speed_pct', '涨速']] as const).map(([key, label]) => <button key={key} type="button" aria-pressed={hotSortKey === key} onClick={() => setHotSortKey(key)} className={`px-1.5 ${hotSortKey === key ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{label}</button>)}
             </div>
-            <span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">≤0.5%</span><span className="rounded border border-orange-400/40 bg-orange-400/10 px-1 py-0.5 text-orange-400">≤1%</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">≤3%</span>
+            <span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">≤0.5%</span><span className="rounded border border-orange-400/40 bg-orange-400/10 px-1 py-0.5 text-orange-400">≤1%</span><span className="rounded border border-yellow-300/40 bg-yellow-300/10 px-1 py-0.5 text-yellow-300">≤3%</span>
           </div>
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
-            {sortedHotRows.slice(0, 30).map(item => {
+            {sortedHotRows.slice(0, 30).map((item, index) => {
               const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
                 symbol: item.thscode,
                 name: item.name,
@@ -1064,7 +1063,7 @@ function SectorStrengthTable({
                 className={`h-[68px] w-[184px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : visual.card}`}
                 title="联动强势股、实时板块与成分股"
               >
-                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className={`shrink-0 font-mono text-[10px] ${visual.text}`}>{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank ?? '--'}</span><div className="flex shrink-0 items-center gap-0.5">
+                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className={`shrink-0 font-mono text-[10px] ${visual.text}`}>{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
                   <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
