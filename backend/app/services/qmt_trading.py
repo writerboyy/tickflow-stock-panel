@@ -75,6 +75,63 @@ def _float(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+# QMT CREDIT account rows expose buying power separately from ordinary cash.
+# Keep the vendor field names at this boundary so cash is never mistaken for
+# financing buying power when a credit account is configured.
+_CREDIT_ASSURE_BUYING_POWER_FIELDS = (
+    "m_dAssureEnbuyBalance",
+    "assure_enbuy_balance",
+    "credit_assure_buying_power",
+)
+_CREDIT_FINANCING_BUYING_POWER_FIELDS = (
+    "m_dFinEnbuyBalance",
+    "fin_enbuy_balance",
+    "credit_financing_buying_power",
+)
+_CREDIT_FINANCING_AVAILABLE_FIELDS = (
+    "m_dFinEnableBalance",
+    "m_dFinEnableQuota",
+    "fin_enable_balance",
+    "financing_available_amount",
+)
+_CREDIT_ASSET_FIELDS = frozenset(
+    (*_CREDIT_ASSURE_BUYING_POWER_FIELDS,
+     *_CREDIT_FINANCING_BUYING_POWER_FIELDS,
+     *_CREDIT_FINANCING_AVAILABLE_FIELDS),
+)
+
+
+def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
+    for field in fields:
+        value = _float(row.get(field))
+        if value is not None and value >= 0:
+            return value
+    return None
+
+
+def _credit_buying_power(account: dict[str, Any]) -> tuple[float | None, str | None, float | None]:
+    """Return collateral-buying power, source label and financing quota."""
+    financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
+    assure_power = _first_number(account, _CREDIT_ASSURE_BUYING_POWER_FIELDS)
+    if assure_power is not None:
+        return assure_power, "可买担保品资金", financing_available
+    return None, None, financing_available
+
+
+def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -> dict[str, Any]:
+    account = {
+        "cash": _float(asset.get("cash")),
+        "total_asset": _float(asset.get("total_asset")),
+        "market_value": _float(asset.get("market_value")),
+    }
+    for field in _CREDIT_ASSET_FIELDS:
+        value = _float(asset.get(field))
+        if value is not None and value >= 0:
+            account[field] = value
+    account["account_type"] = str(account_type or asset.get("account_type") or "STOCK").upper()
+    return account
+
+
 _ALLOCATION_RATIOS = {
     "sixth": 1 / 6,
     "fifth": 0.2,
@@ -170,6 +227,7 @@ class QmtZmqRpcClient:
             getattr(settings, "qmt_zmq_connect_address", "") or "",
         ).strip()
         self.account_id = str(getattr(settings, "qmt_account_id", "") or "").strip()
+        self.account_type = str(getattr(settings, "qmt_account_type", "STOCK") or "STOCK").upper()
         self.timeout = max(1.0, float(getattr(settings, "qmt_rpc_timeout_seconds", 6.0)))
         self._context = None
         self._dealer = None
@@ -342,9 +400,7 @@ class QmtZmqRpcClient:
             "account_id": self.account_id,
             "account": {
                 "name": self.account_id,
-                "cash": _float(asset.get("cash")),
-                "total_asset": _float(asset.get("total_asset")),
-                "market_value": _float(asset.get("market_value")),
+                **_normalise_account(asset, self.account_type),
             },
             "positions": normalized_positions,
             "orders": orders if isinstance(orders, list) else [],
@@ -687,6 +743,13 @@ class QmtTradingService:
             self.trade_enabled = bool(enabled)
         return self.status()
 
+    def _buying_power(self, account: dict[str, Any]) -> tuple[float | None, str, float | None]:
+        """Resolve the amount that a BUY order may actually consume."""
+        if self.account_type == "CREDIT":
+            amount, label, financing_available = _credit_buying_power(account)
+            return amount, label or "信用账户可买额度", financing_available
+        return _float(account.get("cash")), "可用资金", None
+
     def _validate_order(self, request: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.trade_enabled:
             raise QmtRpcError("真实交易开关未开启")
@@ -711,8 +774,12 @@ class QmtTradingService:
             if not row or int(row.get("available") or 0) < volume:
                 raise ValueError("QMT 可用持仓不足，已拒绝卖出")
         elif price_type == "LIMIT":
-            cash = _float((snapshot.get("account") or {}).get("cash"))
-            if cash is not None and cash < price * volume:
+            account = snapshot.get("account") or {}
+            buying_power, _label, _financing_available = self._buying_power(account)
+            if buying_power is None:
+                if self.account_type == "CREDIT":
+                    raise QmtRpcError("QMT 未返回信用账户可买额度，已拒绝买入")
+            elif buying_power < price * volume:
                 raise ValueError("QMT 可用资金不足，已拒绝买入")
         return {"action": action, "symbol": symbol, "volume": volume, "price": price, "price_type": price_type}
 
@@ -736,12 +803,15 @@ class QmtTradingService:
         if mode not in _ALLOCATION_MODES:
             raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
 
+        financing_available = None
         if action == "BUY":
-            basis_amount = _float((snapshot.get("account") or {}).get("cash"))
+            account = snapshot.get("account") or {}
+            basis_amount, basis_label, financing_available = self._buying_power(account)
             if basis_amount is None or basis_amount < 0:
+                if self.account_type == "CREDIT":
+                    raise QmtRpcError("QMT 未返回信用账户可买额度，无法把现金余额当作融资额度")
                 raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
             available_volume = None
-            basis_label = "可用资金"
         else:
             row = next(
                 (item for item in snapshot.get("positions") or [] if item.get("symbol") == symbol),
@@ -775,6 +845,9 @@ class QmtTradingService:
             "allocation_value": requested_amount if mode == "fixed" else None,
             "basis_label": basis_label,
             "basis_amount": round(basis_amount, 2),
+            "cash_amount": _float((snapshot.get("account") or {}).get("cash")),
+            "financing_available_amount": financing_available,
+            "buying_power_amount": round(basis_amount, 2),
             "target_amount": round(target_amount, 2),
             "actual_amount": actual_amount,
             "volume": volume,
@@ -815,7 +888,7 @@ class QmtTradingService:
             asset = self.client.call("get_asset", {"account_id": self.client.account_id})
             if not isinstance(asset, dict):
                 raise QmtRpcError("QMT 资产响应格式无效")
-            return {"account": {"cash": _float(asset.get("cash"))}, "positions": []}
+            return {"account": _normalise_account(asset, self.account_type), "positions": []}
         if action != "SELL":
             raise ValueError("交易方向必须是买入或卖出")
         raw_positions = self.client.call("get_positions", {"account_id": self.client.account_id})

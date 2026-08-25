@@ -469,7 +469,7 @@ def _qmt_settings(**overrides):
         "qmt_account_id": "account-1",
         "qmt_rpc_timeout_seconds": 1,
         "qmt_trade_enabled": False,
-        "qmt_account_type": "CREDIT",
+        "qmt_account_type": "STOCK",
         "qmt_auto_sync": True,
         "qmt_auto_sync_interval_seconds": 30,
     }
@@ -672,6 +672,67 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     assert sell["basis_amount"] == 35_000
     assert sell["volume"] == 100
     assert sell["actual_amount"] == 3_500
+
+
+def test_credit_order_preview_uses_credit_buying_power_not_cash(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+
+    def fake_call(method, _params):
+        assert method == "get_asset"
+        return {
+            "cash": 3_800.52,
+            "m_dAssureEnbuyBalance": 18_000,
+            "m_dFinEnbuyBalance": 25_000,
+            "m_dFinEnableBalance": 30_000,
+        }
+
+    service.client.call = fake_call
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+    })
+
+    assert preview["basis_label"] == "可买担保品资金"
+    assert preview["cash_amount"] == 3_800.52
+    assert preview["financing_available_amount"] == 30_000
+    assert preview["buying_power_amount"] == 18_000
+    assert preview["volume"] == 1_800
+
+
+def test_credit_order_preview_rejects_cash_only_response(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.call = lambda method, _params: {"cash": 100_000} if method == "get_asset" else None
+
+    with pytest.raises(QmtRpcError, match="未返回信用账户可买额度"):
+        service.preview_order({
+            "action": "BUY",
+            "symbol": "600036.SH",
+            "price": 10,
+            "price_type": "LIMIT",
+            "allocation_mode": "available",
+        })
+
+
+def test_credit_order_preview_rejects_financing_only_response(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.call = lambda method, _params: {
+        "cash": 100_000,
+        "m_dFinEnbuyBalance": 50_000,
+        "m_dFinEnableBalance": 80_000,
+    } if method == "get_asset" else None
+
+    with pytest.raises(QmtRpcError, match="未返回信用账户可买额度"):
+        service.preview_order({
+            "action": "BUY",
+            "symbol": "600036.SH",
+            "price": 10,
+            "price_type": "LIMIT",
+            "allocation_mode": "available",
+        })
 
 
 def test_qmt_order_preview_uses_recent_sync_snapshot(tmp_path: Path):

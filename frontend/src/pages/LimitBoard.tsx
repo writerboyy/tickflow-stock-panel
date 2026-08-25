@@ -319,8 +319,10 @@ function LimitBoardAllocationDialog({
   const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
   const genePassed = geneData?.passed ?? geneDetail?.passed
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
-  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'global' || mode === 'volume' ? 'available' : mode
-  const previewValue = mode === 'fixed' ? value : null
+  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'global' ? 'available' : mode === 'volume' ? 'fixed' : mode
+  const previewValue = mode === 'volume'
+    ? (price != null && price > 0 ? price * value : null)
+    : mode === 'fixed' ? value : null
   const allocationPreview = useQuery({
     queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue),
     queryFn: () => api.qmtPreviewOrder({
@@ -338,11 +340,7 @@ function LimitBoardAllocationDialog({
   })
   const previewOrder = allocationPreview.data?.preview
   const estimatedVolume = price != null && price > 0
-    ? mode !== 'volume' && mode !== 'global'
-      ? previewOrder?.volume ?? 0
-      : mode === 'volume'
-      ? Math.floor(Math.max(0, value) / 100) * 100
-      : 0
+    ? previewOrder?.volume ?? 0
     : 0
   const estimatedAmount = mode !== 'volume' && mode !== 'global'
     ? previewOrder?.actual_amount ?? null
@@ -352,7 +350,7 @@ function LimitBoardAllocationDialog({
     : previewOrder?.target_amount ?? null
   const validValue = ratioMode || mode === 'lot' || (Number.isFinite(value) && value > 0)
   const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
-  const previewRequired = kind === 'buy'
+  const previewRequired = kind !== 'edit'
   const previewReady = !previewRequired || (qmtReady && !allocationPreview.isFetching && previewOrder != null)
   const allocationPreviewState = allocationPreview.isFetching
     ? 'loading'
@@ -372,9 +370,9 @@ function LimitBoardAllocationDialog({
   const canConfirm = Boolean(
     validValue
     && validVolume
-    && (kind !== 'buy' || previewReady)
-    && (kind !== 'buy' || (price != null && price > 0 && estimatedVolume >= 100))
-    && (kind !== 'buy' || price == null || price <= 0 || estimatedVolume >= 100),
+    && (kind === 'edit' || previewReady)
+    && (kind === 'edit' || (price != null && price > 0 && estimatedVolume >= 100))
+    && (kind === 'edit' || estimatedVolume >= 100),
   )
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
@@ -429,6 +427,10 @@ function LimitBoardAllocationDialog({
         disabledModes={{ available: !qmtReady }}
         basisLabel={previewOrder?.basis_label}
         basisAmount={previewOrder?.basis_amount}
+        accountType={qmt.data?.account_type}
+        cashAmount={previewOrder?.cash_amount}
+        financingAvailableAmount={previewOrder?.financing_available_amount}
+        buyingPowerAmount={previewOrder?.buying_power_amount}
         targetAmount={targetAmount}
         actualAmount={estimatedAmount}
         volume={estimatedVolume}

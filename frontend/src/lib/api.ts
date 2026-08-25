@@ -1023,6 +1023,9 @@ export interface QmtOrderPreview {
   allocation_value: number | null
   basis_label: string
   basis_amount: number
+  cash_amount?: number | null
+  financing_available_amount?: number | null
+  buying_power_amount?: number | null
   target_amount: number
   actual_amount: number
   volume: number

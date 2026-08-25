@@ -311,6 +311,10 @@ export function QmtTradePanel({
             disabled={tradeMutation.isPending}
             basisLabel={serverPreview?.basis_label}
             basisAmount={serverPreview?.basis_amount}
+            accountType={qmt.data?.account_type}
+            cashAmount={serverPreview?.cash_amount}
+            financingAvailableAmount={serverPreview?.financing_available_amount}
+            buyingPowerAmount={serverPreview?.buying_power_amount}
             targetAmount={serverPreview?.target_amount}
             actualAmount={actualAmount}
             volume={tradeVolume}

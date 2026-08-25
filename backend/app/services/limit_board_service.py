@@ -3720,6 +3720,21 @@ class LimitBoardService:
             volume = int(allocation_value or 0)
             if volume < 100 or volume % 100:
                 raise ValueError("固定数量必须是 100 股的整数倍")
+            preview_getter = getattr(qmt, "preview_order", None)
+            if not callable(preview_getter):
+                raise RuntimeError("QMT 不支持金额预览，无法确认固定数量的可用资金")
+            preview = preview_getter({
+                "action": "BUY",
+                "symbol": symbol,
+                "price": price,
+                "price_type": "LIMIT",
+                "reference_price": price,
+                "allocation_mode": "fixed",
+                "allocation_value": price * volume,
+            })
+            preview_volume = int(preview.get("volume") or 0)
+            if preview_volume < volume:
+                raise ValueError(str(preview.get("reason") or "QMT 可用资金不足，无法买入一手"))
             return {
                 "volume": volume,
                 "actual_amount": round(price * volume, 2),

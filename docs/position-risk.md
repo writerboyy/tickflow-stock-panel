@@ -53,7 +53,8 @@ QMT 配置完整时，应用启动后默认每 30 秒自动读取资金、持仓
 
 金额显示和计算必须使用 `POST /api/position-risk/qmt/orders/preview` 返回的 `preview`：
 
-- 买入的 `basis_amount` 是 QMT 权威账户资产中的实际可用资金（`get_asset.cash`），不是本地截图导入现金、初始资金或页面缓存值。
+- 普通账户买入的 `basis_amount` 是 QMT 权威账户资产中的实际可用资金（`get_asset.cash`），不是本地截图导入现金、初始资金或页面缓存值。
+- 信用账户当前的普通买入走 QMT 担保品买入指令，`basis_amount` 使用 `get_asset.assure_enbuy_balance`（QMT `m_dAssureEnbuyBalance`，可买担保品资金）。页面另行展示 `cash_amount`（现金可用）与 `financing_available_amount`（QMT `m_dFinEnableBalance`，融资可用）；不得用 `cash`、`m_dFinEnbuyBalance`（可买融资标的资金）或融资额度替代担保品买入可买额度。QMT 未返回可买额度时，预览和下单必须拒绝。
 - 卖出的 `basis_amount` 是 QMT 该证券可用持仓数量乘以本次参考价格；数量来自 QMT 的 `available`/`can_use_volume`。
 - `target_amount`、`actual_amount` 和 `volume` 已按账户可用资金/持仓及 100 股整手向下取整；提交前后端仍会重新预检，页面预览不能替代后端校验。
 - 预览完成但目标金额不足一手时，公共控件明确显示 `0 股`、`0.00 元` 并提示“金额不足一手”，不能用破折号掩盖已计算出的零结果。

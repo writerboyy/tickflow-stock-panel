@@ -49,6 +49,10 @@ export function QmtTradeAllocationControls({
   disabledModes,
   basisLabel,
   basisAmount,
+  accountType,
+  cashAmount,
+  financingAvailableAmount,
+  buyingPowerAmount,
   targetAmount,
   actualAmount,
   volume,
@@ -68,6 +72,10 @@ export function QmtTradeAllocationControls({
   disabledModes?: Partial<Record<QmtTradeAllocationMode, boolean>>
   basisLabel?: string | null
   basisAmount?: number | null
+  accountType?: string | null
+  cashAmount?: number | null
+  financingAvailableAmount?: number | null
+  buyingPowerAmount?: number | null
   targetAmount?: number | null
   actualAmount?: number | null
   volume?: number | null
@@ -79,12 +87,18 @@ export function QmtTradeAllocationControls({
 }) {
   const hasValueInput = mode === 'fixed' || mode === 'volume'
   const inputLabel = mode === 'volume' ? '确认数量（股）' : '确认金额'
+  const creditAccount = String(accountType || '').toUpperCase() === 'CREDIT'
   const displayedBasisLabel = basisLabel === '可用资金'
-    ? '账户当前可用资金'
+    ? creditAccount ? '信用账户当前可买额度' : '账户当前可用资金'
     : basisLabel === '可用持仓市值'
-      ? '账户当前可用持仓市值'
-      : basisLabel || (action === 'BUY' ? '账户当前可用资金' : '账户当前可用持仓市值')
+      ? creditAccount ? '信用账户当前可用持仓市值' : '账户当前可用持仓市值'
+      : basisLabel || (action === 'BUY'
+        ? creditAccount ? '信用账户当前可买额度' : '账户当前可用资金'
+        : creditAccount ? '信用账户当前可用持仓市值' : '账户当前可用持仓市值')
   const basisText = basisAmount != null && Number.isFinite(basisAmount) ? `${MONEY.format(basisAmount)} 元` : '—'
+  const cashText = cashAmount != null && Number.isFinite(cashAmount) ? `${MONEY.format(cashAmount)} 元` : '—'
+  const financingText = financingAvailableAmount != null && Number.isFinite(financingAvailableAmount) ? `${MONEY.format(financingAvailableAmount)} 元` : '—'
+  const buyingPowerText = buyingPowerAmount != null && Number.isFinite(buyingPowerAmount) ? `${MONEY.format(buyingPowerAmount)} 元` : basisText
   const targetText = targetAmount != null && Number.isFinite(targetAmount) ? `${MONEY.format(targetAmount)} 元` : '—'
   const calculated = previewState === 'ready'
   const actualText = calculated && actualAmount != null && Number.isFinite(actualAmount)
@@ -147,6 +161,11 @@ export function QmtTradeAllocationControls({
       <div className="grid grid-cols-2 gap-x-4 gap-y-2">
         <div><span className="text-muted">{displayedBasisLabel}</span><div className="mt-0.5 font-mono text-foreground">{basisText}</div></div>
         <div><span className="text-muted">{qmtAllocationLabel(action, mode)}</span><div className="mt-0.5 font-mono text-foreground">{targetText}</div></div>
+        {creditAccount && action === 'BUY' ? <>
+          <div><span className="text-muted">现金可用</span><div className="mt-0.5 font-mono text-foreground">{cashText}</div></div>
+          <div><span className="text-muted">融资可用</span><div className="mt-0.5 font-mono text-foreground">{financingText}</div></div>
+          <div><span className="text-muted">当前可买额度</span><div className="mt-0.5 font-mono text-foreground">{buyingPowerText}</div></div>
+        </> : null}
         <div><span className="text-muted">预计委托数量</span><div className="mt-0.5 font-mono text-foreground">{volumeText}</div></div>
         <div><span className="text-muted">预计委托金额</span><div className="mt-0.5 font-mono text-foreground">{actualText}</div></div>
       </div>
