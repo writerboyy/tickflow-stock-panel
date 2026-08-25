@@ -1,6 +1,9 @@
+import json
+
 from app.services.limit_up_queue import (
     LimitUpQueueService,
     _D202Watcher,
+    _D202WebSocketSource,
     _watcher_url,
     d202_code,
     watcher_snapshot,
@@ -20,28 +23,70 @@ def test_d202_code_uses_market_prefix():
 
 def test_builtin_d202_watcher_tracks_front_and_back_queue():
     watcher = _D202Watcher("SH600000", 11000)
-    watcher.feed({
-        "isFirst": 1,
+    captured = []
+    watcher.on_tick(lambda current: captured.append(watcher_snapshot(current)))
+    watcher.feed_queue({
         "totalCount": 2,
-        "totalVolume": 150,
-        "seq": 0,
-        "records": [{"id": 10, "volume": 100}, {"id": 20, "volume": 50}],
+        "volumes": [200, 300],
     }, 1_000)
-    watcher.queue(25)
-    watcher.feed({
-        "isFirst": 0,
-        "records": [
-            {"id": 30, "volume": 25, "status": 64},
-            {"id": 40, "volume": 10, "status": 64},
-        ],
-    }, 2_000)
+    watcher.queue(100)
+    watcher.feed_queue({"totalCount": 4, "volumes": [200, 300, 100, 50]}, 2_000)
 
     snapshot = watcher_snapshot(watcher)
-    assert snapshot["current"]["volume"] == 185
+    assert snapshot["current"]["volume"] == 650
     assert snapshot["order_status"] == "queueing"
-    assert snapshot["order"]["front"]["volume"] == 150
-    assert snapshot["order"]["back"]["volume"] == 10
+    assert snapshot["order"]["front"]["volume"] == 500
+    assert snapshot["order"]["back"]["volume"] == 50
     assert snapshot["order"]["elapsed_ms"] == 1_000
+    assert snapshot["cancelled"]["volume"] == 0
+
+    watcher.feed_queue({"totalCount": 3, "volumes": [200, 100, 50]}, 3_000)
+    snapshot = captured[-1]
+    assert snapshot["order"]["front"]["volume"] == 200
+    assert snapshot["order"]["back"]["volume"] == 50
+    assert snapshot["cancelled"]["volume"] == 300
+
+
+def test_d202_source_subscribes_queue_channel():
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, message):
+            self.messages.append(message)
+
+    source = _D202WebSocketSource("ws://127.0.0.1:8080/d202")
+    source.add_watcher(_D202Watcher("SH600000", 11000))
+    ws = FakeWebSocket()
+    source._on_open(ws)
+    assert ws.messages == [
+        '[{"type": "queue", "code": "SH600000", "enable": 1, "dir": "B", "level": 0}]'
+    ]
+
+
+def test_d202_source_routes_queue_response_to_watcher():
+    source = _D202WebSocketSource("ws://127.0.0.1:8080/d202")
+    watcher = _D202Watcher("SH600000", 11000)
+    source.add_watcher(watcher)
+    source._on_message(None, json.dumps({
+        "ts": 1000,
+        "list": [{"type": "queue", "data": {
+            "code": "SH600000",
+            "dir": "B",
+            "totalCount": 2,
+            "batchCount": 2,
+            "volumes": [200, 300],
+        }}],
+    }))
+    assert watcher.current.count == 2
+    assert watcher.current.volume == 500
+
+
+def test_service_uses_builtin_d202_protocol_adapter():
+    service = LimitUpQueueService()
+    service.start()
+    assert service._watcher_factory is _D202Watcher
+    assert service._source_factory is _D202WebSocketSource
 
 
 def test_service_isolates_source_and_registers_queue_order():

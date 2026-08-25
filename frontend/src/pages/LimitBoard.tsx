@@ -342,13 +342,13 @@ function queueCell(row: LimitBoardRow): JSX.Element {
   if (!queue) return <span className="text-muted">未接入</span>
   const front = queue.order?.front
   const back = queue.order?.back
-  return <div className="min-w-[132px]" title="D202 排队估算，委托 ID 由手数匹配推测">
+  return <div className="min-w-[132px]" title="D202 排队量分布估算，位置由新增手数匹配推测">
     <div className={`font-medium ${queue.order_status === 'filled_estimate' ? 'text-bear' : queue.limit_up_gone ? 'text-danger' : 'text-secondary'}`}>{queueStatusLabel(row)}</div>
     <div className="mt-0.5 font-mono text-[9px] text-muted">
       {front ? `前 ${front.volume.toLocaleString('zh-CN')} 手 · ${queueAmount(front.amount)}` : `封单 ${queue.current?.volume?.toLocaleString('zh-CN') ?? '--'} 手`}
     </div>
     {front && back ? <div className="font-mono text-[9px] text-muted">后 {back.volume.toLocaleString('zh-CN')} 手 · {queueAmount(back.amount)}</div> : null}
-    <div className="font-mono text-[9px] text-muted">封单 {queue.current?.volume?.toLocaleString('zh-CN') ?? '--'} 手 · 撤 {queue.cancelled?.volume?.toLocaleString('zh-CN') ?? '--'}</div>
+    <div className="font-mono text-[9px] text-muted">封单 {queue.current?.volume?.toLocaleString('zh-CN') ?? '--'} 手 · 减少 {queue.cancelled?.volume?.toLocaleString('zh-CN') ?? '--'}</div>
   </div>
 }
 
