@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import json
+import sys
 import sqlite3
 import time
 from threading import Event, Thread
@@ -748,6 +749,25 @@ def test_credit_order_preview_rejects_financing_only_response(tmp_path: Path):
         "cash": 100_000,
         "m_dFinEnbuyBalance": 50_000,
         "m_dFinEnableBalance": 80_000,
+    } if method == "get_asset" else None
+
+    with pytest.raises(QmtRpcError, match="未返回信用账户可买额度"):
+        service.preview_order({
+            "action": "BUY",
+            "symbol": "600036.SH",
+            "price": 10,
+            "price_type": "LIMIT",
+            "allocation_mode": "available",
+        })
+
+
+def test_credit_order_preview_rejects_qmt_max_float_placeholders(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.call = lambda method, _params: {
+        "cash": 3_800.52,
+        "m_dAssureEnbuyBalance": sys.float_info.max,
+        "m_dFinEnbuyBalance": sys.float_info.max,
+        "m_dFinEnableBalance": sys.float_info.max,
     } if method == "get_asset" else None
 
     with pytest.raises(QmtRpcError, match="未返回信用账户可买额度"):

@@ -72,7 +72,8 @@ def _float(value: Any) -> float | None:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    return result if math.isfinite(result) else None
+    # Big QMT uses the largest representable float as an unset-field sentinel.
+    return result if math.isfinite(result) and abs(result) < 1e307 else None
 
 
 # QMT CREDIT account rows expose buying power separately from ordinary cash.
@@ -105,7 +106,7 @@ _CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
 def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
     for field in fields:
         value = _float(row.get(field))
-        if value is not None and value >= 0:
+        if value is not None and value >= 0 and value < 1e307:
             return value
     return None
 
