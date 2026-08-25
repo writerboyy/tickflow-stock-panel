@@ -384,6 +384,8 @@ function LimitBoardAllocationDialog({
     ? 'loading'
     : allocationPreview.isError
       ? 'error'
+      : previewOrder?.reason
+        ? 'error'
       : previewOrder
         ? 'ready'
         : qmtReady
@@ -472,7 +474,7 @@ function LimitBoardAllocationDialog({
           <option value="financing">融资买入</option>
         </select>
       </label> : null}
-      {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : <div className="text-[10px] leading-4 text-muted">这里只保存该股票的交易数量/金额配置；打板池仍按临板、扫板或排板规则触发委托。</div>}
+      {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : null}
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
       <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>

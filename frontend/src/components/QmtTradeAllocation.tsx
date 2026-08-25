@@ -148,7 +148,7 @@ export function QmtTradeAllocationControls({
           <div><span className="text-muted">融资可用</span><div className="mt-0.5 font-mono text-foreground">{financingText}</div></div>
         </> : null}
       </div>
-      {previewState === 'loading' ? <div className="mt-2 border-t border-accent/20 pt-2 text-muted">正在读取账户可用金额并计算委托…</div> : previewMessage ? <div className={cn('mt-2 border-t border-accent/20 pt-2', previewState === 'error' ? 'text-warning' : 'text-muted')}>{previewMessage}</div> : null}
+      {previewState === 'loading' ? <div className="mt-2 border-t border-accent/20 pt-2 text-muted">正在读取账户可用金额并计算委托…</div> : previewMessage ? <div className={cn('mt-2 border-t border-accent/20 pt-2', previewState === 'error' ? 'text-danger' : 'text-muted')}>{previewMessage}</div> : null}
     </div> : null}
   </div>
 }

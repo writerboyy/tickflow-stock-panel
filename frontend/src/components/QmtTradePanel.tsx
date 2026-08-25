@@ -287,6 +287,8 @@ export function QmtTradePanel({
     ? 'loading'
     : preview.isError
       ? 'error'
+      : serverPreview?.reason
+        ? 'error'
       : serverPreview
         ? 'ready'
         : qmtReady
