@@ -286,9 +286,9 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
     : null
   if (atLimit) return { state: 'limit', label: '已涨停', text: 'text-danger', card: 'border-danger/60 bg-danger/10' }
   if (limitGap != null && limitGap >= 0 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-warning', card: 'border-warning/60 bg-warning/10' }
-  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '大跌', text: 'text-bear', card: 'border-bear/45 bg-bear/5' }
+  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', text: 'text-secondary', card: 'border-border bg-surface' }
   if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', text: 'text-muted', card: 'border-border bg-surface' }
-  return { state: 'normal', label: '', text: financialTone(change), card: 'border-border bg-surface' }
+  return { state: 'normal', label: '', text: 'text-secondary', card: 'border-border bg-surface' }
 }
 
 function moneyValue(value: number | null | undefined): string {
@@ -995,7 +995,7 @@ function SectorStrengthTable({
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">小时飙升 · 行情5秒</div></div>
-          <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">临板</span><span className="rounded border border-bear/35 bg-bear/5 px-1 py-0.5 text-bear">大跌</span></div>
+          <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">临板</span></div>
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
