@@ -500,7 +500,7 @@ function LimitBoardAllocationDialog({
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
       <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>
-      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, ratioMode ? undefined : value, creditBuyMode)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
+      <button type="button" disabled={!canConfirm || pending} onClick={() => onConfirm(mode, mode === 'fixed' || mode === 'volume' ? value : undefined, creditBuyMode)} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">
         {pending ? '提交中…' : kind === 'buy' ? '确认买入并挂单' : kind === 'edit' ? '保存设置' : '确认加入打板池'}
       </button>
     </div>
