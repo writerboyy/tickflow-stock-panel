@@ -34,6 +34,7 @@ export const QK = {
     ['position-risk', 'qmt-preview', symbol, action, priceType, price, mode, value, creditBuyMode] as const
   ),
   limitBoard: ['limit-board'] as const,
+  limitBoardApproachingLimitUp: ['limit-board', 'approaching-limit-up'] as const,
   limitBoardQuotes: (symbols: string) => ['limit-board', 'quotes', symbols] as const,
   limitBoardSectorStrength: (capturedAt: string) => ['limit-board', 'sector-strength', capturedAt] as const,
   limitBoardSectorConstituents: (plateId: string, capturedAt: string) => ['limit-board', 'sector-constituents', plateId, capturedAt] as const,

@@ -35,6 +35,7 @@ import {
   api,
   type QmtCreditBuyMode,
   type LimitBoardEvent,
+  type LimitBoardApproachingLimitUpItem,
   type LimitBoardQuoteSnapshot,
   type LimitBoardRow,
   type LimitBoardSectorConstituent,
@@ -42,7 +43,6 @@ import {
   type LimitBoardSentimentPoint,
   type LimitBoardView,
   type LimitLadderStock,
-  type MarketHeatItem,
   type PremiumGene,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -760,7 +760,7 @@ function SectorStrengthTable({
   busy,
 }: {
   snapshot: LimitBoardView['sector_strength']
-  hotRows?: MarketHeatItem[]
+  hotRows?: LimitBoardApproachingLimitUpItem[]
   hotQuotes?: LimitBoardQuoteSnapshot['quotes']
   hotSectorLinks?: LimitBoardQuoteSnapshot['sector_links']
   hotLoading?: boolean
@@ -845,14 +845,16 @@ function SectorStrengthTable({
   const linkedPlateIds = useMemo(() => {
     if (!selectedStockSymbol) return new Set<string>()
     const heatLinks = hotSectorLinks[selectedStockSymbol] ?? []
+    const heatItem = hotRows.find(item => item.thscode.toUpperCase() === selectedStockSymbol)
     const ids = new Set([
       ...heatLinks.map(link => link.plate_id),
     ])
     const names = new Set([
       ...heatLinks.map(link => link.plate_name),
+      ...(heatItem?.sector ? themes(heatItem.sector) : []),
     ].map(sectorNameKey))
     return new Set(rows.filter(row => ids.has(row.plate_id) || names.has(sectorNameKey(row.plate_name))).map(row => row.plate_id))
-  }, [hotSectorLinks, rows, selectedStockSymbol])
+  }, [hotRows, hotSectorLinks, rows, selectedStockSymbol])
   const selectedPlate = rows.find(row => row.plate_id === selectedPlateId) ?? rows[0] ?? null
   useEffect(() => {
     if (selectedPlateId == null || rows.some(row => row.plate_id === selectedPlateId)) return
@@ -927,6 +929,7 @@ function SectorStrengthTable({
   const selectStock = (symbol: string) => {
     const normalized = symbol.trim().toUpperCase()
     const heatLinks = hotSectorLinks[normalized] ?? []
+    const heatItem = hotRows.find(item => item.thscode.toUpperCase() === normalized)
     setSelectedStockSymbol(normalized)
     lastScrolledConstituent.current = null
     const ids = new Set([
@@ -934,6 +937,7 @@ function SectorStrengthTable({
     ])
     const names = new Set([
       ...heatLinks.map(link => link.plate_name),
+      ...(heatItem?.sector ? themes(heatItem.sector) : []),
     ].map(sectorNameKey))
     const matches = rows.filter(row => ids.has(row.plate_id) || names.has(sectorNameKey(row.plate_name)))
     if (!matches.length) return
@@ -1000,13 +1004,18 @@ function SectorStrengthTable({
     <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_20%_34%_24%]' : 'lg:grid-cols-[25%_30%_45%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
-          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">小时飙升 · 行情5秒</div></div>
+          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">即将涨停 · 行情5秒</div></div>
           <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">临板</span></div>
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
             {hotRows.slice(0, 30).map(item => {
-              const quote = hotQuotes[item.thscode.toUpperCase()]
+              const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
+                symbol: item.thscode,
+                name: item.name,
+                last_price: item.last_price,
+                change_pct: item.change_pct,
+              }
               const selected = item.thscode.toUpperCase() === selectedStockSymbol
               const visual = hotQuoteVisual(quote)
               const actionRow = manualActionRow(item.thscode.toUpperCase(), item.name || item.ticker, quote?.last_price, quote?.change_pct, quote?.limit_up)
@@ -1032,7 +1041,7 @@ function SectorStrengthTable({
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
                 <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{visual.label ? <span className={`shrink-0 ${visual.text}`}>{visual.label}</span> : null}</div>
-                <div className="mt-0.5 truncate font-mono text-[8px] text-muted">热度 {item.heat == null ? '--' : item.heat.toFixed(0)} · 排名变化 {item.rank_change == null ? '--' : `${item.rank_change > 0 ? '+' : ''}${item.rank_change}`}</div>
+                <div className="mt-0.5 truncate font-mono text-[8px] text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}{item.sector ? ` · ${item.sector}` : ''}</div>
               </div>
             })}
           </div>
@@ -1336,21 +1345,15 @@ export function LimitBoard() {
     1,
     view.data?.runtime.refresh_cycle.interval_seconds ?? 5,
   ) * 1000
-  const heat = useQuery({
-    queryKey: QK.marketHeatRadar(30),
-    queryFn: () => api.marketHeatRadar(30, true),
+  const approachingLimitUp = useQuery({
+    queryKey: QK.limitBoardApproachingLimitUp,
+    queryFn: () => api.limitBoardApproachingLimitUp(true),
     enabled: tab === 'sector',
-    refetchInterval: tab === 'sector' && isTradingHours ? 60_000 : false,
-    staleTime: 60_000,
+    refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
+    staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
-  const heatRows = useMemo(
-    () => {
-      const fastRows = heat.data?.lists.skyrocket_hour.items ?? []
-      return (fastRows.length ? fastRows : heat.data?.lists.hot_hour.items ?? []).slice(0, 30)
-    },
-    [heat.data?.lists.hot_hour.items, heat.data?.lists.skyrocket_hour.items],
-  )
+  const heatRows = approachingLimitUp.data?.rows ?? []
   const heatSymbols = useMemo(
     () => heatRows.map(item => item.thscode.toUpperCase()),
     [heatRows],
@@ -1503,7 +1506,7 @@ export function LimitBoard() {
             initialMode: 'lot',
             initialValue: null,
           })}
-        /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>

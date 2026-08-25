@@ -1432,6 +1432,28 @@ export interface LimitBoardQuoteSnapshot {
   missing_symbols: string[]
 }
 
+export interface LimitBoardApproachingLimitUpItem {
+  thscode: string
+  ticker: string
+  name: string
+  rank: number
+  last_price?: number | null
+  change_pct?: number | null
+  rise_speed_pct?: number | null
+  sector?: string | null
+  main_force?: number | null
+  turnover_amount?: number | null
+  tags?: string[]
+}
+
+export interface LimitBoardApproachingLimitUpSnapshot {
+  provider: 'kaipanla_socket' | string
+  state: 'live' | 'unavailable' | string
+  as_of: string | null
+  refreshed_at: string | null
+  rows: LimitBoardApproachingLimitUpItem[]
+}
+
 export interface LimitBoardSectorStrengthRow {
   plate_id: string
   plate_name?: string | null
@@ -2941,6 +2963,8 @@ export const api = {
       method: 'POST', body: JSON.stringify({ symbols }),
       quiet,
     }),
+  limitBoardApproachingLimitUp: (quiet = false) =>
+    request<LimitBoardApproachingLimitUpSnapshot>('/api/limit-board/approaching-limit-up', { quiet }),
   limitBoardAdvancedSettingsUpdate: (
     settings: LimitBoardView['settings'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {

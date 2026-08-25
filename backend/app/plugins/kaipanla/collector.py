@@ -143,6 +143,9 @@ class KaipanlaCollector:
         self._sector_constituents_cache: dict[tuple[date, str], list[dict]] = {}
         self._shortline_constituents_lock = threading.Lock()
         self._shortline_constituents: dict | None = None
+        self._jijiang_lock = threading.Lock()
+        self._jijiang_snapshot: dict | None = None
+        self._jijiang_task: asyncio.Task | None = None
 
     @property
     def configured(self) -> bool:
@@ -218,6 +221,19 @@ class KaipanlaCollector:
                     timezone="Asia/Shanghai",
                 ),
                 id="kaipanla_sector_strength",
+                misfire_grace_time=30,
+                replace_existing=True,
+            )
+            scheduler.add_job(
+                self._scheduled_jijiang_realtime,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-14",
+                    minute="*",
+                    second="*/5",
+                    timezone="Asia/Shanghai",
+                ),
+                id="kaipanla_jijiang_realtime",
                 misfire_grace_time=30,
                 replace_existing=True,
             )
@@ -343,6 +359,15 @@ class KaipanlaCollector:
                 self._bootstrap_sector_strength(),
                 name="kaipanla-sector-strength",
             )
+        if self._jijiang_task is None or self._jijiang_task.done():
+            self._jijiang_task = asyncio.create_task(
+                self._run_safely(
+                    "jijiang_realtime",
+                    self.refresh_jijiang_realtime,
+                    cn_today(),
+                ),
+                name="kaipanla-jijiang-realtime",
+            )
 
     def stop(self) -> None:
         if self._bootstrap_task and not self._bootstrap_task.done():
@@ -353,10 +378,13 @@ class KaipanlaCollector:
             self._sentiment_task.cancel()
         if self._sector_strength_task and not self._sector_strength_task.done():
             self._sector_strength_task.cancel()
+        if self._jijiang_task and not self._jijiang_task.done():
+            self._jijiang_task.cancel()
         self._bootstrap_task = None
         self._four_mode_target_task = None
         self._sentiment_task = None
         self._sector_strength_task = None
+        self._jijiang_task = None
 
     async def _run_safely(self, name: str, func, *args) -> int:
         if not self.configured:
@@ -490,6 +518,20 @@ class KaipanlaCollector:
             )
         return count
 
+    async def _scheduled_jijiang_realtime(self) -> int:
+        now = cn_now()
+        current = now.timetz().replace(tzinfo=None)
+        if not (
+            clock_time(9, 30) <= current < clock_time(11, 30)
+            or clock_time(13, 0) <= current < clock_time(15, 0)
+        ):
+            return 0
+        return await self._run_safely(
+            "jijiang_realtime",
+            self.refresh_jijiang_realtime,
+            now.date(),
+        )
+
     async def _bootstrap_sector_strength(self) -> int:
         now = cn_now()
         current = now.timetz().replace(tzinfo=None)
@@ -599,6 +641,23 @@ class KaipanlaCollector:
                 **snapshot,
                 "plate_ids": list(snapshot.get("plate_ids") or []),
                 "missing_plate_ids": list(snapshot.get("missing_plate_ids") or []),
+                "rows": [dict(row) for row in snapshot.get("rows") or []],
+            }
+
+    def jijiang_realtime_snapshot(self) -> dict:
+        """Return the latest stocks-near-limit-up realtime snapshot."""
+        with self._jijiang_lock:
+            snapshot = self._jijiang_snapshot
+            if snapshot is None:
+                return {
+                    "provider": "kaipanla_socket",
+                    "state": "unavailable",
+                    "as_of": cn_today().isoformat(),
+                    "refreshed_at": None,
+                    "rows": [],
+                }
+            return {
+                **snapshot,
                 "rows": [dict(row) for row in snapshot.get("rows") or []],
             }
 
@@ -775,6 +834,28 @@ class KaipanlaCollector:
         }
         with self._shortline_constituents_lock:
             self._shortline_constituents = snapshot
+        return len(rows)
+
+    async def refresh_jijiang_realtime(self, trade_date: date) -> int:
+        """Refresh the current stocks-near-limit-up radar from the socket feed."""
+        login_packet = load_socket_login_packet()
+        rows: list[dict[str, Any]] = []
+        if login_packet:
+            try:
+                rows = await asyncio.to_thread(
+                    KaipanlaSocketClient(login_packet).fetch_jijiang_realtime,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("开盘啦即将涨停列表刷新失败", exc_info=True)
+        snapshot = {
+            "provider": "kaipanla_socket",
+            "state": "live" if rows else "unavailable",
+            "as_of": trade_date.isoformat(),
+            "refreshed_at": cn_now().isoformat() if rows else None,
+            "rows": rows,
+        }
+        with self._jijiang_lock:
+            self._jijiang_snapshot = snapshot
         return len(rows)
 
     async def sector_constituents_at(

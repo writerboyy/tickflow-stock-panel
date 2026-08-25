@@ -353,6 +353,32 @@ class LimitBoardService:
             "missing_symbols": [symbol for symbol in requested if symbol not in quotes],
         }
 
+    def jijiang_realtime_view(self) -> dict[str, Any]:
+        collector = getattr(self.app_state, "kaipanla_collector", None)
+        getter = getattr(collector, "jijiang_realtime_snapshot", None)
+        if not callable(getter):
+            return {
+                "provider": "kaipanla_socket",
+                "state": "unavailable",
+                "as_of": cn_today().isoformat(),
+                "refreshed_at": None,
+                "rows": [],
+            }
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001
+            logger.debug("读取即将涨停雷达快照失败", exc_info=True)
+            value = None
+        if not isinstance(value, dict):
+            return {
+                "provider": "kaipanla_socket",
+                "state": "unavailable",
+                "as_of": cn_today().isoformat(),
+                "refreshed_at": None,
+                "rows": [],
+            }
+        return value
+
     def _fresh_tickflow_quotes(self, symbols: set[str]) -> dict[str, Any]:
         provider_getter = getattr(self.quote_service, "realtime_provider", None)
         if callable(provider_getter):

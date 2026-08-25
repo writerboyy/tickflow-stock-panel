@@ -88,6 +88,11 @@ def quote_snapshot(payload: QuoteSnapshotRequest, request: Request):
     return _service(request).quote_snapshot(payload.symbols)
 
 
+@router.get("/approaching-limit-up")
+def jijiang_realtime(request: Request):
+    return _service(request).jijiang_realtime_view()
+
+
 @router.get("/sector-strength/{plate_id}/constituents")
 async def sector_constituents(
     plate_id: str,

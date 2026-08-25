@@ -1302,7 +1302,7 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 15
+    assert len(scheduler.jobs) == 16
     assert "kaipanla_four_mode_targets" in scheduler.jobs
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
@@ -1377,5 +1377,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 15
+    assert len(scheduler.jobs) == 16
     assert collector._bootstrap_task is None
