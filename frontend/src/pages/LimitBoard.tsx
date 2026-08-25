@@ -304,9 +304,11 @@ function LimitBoardAllocationDialog({
   onClose: () => void
   onConfirm: (mode: PoolAllocationMode, value: number | undefined, creditBuyMode: QmtCreditBuyMode) => void
 }) {
-  const [mode, setMode] = useState<PoolAllocationMode>(initialMode === 'global' ? 'quarter' : initialMode)
+  const [mode, setMode] = useState<PoolAllocationMode>(kind === 'edit' ? (initialMode === 'global' ? 'lot' : initialMode) : 'lot')
   const [value, setValue] = useState<number>(initialValue ?? 0)
-  const [creditBuyMode, setCreditBuyMode] = useState<QmtCreditBuyMode>(initialCreditBuyMode ?? row.credit_buy_mode ?? 'collateral')
+  const [creditBuyMode, setCreditBuyMode] = useState<QmtCreditBuyMode>(
+    kind === 'edit' ? (initialCreditBuyMode ?? row.credit_buy_mode ?? 'financing') : (initialCreditBuyMode ?? 'financing'),
+  )
   const price = row.last_price ?? row.order_price ?? null
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
   const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
