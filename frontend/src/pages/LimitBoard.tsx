@@ -285,7 +285,9 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
     ? (limitUp - price) / limitUp
     : null
   if (atLimit) return { state: 'limit', label: '已涨停', text: 'text-danger', card: 'border-danger/60 bg-danger/10' }
-  if (limitGap != null && limitGap >= 0 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-warning', card: 'border-warning/60 bg-warning/10' }
+  if (limitGap != null && limitGap >= 0 && limitGap <= 0.005) return { state: 'near_limit', label: '临板', text: 'text-danger', card: 'border-danger/60 bg-danger/10' }
+  if (limitGap != null && limitGap > 0.005 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-orange-400', card: 'border-orange-400/60 bg-orange-400/10' }
+  if (limitGap != null && limitGap > 0.01 && limitGap <= 0.03) return { state: 'near_limit', label: '接近', text: 'text-warning', card: 'border-warning/60 bg-warning/10' }
   if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', text: 'text-secondary', card: 'border-border bg-surface' }
   if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', text: 'text-muted', card: 'border-border bg-surface' }
   return { state: 'normal', label: '', text: 'text-secondary', card: 'border-border bg-surface' }
@@ -1005,7 +1007,7 @@ function SectorStrengthTable({
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
-          <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">临板</span></div>
+          <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">≤0.5%</span><span className="rounded border border-orange-400/40 bg-orange-400/10 px-1 py-0.5 text-orange-400">≤1%</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">≤3%</span></div>
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
