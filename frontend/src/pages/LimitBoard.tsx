@@ -272,28 +272,48 @@ function financialTone(value: number | null | undefined): string {
 type HotQuoteState = 'limit' | 'near_limit' | 'normal' | 'sharp_drop' | 'unavailable'
 type HotSortKey = 'change_pct' | 'rise_speed_pct'
 
+// Only used for visual highlighting when a quote snapshot lacks an authoritative limit_up.
+function fallbackLimitGap(symbol: string | null | undefined, change: number | null | undefined): number | null {
+  if (!symbol || change == null || !Number.isFinite(change)) return null
+  const normalized = symbol.trim().toUpperCase()
+  const growthBoard = ['300', '301', '688', '689'].some(prefix => normalized.startsWith(prefix))
+  const limitRate = normalized.endsWith('.BJ')
+    ? 0.30
+    : growthBoard
+      ? 0.20
+      : 0.10
+  return (limitRate - change) / (1 + limitRate)
+}
+
+function changeTextForLimitGap(limitGap: number | null, fallback: string): string {
+  if (limitGap == null) return fallback
+  if (limitGap <= 0.005) return 'text-danger'
+  if (limitGap <= 0.01) return 'text-orange-400'
+  if (limitGap <= 0.03) return 'text-yellow-300'
+  return 'text-secondary'
+}
+
 function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undefined): {
   state: HotQuoteState
   label: string
-  text: string
   changeText: string
-  card: string
 } {
   const price = quote?.last_price
   const limitUp = quote?.limit_up
   const change = quote?.change_pct
   const fallbackChangeText = financialTone(change)
-  const atLimit = price != null && limitUp != null && price >= limitUp - 0.001
-  const limitGap = price != null && limitUp != null && limitUp > 0
+  const actualLimitGap = price != null && limitUp != null && limitUp > 0
     ? (limitUp - price) / limitUp
     : null
-  if (atLimit) return { state: 'limit', label: '已涨停', text: 'text-danger', changeText: 'text-danger', card: 'border-danger/60 bg-danger/10' }
-  if (limitGap != null && limitGap >= 0 && limitGap <= 0.005) return { state: 'near_limit', label: '临板', text: 'text-danger', changeText: 'text-danger', card: 'border-danger/60 bg-danger/10' }
-  if (limitGap != null && limitGap > 0.005 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-orange-400', changeText: 'text-orange-400', card: 'border-orange-400/60 bg-orange-400/10' }
-  if (limitGap != null && limitGap > 0.01 && limitGap <= 0.03) return { state: 'near_limit', label: '接近', text: 'text-yellow-300', changeText: 'text-yellow-300', card: 'border-yellow-300/60 bg-yellow-300/10' }
-  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', text: 'text-secondary', changeText: fallbackChangeText, card: 'border-border bg-surface' }
-  if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', text: 'text-muted', changeText: 'text-muted', card: 'border-border bg-surface' }
-  return { state: 'normal', label: '', text: 'text-secondary', changeText: limitGap == null ? fallbackChangeText : 'text-secondary', card: 'border-border bg-surface' }
+  const inferredLimitGap = actualLimitGap == null ? fallbackLimitGap(quote?.symbol, change) : null
+  const changeLimitGap = actualLimitGap ?? inferredLimitGap
+  const changeText = changeTextForLimitGap(changeLimitGap, fallbackChangeText)
+  const atLimit = actualLimitGap != null && price != null && limitUp != null && price >= limitUp - 0.001
+  if (atLimit) return { state: 'limit', label: '已涨停', changeText }
+  if (actualLimitGap != null && actualLimitGap >= 0 && actualLimitGap <= 0.01) return { state: 'near_limit', label: '临板', changeText }
+  if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', changeText: fallbackChangeText }
+  if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', changeText: 'text-muted' }
+  return { state: 'normal', label: '', changeText }
 }
 
 function moneyValue(value: number | null | undefined): string {
@@ -1060,15 +1080,15 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`h-[68px] w-[184px] shrink-0 rounded-btn border px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : visual.card}`}
+                className={`h-[68px] w-[184px] shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''}`}
                 title="联动强势股、实时板块与成分股"
               >
-                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className={`shrink-0 font-mono text-[10px] ${visual.text}`}>{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
+                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
                   <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
-                <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{visual.label ? <span className={`shrink-0 ${visual.text}`}>{visual.label}</span> : null}</div>
-                <div className="mt-0.5 truncate font-mono text-[8px] text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}{item.sector ? ` · ${item.sector}` : ''}</div>
+                <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
+                <div className="mt-0.5 flex items-center gap-2 truncate text-[9px]"><span className="shrink-0 font-mono text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}</span>{item.sector ? <span className="truncate text-accent/80">{item.sector}</span> : null}</div>
               </div>
             })}
           </div>
@@ -1118,9 +1138,9 @@ function SectorStrengthTable({
                 className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
               <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium"><span>{row.name || row.code}</span>{row.tags ? <span className="ml-1 text-[9px] font-normal text-accent/80">· {row.tags}</span> : null}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank} · {row.symbol}</span></button></td>
-              <td className={`px-2 py-1.5 text-right font-mono text-[10px] tabular-nums ${visual.text}`}>{row.last_price?.toFixed(2) ?? '--'}</td>
+              <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{row.last_price?.toFixed(2) ?? '--'}</td>
               <td className={`px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums ${visual.changeText}`}>{scorePct(row.change_pct, 2)}</td>
-              <td className={`px-2 py-1.5 text-right text-[10px] ${visual.text}`}>{sectorConstituentStatus(row)}</td>
+              <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{moneyYi(row.amount)}</td>
               <td className="sticky right-0 z-20 w-[60px] min-w-[60px] border-l border-border bg-surface px-1.5 py-1.5">
