@@ -135,6 +135,10 @@ def _credit_buying_power(
     )
 
 
+def _fallback_credit_buy_mode(mode: str) -> str:
+    return "collateral" if mode == "financing" else "financing"
+
+
 def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -> dict[str, Any]:
     account = {
         "cash": _float(asset.get("cash")),
@@ -795,6 +799,8 @@ class QmtTradingService:
         price = _float(request.get("price")) or 0.0
         if price_type == "LIMIT" and price <= 0:
             raise ValueError("限价必须大于 0")
+        requested_credit_buy_mode = str(request.get("requested_credit_buy_mode") or credit_buy_mode).strip().lower()
+        switched_credit_buy_mode = requested_credit_buy_mode != credit_buy_mode
         if action == "SELL":
             positions = snapshot.get("positions") or []
             row = next((item for item in positions if item.get("symbol") == symbol), None)
@@ -803,6 +809,19 @@ class QmtTradingService:
         elif price_type == "LIMIT":
             account = snapshot.get("account") or {}
             buying_power, _label, _financing_available = self._buying_power(account, credit_buy_mode)
+            if self.account_type == "CREDIT":
+                fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
+                fallback_power, _fallback_label, _ = self._buying_power(account, fallback_mode)
+                if (
+                    (buying_power is None or buying_power < price * volume)
+                    and
+                    fallback_power is not None
+                    and fallback_power >= price * volume
+                    and (buying_power is None or fallback_power > buying_power)
+                ):
+                    credit_buy_mode = fallback_mode
+                    buying_power = fallback_power
+                    switched_credit_buy_mode = True
             if buying_power is None:
                 if self.account_type == "CREDIT":
                     raise QmtRpcError("QMT 未返回信用账户可买额度，已拒绝买入")
@@ -815,6 +834,9 @@ class QmtTradingService:
             "price": price,
             "price_type": price_type,
             "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+            "requested_credit_buy_mode": requested_credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+            "credit_buy_mode_switched": switched_credit_buy_mode,
+            "credit_buy_mode_reason": "首选买入额度不足，已自动切换" if switched_credit_buy_mode else None,
         }
 
     def _allocation_preview(
@@ -838,13 +860,14 @@ class QmtTradingService:
             raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
 
         financing_available = None
-        credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
+        requested_credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
+        credit_buy_mode = requested_credit_buy_mode
         if action == "BUY":
             account = snapshot.get("account") or {}
             basis_amount, basis_label, financing_available = self._buying_power(account, credit_buy_mode)
             if basis_amount is None or basis_amount < 0:
                 if self.account_type == "CREDIT":
-                    raise QmtRpcError("QMT 未返回信用账户可买额度，无法把现金余额当作融资额度")
+                    raise QmtRpcError("QMT 未返回信用账户可买额度，无法计算委托金额")
                 raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
             available_volume = None
         else:
@@ -858,38 +881,74 @@ class QmtTradingService:
             basis_amount = available_volume * price
             basis_label = "可用持仓市值"
 
-        if mode == "lot":
-            requested_amount = price * 100
-        elif mode == "fixed":
-            requested_amount = _float(request.get("allocation_value"))
-            if requested_amount is None or requested_amount <= 0:
-                raise ValueError("固定金额必须大于 0")
-        else:
-            requested_amount = basis_amount * _ALLOCATION_RATIOS[mode]
-        target_amount = min(requested_amount, basis_amount)
-        volume = int(target_amount / price / 100) * 100
-        if available_volume is not None:
-            volume = min(volume, (available_volume // 100) * 100)
-        actual_amount = round(volume * price, 2)
+        fixed_amount = _float(request.get("allocation_value")) if mode == "fixed" else None
+        if mode == "fixed" and (fixed_amount is None or fixed_amount <= 0):
+            raise ValueError("固定金额必须大于 0")
+
+        def build_candidate(candidate_mode: str, candidate_basis: float, candidate_label: str) -> dict[str, Any]:
+            if mode == "lot":
+                candidate_requested_amount = price * 100
+            elif mode == "fixed":
+                candidate_requested_amount = fixed_amount or 0.0
+            else:
+                candidate_requested_amount = candidate_basis * _ALLOCATION_RATIOS[mode]
+            candidate_target_amount = min(candidate_requested_amount, candidate_basis)
+            candidate_volume = int(candidate_target_amount / price / 100) * 100
+            if available_volume is not None:
+                candidate_volume = min(candidate_volume, (available_volume // 100) * 100)
+            candidate_actual_amount = round(candidate_volume * price, 2)
+            return {
+                "credit_buy_mode": candidate_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+                "allocation_value": candidate_requested_amount if mode == "fixed" else None,
+                "basis_label": candidate_label,
+                "basis_amount": round(candidate_basis, 2),
+                "target_amount": round(candidate_target_amount, 2),
+                "actual_amount": candidate_actual_amount,
+                "volume": candidate_volume,
+                "capped": candidate_target_amount < candidate_requested_amount or candidate_volume * price < candidate_target_amount,
+                "reason": "金额不足一手" if candidate_volume < 100 else None,
+            }
+
+        candidate = build_candidate(credit_buy_mode, basis_amount, basis_label)
+        switched_credit_buy_mode = False
+        if action == "BUY" and self.account_type == "CREDIT":
+            fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
+            fallback_basis, fallback_label, _ = self._buying_power(account, fallback_mode)
+            if fallback_basis is not None and fallback_basis >= 0:
+                fallback_candidate = build_candidate(fallback_mode, fallback_basis, fallback_label)
+                primary_insufficient = (
+                    basis_amount <= 0
+                    or candidate["capped"]
+                    or candidate["volume"] < 100
+                )
+                if primary_insufficient and fallback_candidate["actual_amount"] > candidate["actual_amount"] and fallback_candidate["volume"] >= 100:
+                    candidate = fallback_candidate
+                    credit_buy_mode = fallback_mode
+                    switched_credit_buy_mode = True
+
+        requested_amount = candidate["allocation_value"] if mode == "fixed" else candidate["target_amount"]
         return {
             "action": action,
             "symbol": symbol,
             "price": price,
             "price_type": price_type,
             "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+            "requested_credit_buy_mode": requested_credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
+            "credit_buy_mode_switched": switched_credit_buy_mode,
+            "credit_buy_mode_reason": "首选买入额度不足，已自动切换为" + ("担保品买入" if credit_buy_mode == "collateral" else "融资买入") if switched_credit_buy_mode else None,
             "allocation_mode": mode,
             "allocation_value": requested_amount if mode == "fixed" else None,
-            "basis_label": basis_label,
-            "basis_amount": round(basis_amount, 2),
+            "basis_label": candidate["basis_label"],
+            "basis_amount": candidate["basis_amount"],
             "cash_amount": _float((snapshot.get("account") or {}).get("cash")),
             "financing_available_amount": financing_available,
-            "buying_power_amount": round(basis_amount, 2),
-            "target_amount": round(target_amount, 2),
-            "actual_amount": actual_amount,
-            "volume": volume,
+            "buying_power_amount": candidate["basis_amount"],
+            "target_amount": candidate["target_amount"],
+            "actual_amount": candidate["actual_amount"],
+            "volume": candidate["volume"],
             "available_volume": available_volume,
-            "capped": target_amount < requested_amount or volume * price < target_amount,
-            "reason": "金额不足一手" if volume < 100 else None,
+            "capped": candidate["capped"],
+            "reason": candidate["reason"],
         }
 
     def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -961,7 +1020,12 @@ class QmtTradingService:
                 allocation = None
                 if request.get("allocation_mode"):
                     allocation = self._allocation_preview(request, snapshot)
-                    request = {**request, "volume": allocation["volume"]}
+                    request = {
+                        **request,
+                        "volume": allocation["volume"],
+                        "requested_credit_buy_mode": request.get("credit_buy_mode"),
+                        "credit_buy_mode": allocation.get("credit_buy_mode") or request.get("credit_buy_mode"),
+                    }
                     if allocation["volume"] < 100:
                         raise ValueError(allocation["reason"] or "金额不足一手")
                 normalized = self._validate_order(request, snapshot)
@@ -976,7 +1040,7 @@ class QmtTradingService:
                 "remark": order_tag, "require_idempotency_check": True,
             }
             if self.account_type == "CREDIT" and normalized["action"] == "BUY":
-                params["credit_buy_mode"] = str(request.get("credit_buy_mode") or "collateral").strip().lower()
+                params["credit_buy_mode"] = normalized["credit_buy_mode"]
             created_at = _now()
             row = {
                 "idempotency_key": idempotency_key, **normalized,
@@ -1000,6 +1064,9 @@ class QmtTradingService:
                     "allocation_target_amount": allocation["target_amount"],
                     "estimated_amount": allocation["actual_amount"],
                 })
+            row["requested_credit_buy_mode"] = request.get("requested_credit_buy_mode") or request.get("credit_buy_mode")
+            row["credit_buy_mode_switched"] = bool(normalized.get("credit_buy_mode_switched"))
+            row["credit_buy_mode_reason"] = normalized.get("credit_buy_mode_reason")
             self._remember_order(row)
             row["qmt_submit_at"] = _now()
             try:

@@ -2396,6 +2396,10 @@ class LimitBoardService:
                 "qmt_submit_at": order.get("qmt_submit_at"),
                 "qmt_accepted_at": order.get("qmt_accepted_at"),
                 "broker_order_at": order.get("broker_order_at"),
+                "credit_buy_mode": order.get("credit_buy_mode") or credit_buy_mode,
+                "requested_credit_buy_mode": order.get("requested_credit_buy_mode") or credit_buy_mode,
+                "credit_buy_mode_switched": bool(order.get("credit_buy_mode_switched")),
+                "credit_buy_mode_reason": order.get("credit_buy_mode_reason"),
                 "broker_order_time_raw": order.get("broker_order_time_raw"),
             }
         except Exception as exc:  # noqa: BLE001
@@ -2416,6 +2420,10 @@ class LimitBoardService:
                 "qmt_accepted_at": None,
                 "broker_order_at": None,
                 "broker_order_time_raw": None,
+                "credit_buy_mode": credit_buy_mode,
+                "requested_credit_buy_mode": credit_buy_mode,
+                "credit_buy_mode_switched": False,
+                "credit_buy_mode_reason": None,
             }
         try:
             self._order_results.put(result)
@@ -3770,6 +3778,10 @@ class LimitBoardService:
                 "actual_amount": round(price * volume, 2),
                 "target_amount": round(price * volume, 2),
                 "capped": False,
+                "credit_buy_mode": preview.get("credit_buy_mode") or credit_buy_mode,
+                "requested_credit_buy_mode": preview.get("requested_credit_buy_mode") or credit_buy_mode,
+                "credit_buy_mode_switched": bool(preview.get("credit_buy_mode_switched")),
+                "credit_buy_mode_reason": preview.get("credit_buy_mode_reason"),
             }
         preview_getter = getattr(qmt, "preview_order", None)
         if not callable(preview_getter):
@@ -3799,6 +3811,10 @@ class LimitBoardService:
             "actual_amount": round(float(preview.get("actual_amount") or price * volume), 2),
             "target_amount": round(float(preview.get("target_amount") or price * volume), 2),
             "capped": bool(preview.get("capped")),
+            "credit_buy_mode": preview.get("credit_buy_mode") or credit_buy_mode,
+            "requested_credit_buy_mode": preview.get("requested_credit_buy_mode") or credit_buy_mode,
+            "credit_buy_mode_switched": bool(preview.get("credit_buy_mode_switched")),
+            "credit_buy_mode_reason": preview.get("credit_buy_mode_reason"),
         }
 
     def add_pool(
@@ -3993,6 +4009,10 @@ class LimitBoardService:
                 "qmt_submit_at": order.get("qmt_submit_at"),
                 "qmt_accepted_at": order.get("qmt_accepted_at"),
                 "broker_order_at": order.get("broker_order_at"),
+                "credit_buy_mode": order.get("credit_buy_mode") or preview.get("credit_buy_mode") or credit_buy_mode,
+                "requested_credit_buy_mode": order.get("requested_credit_buy_mode") or preview.get("requested_credit_buy_mode") or credit_buy_mode,
+                "credit_buy_mode_switched": bool(order.get("credit_buy_mode_switched") or preview.get("credit_buy_mode_switched")),
+                "credit_buy_mode_reason": order.get("credit_buy_mode_reason") or preview.get("credit_buy_mode_reason"),
             }
         except Exception as exc:  # noqa: BLE001
             result = {
@@ -4001,6 +4021,10 @@ class LimitBoardService:
                 "error": str(exc),
                 "volume": preview["volume"],
                 "estimated_amount": preview["actual_amount"],
+                "credit_buy_mode": preview.get("credit_buy_mode") or credit_buy_mode,
+                "requested_credit_buy_mode": preview.get("requested_credit_buy_mode") or credit_buy_mode,
+                "credit_buy_mode_switched": bool(preview.get("credit_buy_mode_switched")),
+                "credit_buy_mode_reason": preview.get("credit_buy_mode_reason"),
             }
         buy_orders[cleaned].update({
             "order_status": result["status"],
@@ -4012,6 +4036,10 @@ class LimitBoardService:
             "order_qmt_submit_at": result.get("qmt_submit_at"),
             "order_qmt_accepted_at": result.get("qmt_accepted_at"),
             "order_broker_at": result.get("broker_order_at"),
+            "credit_buy_mode": result.get("credit_buy_mode") or preview.get("credit_buy_mode") or credit_buy_mode,
+            "requested_credit_buy_mode": result.get("requested_credit_buy_mode") or preview.get("requested_credit_buy_mode") or credit_buy_mode,
+            "credit_buy_mode_switched": bool(result.get("credit_buy_mode_switched") or preview.get("credit_buy_mode_switched")),
+            "credit_buy_mode_reason": result.get("credit_buy_mode_reason") or preview.get("credit_buy_mode_reason"),
         })
         self._persist_runtime(runtime)
         self._refresh_symbol_consumer()

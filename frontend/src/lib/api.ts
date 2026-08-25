@@ -1037,6 +1037,9 @@ export interface QmtOrderPreview {
   price: number
   price_type: string
   credit_buy_mode?: QmtCreditBuyMode | null
+  requested_credit_buy_mode?: QmtCreditBuyMode | null
+  credit_buy_mode_switched?: boolean
+  credit_buy_mode_reason?: string | null
   allocation_mode: string
   allocation_value: number | null
   basis_label: string

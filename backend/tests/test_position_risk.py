@@ -746,13 +746,41 @@ def test_credit_order_preview_treats_missing_financing_buying_power_as_zero(tmp_
         "credit_buy_mode": "financing",
     })
 
-    assert preview["basis_label"] == "可买融资标的资金"
+    assert preview["basis_label"] == "可买担保品资金"
     assert preview["financing_available_amount"] == 80_000
-    assert preview["buying_power_amount"] == 0
-    assert preview["target_amount"] == 0
-    assert preview["actual_amount"] == 0
-    assert preview["volume"] == 0
-    assert preview["reason"] == "金额不足一手"
+    assert preview["buying_power_amount"] == 18_000
+    assert preview["target_amount"] == 18_000
+    assert preview["actual_amount"] == 18_000
+    assert preview["volume"] == 1_800
+    assert preview["requested_credit_buy_mode"] == "financing"
+    assert preview["credit_buy_mode"] == "collateral"
+    assert preview["credit_buy_mode_switched"] is True
+
+
+def test_credit_order_validation_switches_to_fallback_buy_mode_when_selected_amount_is_short(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT", qmt_trade_enabled=True))
+    service.trade_enabled = True
+
+    normalized = service._validate_order(
+        {
+            "action": "BUY",
+            "symbol": "600036.SH",
+            "volume": 200,
+            "price": 10,
+            "credit_buy_mode": "financing",
+        },
+        {
+            "account": {
+                "assure_enbuy_balance": 5_000,
+                "fin_enbuy_balance": 1_000,
+            },
+            "positions": [],
+        },
+    )
+
+    assert normalized["credit_buy_mode"] == "collateral"
+    assert normalized["requested_credit_buy_mode"] == "financing"
+    assert normalized["credit_buy_mode_switched"] is True
 
 
 def test_credit_order_preview_rejects_cash_only_response(tmp_path: Path):
@@ -859,6 +887,44 @@ def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):
     assert result["estimated_amount"] == 28_000
     assert result["allocation_basis_amount"] == 120_000
     assert calls == ["get_asset", "submit_orders_batch"]
+
+
+def test_qmt_submit_sends_effective_credit_buy_mode_after_fallback(tmp_path: Path):
+    service = QmtTradingService(
+        tmp_path,
+        _qmt_settings(qmt_account_type="CREDIT", qmt_trade_enabled=True),
+    )
+    service.trade_enabled = True
+
+    def fake_call(method, params):
+        if method == "get_asset":
+            return {
+                "cash": 3_800.52,
+                "m_dAssureEnbuyBalance": 18_000,
+                "m_dFinEnableBalance": 80_000,
+            }
+        if method == "submit_orders_batch":
+            order = params["orders"][0]
+            assert order["credit_buy_mode"] == "collateral"
+            assert order["volume"] == 1_800
+            return [{"success": True, "accepted": True, "order_sys_id": "fallback-1"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "fallback-submit-1",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+        "credit_buy_mode": "financing",
+    })
+
+    assert result["status"] == "accepted_pending"
+    assert result["credit_buy_mode"] == "collateral"
+    assert result["requested_credit_buy_mode"] == "financing"
+    assert result["credit_buy_mode_switched"] is True
 
 
 def test_qmt_order_preview_api_maps_success_and_service_errors():

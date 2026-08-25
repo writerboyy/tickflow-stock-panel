@@ -211,6 +211,7 @@ export function QmtTradePanel({
       reason: volume < 100 ? '金额不足一手' : null,
     }
   }, [allocationMode, basePreview])
+  const effectiveCreditBuyMode = serverPreview?.credit_buy_mode ?? creditBuyMode
   const tradeVolume = serverPreview?.volume ?? 0
   const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
   const actionLabel = tradeAction === 'BUY' ? '买入' : '卖出'
@@ -301,6 +302,7 @@ export function QmtTradePanel({
     : !qmtReady
       ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
       : serverPreview?.reason
+        || serverPreview?.credit_buy_mode_reason
         || (serverPreview?.capped
         ? '目标金额已按账户可用资金或持仓，以及 100 股整手向下调整。'
         : null)
@@ -338,7 +340,7 @@ export function QmtTradePanel({
             basisAmount={serverPreview?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
             cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
-            financingBuyingPowerAmount={creditBuyMode === 'financing' ? serverPreview?.buying_power_amount ?? cachedFinancingBuyingPower : cachedFinancingBuyingPower}
+            financingBuyingPowerAmount={cachedFinancingBuyingPower}
             financingAvailableAmount={serverPreview?.financing_available_amount ?? cachedFinancingAvailable}
             previewState={allocationPreviewState}
             previewMessage={allocationPreviewMessage}
@@ -360,6 +362,7 @@ export function QmtTradePanel({
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}
           </button>
           <p className="mt-2 text-[10px] leading-4 text-muted">金额和股数由 QMT 最新可用资金或可用持仓计算，并向下取 100 股整手。成交结果以券商回报为准。</p>
+          {serverPreview?.credit_buy_mode_switched ? <p className="mt-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</p> : null}
         </section>
 
         {instrumentOrders.length ? <section className="border-b border-border py-3">
@@ -407,7 +410,7 @@ export function QmtTradePanel({
             <div><div className="text-[10px] text-muted">预计金额</div><div className="mt-1 font-mono text-foreground">{MONEY.format(actualAmount)} 元</div></div>
             <div><div className="text-[10px] text-muted">账户当前可用</div><div className="mt-1 font-mono text-foreground">{serverPreview ? `${MONEY.format(serverPreview.basis_amount)} 元` : '—'}</div></div>
             <div><div className="text-[10px] text-muted">资金方式</div><div className="mt-1 text-foreground">{allocationModeLabel}</div></div>
-            {creditBuy ? <div><div className="text-[10px] text-muted">信用账户买入方式</div><div className="mt-1 text-foreground">{creditBuyMode === 'financing' ? '融资买入' : '担保品买入'}</div></div> : null}
+            {creditBuy ? <div><div className="text-[10px] text-muted">实际买入方式</div><div className="mt-1 text-foreground">{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}{serverPreview?.credit_buy_mode_switched ? '（自动切换）' : ''}</div></div> : null}
             <div className="col-span-2"><div className="text-[10px] text-muted">价格</div><div className="mt-1 font-mono text-foreground">{priceLabel}</div></div>
           </div>
           <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">真实交易已开启。成交、排队和撤单结果以 QMT 与券商回报为准。</div>

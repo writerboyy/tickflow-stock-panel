@@ -394,6 +394,7 @@ function LimitBoardAllocationDialog({
     placeholderData: previous => previous,
   })
   const previewOrder = allocationPreview.data?.preview
+  const effectiveCreditBuyMode = previewOrder?.credit_buy_mode ?? creditBuyMode
   const estimatedVolume = price != null && price > 0
     ? previewOrder?.volume ?? 0
     : 0
@@ -420,6 +421,7 @@ function LimitBoardAllocationDialog({
     : !qmtReady
       ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
       : previewOrder?.reason
+        || previewOrder?.credit_buy_mode_reason
         || (previewOrder?.capped ? '目标金额已按账户可用资金和 100 股整手向下调整。' : null)
   const canConfirm = Boolean(
     validValue
@@ -483,7 +485,7 @@ function LimitBoardAllocationDialog({
         basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
         accountType={qmt.data?.account_type}
         cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
-        financingBuyingPowerAmount={creditBuyMode === 'financing' ? previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower : cachedFinancingBuyingPower}
+        financingBuyingPowerAmount={cachedFinancingBuyingPower}
         financingAvailableAmount={previewOrder?.financing_available_amount ?? cachedFinancingAvailable}
         previewState={allocationPreviewState}
         previewMessage={allocationPreviewMessage}
@@ -499,6 +501,7 @@ function LimitBoardAllocationDialog({
           <option value="financing">融资买入</option>
         </select>
       </label> : null}
+      {previewOrder?.credit_buy_mode_switched ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际委托将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</div> : null}
       {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : null}
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
