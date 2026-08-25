@@ -288,7 +288,7 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
   if (limitGap != null && limitGap >= 0 && limitGap <= 0.01) return { state: 'near_limit', label: '临板', text: 'text-warning', card: 'border-warning/60 bg-warning/10' }
   if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '大跌', text: 'text-bear', card: 'border-bear/45 bg-bear/5' }
   if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', text: 'text-muted', card: 'border-border bg-surface' }
-  return { state: 'normal', label: '普通涨跌', text: financialTone(change), card: 'border-border bg-surface' }
+  return { state: 'normal', label: '', text: financialTone(change), card: 'border-border bg-surface' }
 }
 
 function moneyValue(value: number | null | undefined): string {
@@ -1025,7 +1025,7 @@ function SectorStrengthTable({
                   <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
-                <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span><span className={`shrink-0 ${visual.text}`}>{visual.label}</span></div>
+                <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{visual.label ? <span className={`shrink-0 ${visual.text}`}>{visual.label}</span> : null}</div>
                 <div className="mt-0.5 truncate font-mono text-[8px] text-muted">热度 {item.heat == null ? '--' : item.heat.toFixed(0)} · 排名变化 {item.rank_change == null ? '--' : `${item.rank_change > 0 ? '+' : ''}${item.rank_change}`}</div>
               </div>
             })}
@@ -1066,6 +1066,7 @@ function SectorStrengthTable({
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[29%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[13%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
             <tbody>{constituentRows.map(row => {
               const linked = row.symbol === selectedStockSymbol
+              const visual = hotQuoteVisual({ symbol: row.symbol, last_price: row.last_price, limit_up: row.limit_up, change_pct: row.change_pct })
               return <tr
                 key={row.symbol}
                 ref={element => {
@@ -1075,9 +1076,9 @@ function SectorStrengthTable({
                 className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
               <td className="px-2 py-1.5"><button type="button" onClick={() => onOpenStock(row.symbol, row.name ?? undefined)} className="block max-w-full text-left hover:text-accent" title="查看 K 线与分时"><span className="block truncate text-[11px] font-medium"><span>{row.name || row.code}</span>{row.tags ? <span className="ml-1 text-[9px] font-normal text-accent/80">· {row.tags}</span> : null}</span><span className="block truncate font-mono text-[8px] text-muted">#{row.rank} · {row.symbol}</span></button></td>
-              <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums">{row.last_price?.toFixed(2) ?? '--'}</td>
-              <td className={`px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums ${financialTone(row.change_pct)}`}>{scorePct(row.change_pct, 2)}</td>
-              <td className="px-2 py-1.5 text-right text-[10px] text-secondary">{sectorConstituentStatus(row)}</td>
+              <td className={`px-2 py-1.5 text-right font-mono text-[10px] tabular-nums ${visual.text}`}>{row.last_price?.toFixed(2) ?? '--'}</td>
+              <td className={`px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums ${visual.text}`}>{scorePct(row.change_pct, 2)}</td>
+              <td className={`px-2 py-1.5 text-right text-[10px] ${visual.text}`}>{sectorConstituentStatus(row)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{ratioPct(row.turnover_rate, 2)}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-secondary">{moneyYi(row.amount)}</td>
               <td className="sticky right-0 z-20 w-[60px] min-w-[60px] border-l border-border bg-surface px-1.5 py-1.5">

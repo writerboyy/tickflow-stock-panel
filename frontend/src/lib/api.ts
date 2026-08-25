@@ -1488,6 +1488,7 @@ export interface LimitBoardSectorConstituent {
   name?: string | null
   tags?: string | null
   last_price?: number | null
+  limit_up?: number | null
   change_pct?: number | null
   amount?: number | null
   turnover_rate?: number | null
