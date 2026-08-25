@@ -322,6 +322,36 @@ function moneyValue(value: number | null | undefined): string {
     : `${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 元`
 }
 
+function queueAmount(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value.toLocaleString('zh-CN')}万`
+}
+
+function queueStatusLabel(row: LimitBoardRow): string {
+  const queue = row.queue
+  if (!queue) return '未接入'
+  if (queue.limit_up_gone) return '炸板'
+  if (queue.order_status === 'filled_estimate') return '推测成交'
+  if (queue.order_status === 'queueing') return '排队中'
+  if (queue.order_status === 'queueing_unmatched') return '待匹配'
+  if (queue.order_status === 'cancelled') return '已撤'
+  return '监听中'
+}
+
+function queueCell(row: LimitBoardRow): JSX.Element {
+  const queue = row.queue
+  if (!queue) return <span className="text-muted">未接入</span>
+  const front = queue.order?.front
+  const back = queue.order?.back
+  return <div className="min-w-[132px]" title="D202 排队估算，委托 ID 由手数匹配推测">
+    <div className={`font-medium ${queue.order_status === 'filled_estimate' ? 'text-bear' : queue.limit_up_gone ? 'text-danger' : 'text-secondary'}`}>{queueStatusLabel(row)}</div>
+    <div className="mt-0.5 font-mono text-[9px] text-muted">
+      {front ? `前 ${front.volume.toLocaleString('zh-CN')} 手 · ${queueAmount(front.amount)}` : `封单 ${queue.current?.volume?.toLocaleString('zh-CN') ?? '--'} 手`}
+    </div>
+    {front && back ? <div className="font-mono text-[9px] text-muted">后 {back.volume.toLocaleString('zh-CN')} 手 · {queueAmount(back.amount)}</div> : null}
+    <div className="font-mono text-[9px] text-muted">封单 {queue.current?.volume?.toLocaleString('zh-CN') ?? '--'} 手 · 撤 {queue.cancelled?.volume?.toLocaleString('zh-CN') ?? '--'}</div>
+  </div>
+}
+
 function poolAllocationLabel(mode: PoolAllocationMode): string {
   if (mode === 'global') return '旧配置'
   if (mode === 'available') return '当前可用金额'
@@ -622,6 +652,7 @@ function Row({
       </td>
       <td className="px-2 font-mono tabular-nums">{row.break_count ? `${row.break_count} 次` : '0 次'}</td>
       <td className="px-2 font-mono tabular-nums text-secondary">{row.bid1_volume ? row.bid1_volume.toLocaleString('zh-CN') : '--'}</td>
+      <td className="px-2">{queueCell(row)}</td>
       <td className="px-2"><span className={row.ws_active ? 'text-bear' : 'text-muted'}>{row.ws_active ? 'WS' : '轮询'}</span></td>
       <td className={`px-2 font-medium ${orderStatus.tone}`} title={row.auto_order_error || undefined}>
         <div>{orderStatus.label}</div>
@@ -680,13 +711,13 @@ function Table(props: TableProps) {
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
     <div className="max-w-full overflow-x-auto overscroll-x-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-      <table className={`w-full border-collapse ${mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1080px]'}`}>
+      <table className={`w-full border-collapse ${mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1210px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             <th className="w-[160px] px-2">题材</th>
             {mode === 'buy_pool' ? <><th className="px-2">限价</th><th className="px-2">数量</th><th className="px-2">金额</th><th className="px-2">委托状态</th><th className="px-2">行情</th></> : null}
-            {mode === 'pool' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
+            {mode === 'pool' ? <><th className="px-2">现价</th><th className="px-2">涨停价</th><th className="px-2">距涨停</th><th className="px-2">状态</th><th className="px-2">炸板次数</th><th className="px-2">买一封单</th><th className="px-2">排队</th><th className="px-2">行情</th><th className="px-2">委托状态</th></> : null}
             <th className={`sticky right-0 z-40 border-l border-border bg-surface px-2 text-right ${mode === 'pool' ? 'w-[250px]' : 'w-[172px]'}`}>操作</th>
           </tr>
         </thead>
@@ -1525,6 +1556,7 @@ export function LimitBoard() {
         titleExtra={<div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
           <span className="inline-flex items-center gap-1 rounded-md bg-elevated px-2 py-1 text-secondary"><Radio className="h-3 w-3 text-accent" />买入/打板池 {runtime.websocket_symbols}/{runtime.websocket_capacity} WS</span>
           <span className={`inline-flex items-center gap-1.5 ${runtime.websocket_status === 'connected' ? 'text-bear' : 'text-muted'}`}><Wifi className="h-3.5 w-3.5" />{runtime.websocket_status === 'connected' ? '买入池与打板池已接入 WS' : '买入池与打板池未接入 WS'}</span>
+          <span className={`inline-flex items-center gap-1.5 ${runtime.limit_up_queue.state === 'connected' ? 'text-bear' : runtime.limit_up_queue.state === 'unavailable' ? 'text-warning' : 'text-muted'}`} title={runtime.limit_up_queue.last_error || runtime.limit_up_queue.url}>D202 排队 {runtime.limit_up_queue.state === 'connected' ? '已连接' : runtime.limit_up_queue.state === 'connecting' ? '连接中' : runtime.limit_up_queue.state === 'unavailable' ? '不可用' : '待接入'}</span>
           <span className={runtime.trading_enabled ? 'text-bear' : 'text-warning'}>{runtime.trading_reason}</span>
         </div>}
         right={<div className="flex flex-wrap items-center justify-end gap-2"><button type="button" onClick={() => setAdvancedOpen(true)} className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2.5 text-xs text-secondary hover:bg-elevated hover:text-foreground"><SlidersHorizontal className="h-3.5 w-3.5" />高级设置</button><button type="button" title="刷新" onClick={() => view.refetch()} className="inline-flex h-8 w-8 items-center justify-center rounded-btn bg-elevated text-secondary hover:text-foreground"><RefreshCw className={`h-3.5 w-3.5 ${view.isFetching ? 'animate-spin' : ''}`} /></button></div>}

@@ -35,6 +35,7 @@ dependencies = [
     "openai>=1.40",               # OpenAI 兼容适配器复用 openai SDK
     "httpx[socks]>=0.27",
     "pyzmq>=26.0",
+    "websocket-client>=1.6",
     "platformdirs>=4.0",          # 桌面版用户数据目录 (跨平台持久可写)
     "winotify>=1.1; sys_platform == 'win32'",  # Windows 系统通知 (进操作中心)
     "plyer>=2.1",                 # 系统通知跨平台兜底 (macOS/Linux)

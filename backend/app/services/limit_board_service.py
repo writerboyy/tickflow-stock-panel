@@ -23,6 +23,7 @@ from app.services.limit_board_scoring import (
     technical_detail,
 )
 from app.services.limit_board_store import LimitBoardStore
+from app.services.limit_up_queue import LimitUpQueueService
 from app.services.qmt_trading import QmtOrderPreflightError
 
 
@@ -223,11 +224,13 @@ class LimitBoardService:
         self._history_reason = "正在读取涨停历史与溢价基因数据"
         self._last_scan_at: str | None = None
         self._last_error: str | None = None
+        self._queue_watcher = LimitUpQueueService(on_update=self._notify_updated)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._queue_watcher.start()
         add_fetch_listener = getattr(self.quote_service, "add_fetch_listener", None)
         if callable(add_fetch_listener):
             try:
@@ -271,6 +274,7 @@ class LimitBoardService:
 
     def stop(self) -> None:
         self._started = False
+        self._queue_watcher.stop()
         remove_fetch_listener = getattr(self.quote_service, "remove_fetch_listener", None)
         if callable(remove_fetch_listener):
             remove_fetch_listener(self._on_market_fetch)
@@ -2479,9 +2483,38 @@ class LimitBoardService:
             "auto_order_broker_time_raw": result.get("broker_order_time_raw"),
         })
         self._persist_runtime(runtime)
+        self._sync_queue_watchers(runtime, self.store.load_config())
         self._notify_updated()
 
+    def _sync_queue_watchers(
+        self,
+        runtime: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        """Project accepted limit-up orders into the optional D202 watcher."""
+        states = runtime.get("symbols") or {}
+        specs: dict[str, dict[str, Any]] = {}
+        for item in config.get("board_pool", []):
+            symbol = str(item.get("symbol") or "").strip().upper()
+            state = states.get(symbol) or {}
+            status = str(state.get("auto_order_status") or "")
+            volume = int(_finite(state.get("auto_order_volume")) or 0)
+            limit_up = _finite(state.get("limit_up"))
+            if (
+                symbol
+                and limit_up is not None
+            ):
+                specs[symbol] = {
+                    "limit_up": limit_up,
+                    "queue_key": state.get("auto_order_key") if status in {
+                        "accepted_pending", "submitted", "partial", "unknown",
+                    } else None,
+                    "queue_volume": volume if volume >= 100 and volume % 100 == 0 else 0,
+                }
+        self._queue_watcher.sync(specs)
+
     def _sync_websocket(self, runtime: dict[str, Any], config: dict[str, Any]) -> None:
+        self._sync_queue_watchers(runtime, config)
         hub = self._hub()
         if hub is None:
             self._last_error = "共享 WebSocket Hub 不可用"
@@ -2859,6 +2892,7 @@ class LimitBoardService:
                 "ws_active": symbol in self._ws_symbols,
             }
             row["name"] = self._resolve_name(symbol, row.get("name"))
+            row["queue"] = self._queue_watcher.snapshot(symbol)
             if not is_risk_warning_name(row["name"]):
                 board_pool.append(row)
         buy_pool = []
@@ -2872,6 +2906,7 @@ class LimitBoardService:
                 "ws_active": symbol in self._ws_symbols,
             }
             row["name"] = self._resolve_name(symbol, row.get("name"))
+            row["queue"] = self._queue_watcher.snapshot(symbol)
             if not is_risk_warning_name(row["name"]):
                 buy_pool.append(row)
         return rows, selected, board_pool, buy_pool
@@ -3603,6 +3638,7 @@ class LimitBoardService:
                     "interval_seconds": int(self._refresh_interval_seconds()),
                 },
                 "first_board_enabled": first_board_enabled,
+                "limit_up_queue": self._queue_watcher.status(),
             },
         }
 

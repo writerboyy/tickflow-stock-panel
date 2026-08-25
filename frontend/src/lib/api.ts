@@ -1414,6 +1414,31 @@ export interface LimitBoardRow {
   limit_up_count?: number
   next_day_red_rate?: number
   first_board_broken_rate?: number
+  queue?: LimitUpQueueSnapshot | null
+}
+
+export interface LimitUpQueueSnapshot {
+  state: 'live' | string
+  code?: string
+  price?: number | null
+  as_of?: string | null
+  first?: { count: number; volume: number; amount: number }
+  current?: { count: number; volume: number; amount: number }
+  new_add?: { count: number; volume: number; amount: number }
+  cancelled?: { count: number; volume: number; amount: number }
+  executed?: { count: number; volume: number; amount: number }
+  net_change_amount?: number
+  inflow_streak?: number
+  outflow_streak?: number
+  limit_up_gone?: boolean
+  limit_up_may_gone?: boolean
+  order_status?: 'watching' | 'queueing_unmatched' | 'queueing' | 'cancelled' | 'filled_estimate' | string
+  order?: {
+    hand_count: number
+    front: { volume: number; count: number; amount: number; last_reduction: number }
+    back: { volume: number; count: number; amount: number; last_reduction: number }
+    elapsed_ms: number
+  } | null
 }
 
 export interface LimitBoardQuoteSnapshot {
@@ -1658,6 +1683,12 @@ export interface LimitBoardView {
       interval_seconds: number
     }
     first_board_enabled: boolean
+    limit_up_queue: {
+      state: string
+      url: string
+      symbols: number
+      last_error?: string | null
+    }
   }
 }
 
