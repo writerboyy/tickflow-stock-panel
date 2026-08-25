@@ -23,6 +23,7 @@ from app.services.limit_board_scoring import (
     technical_detail,
 )
 from app.services.limit_board_store import LimitBoardStore
+from app.services.qmt_trading import QmtOrderPreflightError
 
 
 logger = logging.getLogger(__name__)
@@ -1599,7 +1600,29 @@ class LimitBoardService:
             self.store.save_runtime(runtime)
             self._depth.clear()
             self._preselection_quotes.clear()
+        changed = False
+        for state in (runtime.get("symbols") or {}).values():
+            if (
+                state.get("auto_order_status") == "unknown"
+                and self._is_known_preflight_error(state.get("auto_order_error"))
+            ):
+                state["auto_order_status"] = "blocked"
+                changed = True
+        for order in (runtime.get("buy_orders") or {}).values():
+            if (
+                order.get("order_status") == "unknown"
+                and self._is_known_preflight_error(order.get("order_error"))
+            ):
+                order["order_status"] = "blocked"
+                changed = True
+        if changed:
+            self.store.save_runtime(runtime)
         return runtime
+
+    @staticmethod
+    def _is_known_preflight_error(error: object) -> bool:
+        message = str(error or "")
+        return message.startswith("QMT 未返回信用账户可买额度")
 
     def _refresh_history(self, config: dict[str, Any]) -> None:
         today = cn_today()
@@ -2380,7 +2403,7 @@ class LimitBoardService:
             result = {
                 "symbol": symbol,
                 "key": key,
-                "status": "blocked" if isinstance(exc, ValueError) else "unknown",
+                "status": "blocked" if isinstance(exc, (ValueError, QmtOrderPreflightError)) else "unknown",
                 "order_sys_id": None,
                 "error": str(exc),
                 "volume": None,
@@ -3973,7 +3996,7 @@ class LimitBoardService:
             }
         except Exception as exc:  # noqa: BLE001
             result = {
-                "status": "blocked" if isinstance(exc, ValueError) else "unknown",
+                "status": "blocked" if isinstance(exc, (ValueError, QmtOrderPreflightError)) else "unknown",
                 "order_sys_id": None,
                 "error": str(exc),
                 "volume": preview["volume"],

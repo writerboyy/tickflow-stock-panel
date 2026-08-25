@@ -15,6 +15,7 @@ from app.services.limit_board_service import (
 )
 from app.services.limit_board_store import LimitBoardStore, default_config
 from app.services.quote_service import QuoteService
+from app.services.qmt_trading import QmtOrderPreflightError
 
 
 class FakeRepo:
@@ -2295,6 +2296,31 @@ def test_board_pool_auto_trade_defaults_to_one_lot(tmp_path):
     result = service._order_results.get_nowait()
     assert result["allocation_mode"] == "lot"
     assert result["volume"] == 100
+
+
+def test_board_pool_auto_trade_marks_qmt_preflight_failure_blocked(tmp_path):
+    class PreflightQmt(FakeQmt):
+        def submit_order(self, _request):
+            raise QmtOrderPreflightError("QMT 未返回信用账户可买额度")
+
+    qmt = PreflightQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+
+    assert service._order_slots.acquire(blocking=False)
+    service._submit_auto_order(
+        "600000.SH", 11.0, "limit-board-test", "lot", None,
+        "2026-08-13T10:00:00+08:00", "2026-08-13T10:00:00+08:00",
+    )
+
+    result = service._order_results.get_nowait()
+    assert result["status"] == "blocked"
+    assert result["order_sys_id"] is None
+    assert "未返回信用账户可买额度" in result["error"]
 
 
 def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):

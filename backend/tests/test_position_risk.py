@@ -1011,6 +1011,40 @@ def test_qmt_submit_accepts_wrapped_batch_result(tmp_path: Path):
     assert result["order_sys_id"] == "wrapped-1"
 
 
+def test_qmt_submit_does_not_mark_accepted_without_order_identifier(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "submit_orders_batch":
+            return [{"success": True, "accepted": True}]
+        if method == "query_orders":
+            return []
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    request = {
+        "idempotency_key": "missing-order-id",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "volume": 100,
+        "price": 35,
+        "price_type": "LIMIT",
+    }
+    with pytest.raises(QmtRpcError, match="未提供委托号"):
+        service.submit_order(request)
+
+    saved = service._known_order("missing-order-id")
+    assert saved["status"] == "unknown"
+    assert saved["order_sys_id"] is None
+    assert saved["user_order_id"] == "position_risk:missing-order-id"
+    assert calls == ["get_asset", "submit_orders_batch", "query_orders"]
+
+
 def test_qmt_submit_reconciles_remote_order_when_batch_response_shape_is_invalid(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True

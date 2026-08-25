@@ -26,6 +26,10 @@ class QmtRpcError(RuntimeError):
     pass
 
 
+class QmtOrderPreflightError(QmtRpcError):
+    """The order was rejected before a submit request was sent to QMT."""
+
+
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _SAFE_B64_PREFIX = "b64s:"
 _SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
@@ -947,14 +951,17 @@ class QmtTradingService:
             if existing:
                 return existing
             action = str(request.get("action") or "").upper()
-            snapshot = self._order_preflight(action)
-            allocation = None
-            if request.get("allocation_mode"):
-                allocation = self._allocation_preview(request, snapshot)
-                request = {**request, "volume": allocation["volume"]}
-                if allocation["volume"] < 100:
-                    raise ValueError(allocation["reason"] or "金额不足一手")
-            normalized = self._validate_order(request, snapshot)
+            try:
+                snapshot = self._order_preflight(action)
+                allocation = None
+                if request.get("allocation_mode"):
+                    allocation = self._allocation_preview(request, snapshot)
+                    request = {**request, "volume": allocation["volume"]}
+                    if allocation["volume"] < 100:
+                        raise ValueError(allocation["reason"] or "金额不足一手")
+                normalized = self._validate_order(request, snapshot)
+            except QmtRpcError as exc:
+                raise QmtOrderPreflightError(str(exc)) from exc
             order_tag = f"{strategy_name}:{idempotency_key}"
             params = {
                 "stock_code": normalized["symbol"], "action": normalized["action"],
@@ -1003,7 +1010,9 @@ class QmtTradingService:
             qmt_response_at = _now()
             if result is None:
                 remote = self._remote_order_for_submission(idempotency_key, order_tag)
-                if remote is not None:
+                if remote is not None and (
+                    remote.get("order_sys_id") or remote.get("user_order_id")
+                ):
                     row.update({
                         key: value for key, value in remote.items()
                         if value is not None
@@ -1039,11 +1048,40 @@ class QmtTradingService:
                 raise QmtRpcError(
                     f"{row['error']}；该幂等键不会自动重发" if uncertain else str(row["error"]),
                 )
+            result_order_sys_id = str(result.get("order_sys_id") or "").strip() or None
+            result_user_order_id = str(result.get("user_order_id") or "").strip() or None
+            if not result_order_sys_id and not result_user_order_id:
+                remote = self._remote_order_for_submission(idempotency_key, order_tag)
+                if remote is not None and (
+                    remote.get("order_sys_id") or remote.get("user_order_id")
+                ):
+                    row.update({key: value for key, value in remote.items() if value is not None})
+                    row.update(
+                        idempotency_key=idempotency_key,
+                        strategy_name=str(row.get("strategy_name") or strategy_name),
+                        status=str(remote.get("status") or "accepted_pending"),
+                        error=None,
+                        qmt_response_at=qmt_response_at,
+                        qmt_accepted_at=qmt_response_at,
+                        updated_at=qmt_response_at,
+                    )
+                    self._remember_order(row)
+                    return row
+                row.update(
+                    status="unknown",
+                    qmt_response_at=qmt_response_at,
+                    updated_at=qmt_response_at,
+                    error="QMT 返回已受理但未提供委托号，且委托列表未找到对应订单",
+                )
+                self._remember_order(row)
+                raise QmtRpcError(
+                    "QMT 返回已受理但未提供委托号，且委托列表未找到对应订单；该幂等键不会自动重发",
+                )
             broker_at, broker_raw, broker_field = _broker_time(result, created_at)
             row.update(
                 status="accepted_pending",
-                order_sys_id=str(result.get("order_sys_id") or "") or None,
-                user_order_id=str(result.get("user_order_id") or order_tag),
+                order_sys_id=result_order_sys_id,
+                user_order_id=result_user_order_id,
                 qmt_response_at=qmt_response_at,
                 qmt_accepted_at=qmt_response_at,
                 broker_order_at=broker_at,

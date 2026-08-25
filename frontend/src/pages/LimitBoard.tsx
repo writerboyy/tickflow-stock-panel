@@ -82,10 +82,10 @@ const STATUS: Record<string, { label: string; tone: string }> = {
 
 const ORDER_STATUS: Record<string, { label: string; tone: string }> = {
   submitting: { label: '提交中', tone: 'text-accent' },
-  accepted_pending: { label: '已受理', tone: 'text-warning' },
+  accepted_pending: { label: '已委托', tone: 'text-warning' },
   filled: { label: '已成交', tone: 'text-bear' },
   rejected: { label: '已拒绝', tone: 'text-danger' },
-  unknown: { label: '待人工核对', tone: 'text-danger' },
+  unknown: { label: '委托未确认', tone: 'text-danger' },
   blocked: { label: '交易未就绪', tone: 'text-muted' },
 }
 
