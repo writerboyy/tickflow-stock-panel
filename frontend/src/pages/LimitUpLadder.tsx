@@ -1475,7 +1475,13 @@ function ExtConfigDialog({ fields, onSave, onClose }: {
 
 // ===== 主页面 =====
 
-export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNode } = {}) {
+export function LimitUpLadder({
+  headerContent,
+  onAddToPool: onAddToPoolFromParent,
+}: {
+  headerContent?: React.ReactNode
+  onAddToPool?: (stock: LimitLadderStock) => void
+} = {}) {
   const queryClient = useQueryClient()
   const [asOf, setAsOf] = useState('')
   const [direction, setDirection] = useState<Direction>(() => storage.limitLadderDirection.get('up'))
@@ -1817,7 +1823,13 @@ export function LimitUpLadder({ headerContent }: { headerContent?: React.ReactNo
             poolSymbols={poolSymbols}
             poolBusy={addToPool.isPending}
             poolAvailable={limitBoardView.data != null}
-            onAddToPool={stock => addToPool.mutate(stock)}
+            onAddToPool={stock => {
+              if (onAddToPoolFromParent) {
+                onAddToPoolFromParent(stock)
+                return
+              }
+              addToPool.mutate(stock)
+            }}
           />
         ))}
       </div>

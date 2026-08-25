@@ -41,6 +41,7 @@ import {
   type LimitBoardSectorStrengthRow,
   type LimitBoardSentimentPoint,
   type LimitBoardView,
+  type LimitLadderStock,
   type MarketHeatItem,
   type PremiumGene,
 } from '@/lib/api'
@@ -1442,7 +1443,15 @@ export function LimitBoard() {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
-        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder headerContent={sentimentPanel} /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder
+          headerContent={sentimentPanel}
+          onAddToPool={(stock: LimitLadderStock) => setAllocationDialog({
+            row: manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null),
+            kind: 'board',
+            initialMode: 'lot',
+            initialValue: null,
+          })}
+        /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heat.data?.lists.hot_day.items ?? []} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={heat.isPending} hotError={heat.isError} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
