@@ -388,7 +388,13 @@ function LimitBoardAllocationDialog({
     kind === 'edit' ? (initialCreditBuyMode ?? row.credit_buy_mode ?? 'financing') : (initialCreditBuyMode ?? 'financing'),
   )
   const price = row.last_price ?? row.order_price ?? null
-  const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
+  const qmt = useQuery({
+    queryKey: QK.positionRiskQmt,
+    queryFn: api.qmtStatus,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+    placeholderData: previous => previous,
+  })
   const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
   const creditBuy = String(qmt.data?.account_type || '').toUpperCase() === 'CREDIT'
   const cachedAccount = qmt.data?.account
@@ -428,10 +434,10 @@ function LimitBoardAllocationDialog({
   const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
   const genePassed = geneData?.passed ?? geneDetail?.passed
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
-  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'global' ? 'available' : mode === 'volume' ? 'fixed' : mode
-  const previewValue = mode === 'volume'
-    ? (price != null && price > 0 ? price * value : null)
-    : mode === 'fixed' ? value : null
+  // Fetch one authoritative account basis and derive the other lot/ratio modes
+  // locally. Switching the selector should not issue another QMT RPC request.
+  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'fixed' ? 'fixed' : 'quarter'
+  const previewValue = mode === 'fixed' ? value : null
   const allocationPreview = useQuery({
     queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue, creditBuyMode),
     queryFn: () => api.qmtPreviewOrder({
@@ -447,8 +453,40 @@ function LimitBoardAllocationDialog({
     enabled: Boolean(qmtReady && validPrice),
     retry: false,
     placeholderData: previous => previous,
+    staleTime: 500,
   })
-  const previewOrder = allocationPreview.data?.preview
+  const basePreview = allocationPreview.data?.preview
+  const previewOrder = useMemo(() => {
+    if (!basePreview || mode === 'fixed') return basePreview
+    const ratio = mode === 'available'
+      ? 1
+      : mode === 'sixth'
+        ? 1 / 6
+        : mode === 'fifth'
+          ? 0.2
+          : mode === 'quarter'
+            ? 0.25
+            : 0
+    const basisAmount = Number(basePreview.basis_amount) || 0
+    const requestedVolume = mode === 'lot' ? 100 : mode === 'volume' ? Math.max(0, value) : null
+    const requestedAmount = requestedVolume != null
+      ? requestedVolume * (basePreview.price || 0)
+      : basisAmount * ratio
+    const targetAmount = Math.min(requestedAmount, basisAmount)
+    const lotVolume = Math.floor(targetAmount / basePreview.price / 100) * 100
+    const volume = requestedVolume != null ? Math.min(requestedVolume, lotVolume) : lotVolume
+    const actualAmount = Math.round(volume * basePreview.price * 100) / 100
+    return {
+      ...basePreview,
+      allocation_mode: mode,
+      allocation_value: mode === 'volume' ? value : null,
+      target_amount: Math.round(targetAmount * 100) / 100,
+      actual_amount: actualAmount,
+      volume,
+      capped: targetAmount < requestedAmount || actualAmount < requestedAmount,
+      reason: volume < 100 ? '金额不足一手' : null,
+    }
+  }, [basePreview, mode, value])
   const effectiveCreditBuyMode = previewOrder?.credit_buy_mode ?? creditBuyMode
   const estimatedVolume = price != null && price > 0
     ? previewOrder?.volume ?? 0
@@ -1447,15 +1485,15 @@ export function LimitBoard() {
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number; creditBuyMode: QmtCreditBuyMode }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
-    onSuccess: () => { setAllocationDialog(null); refresh() },
+    onSuccess: () => { setAllocationDialog(null); void refresh() },
   })
   const addBuyPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode, orderPrice }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'; allocationValue?: number; creditBuyMode: QmtCreditBuyMode; orderPrice?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode, orderPrice),
-    onSuccess: () => { setAllocationDialog(null); refresh() },
+    onSuccess: () => { setAllocationDialog(null); void refresh() },
   })
   const updatePool = useMutation({
     mutationFn: ({ row, enabled, orderMode, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; enabled: boolean; orderMode: 'sweep' | 'queue'; allocationMode?: PoolAllocationMode; allocationValue?: number; creditBuyMode?: QmtCreditBuyMode }) => api.limitBoardPoolUpdate(row.symbol, enabled, orderMode, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
-    onSuccess: () => { setAllocationDialog(null); refresh() },
+    onSuccess: () => { setAllocationDialog(null); void refresh() },
   })
   const removePool = useMutation({
     mutationFn: (row: LimitBoardRow) => api.limitBoardPoolRemove(row.symbol, view.data?.revision ?? 0),

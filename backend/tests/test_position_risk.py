@@ -856,6 +856,31 @@ def test_qmt_order_preview_uses_recent_sync_snapshot(tmp_path: Path):
     assert preview["volume"] == 300
 
 
+def test_qmt_account_cache_warms_status_and_buy_preview(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+    calls: list[str] = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        assert method == "get_asset"
+        return {"cash": 120_000}
+
+    service.client.call = fake_call
+    account = service._sync_account_cache()
+
+    assert account["cash"] == 120_000
+    assert service.status()["account"]["cash"] == 120_000
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+    assert preview["volume"] == 800
+    assert calls == ["get_asset"]
+
+
 def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):
     service = QmtTradingService(
         tmp_path,

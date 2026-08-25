@@ -1167,6 +1167,8 @@ export interface QmtStatus {
   auto_sync_interval_seconds: number
   last_probe_at: string | null
   last_sync_at: string | null
+  account_age_ms?: number | null
+  account_stale?: boolean
   state: 'not_configured' | 'unknown' | 'ready' | 'error'
   reason: string
   latency_ms?: number

@@ -114,7 +114,13 @@ export function QmtTradePanel({
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
-  const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
+  const qmt = useQuery({
+    queryKey: QK.positionRiskQmt,
+    queryFn: api.qmtStatus,
+    refetchInterval: 30_000,
+    staleTime: 5_000,
+    placeholderData: previous => previous,
+  })
   const qmtReady = qmt.data?.configured === true && qmt.data.state === 'ready'
   const orders = useQuery({
     queryKey: QK.positionRiskQmtOrders,
@@ -190,6 +196,7 @@ export function QmtTradePanel({
     enabled: qmtReady && validReferencePrice && validAllocation,
     retry: false,
     placeholderData: previous => previous,
+    staleTime: 500,
   })
   const basePreview = preview.data?.preview
   const serverPreview = useMemo(() => {

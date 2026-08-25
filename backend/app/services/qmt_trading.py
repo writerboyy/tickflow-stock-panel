@@ -453,6 +453,8 @@ class QmtTradingService:
         self._last_status: dict[str, Any] = {}
         self._last_snapshot: dict[str, Any] | None = None
         self._last_snapshot_monotonic = 0.0
+        self._last_account: dict[str, Any] | None = None
+        self._last_account_monotonic = 0.0
         self._orders: dict[str, dict[str, Any]] = {}
         self._db_path = data_dir / "user_data" / "position_risk" / "runtime.sqlite3"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,7 +469,15 @@ class QmtTradingService:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            cached_account = dict(self._last_snapshot.get("account") or {}) if self._last_snapshot else None
+            cached_account = (
+                dict(self._last_account)
+                if self._last_account is not None
+                else dict(self._last_snapshot.get("account") or {}) if self._last_snapshot else None
+            )
+            account_age_ms = (
+                round(max(0.0, time.monotonic() - self._last_account_monotonic) * 1000, 1)
+                if self._last_account is not None else None
+            )
             status = {
                 "configured": self.client.configured,
                 "trade_authorized": self.trade_authorized,
@@ -482,6 +492,8 @@ class QmtTradingService:
                 "last_probe_at": self._last_status.get("last_probe_at"),
                 "last_sync_at": self._last_snapshot.get("synced_at") if self._last_snapshot else None,
                 "account": cached_account or None,
+                "account_age_ms": account_age_ms,
+                "account_stale": account_age_ms is not None and account_age_ms > self.auto_sync_interval * 1000,
                 "state": self._last_status.get("state", "not_configured" if not self.client.configured else "unknown"),
                 "reason": self._last_status.get("reason") or self.client.configuration_reason,
                 "latency_ms": self._last_status.get("latency_ms"),
@@ -708,6 +720,8 @@ class QmtTradingService:
         with self._lock:
             self._last_snapshot = snapshot
             self._last_snapshot_monotonic = time.monotonic()
+            self._last_account = dict(snapshot.get("account") or {})
+            self._last_account_monotonic = self._last_snapshot_monotonic
             self._last_status = {
                 "state": "ready",
                 "reason": "QMT账户正在自动同步" if self._auto_thread else "账户、持仓和委托已同步",
@@ -715,6 +729,27 @@ class QmtTradingService:
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
             }
         return snapshot
+
+    def _sync_account_cache(self) -> dict[str, Any]:
+        """Warm the account amount independently of the slower full snapshot."""
+        asset = self.client.call("get_asset", {"account_id": self.client.account_id})
+        if not isinstance(asset, dict):
+            raise QmtRpcError("QMT 资产响应格式无效")
+        account = {
+            "name": self.client.account_id,
+            **_normalise_account(asset, self.account_type),
+        }
+        with self._lock:
+            self._last_account = account
+            self._last_account_monotonic = time.monotonic()
+            if self._last_status.get("state") != "error":
+                self._last_status = {
+                    "state": "ready",
+                    "reason": "QMT账户金额已更新，持仓正在同步",
+                    "last_probe_at": _now(),
+                    "latency_ms": self._last_status.get("latency_ms"),
+                }
+        return account
 
     def sync_into(self, position_risk_service: Any) -> dict[str, Any]:
         with self._sync_write_lock:
@@ -736,7 +771,17 @@ class QmtTradingService:
             self._auto_stop.clear()
 
             def run() -> None:
+                first_cycle = True
                 while not self._auto_stop.is_set():
+                    if first_cycle:
+                        # Account cash is needed by the UI immediately; do not
+                        # make it wait for positions, orders and trades.
+                        threading.Thread(
+                            target=self._warm_account_cache,
+                            name="qmt-account-cache",
+                            daemon=True,
+                        ).start()
+                        first_cycle = False
                     try:
                         self.sync_into(position_risk_service)
                     except Exception:  # 状态由 sync 记录，下一轮自动重试
@@ -747,6 +792,12 @@ class QmtTradingService:
             self._auto_thread = threading.Thread(target=run, name="qmt-auto-sync", daemon=True)
             self._auto_thread.start()
         return True
+
+    def _warm_account_cache(self) -> None:
+        try:
+            self._sync_account_cache()
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self._auto_stop.set()
@@ -958,7 +1009,11 @@ class QmtTradingService:
         with self._lock:
             cached_snapshot = self._last_snapshot
             snapshot_age = time.monotonic() - self._last_snapshot_monotonic
-        if cached_snapshot is not None and snapshot_age <= self.auto_sync_interval:
+            cached_account = self._last_account
+            account_age = time.monotonic() - self._last_account_monotonic
+        if action == "BUY" and cached_account is not None and account_age <= self.auto_sync_interval:
+            snapshot = {"account": dict(cached_account), "positions": []}
+        elif cached_snapshot is not None and snapshot_age <= self.auto_sync_interval:
             if action == "BUY":
                 snapshot = {
                     "account": dict(cached_snapshot.get("account") or {}),

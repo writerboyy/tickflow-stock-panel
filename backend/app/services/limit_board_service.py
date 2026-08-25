@@ -177,7 +177,7 @@ class LimitBoardService:
         self._score_lock = threading.Lock()
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=3)
         self._order_results: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=10)
-        self._order_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="limit-board-order")
+        self._order_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="limit-board-order")
         self._order_slots = threading.BoundedSemaphore(4)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -2637,6 +2637,24 @@ class LimitBoardService:
         if callable(notify):
             notify()
 
+    def _schedule_pool_refresh(self, runtime: dict[str, Any] | None, config: dict[str, Any]) -> None:
+        """Run subscription and market refresh work after the API response path."""
+        def refresh() -> None:
+            try:
+                if runtime is not None:
+                    self._sync_websocket(runtime, config)
+                self._refresh_symbol_consumer()
+                self._on_market_fetch()
+                self._notify_updated()
+            except Exception:  # noqa: BLE001
+                logger.exception("打板池变更后的行情刷新失败")
+
+        try:
+            self._order_executor.submit(refresh)
+        except RuntimeError:
+            # During shutdown the durable config/runtime update is still valid.
+            logger.debug("打板池变更后的行情刷新未调度", exc_info=True)
+
     def _refresh_symbol_consumer(self, additional_symbols: set[str] | None = None) -> None:
         setter = getattr(self.quote_service, "set_symbol_consumer", None)
         if not callable(setter):
@@ -3924,10 +3942,7 @@ class LimitBoardService:
             })
 
         saved = self.store.update(revision, update)
-        self._refresh_symbol_consumer()
-        self._sync_websocket(self._runtime_for_today(), saved)
-        self._on_market_fetch()
-        self._notify_updated()
+        self._schedule_pool_refresh(self._runtime_for_today(), saved)
         return saved
 
     def update_pool(
@@ -3971,8 +3986,7 @@ class LimitBoardService:
                 member["credit_buy_mode"] = credit_buy_mode
 
         saved = self.store.update(revision, update)
-        self._on_market_fetch()
-        self._notify_updated()
+        self._schedule_pool_refresh(None, saved)
         return saved
 
     def add_buy_pool(
@@ -4113,10 +4127,7 @@ class LimitBoardService:
             "credit_buy_mode_reason": result.get("credit_buy_mode_reason") or preview.get("credit_buy_mode_reason"),
         })
         self._persist_runtime(runtime)
-        self._refresh_symbol_consumer()
-        self._sync_websocket(runtime, saved)
-        self._on_market_fetch()
-        self._notify_updated()
+        self._schedule_pool_refresh(runtime, saved)
         return {"config": saved, "order": {"symbol": cleaned, **result}}
 
     def remove_buy_pool(self, symbol: str, revision: int) -> dict[str, Any]:
