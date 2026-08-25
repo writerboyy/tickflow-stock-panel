@@ -1004,7 +1004,7 @@ function SectorStrengthTable({
     <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_20%_34%_24%]' : 'lg:grid-cols-[25%_30%_45%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 items-center border-b border-border px-2 py-1.5">
-          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">热股雷达</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">即将涨停 · 行情5秒</div></div>
+          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
           <div className="flex shrink-0 items-center gap-1 text-[8px] font-medium"><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-warning/40 bg-warning/10 px-1 py-0.5 text-warning">临板</span></div>
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
@@ -1045,7 +1045,7 @@ function SectorStrengthTable({
               </div>
             })}
           </div>
-        </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取热股雷达' : hotError ? '热股雷达暂不可用' : '暂无热股数据'}</div>}
+        </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[360px] table-fixed border-collapse">
