@@ -511,6 +511,11 @@ class QmtTradingService:
                 (key, json.dumps(row, ensure_ascii=False), _now()),
             )
 
+    def _remember_account(self, account: dict[str, Any]) -> None:
+        with self._lock:
+            self._last_account = dict(account)
+            self._last_account_monotonic = time.monotonic()
+
     def _known_order(self, key: str) -> dict[str, Any] | None:
         with self._lock:
             if key in self._orders:
@@ -1004,8 +1009,9 @@ class QmtTradingService:
 
     def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "").upper()
-        # Preview reads the auto-sync snapshot for responsiveness; submission
-        # still performs a fresh QMT preflight before sending the order.
+        # Preview and an immediately following submission share the recent
+        # account snapshot for responsiveness. QMT still performs the final
+        # acceptance and balance validation when the order is sent.
         with self._lock:
             cached_snapshot = self._last_snapshot
             snapshot_age = time.monotonic() - self._last_snapshot_monotonic
@@ -1038,7 +1044,9 @@ class QmtTradingService:
             asset = self.client.call("get_asset", {"account_id": self.client.account_id})
             if not isinstance(asset, dict):
                 raise QmtRpcError("QMT 资产响应格式无效")
-            return {"account": _normalise_account(asset, self.account_type), "positions": []}
+            account = _normalise_account(asset, self.account_type)
+            self._remember_account(account)
+            return {"account": account, "positions": []}
         if action != "SELL":
             raise ValueError("交易方向必须是买入或卖出")
         raw_positions = self.client.call("get_positions", {"account_id": self.client.account_id})
@@ -1071,7 +1079,13 @@ class QmtTradingService:
                 return existing
             action = str(request.get("action") or "").upper()
             try:
-                snapshot = self._order_preflight(action)
+                with self._lock:
+                    cached_account = self._last_account
+                    account_age = time.monotonic() - self._last_account_monotonic
+                if action == "BUY" and cached_account is not None and account_age <= self.auto_sync_interval:
+                    snapshot = {"account": dict(cached_account), "positions": []}
+                else:
+                    snapshot = self._order_preflight(action)
                 allocation = None
                 if request.get("allocation_mode"):
                     allocation = self._allocation_preview(request, snapshot)

@@ -914,6 +914,69 @@ def test_qmt_submit_recomputes_allocation_before_sending(tmp_path: Path):
     assert calls == ["get_asset", "submit_orders_batch"]
 
 
+def test_qmt_submit_reuses_recent_account_cache(tmp_path: Path):
+    service = QmtTradingService(
+        tmp_path,
+        _qmt_settings(qmt_trade_enabled=True),
+    )
+    service.trade_enabled = True
+    service._last_account = {"cash": 120_000}
+    service._last_account_monotonic = time.monotonic()
+    calls: list[str] = []
+
+    def fake_call(method, params):
+        calls.append(method)
+        if method == "submit_orders_batch":
+            assert params["orders"][0]["volume"] == 800
+            return [{"success": True, "accepted": True, "order_sys_id": "cached-1"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "cached-submit-1",
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    })
+
+    assert result["status"] == "accepted_pending"
+    assert calls == ["submit_orders_batch"]
+
+
+def test_qmt_submit_reuses_account_from_immediately_prior_preview(tmp_path: Path):
+    service = QmtTradingService(
+        tmp_path,
+        _qmt_settings(qmt_trade_enabled=True),
+    )
+    service.trade_enabled = True
+    calls: list[str] = []
+
+    def fake_call(method, params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 120_000}
+        if method == "submit_orders_batch":
+            assert params["orders"][0]["volume"] == 800
+            return [{"success": True, "accepted": True, "order_sys_id": "preview-cache-1"}]
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    request = {
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 35,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+    }
+    service.preview_order(request)
+    result = service.submit_order({**request, "idempotency_key": "preview-cache-submit-1"})
+
+    assert result["status"] == "accepted_pending"
+    assert calls == ["get_asset", "submit_orders_batch"]
+
+
 def test_qmt_submit_sends_effective_credit_buy_mode_after_fallback(tmp_path: Path):
     service = QmtTradingService(
         tmp_path,
