@@ -517,7 +517,14 @@ export function LargeOrders() {
   const options = useQuery({ queryKey: QK.positionRiskOptions, queryFn: api.positionRiskOptions })
   const events = useQuery({ queryKey: QK.positionRiskEvents, queryFn: api.positionRiskEvents })
   const queryClient = useQueryClient()
-  const qmtProbe = useMutation({ mutationFn: api.qmtProbe, onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRiskQmt }) })
+  const qmtProbe = useMutation({
+    mutationFn: api.qmtProbe,
+    onSuccess: result => {
+      queryClient.setQueryData(QK.positionRiskQmt, result)
+      const latency = result.latency_ms != null ? `，延迟 ${result.latency_ms}ms` : ''
+      toast(`QMT 连接正常${latency}`, 'success')
+    },
+  })
   const qmtSync = useMutation({
     mutationFn: api.qmtSync,
     onSuccess: result => {
