@@ -513,14 +513,23 @@ export function LargeOrders() {
   const openRiskSettings = (row: PositionRiskPosition, tab: RiskModuleTab) => setSelected({ row, tab })
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
+  const qmtProbeQuery = useQuery({
+    queryKey: QK.positionRiskQmtProbe,
+    queryFn: () => api.qmtProbe(true),
+    enabled: Boolean(qmt.data?.configured),
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: true,
+    retry: false,
+  })
   const qmtOrders = useQuery({ queryKey: QK.positionRiskQmtOrders, queryFn: api.qmtOrders, enabled: Boolean(qmt.data?.configured), refetchInterval: 15_000 })
   const options = useQuery({ queryKey: QK.positionRiskOptions, queryFn: api.positionRiskOptions })
   const events = useQuery({ queryKey: QK.positionRiskEvents, queryFn: api.positionRiskEvents })
   const queryClient = useQueryClient()
   const qmtProbe = useMutation({
-    mutationFn: api.qmtProbe,
+    mutationFn: () => api.qmtProbe(),
     onSuccess: result => {
       queryClient.setQueryData(QK.positionRiskQmt, result)
+      queryClient.setQueryData(QK.positionRiskQmtProbe, result)
       const latency = result.latency_ms != null ? `，延迟 ${result.latency_ms}ms` : ''
       toast(`QMT 连接正常${latency}`, 'success')
     },
@@ -623,6 +632,9 @@ export function LargeOrders() {
           <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(data.account.total_asset)}</b></span>
           <span className={cn('inline-flex items-center gap-1.5', data.runtime.status === 'websocket' ? 'text-bear' : data.runtime.status === 'polling_degraded' || data.runtime.status === 'reconnecting' ? 'text-warning' : 'text-muted')}><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
           <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bear' : qmt.data?.configured ? 'text-warning' : 'text-muted')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
+          {qmt.data?.configured && <span className={cn('text-[11px]', qmtProbeQuery.isFetching ? 'text-warning' : qmtProbeQuery.isError ? 'text-danger' : 'text-muted')} title="每 30 秒自动探测一次 QMT 连接">
+            {qmtProbeQuery.isFetching ? '检查中…' : qmtProbeQuery.isError ? '延迟获取失败' : qmtProbeQuery.data?.latency_ms != null ? `延迟 ${qmtProbeQuery.data.latency_ms}ms` : qmt.data?.latency_ms != null ? `延迟 ${qmt.data.latency_ms}ms` : '延迟 --'}
+          </span>}
           <span className="inline-flex items-center rounded-btn bg-elevated p-0.5" title="切换 QMT 连接位置">
             {(['remote', 'local'] as const).map(mode => {
               const active = (qmt.data?.connection_mode ?? 'remote') === mode

@@ -28,6 +28,7 @@ export const QK = {
   positionRiskOptions: ['position-risk', 'options'] as const,
   positionRiskEvents: ['position-risk', 'events'] as const,
   positionRiskQmt: ['position-risk', 'qmt'] as const,
+  positionRiskQmtProbe: ['position-risk', 'qmt-probe'] as const,
   positionRiskQmtOrders: ['position-risk', 'qmt-orders'] as const,
   positionRiskQmtPriceLimit: (symbol: string) => ['position-risk', 'qmt-price-limit', symbol] as const,
   positionRiskQmtPreview: (symbol: string, action: string, priceType: string, price: number | null, mode: string, value: number | null, creditBuyMode = 'collateral') => (

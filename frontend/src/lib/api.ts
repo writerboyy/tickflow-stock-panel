@@ -3462,7 +3462,7 @@ export const api = {
   positionRiskEvents: () =>
     request<{ events: PositionRiskEvent[]; count: number }>('/api/position-risk/events'),
   qmtStatus: () => request<QmtStatus>('/api/position-risk/qmt/status'),
-  qmtProbe: () => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST' }),
+  qmtProbe: (quiet = false) => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST', quiet }),
   qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
   qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
   qmtConnectionMode: (mode: 'remote' | 'local') => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/connection-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
