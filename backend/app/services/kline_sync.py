@@ -504,9 +504,7 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
     if "timestamp" in df.columns:
         df = df.with_columns(
-            # TickFlow 的 epoch 是 UTC；策略、交易时段和页面均使用北京时间的
-            # 无时区 wall-clock，必须在落库前转换，否则 09:30 会被存成 01:30。
-            pl.from_epoch("timestamp", time_unit="ms").dt.offset_by("8h").alias("datetime"),
+            pl.from_epoch("timestamp", time_unit="ms").alias("datetime"),
         ).drop("timestamp")
         for drop_col in ("trade_time", "trade_date"):
             if drop_col in df.columns:

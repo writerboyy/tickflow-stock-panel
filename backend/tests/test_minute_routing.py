@@ -63,8 +63,8 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
     )
 
 
-def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
-    """TickFlow epoch 01:35 UTC 必须以 09:35 北京时间存储。"""
+def test_tickflow_minute_epoch_is_normalized_to_utc_wall_clock():
+    """TickFlow epoch is kept as the UTC-naive wall-clock expected by upstream."""
     raw = pl.DataFrame({
         "symbol": ["510300.SH"],
         "timestamp": [1779327300000],
@@ -73,7 +73,7 @@ def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
     })
     normalized = kline_sync._normalize_minute(raw)
     value = normalized["datetime"][0]
-    assert (value.hour, value.minute) == (9, 35)
+    assert (value.hour, value.minute) == (1, 35)
 
 
 def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path):
