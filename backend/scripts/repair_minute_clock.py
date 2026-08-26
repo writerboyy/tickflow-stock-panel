@@ -16,6 +16,7 @@ from app.services.minute_quality import (
     minute_coverage_manifest,
     minute_frame_is_canonical,
     normalize_minute_clock,
+    sanitize_minute_rows,
 )
 
 
@@ -159,6 +160,7 @@ def _build_shadow(
 
     source_rows = 0
     published_rows = 0
+    rejected_rows = 0
     shifted_rows = 0
     deduplicated_rows = 0
     conflict_groups = 0
@@ -187,6 +189,8 @@ def _build_shadow(
             raise RuntimeError(
                 f"minute timestamp remains mixed or invalid after normalization: {source_path}"
             )
+        normalized = sanitize_minute_rows(normalized)
+        rejected = frame.height - normalized.height
         normalized, deduplicated, partition_conflict_groups = _resolve_duplicate_rows(
             normalized,
             data_dir,
@@ -200,13 +204,14 @@ def _build_shadow(
 
         relative = source_path.relative_to(source_root)
         target = shadow_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        normalized.write_parquet(target, compression="zstd")
+        if not normalized.is_empty():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            normalized.write_parquet(target, compression="zstd")
         coverage = minute_coverage_manifest(normalized)
         coverage.update({
             "trade_date": expected_date,
             "incoming_rows": frame.height,
-            "rejected_rows": 0,
+            "rejected_rows": rejected,
             "source": "utc_clock_repair",
             "datetime_basis": "utc_naive",
             "basis_before": basis,
@@ -222,6 +227,7 @@ def _build_shadow(
         )
         source_rows += frame.height
         published_rows += normalized.height
+        rejected_rows += rejected
         shifted_rows += shifted
         deduplicated_rows += deduplicated
         conflict_groups += partition_conflict_groups
@@ -236,6 +242,7 @@ def _build_shadow(
         "source_files": len(source_files),
         "source_rows": source_rows,
         "published_rows": published_rows,
+        "rejected_rows": rejected_rows,
         "shifted_rows": shifted_rows,
         "deduplicated_rows": deduplicated_rows,
         "conflicting_duplicate_groups": conflict_groups,

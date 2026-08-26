@@ -11,6 +11,7 @@ mock 范式沿用 test_stocksdk_provider.py (monkeypatch 模块属性)。
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from threading import Lock
 from unittest.mock import MagicMock

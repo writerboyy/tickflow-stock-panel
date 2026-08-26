@@ -52,3 +52,22 @@ def test_minute_repair_rewrites_invalid_partition_and_hardlinks_clean_partition(
     assert os.stat(second).st_ino == os.stat(
         backup / "date=2026-07-22" / "part.parquet"
     ).st_ino
+
+
+def test_minute_repair_rejects_real_negative_amount(tmp_path):
+    part = tmp_path / "kline_minute" / "date=2026-07-21" / "part.parquet"
+    _write(part, [{
+        "symbol": "600000.SH",
+        "datetime": datetime(2026, 7, 21, 1, 31),
+        "open": 10.0,
+        "high": 10.0,
+        "low": 10.0,
+        "close": 10.0,
+        "volume": 100.0,
+        "amount": -1.0,
+    }])
+
+    result = repair_minute_table(tmp_path, "kline_minute", apply=True)
+
+    assert result["rejected_rows"] == 1
+    assert not (tmp_path / "kline_minute" / "date=2026-07-21" / "part.parquet").exists()

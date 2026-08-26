@@ -12,6 +12,10 @@ class MinuteCoverageError(ValueError):
     """Raised when exact minute execution is requested on incomplete data."""
 
 
+_PRICE_TOLERANCE = 1e-7
+_AMOUNT_TOLERANCE = 1e-6
+
+
 def _minute_range(start: time, end: time) -> set[time]:
     current = datetime.combine(date.min, start)
     finish = datetime.combine(date.min, end)
@@ -38,19 +42,25 @@ _UTC_CONTINUOUS_TIMES = {
 _UTC_AUCTION_TIME = (datetime.combine(_UTC_REFERENCE_DATE, _BEIJING_AUCTION_TIME) - timedelta(hours=8)).time()
 _UTC_ALLOWED_TIMES = _UTC_CONTINUOUS_TIMES | {_UTC_AUCTION_TIME}
 _BEIJING_TIME_STRINGS = [value.strftime("%H:%M") for value in _BEIJING_ALLOWED_TIMES]
+_UTC_TIME_STRINGS = {value.strftime("%H:%M") for value in _UTC_ALLOWED_TIMES}
+_BEIJING_CONTINUOUS_STRINGS = {
+    value.strftime("%H:%M") for value in _BEIJING_CONTINUOUS_TIMES
+}
+_UTC_CONTINUOUS_STRINGS = {
+    value.strftime("%H:%M") for value in _UTC_CONTINUOUS_TIMES
+}
 
 
 def minute_clock_basis(frame: pl.DataFrame) -> str:
     """Classify naive minute timestamps without silently accepting mixtures."""
     if frame.is_empty() or "datetime" not in frame.columns:
         return "invalid"
-    values = frame["datetime"].drop_nulls().to_list()
-    if len(values) != frame.height:
+    if frame["datetime"].null_count():
         return "invalid"
-    times = {value.time() for value in values}
-    if times <= _UTC_ALLOWED_TIMES:
+    times = set(frame.select(pl.col("datetime").dt.strftime("%H:%M").unique()).to_series().to_list())
+    if times <= _UTC_TIME_STRINGS:
         return "utc_naive"
-    if times <= _BEIJING_ALLOWED_TIMES:
+    if times <= set(_BEIJING_TIME_STRINGS):
         return "beijing_naive"
     return "mixed_or_invalid"
 
@@ -58,6 +68,41 @@ def minute_clock_basis(frame: pl.DataFrame) -> str:
 def minute_frame_is_canonical(frame: pl.DataFrame) -> bool:
     """Return whether a frame uses the repository's UTC-naive minute clock."""
     return minute_clock_basis(frame) == "utc_naive"
+
+
+def sanitize_minute_rows(frame: pl.DataFrame) -> pl.DataFrame:
+    """Drop unusable bars and remove only numerical boundary noise."""
+    required = ("symbol", "datetime", "open", "high", "low", "close")
+    if any(column not in frame.columns for column in required):
+        return pl.DataFrame(schema=frame.schema)
+    clean = frame.filter(
+        pl.all_horizontal(pl.col(column).is_not_null() for column in required)
+        & pl.all_horizontal(pl.col(column).is_finite() for column in required[2:])
+    )
+    if "amount" in clean.columns:
+        clean = clean.filter(
+            pl.col("amount").is_null()
+            | (pl.col("amount").is_finite() & (pl.col("amount") >= -_AMOUNT_TOLERANCE))
+        ).with_columns(
+            pl.when(pl.col("amount") < 0)
+            .then(pl.lit(0.0))
+            .otherwise(pl.col("amount"))
+            .alias("amount")
+        )
+    if clean.is_empty():
+        return clean
+    high_bound = pl.max_horizontal("open", "close")
+    low_bound = pl.min_horizontal("open", "close")
+    return clean.with_columns(
+        pl.when((pl.col("high") - high_bound).abs() <= _PRICE_TOLERANCE)
+        .then(high_bound)
+        .otherwise(pl.col("high"))
+        .alias("high"),
+        pl.when((pl.col("low") - low_bound).abs() <= _PRICE_TOLERANCE)
+        .then(low_bound)
+        .otherwise(pl.col("low"))
+        .alias("low"),
+    )
 
 
 def normalize_minute_clock(frame: pl.DataFrame) -> tuple[pl.DataFrame, str, int]:
@@ -91,8 +136,8 @@ def minute_group_complete(frame: pl.DataFrame) -> bool:
             pl.col(column).is_not_null() & pl.col(column).is_finite() & (pl.col(column) > 0)
             for column in ("open", "high", "low", "close")
         )
-        & (pl.col("high") >= pl.max_horizontal("open", "close"))
-        & (pl.col("low") <= pl.min_horizontal("open", "close"))
+        & (pl.col("high") + _PRICE_TOLERANCE >= pl.max_horizontal("open", "close"))
+        & (pl.col("low") - _PRICE_TOLERANCE <= pl.min_horizontal("open", "close"))
     )
     if valid.height != frame.height or valid["datetime"].n_unique() != frame.height:
         return False
@@ -103,20 +148,70 @@ def minute_group_complete(frame: pl.DataFrame) -> bool:
         required, allowed = _BEIJING_CONTINUOUS_TIMES, _BEIJING_ALLOWED_TIMES
     else:
         return False
-    times = {value.time() for value in valid["datetime"].to_list()}
-    return required <= times and times <= allowed
+    time_strings = set(
+        valid.select(pl.col("datetime").dt.strftime("%H:%M").unique()).to_series().to_list()
+    )
+    required_strings = {value.strftime("%H:%M") for value in required}
+    allowed_strings = {value.strftime("%H:%M") for value in allowed}
+    return required_strings <= time_strings and time_strings <= allowed_strings
 
 
 def minute_coverage_manifest(frame: pl.DataFrame) -> dict[str, object]:
     groups: list[dict[str, object]] = []
     if not frame.is_empty() and {"symbol", "datetime"} <= set(frame.columns):
-        for group in frame.partition_by("symbol", maintain_order=True):
-            symbol = str(group["symbol"][0])
-            groups.append({
-                "symbol": symbol,
-                "bars": group.height,
-                "complete": minute_group_complete(group),
-            })
+        # Keep this aggregation in Polars. The old partition loop converted every
+        # symbol's full timestamp column to Python objects, which was prohibitively
+        # slow for full-market minute partitions.
+        available = set(frame.columns)
+        valid_expr = pl.col("datetime").is_not_null()
+        for column in ("open", "high", "low", "close"):
+            if column not in available:
+                valid_expr &= pl.lit(False)
+            else:
+                valid_expr &= (
+                    pl.col(column).is_not_null()
+                    & pl.col(column).is_finite()
+                    & (pl.col(column) > 0)
+                )
+        if {"open", "high", "low", "close"} <= available:
+            valid_expr &= (
+                pl.col("high") + _PRICE_TOLERANCE >= pl.max_horizontal("open", "close")
+            ) & (
+                pl.col("low") - _PRICE_TOLERANCE <= pl.min_horizontal("open", "close")
+            )
+        work = frame.with_columns([
+            pl.col("datetime").dt.strftime("%H:%M").alias("_time"),
+            valid_expr.alias("_valid"),
+        ])
+        stats = work.group_by("symbol", maintain_order=True).agg([
+            pl.len().alias("bars"),
+            pl.col("datetime").n_unique().alias("_unique_datetimes"),
+            pl.col("_time").n_unique().alias("_unique_times"),
+            pl.col("_valid").sum().alias("_valid_rows"),
+            pl.col("_time").filter(pl.col("_time").is_in(list(_UTC_CONTINUOUS_STRINGS))).n_unique().alias("_utc_required"),
+            pl.col("_time").filter(pl.col("_time").is_in(list(_BEIJING_CONTINUOUS_STRINGS))).n_unique().alias("_beijing_required"),
+            pl.col("_time").filter(~pl.col("_time").is_in(list(_UTC_TIME_STRINGS))).n_unique().alias("_utc_bad"),
+            pl.col("_time").filter(~pl.col("_time").is_in(set(_BEIJING_TIME_STRINGS))).n_unique().alias("_beijing_bad"),
+        ])
+        complete = (
+            (pl.col("_valid_rows") == pl.col("bars"))
+            & (pl.col("_unique_datetimes") == pl.col("bars"))
+            & (
+                (
+                    (pl.col("_utc_bad") == 0)
+                    & (pl.col("_utc_required") == len(_UTC_CONTINUOUS_STRINGS))
+                )
+                | (
+                    (pl.col("_beijing_bad") == 0)
+                    & (pl.col("_beijing_required") == len(_BEIJING_CONTINUOUS_STRINGS))
+                )
+            )
+            & (pl.col("_unique_times") <= 241)
+        )
+        groups = [
+            {"symbol": str(row["symbol"]), "bars": int(row["bars"]), "complete": bool(row["complete"])}
+            for row in stats.with_columns(complete.alias("complete")).select("symbol", "bars", "complete").to_dicts()
+        ]
     complete = sum(bool(group["complete"]) for group in groups)
     return {
         "schema_version": 1,

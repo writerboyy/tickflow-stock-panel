@@ -355,7 +355,11 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
     cols = [c for c in ["symbol", "trade_date", "ex_factor"] if c in df.columns]
     if len(cols) < 3:
         return pl.DataFrame()
-    return df.select(cols).drop_nulls()
+    return (
+        df.select(cols)
+        .drop_nulls()
+        .filter(pl.col("ex_factor").is_finite() & (pl.col("ex_factor") > 0))
+    )
 
 
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
@@ -543,17 +547,9 @@ def _datetime_to_ms(dt: datetime) -> int:
 
 def _sanitize_minute_rows(df: pl.DataFrame) -> pl.DataFrame:
     """丢弃不可回放的分钟 K，并消除浮点误差造成的 OHLC 边界倒挂。"""
-    required = ("symbol", "datetime", "open", "high", "low", "close")
-    if any(column not in df.columns for column in required):
-        return pl.DataFrame(schema=df.schema)
-    clean = df.filter(
-        pl.all_horizontal(pl.col(column).is_not_null() for column in required)
-        & pl.all_horizontal(pl.col(column).is_finite() for column in required[2:])
-    )
-    return clean.with_columns(
-        pl.max_horizontal("open", "high", "low", "close").alias("high"),
-        pl.min_horizontal("open", "high", "low", "close").alias("low"),
-    )
+    from app.services.minute_quality import sanitize_minute_rows
+
+    return sanitize_minute_rows(df)
 
 
 def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:

@@ -90,7 +90,13 @@ def normalize_adj_factors(data, source: str = "tickflow") -> pl.DataFrame:  # no
     if "ex_factor" in df.columns:
         df = df.with_columns(pl.col("ex_factor").cast(pl.Float64, strict=False))
     keep = [c for c in ADJ_FACTOR_COLS if c in df.columns]
-    return df.select(keep).drop_nulls() if len(keep) == len(ADJ_FACTOR_COLS) else pl.DataFrame()
+    if len(keep) != len(ADJ_FACTOR_COLS):
+        return pl.DataFrame()
+    return (
+        df.select(keep)
+        .drop_nulls()
+        .filter(pl.col("ex_factor").is_finite() & (pl.col("ex_factor") > 0))
+    )
 
 
 def normalize_instruments(rows: list[dict], asset_type: str, source: str = "tickflow") -> pl.DataFrame:

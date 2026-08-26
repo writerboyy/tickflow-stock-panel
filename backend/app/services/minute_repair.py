@@ -11,20 +11,11 @@ from uuid import uuid4
 
 import polars as pl
 
-from app.services.minute_quality import minute_coverage_manifest
+from app.services.minute_quality import minute_coverage_manifest, sanitize_minute_rows
 
 
 def _valid_minute_rows(frame: pl.DataFrame) -> pl.DataFrame:
-    required = ("symbol", "datetime", "open", "high", "low", "close")
-    if any(column not in frame.columns for column in required):
-        return pl.DataFrame(schema=frame.schema)
-    return frame.filter(
-        pl.all_horizontal(pl.col(column).is_not_null() for column in required)
-        & pl.all_horizontal(
-            pl.col(column).is_finite() & (pl.col(column) > 0)
-            for column in required[2:]
-        )
-    )
+    return sanitize_minute_rows(frame)
 
 
 def repair_minute_table(
@@ -60,7 +51,8 @@ def repair_minute_table(
         target = shadow_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         if rejected:
-            clean.sort(["symbol", "datetime"]).write_parquet(target)
+            if not clean.is_empty():
+                clean.sort(["symbol", "datetime"]).write_parquet(target)
             rewritten_files += 1
         else:
             os.link(source_path, target)

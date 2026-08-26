@@ -1,15 +1,18 @@
 from datetime import date, datetime
+import json
+import shutil
 
 import polars as pl
 import pytest
 
-from scripts.repair_minute_clock import _resolve_duplicate_rows
+from scripts.repair_minute_clock import _build_shadow, _resolve_duplicate_rows
 from app.services import kline_sync
 
 from app.services.minute_quality import (
     minute_clock_basis,
     minute_frame_is_canonical,
     normalize_minute_clock,
+    sanitize_minute_rows,
 )
 
 
@@ -58,6 +61,20 @@ def test_minute_frame_is_canonical_accepts_only_utc_naive_clock():
     assert not minute_frame_is_canonical(pl.DataFrame())
 
 
+def test_sanitize_minute_rows_normalizes_float_noise_and_rejects_real_negative_amount():
+    frame = _frame([datetime(2026, 8, 26, 1, 30), datetime(2026, 8, 26, 1, 31)]).with_columns([
+        pl.Series("high", [10.0 - 5e-13, 10.0]),
+        pl.Series("amount", [-3e-7, -1e-3]),
+    ])
+
+    cleaned = sanitize_minute_rows(frame)
+
+    assert cleaned.height == 1
+    assert cleaned["high"].item() == 10.0
+    assert cleaned["low"].item() == 10.0
+    assert cleaned["amount"].item() == 0.0
+
+
 def test_duplicate_repair_prefers_daily_enriched_close(tmp_path):
     enriched = tmp_path / "kline_daily_enriched/date=2026-08-24/part.parquet"
     enriched.parent.mkdir(parents=True)
@@ -104,3 +121,29 @@ def test_minute_partition_write_normalizes_legacy_beijing_clock(tmp_path):
     )
     assert stored["datetime"].item() == datetime(2026, 8, 24, 1, 31)
     assert minute_frame_is_canonical(stored)
+
+
+def test_clock_shadow_records_rejected_rows_without_empty_partition(tmp_path):
+    source = tmp_path / "kline_minute" / "date=2026-08-24" / "part.parquet"
+    source.parent.mkdir(parents=True)
+    _frame([datetime(2026, 8, 24, 1, 31)]).with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("open"),
+    ).write_parquet(source)
+
+    shadow, manifest = _build_shadow(
+        tmp_path,
+        "kline_minute",
+        "test-repair",
+        None,
+        None,
+    )
+
+    assert manifest["source_rows"] == 1
+    assert manifest["published_rows"] == 0
+    assert manifest["rejected_rows"] == 1
+    assert not (shadow / "date=2026-08-24" / "part.parquet").exists()
+    coverage = json.loads(
+        (shadow / "_coverage" / "date=2026-08-24.json").read_text()
+    )
+    assert coverage["rejected_rows"] == 1
+    shutil.rmtree(shadow)
