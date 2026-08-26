@@ -11,10 +11,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
-from app.market_time import cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
+from app.services.minute_quality import minute_frame_is_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -691,15 +692,17 @@ def get_minute_batch(request: Request, body: dict):
             local_parts[part["symbol"][0]] = part.sort("datetime")
     for sym in symbols:
         sub = local_parts.get(sym, pl.DataFrame())
-        if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
+        if sub.is_empty() or not minute_frame_is_canonical(sub) or (
+            expected > 0 and len(sub) < expected * 0.9
+        ):
             incomplete.append(sym)
         elif not sub.is_empty():
             result[sym] = sub.to_dicts()
 
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
-        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
-        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0, tzinfo=CN_TZ)
+        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0, tzinfo=CN_TZ)
         lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
         # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
         # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
@@ -781,7 +784,16 @@ def get_minute_range(
     minute = minute.with_columns(
         pl.col("datetime").dt.date().alias("_trade_date"),
     )
-    trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
+    canonical_dates = [
+        trade_date
+        for trade_date in sorted(minute["_trade_date"].unique().to_list())
+        if minute_frame_is_canonical(
+            minute.filter(pl.col("_trade_date") == trade_date).drop("_trade_date")
+        )
+    ]
+    trade_dates = canonical_dates[-days:]
+    if not trade_dates:
+        return {**base_response, "sessions": [], "source": "none"}
     previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
     row_columns = [
         column
@@ -890,7 +902,11 @@ def get_minute(
         else:
             expected = 240
 
-    is_complete = not df.is_empty() and len(df) >= expected * 0.9  # 允许 10% 容差
+    is_complete = (
+        not df.is_empty()
+        and minute_frame_is_canonical(df)
+        and len(df) >= expected * 0.9
+    )  # 允许 10% 容差
 
     if is_complete:
         return {

@@ -561,9 +561,16 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
 
     抽自原 sync_and_persist_minute 末尾的循环, 供流式落盘 (每段一次) 与一次性迁移共用。
     """
-    from app.services.minute_quality import minute_coverage_manifest
+    from app.services.minute_quality import (
+        minute_coverage_manifest,
+        minute_frame_is_canonical,
+        normalize_minute_clock,
+    )
 
-    raw = df
+    raw, _basis, _shifted = normalize_minute_clock(df)
+    if not raw.is_empty() and not minute_frame_is_canonical(raw):
+        logger.warning("skip minute partition with mixed or invalid datetime clock")
+        return 0
     raw_dated = (
         raw.filter(pl.col("datetime").is_not_null()).with_columns(
             pl.col("datetime").dt.date().alias("_trade_date")
@@ -620,6 +627,11 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists():
             existing = _sanitize_minute_rows(pl.read_parquet(out))
+            if not existing.is_empty():
+                existing, _existing_basis, _existing_shifted = normalize_minute_clock(existing)
+                if not minute_frame_is_canonical(existing):
+                    logger.warning("skip merge with mixed or invalid existing minute clock: %s", out)
+                    continue
             incoming = day_df.drop("_trade_date")
             day_df = incoming if existing.is_empty() else pl.concat(
                 [existing, incoming], how="diagonal_relaxed",
@@ -1163,10 +1175,16 @@ def sync_and_persist_minute(
 
     # 迁移:旧版 _normalize_minute 未转换 timestamp→datetime,导致全部 datetime 为 null
     # 检测到后直接清除(这些数据无法使用)
-    _cleanup_null_datetime_minute(repo, asset_type)
+    if asset_type == "stock":
+        _cleanup_null_datetime_minute(repo)
+    else:
+        _cleanup_null_datetime_minute(repo, asset_type)
 
     # 迁移:旧版按 symbol= 分区转为 date= 分区
-    _migrate_symbol_to_date_partition(repo, asset_type)
+    if asset_type == "stock":
+        _migrate_symbol_to_date_partition(repo)
+    else:
+        _migrate_symbol_to_date_partition(repo, asset_type)
 
     now = datetime.now()
 
@@ -1185,7 +1203,11 @@ def sync_and_persist_minute(
         end_time = datetime.combine(latest_trade_date + timedelta(days=1), datetime.min.time())
     elif extend_backward:
         # 向前扩展模式: 从本地最早数据往前补, 叠加已有数据避免缺口。
-        earliest_dt = _earliest_minute_datetime(repo, asset_type)
+        earliest_dt = (
+            _earliest_minute_datetime(repo)
+            if asset_type == "stock"
+            else _earliest_minute_datetime(repo, asset_type)
+        )
         # 按交易日换算自然日 (7/5 系数)。>41 交易日时 +10 天余量覆盖节假日。
         # (分段由 sync_minute_batch 的 segment_trading_days 控制, 与此处的区间天数独立。)
         calendar_days = int(days * 7 / 5) + (10 if days > 41 else 0)
@@ -1199,7 +1221,11 @@ def sync_and_persist_minute(
     else:
         # 默认增量模式: 首次拉取回溯 N 天, 已有数据则从最新时间增量补到今天
         # force_full_days=True: 强制回溯 days 自然日 (个股补齐历史, 不增量)
-        last_dt = _latest_minute_datetime(repo, asset_type)
+        last_dt = (
+            _latest_minute_datetime(repo)
+            if asset_type == "stock"
+            else _latest_minute_datetime(repo, asset_type)
+        )
         if force_full_days:
             # 按交易日换算自然日 (7/5 系数), 确保覆盖足够交易日
             calendar_days = int(days * 7 / 5) + 5

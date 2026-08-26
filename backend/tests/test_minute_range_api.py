@@ -85,6 +85,32 @@ def test_minute_range_does_not_read_stock_store_for_index():
     repo.get_minute_range.assert_not_called()
 
 
+def test_minute_range_skips_legacy_beijing_clock_sessions():
+    repo = MagicMock()
+    repo.resolve_asset_type.return_value = "stock"
+    repo.get_instruments.return_value = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "name": ["浦发银行"],
+        "total_shares": [1.0],
+        "float_shares": [1.0],
+    })
+    repo.get_minute_range.return_value = pl.DataFrame({
+        "symbol": ["600000.SH"],
+        "datetime": [datetime(2026, 8, 7, 9, 31)],
+        "open": [10.0],
+        "high": [10.0],
+        "low": [10.0],
+        "close": [10.0],
+        "volume": [100.0],
+        "amount": [1_000.0],
+    })
+
+    result = kline_api.get_minute_range(_request(repo), "600000.SH", 2)
+
+    assert result["sessions"] == []
+    assert result["source"] == "none"
+
+
 def test_sync_minute_single_uses_requested_days(monkeypatch):
     repo = MagicMock()
     repo.resolve_asset_type.return_value = "stock"
