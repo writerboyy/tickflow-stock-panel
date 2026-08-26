@@ -18,6 +18,8 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Callable
 
+import polars as pl
+
 from app.free_strategy.bars import Bar, group_bars, rows_to_bars
 from app.free_strategy.continuation import compact_paper_checkpoint
 from app.free_strategy.engine import FreeStrategyConfig, FreeStrategyEngine, Quote, RiskConfig
@@ -38,6 +40,172 @@ PAPER_BAR_CHECKPOINT_GROUPS = 30
 PAPER_CALLBACK_LABEL_SIZE = 128
 _WORKER_RESTART_LIMIT = 3
 _WORKER_RESTART_WINDOW_SECONDS = 300.0
+_PAPER_UTC_OFFSET = timedelta(hours=8)
+
+
+def _paper_adjust_frame(frame: Any) -> Any:
+    if frame is None or frame.is_empty() or "datetime" not in frame.columns:
+        return frame
+    return frame.with_columns(
+        pl.when(pl.col("datetime").dt.hour() < 8)
+        .then(pl.col("datetime").dt.offset_by("8h"))
+        .otherwise(pl.col("datetime"))
+        .alias("datetime")
+    )
+
+
+def _paper_filter_frame(
+    frame: Any,
+    *,
+    after: datetime | None = None,
+    until: datetime | None = None,
+) -> Any:
+    frame = _paper_adjust_frame(frame)
+    if frame is None or frame.is_empty() or "datetime" not in frame.columns:
+        return frame
+    predicate = pl.lit(True)
+    if after is not None:
+        predicate &= pl.col("datetime") > after
+    if until is not None:
+        predicate &= pl.col("datetime") <= until
+    return frame.filter(predicate)
+
+
+def _paper_latest_by_symbol(frame: Any) -> Any:
+    if frame is None or frame.is_empty() or "symbol" not in frame.columns:
+        return frame
+    sort_columns = [column for column in ("symbol", "datetime", "source_order", "sequence", "trade_id") if column in frame.columns]
+    frame = frame.sort(sort_columns, maintain_order=True)
+    return frame.group_by("symbol", maintain_order=True).tail(1).sort(
+        [column for column in ("datetime", "symbol") if column in frame.columns],
+        maintain_order=True,
+    )
+
+
+class _PaperHistoricalRepository:
+    """Read-only paper-clock adapter for UTC-naive minute and tick history."""
+
+    def __init__(self, repo: Any) -> None:
+        self._repo = repo
+        self._paper_clock_adapter = True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._repo, name)
+
+    @staticmethod
+    def _raw_after(value: datetime | None) -> datetime | None:
+        return value - _PAPER_UTC_OFFSET if value is not None else None
+
+    def get_minute_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        asset_type: str = "stock",
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Any:
+        frame = self._repo.get_minute_range(
+            symbols,
+            start,
+            end,
+            asset_type,
+            after=self._raw_after(after),
+            until=until,
+        )
+        return _paper_filter_frame(frame, after=after, until=until)
+
+    def get_minute_snapshot(self, symbols: list[str], at: datetime, asset_type: str = "stock") -> Any:
+        getter = getattr(self._repo, "get_minute_snapshot", None)
+        if callable(getter):
+            frame = getter(symbols, at - _PAPER_UTC_OFFSET, asset_type)
+        else:
+            frame = self.get_minute_range(symbols, at.date(), at.date(), asset_type, until=at)
+        return _paper_latest_by_symbol(_paper_filter_frame(
+            frame, until=at,
+        ))
+
+    def get_minute_next(
+        self,
+        symbols: list[str],
+        after: datetime,
+        until: datetime,
+        asset_type: str = "stock",
+    ) -> Any:
+        getter = getattr(self._repo, "get_minute_next", None)
+        if callable(getter):
+            frame = getter(symbols, after - _PAPER_UTC_OFFSET, until, asset_type)
+        else:
+            frame = self._repo.get_minute_range(
+                symbols,
+                after.date(),
+                until.date(),
+                asset_type,
+                after=self._raw_after(after),
+                until=until,
+            )
+        frame = _paper_filter_frame(frame, after=after, until=until)
+        if frame is None or frame.is_empty():
+            return frame
+        sort_columns = [column for column in ("symbol", "datetime", "source_order", "sequence", "trade_id") if column in frame.columns]
+        return frame.sort(sort_columns, maintain_order=True).group_by(
+            "symbol", maintain_order=True,
+        ).head(1).sort([column for column in ("datetime", "symbol") if column in frame.columns], maintain_order=True)
+
+    def get_tick_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        asset_type: str = "stock",
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Any:
+        frame = self._repo.get_tick_range(
+            symbols,
+            start,
+            end,
+            asset_type,
+            after=self._raw_after(after),
+            until=until,
+        )
+        return _paper_filter_frame(frame, after=after, until=until)
+
+    def get_tick_snapshot(self, symbols: list[str], at: datetime, asset_type: str = "stock") -> Any:
+        getter = getattr(self._repo, "get_tick_snapshot", None)
+        if not callable(getter):
+            return pl.DataFrame()
+        return _paper_latest_by_symbol(_paper_filter_frame(
+            getter(symbols, at - _PAPER_UTC_OFFSET, asset_type), until=at,
+        ))
+
+    def get_tick_next(
+        self,
+        symbols: list[str],
+        after: datetime,
+        until: datetime,
+        asset_type: str = "stock",
+    ) -> Any:
+        getter = getattr(self._repo, "get_tick_next", None)
+        if not callable(getter):
+            return pl.DataFrame()
+        frame = _paper_filter_frame(
+            getter(symbols, after - _PAPER_UTC_OFFSET, until, asset_type),
+            after=after,
+            until=until,
+        )
+        if frame is None or frame.is_empty():
+            return frame
+        sort_columns = [column for column in ("symbol", "datetime", "source_order", "sequence", "trade_id") if column in frame.columns]
+        return frame.sort(sort_columns, maintain_order=True).group_by(
+            "symbol", maintain_order=True,
+        ).head(1).sort([column for column in ("datetime", "symbol") if column in frame.columns], maintain_order=True)
+
+
+def _paper_repo(repo: Any) -> Any:
+    return repo if getattr(repo, "_paper_clock_adapter", False) is True else _PaperHistoricalRepository(repo)
 
 
 def state_market_mode(state: dict[str, Any]) -> str:
@@ -371,7 +539,7 @@ class MarketDataHub:
 
     def __init__(self, quote_service: Any, repo: Any) -> None:
         self.quote_service = quote_service
-        self.repo = repo
+        self.repo = _paper_repo(repo)
         self._lock = threading.RLock()
         self._subscriptions: dict[str, _Subscription] = {}
         self._quote_feed_leased = False
@@ -1309,7 +1477,7 @@ def _engine_from_state(
     allowed = {field.name for field in fields(FreeStrategyConfig)}
     config = FreeStrategyConfig(asset_type=asset_type, **{key: value for key, value in raw.items() if key in allowed})
     risk = RiskConfig(**state.get("risk_config", {}))
-    repo = KlineRepository(DataStore(data_dir))
+    repo = _paper_repo(KlineRepository(DataStore(data_dir)))
     source = (account_root / "strategy.py").read_text(encoding="utf-8")
     checkpoint = state.get("checkpoint")
     compatible_checkpoint = (
@@ -2310,7 +2478,7 @@ def _paper_worker(
     account_root = Path(root) / account_id
     store = PaperAccountStore(Path(root).parent)
     state = store.get(account_id)
-    repo = KlineRepository(DataStore(Path(root).parent))
+    repo = _paper_repo(KlineRepository(DataStore(Path(root).parent)))
     scheduled_market = MarketData()
     engine: FreeStrategyEngine | None = None
     slot_acquired = False
@@ -2581,16 +2749,7 @@ class PaperTradingSupervisor:
     def __init__(self, data_dir: Path, quote_service: Any, repo: Any) -> None:
         self.data_dir = Path(data_dir)
         self.store = PaperAccountStore(self.data_dir)
-        # Repair minute partitions before any paper worker performs catch-up.
-        # This is intentionally shared for stock and ETF data so existing
-        # accounts recover without requiring a manual history sync.
-        try:
-            from app.services.kline_sync import _migrate_utc_minute_wall_clock
-            for asset_type in ("stock", "etf"):
-                _migrate_utc_minute_wall_clock(repo, asset_type)
-        except Exception:  # noqa: BLE001
-            logger.exception("模拟盘启动前分钟K时区迁移失败")
-        self.hub = MarketDataHub(quote_service, repo)
+        self.hub = MarketDataHub(quote_service, _paper_repo(repo))
         self._ctx = mp.get_context("spawn")
         self._processes: dict[str, mp.Process] = {}
         self._queues: dict[str, Any] = {}

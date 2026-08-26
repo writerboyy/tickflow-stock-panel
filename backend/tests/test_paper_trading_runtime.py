@@ -30,6 +30,7 @@ from app.free_strategy.paper import (
     _queued_payload,
     _process_bar_rows,
     _process_scheduled_day,
+    _PaperHistoricalRepository,
     _quote_to_live_bar,
 )
 from app.free_strategy.process import MarketData
@@ -56,6 +57,69 @@ def quote(second: int, price: float) -> Quote:
         low=min(10, price),
         volume=100,
     )
+
+
+def test_paper_historical_repository_maps_utc_naive_minutes_in_memory():
+    calls = []
+
+    class Repository:
+        def get_minute_range(self, symbols, start, end, asset_type, *, after=None, until=None):
+            calls.append((after, until))
+            return pl.DataFrame({
+                "symbol": ["X", "X"],
+                "datetime": [datetime(2024, 1, 2, 1, 30), datetime(2024, 1, 2, 2, 15)],
+                "open": [10.0, 10.1],
+                "high": [10.0, 10.1],
+                "low": [10.0, 10.1],
+                "close": [10.0, 10.1],
+                "volume": [100.0, 110.0],
+                "amount": [1000.0, 1111.0],
+            })
+
+    paper_repo = _PaperHistoricalRepository(Repository())
+    frame = paper_repo.get_minute_range(
+        ["X"],
+        date(2024, 1, 2),
+        date(2024, 1, 2),
+        "stock",
+        after=datetime(2024, 1, 2, 9, 30),
+        until=datetime(2024, 1, 2, 10, 15),
+    )
+
+    assert calls == [(datetime(2024, 1, 2, 1, 30), datetime(2024, 1, 2, 10, 15))]
+    assert frame["datetime"].to_list() == [
+        datetime(2024, 1, 2, 10, 15),
+    ]
+
+
+def test_paper_historical_repository_maps_utc_naive_ticks_for_scheduled_fills():
+    calls = []
+
+    class Repository:
+        def get_tick_next(self, symbols, after, until, asset_type):
+            calls.append((after, until))
+            return pl.DataFrame({
+                "symbol": ["X"],
+                "datetime": [datetime(2024, 1, 2, 2, 16)],
+                "last_price": [10.2],
+                "close": [10.2],
+                "open": [10.2],
+                "high": [10.2],
+                "low": [10.2],
+                "volume": [1.0],
+                "amount": [10.2],
+            })
+
+    paper_repo = _PaperHistoricalRepository(Repository())
+    frame = paper_repo.get_tick_next(
+        ["X"],
+        datetime(2024, 1, 2, 10, 15),
+        datetime(2024, 1, 2, 10, 30),
+        "stock",
+    )
+
+    assert calls == [(datetime(2024, 1, 2, 2, 15), datetime(2024, 1, 2, 10, 30))]
+    assert frame["datetime"].to_list() == [datetime(2024, 1, 2, 10, 16)]
 
 
 def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:

@@ -63,8 +63,8 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
     )
 
 
-def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
-    """TickFlow epoch 01:35 UTC must be stored as 09:35 Beijing time."""
+def test_tickflow_minute_epoch_is_normalized_to_utc_wall_clock():
+    """TickFlow epoch is kept as the UTC-naive wall-clock expected by upstream."""
     raw = pl.DataFrame({
         "symbol": ["510300.SH"],
         "timestamp": [1779327300000],
@@ -73,32 +73,7 @@ def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
     })
     normalized = kline_sync._normalize_minute(raw)
     value = normalized["datetime"][0]
-    assert (value.hour, value.minute) == (9, 35)
-
-
-def test_migrate_utc_minute_wall_clock_repairs_mixed_partitions(tmp_path):
-    minute_dir = tmp_path / "kline_minute"
-    partition = minute_dir / "date=2026-08-25" / "part.parquet"
-    partition.parent.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["600000.SH", "600000.SH"],
-        "datetime": [datetime(2026, 8, 25, 1, 30), datetime(2026, 8, 25, 9, 31)],
-        "open": [10.0, 10.0], "high": [10.0, 10.0],
-        "low": [10.0, 10.0], "close": [10.0, 10.0],
-        "volume": [1.0, 1.0], "amount": [10.0, 10.0],
-    }).write_parquet(partition)
-
-    repo = MagicMock()
-    repo.store.data_dir = tmp_path
-    kline_sync._migrate_utc_minute_wall_clock(repo, "stock")
-
-    stored = pl.read_parquet(partition).sort("datetime")
-    assert stored["datetime"].to_list() == [
-        datetime(2026, 8, 25, 9, 30),
-        datetime(2026, 8, 25, 9, 31),
-    ]
-    kline_sync._migrate_utc_minute_wall_clock(repo, "stock")
-    assert stored.height == 2
+    assert (value.hour, value.minute) == (1, 35)
 
 
 def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path):
