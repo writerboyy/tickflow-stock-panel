@@ -102,6 +102,17 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _positive_cost(value: object) -> float | None:
+    """Return a cost usable by price-relative risk rules.
+
+    Credit-account amortized costs may be zero or negative after realized
+    profit and fees are applied. They remain valid for absolute P&L, but are
+    not valid denominators or price anchors for percentage-based rules.
+    """
+    cost = _finite(value)
+    return cost if cost is not None and cost > 0 else None
+
+
 def _action_pct(config: dict[str, Any], default: int) -> int:
     value = _finite(config.get("action_pct"))
     if value is None:
@@ -947,14 +958,15 @@ class PositionRiskService:
             history = self._history.get(symbol) or {}
             runtime = self.store.get_runtime(f"position:{symbol}", {}) or {}
             cost = _finite(position.get("cost_price"))
+            positive_cost = _positive_cost(cost)
             stop_cfg = self._rule_config(portfolio, symbol, "stop_loss")
             stop_enabled = stop_cfg.get("enabled") is True
             hard_stop = None
             if stop_enabled:
                 threshold = _finite(stop_cfg.get("threshold"))
-                hard_stop = cost * (1 + threshold) if cost is not None and threshold is not None else None
+                hard_stop = positive_cost * (1 + threshold) if positive_cost is not None and threshold is not None else None
                 atr_value = _finite(history.get("atr_14"))
-                atr_stop = cost - atr_value * (_finite(stop_cfg.get("atr_multiple")) or 1.5) if cost and atr_value and atr_value > 0 else None
+                atr_stop = positive_cost - atr_value * (_finite(stop_cfg.get("atr_multiple")) or 1.5) if positive_cost and atr_value and atr_value > 0 else None
                 mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
                 if mode == "atr":
                     hard_stop = atr_stop or hard_stop
@@ -981,8 +993,8 @@ class PositionRiskService:
                 "risk_stage": runtime.get("stage", "initial"),
                 "initial_r": runtime.get("initial_r"),
                 "holding_day": runtime.get("holding_day"),
-                "r_multiple": runtime.get("r_multiple"),
-                "effective_stop_price": runtime.get("effective_stop_price") or hard_stop,
+                "r_multiple": runtime.get("r_multiple") if positive_cost else None,
+                "effective_stop_price": (runtime.get("effective_stop_price") or hard_stop) if positive_cost else None,
                 "hard_stop_price": hard_stop,
                 "hard_stop_enabled": stop_enabled,
                 "feature_snapshot_at": runtime.get("feature_snapshot_at") or item.get("as_of"),
@@ -1017,8 +1029,8 @@ class PositionRiskService:
                 position={
                     **position,
                     "profit_loss_pct": (
-                        item["last_price"] / cost - 1
-                        if item.get("last_price") is not None and cost
+                        item["last_price"] / positive_cost - 1
+                        if item.get("last_price") is not None and positive_cost
                         else None
                     ),
                 },
@@ -1039,6 +1051,7 @@ class PositionRiskService:
         symbol = position["symbol"]
         price = _finite(quote.get("last_price"))
         cost = _finite(position.get("cost_price"))
+        positive_cost = _positive_cost(cost)
         if price is None:
             return
         self._latest_quotes[symbol] = {
@@ -1107,6 +1120,7 @@ class PositionRiskService:
                     "initial_stop_price": None,
                     "initial_r": None,
                     "effective_stop_price": None,
+                    "r_multiple": None,
                 })
 
         if features.get("as_of"):
@@ -1116,14 +1130,14 @@ class PositionRiskService:
         stop_enabled = stop_cfg.get("enabled") is True
         stop_threshold = _finite(stop_cfg.get("threshold")) if stop_enabled else None
         stop_action = _action_pct(stop_cfg, 100)
-        stop_return = price / cost - 1 if cost else None
+        stop_return = price / positive_cost - 1 if positive_cost else None
         candidate_stop_price = None
         if stop_enabled:
             stop_mode = str(stop_cfg.get("mode") or "max_fixed_atr").lower()
             atr_multiple = _finite(stop_cfg.get("atr_multiple")) or 1.5
             daily_atr = _finite((self._history.get(symbol) or {}).get("atr_14"))
-            fixed_stop_price = cost * (1 + stop_threshold) if cost and stop_threshold is not None and stop_threshold < 0 else None
-            atr_stop_price = cost - daily_atr * atr_multiple if cost and daily_atr and daily_atr > 0 else None
+            fixed_stop_price = positive_cost * (1 + stop_threshold) if positive_cost and stop_threshold is not None and stop_threshold < 0 else None
+            atr_stop_price = positive_cost - daily_atr * atr_multiple if positive_cost and daily_atr and daily_atr > 0 else None
             if stop_mode == "atr":
                 candidate_stop_price = atr_stop_price or fixed_stop_price
             elif stop_mode == "max_fixed_atr":
@@ -1138,7 +1152,7 @@ class PositionRiskService:
             runtime["effective_stop_price"] = None
         if candidate_stop_price and _finite(runtime.get("initial_stop_price")) is None:
             runtime["initial_stop_price"] = candidate_stop_price
-            runtime["initial_r"] = max(cost - candidate_stop_price, cost * 0.0001)
+            runtime["initial_r"] = max(positive_cost - candidate_stop_price, positive_cost * 0.0001)
             runtime["effective_stop_price"] = candidate_stop_price
         initial_stop_price = _finite(runtime.get("initial_stop_price"))
         initial_r = _finite(runtime.get("initial_r"))
@@ -1146,8 +1160,8 @@ class PositionRiskService:
             (self._rule_states.get(f"{symbol}:stop_loss") or {}).get("active"),
         )
         stop_limit = (
-            initial_stop_price + cost * _STOP_LOSS_RECOVERY_BUFFER
-            if initial_stop_price and cost and stop_was_active else initial_stop_price
+            initial_stop_price + positive_cost * _STOP_LOSS_RECOVERY_BUFFER
+            if initial_stop_price and positive_cost and stop_was_active else initial_stop_price
         )
         stop_active = bool(
             stop_cfg.get("enabled") is True
@@ -1161,7 +1175,7 @@ class PositionRiskService:
                 initial_r=initial_r, effective_stop_price=initial_stop_price,
                 holding_day=holding_day, risk_stage="initial_stop",
             )
-        r_multiple = (price - cost) / initial_r if cost and initial_r and initial_r > 0 else None
+        r_multiple = (price - positive_cost) / initial_r if positive_cost and initial_r and initial_r > 0 else None
         if r_multiple is not None:
             runtime["r_multiple"] = r_multiple
 
@@ -1204,7 +1218,7 @@ class PositionRiskService:
         atr_multiple = _finite(atr_cfg.get("atr_multiple")) or 2.0
         activation_gain = _finite(atr_cfg.get("activation_gain")) or 0.02
         atr_stop = high - atr * atr_multiple if atr and high > 0 else None
-        if _advanced_rule_enabled(atr_cfg) and atr_stop and cost and stop_return is not None and stop_return >= activation_gain:
+        if _advanced_rule_enabled(atr_cfg) and atr_stop and positive_cost and stop_return is not None and stop_return >= activation_gain:
             effective_stop = max(_finite(runtime.get("effective_stop_price")) or 0, atr_stop)
             runtime["effective_stop_price"] = effective_stop
             atr_active = price <= effective_stop
@@ -1271,7 +1285,7 @@ class PositionRiskService:
         trailing_threshold = trailing_threshold if trailing_threshold is not None else 0.08
         trailing_action = _action_pct(trailing_cfg, 50)
         trailing_active = bool(
-            trailing_cfg.get("enabled") is True and cost and high / cost - 1 >= activation_gain
+            trailing_cfg.get("enabled") is True and positive_cost and high / positive_cost - 1 >= activation_gain
             and price / high - 1 <= -trailing_threshold
         )
         if self._set_rule(symbol, "trailing_drawdown", trailing_active, now):
@@ -1373,8 +1387,8 @@ class PositionRiskService:
         peak_threshold = max(0.0, _finite(peak_cfg.get("threshold")) or 0.03)
         peak_confirm = max(0, int(_finite(peak_cfg.get("confirm_seconds")) or 5))
         peak_pullback = bool(
-            cost and features_available and intraday_high > 0
-            and intraday_high / cost - 1 >= peak_activation
+            positive_cost and features_available and intraday_high > 0
+            and intraday_high / positive_cost - 1 >= peak_activation
             and price <= intraday_high * (1 - peak_threshold)
         )
         peak_suppressed = self._recovery_suppressed(runtime, "intraday_peak_pullback", peak_pullback)
@@ -1434,7 +1448,7 @@ class PositionRiskService:
         gap_up_cfg = self._rule_config(portfolio, symbol, "next_day_gap_up_take_profit")
         gap_up_threshold = _finite(gap_up_cfg.get("threshold")) or 0.04
         gap_up_buffer = max(0.0, _finite(gap_up_cfg.get("fees_buffer")) or 0.002)
-        gap_up_return = opening_price / cost - 1 if opening_price and cost else None
+        gap_up_return = opening_price / positive_cost - 1 if opening_price and positive_cost else None
         gap_up_active = bool(
             _advanced_rule_enabled(gap_up_cfg) and opening_confirmed and gap_up_return is not None
             and gap_up_return >= gap_up_threshold + gap_up_buffer
@@ -2649,7 +2663,7 @@ class PositionRiskService:
                 asset_type = "unknown"
             if asset_type not in {"stock", "etf"} or symbol not in names:
                 issues.append({"level": "error", "row": index, "message": "代码未匹配本地股票/ETF主数据"})
-            if quantity is None or quantity < 0 or cost is None or cost <= 0:
+            if quantity is None or quantity < 0 or cost is None:
                 issues.append({"level": "error", "row": index, "message": "数量和成本价必须有效"})
                 continue
             if available is None:
@@ -2781,7 +2795,7 @@ class PositionRiskService:
             cost = _finite(row.get("cost_price"))
             if (
                 not symbol or quantity is None or available is None or cost is None
-                or quantity < 0 or available < 0 or available > quantity or cost <= 0
+                or quantity < 0 or available < 0 or available > quantity
             ):
                 raise ValueError(f"QMT 持仓字段无效: {symbol or 'unknown'}")
             positions.append({
@@ -2883,7 +2897,7 @@ class PositionRiskService:
                 "price": price,
                 "market_value": market_value,
                 "profit_loss": pnl,
-                "profit_loss_pct": (price / cost - 1) if price is not None and cost else None,
+                "profit_loss_pct": (price / cost - 1) if price is not None and cost is not None and cost > 0 else None,
                 "weight": market_value / total_asset if market_value is not None and total_asset else None,
                 "ma5": history.get("ma5"),
                 "ma10": history.get("ma10"),

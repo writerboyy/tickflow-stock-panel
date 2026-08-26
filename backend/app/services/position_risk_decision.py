@@ -149,7 +149,7 @@ def build_position_decision(
         evidence.append({"source": "technical", "label": "短线动能为正", "detail": f"5m 动能 {momentum:.2%}"})
 
     return_pct = _finite(position.get("profit_loss_pct"))
-    if return_pct is None and price is not None and cost:
+    if return_pct is None and price is not None and cost is not None and cost > 0:
         return_pct = price / cost - 1
     limit_up = _finite(feature.get("limit_up")) or _finite(quote.get("limit_up"))
     limit_down = _finite(feature.get("limit_down")) or _finite(quote.get("limit_down"))

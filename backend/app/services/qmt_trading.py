@@ -409,7 +409,7 @@ class QmtZmqRpcClient:
                 if available != 0:
                     raise QmtRpcError(f"QMT 空持仓可用数量不为零: {symbol}")
                 continue
-            if cost is None or cost <= 0:
+            if cost is None:
                 raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}")
             if available > volume:
                 raise QmtRpcError(f"QMT 可用数量大于持仓数量: {symbol}")

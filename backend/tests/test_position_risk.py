@@ -1502,6 +1502,28 @@ def test_qmt_snapshot_derives_latest_buy_entry_date():
     assert snapshot["positions"][0]["entry_date"] == "2026-08-21"
 
 
+def test_qmt_snapshot_accepts_negative_amortized_cost():
+    client = QmtZmqRpcClient(_qmt_settings())
+    responses = iter([
+        {"account_id": "account-1"},
+        {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
+        {
+            "003040.SZ": {
+                "stock_code": "003040.SZ", "volume": 300, "available": 0,
+                "cost": -0.025899966666666666,
+            },
+        },
+        [],
+        [],
+    ])
+    client.call = lambda _method, _params=None: next(responses)
+
+    snapshot = client.snapshot()
+
+    assert snapshot["positions"][0]["symbol"] == "003040.SZ"
+    assert snapshot["positions"][0]["cost_price"] == pytest.approx(-0.025899966666666666)
+
+
 class _Repo:
     def __init__(self) -> None:
         self.rows = pl.DataFrame({
@@ -1557,6 +1579,24 @@ class _Quotes:
 
     def acquire_temporary_polling(self, _interval):
         pass
+
+
+def test_qmt_sync_preserves_negative_amortized_cost_and_skips_relative_pnl(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    saved = service.replace_from_qmt({
+        "account_id": "account-1",
+        "account": {"name": "account-1", "cash": 1_000, "total_asset": 2_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 100,
+            "available": 0, "cost_price": -0.0259, "price": 18.0,
+        }],
+        "synced_at": "2026-08-26T00:00:00+00:00",
+    })
+
+    assert saved["positions"][0]["cost_price"] == pytest.approx(-0.0259)
+    row = service.view()["positions"][0]
+    assert row["profit_loss"] == pytest.approx((18.0 + 0.0259) * 100)
+    assert row["profit_loss_pct"] is None
 
 
 class _AssetAwareQuotes(_Quotes):
