@@ -134,6 +134,66 @@ def test_shared_market_data_keeps_canonical_repository_clock():
     assert _paper_schedule_repo(repo) is not repo
 
 
+def test_scheduled_execution_adapts_utc_history_without_mutating_repository(monkeypatch, tmp_path):
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '09:30')
+
+def run(context):
+    context.state['ran_at'] = context.now.isoformat()
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
+    )
+
+    class CanonicalRepository:
+        intraday_datetime_basis = "utc_naive"
+
+        def get_minute_snapshot(self, symbols, at, _asset_type):
+            return pl.DataFrame({
+                "symbol": list(symbols),
+                "datetime": [at] * len(symbols),
+                "open": [10.0] * len(symbols),
+                "high": [10.0] * len(symbols),
+                "low": [10.0] * len(symbols),
+                "close": [10.0] * len(symbols),
+                "volume": [100.0] * len(symbols),
+                "amount": [1000.0] * len(symbols),
+            })
+
+    monkeypatch.setattr(
+        "app.free_strategy.process._ensure_scheduled_market_data",
+        lambda *_args, **_kwargs: None,
+    )
+    store = PaperAccountStore(tmp_path)
+    current = store.save({
+        "id": "paper",
+        "status": "running",
+        "config": {"market_mode": "bar_1m", "asset_type": "stock"},
+    })
+    repo = CanonicalRepository()
+
+    _process_scheduled_day(
+        store,
+        "paper",
+        current,
+        engine,
+        repo,
+        MarketData(),
+        date(2024, 1, 2),
+        datetime(2024, 1, 2, 9, 30),
+        "stock",
+        "1m",
+        finalize=False,
+    )
+
+    assert engine.context.state["ran_at"] == "2024-01-02T09:30:00"
+    assert repo.get_minute_snapshot(["X"], datetime(2024, 1, 2, 1, 30), "stock")["datetime"].item() == datetime(2024, 1, 2, 1, 30)
+
+
 def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:
     engine.advance_event(
         max(value.timestamp for value in values),
