@@ -24,13 +24,15 @@
 
 持仓风控可选接入云端大 QMT。浏览器只访问本地后端，QMT ZMQ RPC 由后端统一调用；QMT 返回的资金、持仓、委托和成交是权威状态。截图导入仍可作为未接入 QMT 时的备用方式。
 
-ZMQ RPC 通过明确的 TCP 地址连接 QMT 单文件服务端，例如 `tcp://111.228.39.194:15648`；建议只开放该端口给可信来源，并使用云端防火墙白名单。应用只在以下条件同时满足时显示可交易：`QMT_ENABLED=true`、ZMQ 地址/账户 ID 完整、`ping` 账户匹配、同一轮资金和持仓同步成功，并且页面的“允许真实交易”开关已打开。
+ZMQ RPC 通过明确的 TCP 地址连接 QMT 单文件服务端，例如远程 `tcp://111.228.39.194:15648`；本地地址默认是 `tcp://127.0.0.1:15648`，也可通过 `QMT_LOCAL_ZMQ_CONNECT_ADDRESS` 覆盖。持仓风控页的“远程 / 本地”按钮会立即切换连接位置；切换后旧账户缓存和实盘开关会清空，需要重新检查并同步。应用只在以下条件同时满足时显示可交易：`QMT_ENABLED=true`、ZMQ 地址/账户 ID 完整、`ping` 账户匹配、同一轮资金和持仓同步成功，并且页面的“允许真实交易”开关已打开。
 
 配置项从本机环境变量读取：
 
 ```text
 QMT_ENABLED=true
 QMT_ZMQ_CONNECT_ADDRESS=tcp://111.228.39.194:15648
+QMT_LOCAL_ZMQ_CONNECT_ADDRESS=tcp://127.0.0.1:15648
+QMT_CONNECTION_MODE=remote
 QMT_ACCOUNT_ID=资金账号
 QMT_TRADE_ENABLED=false
 QMT_ACCOUNT_TYPE=STOCK

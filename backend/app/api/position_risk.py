@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
@@ -56,6 +56,10 @@ class QmtOrderPreviewPayload(BaseModel):
 
 class QmtTradeTogglePayload(BaseModel):
     enabled: bool
+
+
+class QmtConnectionModePayload(BaseModel):
+    mode: Literal["remote", "local"]
 
 
 class QmtRiskActionPayload(BaseModel):
@@ -344,6 +348,15 @@ def qmt_sync(request: Request):
 def qmt_trading_toggle(payload: QmtTradeTogglePayload, request: Request):
     try:
         status = _qmt(request).set_trade_enabled(payload.enabled)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "status": status}
+
+
+@router.post("/qmt/connection-mode")
+def qmt_connection_mode(payload: QmtConnectionModePayload, request: Request):
+    try:
+        status = _qmt(request).switch_connection(payload.mode)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "status": status}

@@ -1,7 +1,7 @@
-"""云端 QMT ZMQ RPC 交易网关。
+"""QMT ZMQ RPC 交易网关。
 
-浏览器永远只访问本地 API；本模块是主项目与云端 QMT 之间的唯一边界。
-ZMQ 连接地址和账户从环境变量读取，不写入运行日志或用户数据。
+浏览器永远只访问本地 API；本模块是主项目与 QMT 之间的唯一边界。
+连接地址和账户从环境变量读取，当前连接模式可在运行时切换。
 """
 from __future__ import annotations
 
@@ -248,33 +248,70 @@ class QmtZmqRpcClient:
     """调用 bigqmt_signal_trader 的 ZMQ ROUTER/DEALER RPC 协议。"""
 
     def __init__(self, settings: Any) -> None:
+        self.settings = settings
         self.enabled = bool(getattr(settings, "qmt_enabled", False))
-        self.connect_address = str(
+        self.connection_mode = self._normalise_connection_mode(
+            getattr(settings, "qmt_connection_mode", "remote"),
+        )
+        self.remote_connect_address = str(
             getattr(settings, "qmt_zmq_connect_address", "") or "",
         ).strip()
+        self.local_connect_address = str(
+            getattr(settings, "qmt_local_zmq_connect_address", "tcp://127.0.0.1:15648")
+            or "",
+        ).strip()
+        self.connect_address = self._address_for_mode(self.connection_mode)
         self.account_id = str(getattr(settings, "qmt_account_id", "") or "").strip()
         self.account_type = str(getattr(settings, "qmt_account_type", "STOCK") or "STOCK").upper()
         self.timeout = max(1.0, float(getattr(settings, "qmt_rpc_timeout_seconds", 6.0)))
         self._context = None
         self._dealer = None
         self._lock = threading.Lock()
+        self._retired = False
+
+    @staticmethod
+    def _normalise_connection_mode(value: Any) -> str:
+        return "local" if str(value or "remote").strip().lower() == "local" else "remote"
+
+    def _address_for_mode(self, mode: str) -> str:
+        return self.local_connect_address if mode == "local" else self.remote_connect_address
 
     @property
     def configured(self) -> bool:
-        return bool(self.enabled and self.connect_address and self.account_id and zmq is not None)
+        return bool(
+            not self._retired
+            and self.enabled
+            and self.connect_address
+            and self.account_id
+            and zmq is not None
+        )
 
     @property
     def configuration_reason(self) -> str:
+        if self._retired:
+            return "QMT 连接已切换"
         if not self.enabled:
             return "QMT_ENABLED 未开启"
         missing = []
         if not self.connect_address:
-            missing.append("QMT_ZMQ_CONNECT_ADDRESS")
+            missing.append(
+                "QMT_LOCAL_ZMQ_CONNECT_ADDRESS"
+                if self.connection_mode == "local"
+                else "QMT_ZMQ_CONNECT_ADDRESS",
+            )
         if not self.account_id:
             missing.append("QMT_ACCOUNT_ID")
         if missing:
             return "缺少 " + ", ".join(missing)
         return "后端未安装 pyzmq 客户端" if zmq is None else "已配置"
+
+    @property
+    def remote_configured(self) -> bool:
+        return bool(self.enabled and self.remote_connect_address and self.account_id and zmq is not None)
+
+    @property
+    def local_configured(self) -> bool:
+        return bool(self.enabled and self.local_connect_address and self.account_id and zmq is not None)
 
     def _ensure_dealer(self):
         if not self.configured:
@@ -356,6 +393,7 @@ class QmtZmqRpcClient:
 
     def close(self) -> None:
         with self._lock:
+            self._retired = True
             self._close_dealer_locked()
 
     def probe(self) -> dict[str, Any]:
@@ -439,6 +477,7 @@ class QmtTradingService:
     """本地交易控制面；不会把确认风险建议直接变成委托。"""
 
     def __init__(self, data_dir, settings: Any) -> None:
+        self.settings = settings
         self.client = QmtZmqRpcClient(settings)
         self.trade_authorized = bool(getattr(settings, "qmt_trade_enabled", False))
         self.trade_enabled = self.trade_authorized and self.client.configured
@@ -450,6 +489,8 @@ class QmtTradingService:
         self._sync_write_lock = threading.Lock()
         self._auto_stop = threading.Event()
         self._auto_thread: threading.Thread | None = None
+        self._auto_position_risk_service: Any | None = None
+        self._connection_generation = 0
         self._last_status: dict[str, Any] = {}
         self._last_snapshot: dict[str, Any] | None = None
         self._last_snapshot_monotonic = 0.0
@@ -485,6 +526,11 @@ class QmtTradingService:
                 "account_id": self.client.account_id or None,
                 "rpc_transport": "zmq",
                 "rpc_address": self.client.connect_address or None,
+                "connection_mode": self.client.connection_mode,
+                "remote_rpc_address": self.client.remote_connect_address or None,
+                "local_rpc_address": self.client.local_connect_address or None,
+                "remote_configured": self.client.remote_configured,
+                "local_configured": self.client.local_configured,
                 "account_type": self.account_type,
                 "auto_sync_enabled": self.auto_sync_enabled,
                 "auto_sync_running": bool(self._auto_thread and self._auto_thread.is_alive()),
@@ -689,20 +735,28 @@ class QmtTradingService:
         ]
 
     def _query_remote_orders(self) -> list[dict[str, Any]]:
-        result = self.client.call("query_orders", {"account_id": self.client.account_id, "strategy_name": ""})
+        with self._lock:
+            client = self.client
+        result = client.call("query_orders", {"account_id": client.account_id, "strategy_name": ""})
         if not isinstance(result, list):
             raise QmtRpcError("QMT 委托响应格式无效")
         return [self._normalize_remote_order(item) for item in result if isinstance(item, dict)]
 
     def probe(self) -> dict[str, Any]:
+        with self._lock:
+            client = self.client
+            generation = self._connection_generation
         started = time.monotonic()
         try:
-            result = self.client.probe()
+            result = client.probe()
         except Exception as exc:  # noqa: BLE001
             with self._lock:
-                self._last_status = {"state": "error", "reason": str(exc), "last_probe_at": _now()}
+                if generation == self._connection_generation and client is self.client:
+                    self._last_status = {"state": "error", "reason": str(exc), "last_probe_at": _now()}
             raise
         with self._lock:
+            if generation != self._connection_generation or client is not self.client:
+                raise QmtRpcError("QMT 连接已切换，请重新检查")
             self._last_status = {
                 "state": "ready", "reason": "QMT RPC 在线", "last_probe_at": _now(),
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
@@ -710,9 +764,12 @@ class QmtTradingService:
         return {**self.status(), **result}
 
     def sync(self) -> dict[str, Any]:
+        with self._lock:
+            client = self.client
+            generation = self._connection_generation
         started = time.monotonic()
         try:
-            snapshot = self.client.snapshot()
+            snapshot = client.snapshot()
             remote_orders = snapshot.get("orders") or []
             if isinstance(remote_orders, list):
                 snapshot["orders"] = self._merge_remote_orders([
@@ -720,9 +777,12 @@ class QmtTradingService:
                 ])
         except Exception as exc:
             with self._lock:
-                self._last_status = {"state": "error", "reason": str(exc), "last_probe_at": _now()}
+                if generation == self._connection_generation and client is self.client:
+                    self._last_status = {"state": "error", "reason": str(exc), "last_probe_at": _now()}
             raise
         with self._lock:
+            if generation != self._connection_generation or client is not self.client:
+                raise QmtRpcError("QMT 连接已切换，本次同步结果已丢弃")
             self._last_snapshot = snapshot
             self._last_snapshot_monotonic = time.monotonic()
             self._last_account = dict(snapshot.get("account") or {})
@@ -737,7 +797,10 @@ class QmtTradingService:
 
     def _sync_account_cache(self) -> dict[str, Any]:
         """Warm the account amount independently of the slower full snapshot."""
-        asset = self.client.call("get_asset", {"account_id": self.client.account_id})
+        with self._lock:
+            client = self.client
+            generation = self._connection_generation
+        asset = client.call("get_asset", {"account_id": client.account_id})
         if not isinstance(asset, dict):
             raise QmtRpcError("QMT 资产响应格式无效")
         account = {
@@ -745,6 +808,8 @@ class QmtTradingService:
             **_normalise_account(asset, self.account_type),
         }
         with self._lock:
+            if generation != self._connection_generation or client is not self.client:
+                raise QmtRpcError("QMT 连接已切换，本次账户缓存已丢弃")
             self._last_account = account
             self._last_account_monotonic = time.monotonic()
             if self._last_status.get("state") != "error":
@@ -768,6 +833,7 @@ class QmtTradingService:
             return {"portfolio": portfolio, "snapshot": snapshot}
 
     def start_auto_sync(self, position_risk_service: Any) -> bool:
+        self._auto_position_risk_service = position_risk_service
         if not self.auto_sync_enabled or not self.client.configured:
             return False
         with self._lock:
@@ -798,6 +864,39 @@ class QmtTradingService:
             self._auto_thread.start()
         return True
 
+    def switch_connection(self, mode: str) -> dict[str, Any]:
+        """Switch the QMT endpoint without restarting the API process."""
+        mode = QmtZmqRpcClient._normalise_connection_mode(mode)
+        with self._submit_lock:
+            with self._lock:
+                if mode == self.client.connection_mode:
+                    return self.status()
+                setattr(self.settings, "qmt_connection_mode", mode)
+                self.client.close()
+                self.client = QmtZmqRpcClient(self.settings)
+                self._connection_generation += 1
+                self.trade_enabled = False
+                self._last_status = {
+                    "state": "unknown" if self.client.configured else "not_configured",
+                    "reason": f"已切换到{'本地' if mode == 'local' else '远程'} QMT，等待检查连接",
+                    "last_probe_at": None,
+                }
+                self._last_snapshot = None
+                self._last_snapshot_monotonic = 0.0
+                self._last_account = None
+                self._last_account_monotonic = 0.0
+                position_risk_service = self._auto_position_risk_service
+                auto_running = bool(self._auto_thread and self._auto_thread.is_alive())
+                should_start_auto_sync = (
+                    not auto_running
+                    and self.auto_sync_enabled
+                    and self.client.configured
+                    and position_risk_service is not None
+                )
+        if should_start_auto_sync:
+            self.start_auto_sync(position_risk_service)
+        return self.status()
+
     def _warm_account_cache(self) -> None:
         try:
             self._sync_account_cache()
@@ -815,16 +914,16 @@ class QmtTradingService:
         self.client.close()
 
     def set_trade_enabled(self, enabled: bool) -> dict[str, Any]:
-        if enabled:
-            if not self.trade_authorized:
-                raise QmtRpcError("QMT_TRADE_ENABLED 未授权真实交易")
-            if not self.client.configured:
-                raise QmtRpcError(self.client.configuration_reason)
+        with self._submit_lock:
             with self._lock:
-                if self._last_snapshot is None or self._last_status.get("state") != "ready":
-                    raise QmtRpcError("请先成功同步 QMT 权威账户，再开启真实交易")
-        with self._lock:
-            self.trade_enabled = bool(enabled)
+                if enabled:
+                    if not self.trade_authorized:
+                        raise QmtRpcError("QMT_TRADE_ENABLED 未授权真实交易")
+                    if not self.client.configured:
+                        raise QmtRpcError(self.client.configuration_reason)
+                    if self._last_snapshot is None or self._last_status.get("state") != "ready":
+                        raise QmtRpcError("请先成功同步 QMT 权威账户，再开启真实交易")
+                self.trade_enabled = bool(enabled)
         return self.status()
 
     def _buying_power(self, account: dict[str, Any], credit_buy_mode: str = "collateral") -> tuple[float | None, str, float | None]:
@@ -1242,6 +1341,10 @@ class QmtTradingService:
         return self._merge_remote_orders(orders)
 
     def cancel_order(self, request: dict[str, Any]) -> dict[str, Any]:
+        with self._submit_lock:
+            return self._cancel_order(request)
+
+    def _cancel_order(self, request: dict[str, Any]) -> dict[str, Any]:
         if not self.trade_enabled:
             raise QmtRpcError("真实交易开关未开启")
         order_sys_id = str(request.get("order_sys_id") or "").strip()

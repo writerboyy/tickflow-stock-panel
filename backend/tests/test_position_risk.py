@@ -534,6 +534,28 @@ def test_qmt_client_requires_explicit_enable_and_complete_credentials():
     assert "QMT_ZMQ_CONNECT_ADDRESS" in incomplete.configuration_reason
 
 
+def test_qmt_trading_service_switches_between_remote_and_local_endpoints(tmp_path: Path):
+    settings = _qmt_settings(
+        qmt_zmq_connect_address="tcp://remote.example:15648",
+        qmt_local_zmq_connect_address="tcp://127.0.0.1:15648",
+        qmt_connection_mode="remote",
+    )
+    service = QmtTradingService(tmp_path, settings)
+    old_client = service.client
+
+    switched = service.switch_connection("local")
+
+    assert settings.qmt_connection_mode == "local"
+    assert old_client.configured is False
+    assert old_client._dealer is None
+    assert switched["connection_mode"] == "local"
+    assert switched["rpc_address"] == "tcp://127.0.0.1:15648"
+    assert switched["remote_rpc_address"] == "tcp://remote.example:15648"
+    assert switched["local_configured"] is True
+    assert switched["trade_enabled"] is False
+    assert switched["last_sync_at"] is None
+
+
 def test_qmt_zmq_client_round_trip_uses_server_protocol():
     seen = []
 

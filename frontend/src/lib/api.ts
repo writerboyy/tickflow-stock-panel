@@ -1162,6 +1162,11 @@ export interface QmtStatus {
   trade_enabled: boolean
   account_id: string | null
   account_type: string
+  connection_mode: 'remote' | 'local'
+  remote_rpc_address?: string | null
+  local_rpc_address?: string | null
+  remote_configured?: boolean
+  local_configured?: boolean
   auto_sync_enabled: boolean
   auto_sync_running: boolean
   auto_sync_interval_seconds: number
@@ -3460,6 +3465,7 @@ export const api = {
   qmtProbe: () => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST' }),
   qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
   qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  qmtConnectionMode: (mode: 'remote' | 'local') => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/connection-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
   qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
   qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode }, quiet = false) =>
     request<{ ok: boolean; preview: QmtOrderPreview }>('/api/position-risk/qmt/orders/preview', { method: 'POST', body: JSON.stringify(payload), quiet }),

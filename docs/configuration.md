@@ -110,7 +110,7 @@ BACKEND_EXTRAS=             # 留空默认;legacy-cpu 兼容老 CPU
 
 ### QMT 实盘交易（可选）
 
-持仓风控的云端 QMT ZMQ RPC 只从环境变量读取，默认关闭连接和交易能力：`QMT_ENABLED=false`、`QMT_TRADE_ENABLED=false`、`QMT_ACCOUNT_TYPE=STOCK`。金额下单不再设置应用侧单笔手数上限，但仍按 100 股整手、可用资金和可用持仓校验。连接配置完整后，`QMT_AUTO_SYNC=true` 默认每 30 秒同步一次权威账户；`QMT_TRADE_ENABLED=true` 只授权交易能力，运行时开关重启后仍默认关闭。ZMQ 端口应通过防火墙限制来源，账户信息和连接地址不要提交到 Git。
+持仓风控的 QMT ZMQ RPC 只从环境变量读取，默认关闭连接和交易能力：`QMT_ENABLED=false`、`QMT_TRADE_ENABLED=false`、`QMT_ACCOUNT_TYPE=STOCK`。远程地址使用 `QMT_ZMQ_CONNECT_ADDRESS`，本地地址使用 `QMT_LOCAL_ZMQ_CONNECT_ADDRESS`（默认 `tcp://127.0.0.1:15648`），启动模式由 `QMT_CONNECTION_MODE=remote|local` 指定；运行中也可在持仓风控页切换。金额下单不再设置应用侧单笔手数上限，但仍按 100 股整手、可用资金和可用持仓校验。连接配置完整后，`QMT_AUTO_SYNC=true` 默认每 30 秒同步一次权威账户；`QMT_TRADE_ENABLED=true` 只授权交易能力，运行时开关重启后仍默认关闭。ZMQ 端口应通过防火墙限制来源，账户信息和连接地址不要提交到 Git。
 
 1. **面板设置页**(`设置 → ...`):UI 修改后立即生效,持久化到 `data/`
 2. **`.env` 文件**:启动时读取
