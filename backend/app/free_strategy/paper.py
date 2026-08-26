@@ -235,6 +235,25 @@ def _has_second_precision_schedule(values: tuple[str, ...] | list[str] | None) -
     )
 
 
+def _has_scheduled_paper_execution(
+    execution_mode: str | None,
+    scheduled_times: tuple[str, ...] | list[str] | None,
+) -> bool:
+    """Use schedule boundaries for paper replay when explicit tasks exist."""
+    values = tuple(value for value in scheduled_times or () if value != "every_bar")
+    return bool(values) and (
+        execution_mode in {"scheduled", "full_bar"}
+        or _has_second_precision_schedule(values)
+    )
+
+
+def _engine_uses_scheduled_paper_execution(engine: Any) -> bool:
+    return _has_scheduled_paper_execution(
+        getattr(engine, "execution_mode", None),
+        getattr(engine, "scheduled_times", ()),
+    )
+
+
 def _paper_callback_timeout(state: dict[str, Any]) -> float:
     config = state.get("config") or {}
     value = config.get("callback_timeout_seconds")
@@ -618,8 +637,7 @@ class MarketDataHub:
                     self._quote_feed_leased = True
                 if (
                     mode.startswith("bar_")
-                    or execution_mode == "scheduled"
-                    or _has_second_precision_schedule(scheduled_times)
+                    or _has_scheduled_paper_execution(execution_mode, scheduled_times)
                 ):
                     self._ensure_bar_thread()
                 if mode == "websocket":
@@ -676,12 +694,12 @@ class MarketDataHub:
                 self._sync_websocket()
             if (
                 removed.mode.startswith("bar_")
-                or removed.execution_mode == "scheduled"
-                or _has_second_precision_schedule(removed.scheduled_times)
+                or _has_scheduled_paper_execution(
+                    removed.execution_mode, removed.scheduled_times,
+                )
             ) and not any(
                 s.mode.startswith("bar_")
-                or s.execution_mode == "scheduled"
-                or _has_second_precision_schedule(s.scheduled_times)
+                or _has_scheduled_paper_execution(s.execution_mode, s.scheduled_times)
                 for s in self._subscriptions.values()
             ):
                 self._bar_stop.set()
@@ -1002,8 +1020,9 @@ class MarketDataHub:
                 and not (
                     mode == "websocket"
                     and (
-                        sub.execution_mode == "scheduled"
-                        or _has_second_precision_schedule(sub.scheduled_times)
+                        _has_scheduled_paper_execution(
+                            sub.execution_mode, sub.scheduled_times,
+                        )
                     )
                 )
             ]
@@ -1030,14 +1049,16 @@ class MarketDataHub:
             scheduled = [
                 sub for sub in all_subscriptions
                 if sub.mode.startswith("bar_") or sub.mode == "websocket"
-                if sub.execution_mode == "scheduled"
-                or _has_second_precision_schedule(sub.scheduled_times)
+                if _has_scheduled_paper_execution(
+                    sub.execution_mode, sub.scheduled_times,
+                )
             ]
             self._dispatch_scheduled_clocks(scheduled, now)
             targets = [
                 sub for sub in targets
-                if sub.execution_mode != "scheduled"
-                and not _has_second_precision_schedule(sub.scheduled_times)
+                if not _has_scheduled_paper_execution(
+                    sub.execution_mode, sub.scheduled_times,
+                )
             ]
             groups: dict[tuple[str, str], list[_Subscription]] = {}
             for sub in targets:
@@ -1517,7 +1538,7 @@ def _engine_from_state(
     )
     schedule_repo = (
         _paper_schedule_repo(repo)
-        if engine.execution_mode == "scheduled" or engine.second_precision_schedules
+        if _engine_uses_scheduled_paper_execution(engine)
         else repo
     )
     runtime_timestamp = (
@@ -2376,7 +2397,7 @@ def _catch_up_bars(
     start_day = last_timestamp.date() if last_timestamp else cn_today()
     timeframe = {"bar_1m": "1m", "bar_5m": "5m", "bar_30m": "30m"}.get(mode, "1d")
     asset_type = str(current.get("config", {}).get("asset_type", "stock"))
-    if engine.execution_mode == "scheduled" or _has_second_precision_schedule(engine.scheduled_times):
+    if _engine_uses_scheduled_paper_execution(engine):
         return _catch_up_scheduled(
             store,
             account_id,
@@ -2610,8 +2631,7 @@ def _paper_worker(
             current["sync"]["queue_delay_seconds"] = round(queue_wait, 3)
             if message.get("type") == "scheduled_clock":
                 if (
-                    engine.execution_mode != "scheduled"
-                    and not _has_second_precision_schedule(engine.scheduled_times)
+                    not _engine_uses_scheduled_paper_execution(engine)
                 ):
                     continue
                 cutoff = datetime.fromisoformat(str(message["cutoff"]))

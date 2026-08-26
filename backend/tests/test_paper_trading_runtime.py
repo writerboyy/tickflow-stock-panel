@@ -26,6 +26,7 @@ from app.free_strategy.paper import (
     _equity_snapshot,
     _full_bar_wait_reason,
     _has_second_precision_schedule,
+    _has_scheduled_paper_execution,
     _queue_delay_seconds,
     _queued_payload,
     _process_bar_rows,
@@ -320,6 +321,32 @@ def test_full_bar_wait_does_not_survive_market_close(monkeypatch):
     state["last_bar"] = "2026-08-06T14:49:00"
     assert _full_bar_wait_reason(state, datetime(2026, 8, 6, 14, 51)) is None
     assert _full_bar_wait_reason(state, datetime(2026, 8, 6, 15, 1)) is None
+
+
+def test_full_bar_strategy_with_explicit_schedules_uses_paper_boundaries():
+    assert _has_scheduled_paper_execution("full_bar", ("09:40", "13:10"))
+    assert not _has_scheduled_paper_execution("full_bar", ("every_bar",))
+    assert not _has_scheduled_paper_execution("quote", ("09:40",))
+
+
+def test_scheduled_event_updates_on_bar_state_before_schedule_callback():
+    engine = FreeStrategyEngine(
+        "def initialize(context):\n"
+        "    context.schedule(task, '10:00')\n"
+        "def on_bar(context, bars):\n"
+        "    context.state['bar_seen'] = list(bars)\n"
+        "def task(context):\n"
+        "    context.state['scheduled_seen'] = context.state.get('bar_seen')\n",
+        timeframe="1m",
+    )
+    engine.advance_event(
+        datetime(2024, 1, 2, 10, 0),
+        [Bar("X", datetime(2024, 1, 2, 10, 0), 10, 10, 10, 10)],
+        event_type="scheduled",
+        scheduled_at="10:00",
+    )
+    assert engine.context.state["bar_seen"] == ["X"]
+    assert engine.context.state["scheduled_seen"] == ["X"]
 
 
 class FakePaperProcess:

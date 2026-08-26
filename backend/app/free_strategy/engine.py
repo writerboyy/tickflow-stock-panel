@@ -2570,7 +2570,9 @@ class FreeStrategyEngine:
         published_fill_count = len(self.account.fills)
 
         # 4. Primary market callback.
-        if event_type == "bar":
+        if event_type == "bar" or (
+            event_type == "scheduled" and self._callbacks.get("on_bar") is not None
+        ):
             self._run_callback("on_bar", bars_now)
             if self._callbacks.get("on_bar") is None:
                 callback = self._callbacks.get("on_quote")
