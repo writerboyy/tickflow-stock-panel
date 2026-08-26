@@ -10,7 +10,7 @@
 # 用法:
 #   bash scripts/auto_merge_upstream.sh
 #
-set -uo pipefail
+set -o pipefail
 
 # 仓库根目录（脚本位于 <repo>/scripts/ 下）
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,6 +20,9 @@ UPSTREAM_REMOTE="upstream"
 UPSTREAM_BRANCH="main"
 TARGET_BRANCH="custom"
 ORIGIN_REMOTE="origin"
+STASHED=0
+BRANCH_BEFORE=""
+STASH_MSG=""
 
 LOG_DIR="$REPO_DIR/.workbuddy"
 LOG_FILE="$LOG_DIR/auto_merge_upstream.log"
@@ -29,27 +32,27 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 
 # 恢复现场（切回原分支 + 还原 stash）后退出
 restore() {
-  local rc=$1
-  if [ -n "${BRANCH_BEFORE:-}" ] && [ "$BRANCH_BEFORE" != "$TARGET_BRANCH" ]; then
+  rc=$1
+  if [ -n "$BRANCH_BEFORE" ] && [ "$BRANCH_BEFORE" != "$TARGET_BRANCH" ]; then
     if git switch "$BRANCH_BEFORE" 2>/dev/null; then
       log "已切回原分支 $BRANCH_BEFORE"
     else
-      log "⚠️ 切回 $BRANCH_BEFORE 失败，请手动处理"
+      log "警告: 切回 $BRANCH_BEFORE 失败，请手动处理"
     fi
   fi
-  if [ "${STASHED:-0}" = "1" ]; then
+  if [ "$STASHED" = "1" ]; then
     log "恢复 stash（git stash pop）..."
     if git stash pop; then
       log "stash 已恢复，工作区改动已还原"
     else
-      log "⚠️ stash pop 冲突：stash 已保留（git stash list 查看），请手动解决"
+      log "警告: stash pop 冲突，stash 已保留（git stash list 查看），请手动解决"
     fi
   fi
   log "===== 结束（退出码 $rc）====="
   exit "$rc"
 }
 
-log "===== 开始 upstream($UPSTREAM_REMOTE/$UPSTREAM_BRANCH) → $TARGET_BRANCH 自动合并 ====="
+log "===== 开始 upstream($UPSTREAM_REMOTE/$UPSTREAM_BRANCH) -> $TARGET_BRANCH 自动合并 ====="
 
 BRANCH_BEFORE="$(git symbolic-ref --short HEAD 2>/dev/null || echo '')"
 log "运行前分支: ${BRANCH_BEFORE:-<detached>}"
@@ -61,7 +64,6 @@ if [ -n "$(git status --porcelain)" ]; then
   git stash push -u -m "$STASH_MSG"
   STASHED=1
 else
-  STASHED=0
   log "工作区干净，无需 stash"
 fi
 
@@ -78,7 +80,7 @@ fi
 # 3) 拉取 upstream 最新
 log "git fetch $UPSTREAM_REMOTE ..."
 if ! git fetch "$UPSTREAM_REMOTE"; then
-  log "⚠️ fetch $UPSTREAM_REMOTE 失败（可能无网络/无权限）"
+  log "警告: fetch $UPSTREAM_REMOTE 失败（可能无网络/无权限）"
   restore 1
 fi
 
@@ -97,10 +99,10 @@ if git merge -X theirs --no-edit "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"; then
   if [ "$BEFORE" = "$AFTER" ]; then
     log "$TARGET_BRANCH 已与 upstream 同步，无新合并"
   else
-    log "合并完成 ✅（新增/变更提交数: $INCOMING）"
+    log "合并完成（新增/变更提交数: $INCOMING）"
   fi
 else
-  log "⚠️ 合并失败，执行 git merge --abort"
+  log "警告: 合并失败，执行 git merge --abort"
   git merge --abort 2>/dev/null
   restore 1
 fi
@@ -108,9 +110,9 @@ fi
 # 5) 推送到 origin
 log "git push $ORIGIN_REMOTE $TARGET_BRANCH ..."
 if git push "$ORIGIN_REMOTE" "$TARGET_BRANCH"; then
-  log "推送成功 → $ORIGIN_REMOTE/$TARGET_BRANCH ✅"
+  log "推送成功 -> $ORIGIN_REMOTE/$TARGET_BRANCH"
 else
-  log "⚠️ 推送失败（可能无凭证/网络），本地合并已完成，请手动 push"
+  log "警告: 推送失败（可能无凭证/网络），本地合并已完成，请手动 push"
 fi
 
 restore 0
