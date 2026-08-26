@@ -195,6 +195,54 @@ def run(context):
     assert repo.get_minute_snapshot(["X"], datetime(2024, 1, 2, 1, 30), "stock")["datetime"].item() == datetime(2024, 1, 2, 1, 30)
 
 
+def test_second_precision_catchup_resets_schedule_before_resolving_symbols(monkeypatch, tmp_path):
+    source = """
+def initialize(context):
+    context.set_universe(['X'])
+    context.schedule(run, '09:30:16')
+
+def run(context):
+    context.state['ran_at'] = context.now.isoformat()
+"""
+    engine = FreeStrategyEngine(
+        source,
+        timeframe="1m",
+        config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="000001.SH"),
+    )
+    # A restored checkpoint has all previous-day schedules marked complete.
+    engine.context._scheduled[0].done = True
+    requested = []
+
+    class Repository:
+        def get_tick_range(self, symbols, *_args, **_kwargs):
+            requested.append(list(symbols))
+            return pl.DataFrame({"symbol": ["X"], "datetime": [datetime(2024, 1, 2, 9, 30, 16)]})
+
+    monkeypatch.setattr(
+        "app.free_strategy.process._ensure_scheduled_market_data",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process._scheduled_minute_bars",
+        lambda *_args, **_kwargs: [Bar("X", datetime(2024, 1, 2, 9, 30, 16), 10, 10, 10, 10)],
+    )
+    monkeypatch.setattr(
+        "app.free_strategy.process.replay_second_precision_session",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr("app.free_strategy.paper._persist_engine_state", lambda *_args, **_kwargs: _args[2])
+    store = PaperAccountStore(tmp_path)
+    current = store.save({"id": "paper", "status": "running", "config": {"market_mode": "bar_1m", "asset_type": "stock"}})
+
+    _process_scheduled_day(
+        store, "paper", current, engine, Repository(), MarketData(),
+        date(2024, 1, 2), datetime(2024, 1, 2, 9, 31), "stock", "1m",
+        finalize=False,
+    )
+
+    assert requested == [["X"]]
+
+
 def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:
     engine.advance_event(
         max(value.timestamp for value in values),

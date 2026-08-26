@@ -2181,7 +2181,34 @@ def _process_scheduled_day(
             _scheduled_symbols,
         )
 
-        symbols = _scheduled_symbols(engine, cutoff)
+        # Reset the previous session's completed schedule markers before
+        # resolving the target day's dynamic subscription scope. Otherwise
+        # `_scheduled_symbols` can return only held positions/benchmark,
+        # producing an empty Tick request during catch-up.
+        engine.begin_session(day)
+        # Resolve against the first scheduled boundary rather than the
+        # session close. `_scheduled_symbols` matches exact schedule times;
+        # using `cutoff` (15:00 for catch-up) otherwise yields an empty scope.
+        due_schedule_times = [
+            at for at in engine.scheduled_times
+            if at != "every_bar"
+            and datetime.combine(day, clock_time.fromisoformat(at)) <= cutoff
+        ]
+        scope_timestamp = (
+            datetime.combine(day, clock_time.fromisoformat(min(due_schedule_times)))
+            if due_schedule_times else cutoff
+        )
+        symbols = _scheduled_symbols(engine, scope_timestamp)
+        # Four-mode preselection expands the universe at 09:05, after the
+        # historical Tick request must already have been assembled. Include
+        # its static candidates up front so later callbacks have visible rows.
+        if engine.four_mode_snapshot_requirement is not None:
+            snapshot = engine.context.four_mode_snapshot(day)
+            static_candidates = snapshot.get("static_candidates") or []
+            symbols = list(dict.fromkeys([
+                *symbols,
+                *(str(row.get("symbol") or "").strip().upper() for row in static_candidates),
+            ]))
         benchmark = str(engine.config.benchmark_symbol or "").strip().upper()
         second_symbols = [symbol for symbol in symbols if symbol != benchmark]
         _ensure_scheduled_market_data(
