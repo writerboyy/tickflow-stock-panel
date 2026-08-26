@@ -125,6 +125,71 @@ def test_snapshot_build_filters_stock_symbols_without_polars_list_cast_error():
     assert cache.all_symbols == ["000001.SZ", "600000.SH"]
 
 
+def test_stock_symbols_match_prepare_stock_list_filters():
+    class Repo:
+        def get_instruments_asset(self, asset_type):
+            import polars as pl
+
+            assert asset_type == "stock"
+            return pl.DataFrame({
+                "symbol": [
+                    "000001.SZ", "300001.SZ", "600000.SH", "688001.SH",
+                    "430001.BJ", "000002.SZ", "000003.SZ", "000004.SZ",
+                ],
+                "name": ["平安银行", "创业板", "浦发银行", "科创板", "北交所", "ST测试", "退市股", "次新股"],
+                "status": ["active", "active", "active", "active", "active", "active", "delisted", "active"],
+                "listing_date": [
+                    date(2020, 1, 1), date(2020, 1, 1), date(2020, 1, 1), date(2020, 1, 1),
+                    date(2020, 1, 1), date(2020, 1, 1), date(2020, 1, 1), date(2026, 8, 1),
+                ],
+            })
+
+    assert snapshot._stock_symbols(Repo(), date(2026, 8, 26)) == [
+        "000001.SZ", "300001.SZ", "600000.SH"
+    ]
+
+
+def test_snapshot_valuation_uses_full_prepared_pool_not_pit_members(monkeypatch, tmp_path):
+    import polars as pl
+
+    day = date(2026, 8, 26)
+
+    class Store:
+        data_dir = tmp_path
+
+    class Repo:
+        store = Store()
+
+        def get_instruments_asset(self, asset_type):
+            assert asset_type == "stock"
+            return pl.DataFrame({"symbol": ["000001.SZ", "000002.SZ"]})
+
+        def get_daily_asset_batch(self, *_args, **_kwargs):
+            return pl.DataFrame({
+                "symbol": ["000001.SZ", "000002.SZ"],
+                "date": [date(2026, 8, 25), date(2026, 8, 25)],
+            })
+
+    cache = object.__new__(snapshot.FourModeSnapshotCache)
+    cache.repo = Repo()
+    cache.start = day
+    cache.end = day
+    cache.requirement = {"index_symbol": "000852.SH"}
+    cache._snapshots = {}
+    cache._auction_signatures = {}
+    cache._all_symbols = set()
+    valuation_symbols = []
+    monkeypatch.setattr(cache, "_trading_days", lambda: [day])
+    monkeypatch.setattr(cache, "_members", lambda _day: ({"000001.SZ"}, None))
+    monkeypatch.setattr(cache, "_auction", lambda _day: ({}, [], {}))
+    monkeypatch.setattr(cache, "_valuation", lambda symbols, _cutoff: valuation_symbols.append(list(symbols)) or {})
+    monkeypatch.setattr(cache, "_remember_auction_signatures", lambda: None)
+
+    cache._build()
+
+    assert valuation_symbols == [["000001.SZ", "000002.SZ"]]
+
+
 def test_valid_empty_auction_manifest_is_not_a_storage_gap():
     manifest = {
         "status": "complete",

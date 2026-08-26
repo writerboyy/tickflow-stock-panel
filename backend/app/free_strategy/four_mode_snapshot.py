@@ -116,16 +116,46 @@ def _auction_manifest_is_valid_empty(manifest: dict[str, Any]) -> bool:
     )
 
 
-def _stock_symbols(repo: Any) -> list[str]:
-    """Return the native A-share universe used by the four-mode snapshot."""
+def _stock_symbols(repo: Any, as_of: date | None = None) -> list[str]:
+    """Return the point-in-time stock universe used by the four-mode snapshot.
+
+    The archived strategy's ``prepare_stock_list`` removes KCB/BJ symbols,
+    delisted or risk-warning names, and stocks listed for 50 days or less
+    before any mode-specific rule runs.  Apply the same filters here when the
+    instrument catalog exposes the corresponding metadata.
+    """
     instruments = repo.get_instruments_asset("stock")
     if instruments is None or instruments.is_empty() or "symbol" not in instruments.columns:
         return []
-    return sorted({
-        str(symbol).strip().upper()
-        for symbol in instruments["symbol"].to_list()
-        if str(symbol).strip().upper().endswith((".SH", ".SZ"))
-    })
+    frame = instruments
+    symbols = pl.col("symbol").cast(pl.String).str.strip_chars().str.to_uppercase()
+    code = symbols.str.split(".").list.first()
+    frame = frame.filter(
+        symbols.str.ends_with(".SH") | symbols.str.ends_with(".SZ")
+    ).filter(
+        code.str.len_chars() == 6
+    ).filter(
+        ~code.str.starts_with("4")
+        & ~code.str.starts_with("8")
+        & ~code.str.starts_with("68")
+    )
+    if "status" in frame.columns:
+        frame = frame.filter(pl.col("status").cast(pl.String).str.to_lowercase() == "active")
+    if "name" in frame.columns:
+        frame = frame.filter(
+            ~pl.col("name").cast(pl.String).str.to_uppercase().str.contains("ST|退")
+        )
+    if as_of is not None:
+        listing_column = "listing_date" if "listing_date" in frame.columns else (
+            "list_date" if "list_date" in frame.columns else None
+        )
+        if listing_column is not None:
+            listing_date = pl.col(listing_column).cast(pl.Date, strict=False)
+            frame = frame.filter(
+                listing_date.is_not_null()
+                & ((pl.lit(as_of) - listing_date).dt.total_days() > 50)
+            )
+    return sorted(set(frame.select(symbols).to_series().to_list()))
 
 
 def four_mode_limit_up_symbols(repo: Any, trade_date: date) -> list[str]:
@@ -134,7 +164,7 @@ def four_mode_limit_up_symbols(repo: Any, trade_date: date) -> list[str]:
     This is intentionally a small preparation universe for the archived
     first-to-second-board score.  It never uses auction or substitute prices.
     """
-    symbols = _stock_symbols(repo)
+    symbols = _stock_symbols(repo, trade_date)
     if not symbols:
         return []
     daily = repo.get_daily_asset_batch(
@@ -176,7 +206,7 @@ def four_mode_minute_requirements(
     """
     if end < start:
         return {}
-    symbols = _stock_symbols(repo)
+    symbols = _stock_symbols(repo, end)
     if not symbols:
         return {}
     index_symbol = str(requirement.get("index_symbol") or "000852.SH")
@@ -803,13 +833,7 @@ class FourModeSnapshotCache:
         # tuple produces a list-typed literal and fails at runtime on current
         # Polars versions.  Keep the stock universe limited to Shanghai and
         # Shenzhen symbols while expressing the predicate explicitly.
-        symbols = [
-            str(item)
-            for item in instruments.filter(
-                pl.col("symbol").str.ends_with(".SH")
-                | pl.col("symbol").str.ends_with(".SZ")
-            )["symbol"].to_list()
-        ]
+        symbols = _stock_symbols(self.repo, self.end)
         self._all_symbols.update(symbols)
         load_start = self.start - timedelta(days=max(180, int(self.requirement.get("lookback_days", 80)) * 3))
         columns = ["symbol", "date", "open", "high", "low", "close", "volume", "amount", "raw_open", "raw_high", "raw_low", "raw_close"]
@@ -826,7 +850,9 @@ class FourModeSnapshotCache:
         for day in self._trading_days():
             members, member_gap = self._members(day)
             auction_rows, auction_gaps, manifest = self._auction(day)
-            valuations = self._valuation(list(members or symbols), day - timedelta(days=1))
+            # Weak-reversal and first-board modes use the full prepared stock
+            # pool.  Only trend evaluation is restricted to PIT index members.
+            valuations = self._valuation(symbols, day - timedelta(days=1))
             static_modes: dict[str, dict[str, Any]] = {}
             modes: dict[str, dict[str, Any]] = {}
             candidates: list[dict[str, Any]] = []
