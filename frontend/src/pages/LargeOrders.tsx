@@ -530,8 +530,6 @@ export function LargeOrders() {
     onSuccess: result => {
       queryClient.setQueryData(QK.positionRiskQmt, result)
       queryClient.setQueryData(QK.positionRiskQmtProbe, result)
-      const latency = result.latency_ms != null ? `，延迟 ${result.latency_ms}ms` : ''
-      toast(`QMT 连接正常${latency}`, 'success')
     },
   })
   const qmtSync = useMutation({
@@ -554,6 +552,14 @@ export function LargeOrders() {
       toast(`已切换到${result.status.connection_mode === 'local' ? '本地' : '远程'} QMT`, 'success')
     },
   })
+  const probeLatency = qmtProbeQuery.data?.latency_ms ?? qmtProbe.data?.latency_ms ?? qmt.data?.latency_ms
+  const probeButtonLabel = qmtProbe.isPending || qmtProbeQuery.isFetching
+    ? '检查 QMT 连接（检查中…）'
+    : qmtProbe.isError || qmtProbeQuery.isError
+      ? '检查 QMT 连接（失败）'
+      : probeLatency != null
+        ? `检查 QMT 连接（${probeLatency}ms）`
+        : '检查 QMT 连接'
   const signalNames = useMemo(
     () => Object.fromEntries((options.data?.custom_signals ?? []).map(signal => [signal.id, signal.label])),
     [options.data?.custom_signals],
@@ -632,9 +638,6 @@ export function LargeOrders() {
           <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(data.account.total_asset)}</b></span>
           <span className={cn('inline-flex items-center gap-1.5', data.runtime.status === 'websocket' ? 'text-bear' : data.runtime.status === 'polling_degraded' || data.runtime.status === 'reconnecting' ? 'text-warning' : 'text-muted')}><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
           <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bear' : qmt.data?.configured ? 'text-warning' : 'text-muted')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
-          {qmt.data?.configured && <span className={cn('text-[11px]', qmtProbeQuery.isFetching ? 'text-warning' : qmtProbeQuery.isError ? 'text-danger' : 'text-muted')} title="每 30 秒自动探测一次 QMT 连接">
-            {qmtProbeQuery.isFetching ? '检查中…' : qmtProbeQuery.isError ? '延迟获取失败' : qmtProbeQuery.data?.latency_ms != null ? `延迟 ${qmtProbeQuery.data.latency_ms}ms` : qmt.data?.latency_ms != null ? `延迟 ${qmt.data.latency_ms}ms` : '延迟 --'}
-          </span>}
           <span className="inline-flex items-center rounded-btn bg-elevated p-0.5" title="切换 QMT 连接位置">
             {(['remote', 'local'] as const).map(mode => {
               const active = (qmt.data?.connection_mode ?? 'remote') === mode
@@ -646,7 +649,7 @@ export function LargeOrders() {
           </span>
           <span className={qmt.data?.auto_sync_running ? 'text-bear' : 'text-muted'}>{qmt.data?.auto_sync_running ? `自动同步 ${qmt.data.auto_sync_interval_seconds}秒` : '自动同步未运行'}</span>
           <label className="inline-flex items-center gap-1.5 text-muted" title={!qmt.data?.trade_authorized ? '后端未授权实盘交易' : '取消勾选可暂停本次运行的实盘下单'}><input type="checkbox" checked={qmt.data?.trade_enabled === true} disabled={!qmt.data?.configured || !qmt.data?.trade_authorized || qmtToggle.isPending} onChange={event => qmtToggle.mutate(event.target.checked)} />实盘模式</label>
-          <button type="button" onClick={() => qmtProbe.mutate()} disabled={qmtProbe.isPending} className="h-7 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">{qmtProbe.isPending ? '检查中…' : '检查 QMT 连接'}</button>
+          <button type="button" onClick={() => qmtProbe.mutate()} disabled={qmtProbe.isPending || qmtProbeQuery.isFetching} className="h-7 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50" title="点击立即检查；页面每 30 秒自动更新一次延迟">{probeButtonLabel}</button>
           {runtimeReason && <span className="ml-auto max-w-[10rem] truncate text-[11px] text-muted" title={data.runtime.reason}>{runtimeReason}</span>}
         </div>
       </div>
