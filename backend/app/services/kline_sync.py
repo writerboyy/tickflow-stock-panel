@@ -504,7 +504,9 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
     if "timestamp" in df.columns:
         df = df.with_columns(
-            pl.from_epoch("timestamp", time_unit="ms").alias("datetime"),
+            # TickFlow epoch is UTC; the canonical minute contract uses
+            # timezone-naive Beijing wall-clock timestamps.
+            pl.from_epoch("timestamp", time_unit="ms").dt.offset_by("8h").alias("datetime"),
         ).drop("timestamp")
         for drop_col in ("trade_time", "trade_date"):
             if drop_col in df.columns:
@@ -637,31 +639,42 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
 
 
 def _migrate_utc_minute_wall_clock(repo: KlineRepository, asset_type: AssetType) -> None:
-    """一次性把早期 UTC-naive 分钟K迁移成北京时间 wall-clock。"""
+    """Repair UTC-naive minute rows left by the old timestamp normalizer.
+
+    The first migration marker only inspected one partition, so a later sync
+    could leave a mixture of Beijing and UTC-naive rows.  The versioned pass
+    repairs only rows before 08:00, which is outside the A-share session and
+    therefore unambiguous, then becomes a no-op on subsequent starts.
+    """
     minute_dir = repo.store.data_dir / _minute_table(asset_type)
-    marker = minute_dir / ".beijing_wall_clock_v1"
+    marker = minute_dir / ".beijing_wall_clock_v2"
     if marker.exists():
         return
     files = sorted(minute_dir.glob("date=*/part.parquet"))
     if not files:
         return
-    sample = pl.read_parquet(files[0], columns=["datetime"])
-    if sample.is_empty() or "datetime" not in sample.columns:
-        return
-    first = sample["datetime"][0]
-    # 正确数据的连续竞价首根为 09:30；旧 UTC 数据落为 01:30。
-    if not hasattr(first, "hour") or first.hour >= 8:
-        marker.write_text("already_beijing", encoding="utf-8")
-        return
+    repaired = 0
     for path in files:
         frame = pl.read_parquet(path)
         if "datetime" not in frame.columns:
             continue
-        _atomic_write_parquet(
-            frame.with_columns(pl.col("datetime").dt.offset_by("8h").alias("datetime")), path,
-        )
+        bad = frame.filter(pl.col("datetime").dt.hour() < 8).height
+        if not bad:
+            continue
+        _atomic_write_parquet(frame.with_columns(
+            pl.when(pl.col("datetime").dt.hour() < 8)
+            .then(pl.col("datetime").dt.offset_by("8h"))
+            .otherwise(pl.col("datetime"))
+            .alias("datetime"),
+        ), path)
+        repaired += bad
     marker.write_text("migrated", encoding="utf-8")
-    logger.info("%s minute K timestamps migrated to Asia/Shanghai wall-clock (%d partitions)", asset_type, len(files))
+    logger.info(
+        "%s minute K timestamps checked for UTC-naive rows: repaired %d rows across %d partitions",
+        asset_type,
+        repaired,
+        len(files),
+    )
 
 
 def _resolve_minute_provider(

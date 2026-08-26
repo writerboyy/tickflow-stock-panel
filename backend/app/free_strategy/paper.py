@@ -2581,6 +2581,15 @@ class PaperTradingSupervisor:
     def __init__(self, data_dir: Path, quote_service: Any, repo: Any) -> None:
         self.data_dir = Path(data_dir)
         self.store = PaperAccountStore(self.data_dir)
+        # Repair minute partitions before any paper worker performs catch-up.
+        # This is intentionally shared for stock and ETF data so existing
+        # accounts recover without requiring a manual history sync.
+        try:
+            from app.services.kline_sync import _migrate_utc_minute_wall_clock
+            for asset_type in ("stock", "etf"):
+                _migrate_utc_minute_wall_clock(repo, asset_type)
+        except Exception:  # noqa: BLE001
+            logger.exception("模拟盘启动前分钟K时区迁移失败")
         self.hub = MarketDataHub(quote_service, repo)
         self._ctx = mp.get_context("spawn")
         self._processes: dict[str, mp.Process] = {}
