@@ -204,8 +204,20 @@ class _PaperHistoricalRepository:
         ).head(1).sort([column for column in ("datetime", "symbol") if column in frame.columns], maintain_order=True)
 
 
-def _paper_repo(repo: Any) -> Any:
-    return repo if getattr(repo, "_paper_clock_adapter", False) is True else _PaperHistoricalRepository(repo)
+def _paper_schedule_repo(repo: Any) -> Any:
+    """Adapt UTC-naive intraday history only for Beijing-clock scheduling."""
+    if (
+        repo is None
+        or getattr(repo, "_paper_clock_adapter", False) is True
+        or getattr(repo, "intraday_datetime_basis", None) != "utc_naive"
+    ):
+        return repo
+    return _PaperHistoricalRepository(repo)
+
+
+# Keep the old private name for existing tests/importers; runtime code opts in
+# explicitly so shared quote and ordinary bar paths stay on canonical data.
+_paper_repo = _paper_schedule_repo
 
 
 def state_market_mode(state: dict[str, Any]) -> str:
@@ -539,7 +551,7 @@ class MarketDataHub:
 
     def __init__(self, quote_service: Any, repo: Any) -> None:
         self.quote_service = quote_service
-        self.repo = _paper_repo(repo)
+        self.repo = repo
         self._lock = threading.RLock()
         self._subscriptions: dict[str, _Subscription] = {}
         self._quote_feed_leased = False
@@ -1477,7 +1489,7 @@ def _engine_from_state(
     allowed = {field.name for field in fields(FreeStrategyConfig)}
     config = FreeStrategyConfig(asset_type=asset_type, **{key: value for key, value in raw.items() if key in allowed})
     risk = RiskConfig(**state.get("risk_config", {}))
-    repo = _paper_repo(KlineRepository(DataStore(data_dir)))
+    repo = KlineRepository(DataStore(data_dir))
     source = (account_root / "strategy.py").read_text(encoding="utf-8")
     checkpoint = state.get("checkpoint")
     compatible_checkpoint = (
@@ -1502,6 +1514,11 @@ def _engine_from_state(
         callback_deadline=callback_deadline,
         callback_label=callback_label,
         dialect=str(state.get("dialect") or "native"),
+    )
+    schedule_repo = (
+        _paper_schedule_repo(repo)
+        if engine.execution_mode == "scheduled" or engine.second_precision_schedules
+        else repo
     )
     runtime_timestamp = (
         state.get("last_bar")
@@ -1620,7 +1637,7 @@ def _engine_from_state(
         start = cutoff.date() - timedelta(days=max(30, count * 3))
         try:
             rows = _read_rows(
-                repo,
+                schedule_repo if period != "1d" else repo,
                 [symbol],
                 start,
                 cutoff.date(),
@@ -1646,7 +1663,7 @@ def _engine_from_state(
         if cached is not None:
             return {symbol: list(values) for symbol, values in cached.items()}
         result = _load_scheduled_history_batch(
-            repo,
+            schedule_repo if period != "1d" else repo,
             scheduled_history_market,
             asset_type,
             list(normalized),
@@ -2132,8 +2149,9 @@ def _process_scheduled_day(
     before_fills = len(engine.account.fills)
     before_logs = len(engine.logs)
     before_risk = engine.risk_status
+    schedule_repo = _paper_schedule_repo(repo)
     if not live_only and engine.second_precision_schedules:
-        get_tick_range = getattr(repo, "get_tick_range", None)
+        get_tick_range = getattr(schedule_repo, "get_tick_range", None)
         if not callable(get_tick_range):
             raise ValueError("模拟盘历史续接包含秒级定时点，但当前 provider 没有 tick/逐笔行情能力")
         from app.free_strategy.process import (
@@ -2146,7 +2164,7 @@ def _process_scheduled_day(
         benchmark = str(engine.config.benchmark_symbol or "").strip().upper()
         second_symbols = [symbol for symbol in symbols if symbol != benchmark]
         _ensure_scheduled_market_data(
-            repo,
+            schedule_repo,
             market,
             second_symbols,
             day - timedelta(days=45),
@@ -2166,7 +2184,7 @@ def _process_scheduled_day(
         )
     else:
         advance_scheduled_session(
-            repo,
+            schedule_repo,
             engine,
             market,
             day,
@@ -2478,7 +2496,7 @@ def _paper_worker(
     account_root = Path(root) / account_id
     store = PaperAccountStore(Path(root).parent)
     state = store.get(account_id)
-    repo = _paper_repo(KlineRepository(DataStore(Path(root).parent)))
+    repo = KlineRepository(DataStore(Path(root).parent))
     scheduled_market = MarketData()
     engine: FreeStrategyEngine | None = None
     slot_acquired = False
@@ -2749,7 +2767,7 @@ class PaperTradingSupervisor:
     def __init__(self, data_dir: Path, quote_service: Any, repo: Any) -> None:
         self.data_dir = Path(data_dir)
         self.store = PaperAccountStore(self.data_dir)
-        self.hub = MarketDataHub(quote_service, _paper_repo(repo))
+        self.hub = MarketDataHub(quote_service, repo)
         self._ctx = mp.get_context("spawn")
         self._processes: dict[str, mp.Process] = {}
         self._queues: dict[str, Any] = {}

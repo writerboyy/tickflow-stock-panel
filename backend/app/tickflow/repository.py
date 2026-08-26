@@ -314,6 +314,10 @@ class DataStore:
 class KlineRepository:
     """日 K / 分钟 K 的读写入口。"""
 
+    # Intraday parquet timestamps are stored as UTC-naive values. Paper
+    # scheduling is the only caller that needs to reinterpret that clock.
+    intraday_datetime_basis = "utc_naive"
+
     def __init__(self, store: DataStore) -> None:
         self.store = store
         self.db = store.db

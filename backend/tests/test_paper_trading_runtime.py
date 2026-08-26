@@ -31,6 +31,7 @@ from app.free_strategy.paper import (
     _process_bar_rows,
     _process_scheduled_day,
     _PaperHistoricalRepository,
+    _paper_schedule_repo,
     _quote_to_live_bar,
 )
 from app.free_strategy.process import MarketData
@@ -120,6 +121,17 @@ def test_paper_historical_repository_maps_utc_naive_ticks_for_scheduled_fills():
 
     assert calls == [(datetime(2024, 1, 2, 2, 15), datetime(2024, 1, 2, 10, 30))]
     assert frame["datetime"].to_list() == [datetime(2024, 1, 2, 10, 16)]
+
+
+def test_shared_market_data_keeps_canonical_repository_clock():
+    class CanonicalRepository:
+        intraday_datetime_basis = "utc_naive"
+
+    repo = CanonicalRepository()
+    hub = MarketDataHub(object(), repo)
+
+    assert hub.repo is repo
+    assert _paper_schedule_repo(repo) is not repo
 
 
 def advance_quotes(engine: FreeStrategyEngine, *values: Quote) -> None:
