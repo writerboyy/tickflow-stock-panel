@@ -16,6 +16,7 @@ from app.services.limit_board_service import (
 from app.services.limit_board_store import LimitBoardStore, default_config
 from app.services.quote_service import QuoteService
 from app.services.qmt_trading import QmtOrderPreflightError
+from app.services.screener import ScreenerService
 
 
 class FakeRepo:
@@ -197,14 +198,14 @@ def test_jijiang_realtime_view_adds_cached_yesterday_boards(tmp_path, monkeypatc
     monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
     calls = []
 
-    def load_prior(_as_of, _column):
+    def load_prior(_as_of):
         calls.append(1)
         return pl.DataFrame({
             "symbol": ["600000.SH", "600001.SH"],
-            "prev_consec": [1, 3],
+            "boards": [1, 3],
         })
 
-    monkeypatch.setattr(service._screener, "load_prior_consecutive", load_prior)
+    monkeypatch.setattr(service._screener, "load_prior_ladder_boards", load_prior)
     service.app_state.kaipanla_collector = SimpleNamespace(
         jijiang_realtime_snapshot=lambda: {
             "provider": "kaipanla_socket",
@@ -225,6 +226,70 @@ def test_jijiang_realtime_view_adds_cached_yesterday_boards(tmp_path, monkeypatc
     assert [row["yesterday_boards"] for row in first["rows"]] == [1, 3, 0]
     assert second["rows"] == first["rows"]
     assert len(calls) == 1
+
+
+def test_jijiang_realtime_view_uses_system_ladder_boards(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 27)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    monkeypatch.setattr(
+        service._screener,
+        "load_prior_ladder_boards",
+        lambda _as_of: pl.DataFrame({
+            "symbol": ["600000.SH", "600001.SH", "600002.SH"],
+            "boards": [1, 2, 3],
+        }),
+    )
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        jijiang_realtime_snapshot=lambda: {
+            "provider": "kaipanla_socket",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-27T10:00:00+08:00",
+            "rows": [
+                {"thscode": "600000.SH", "name": "昨日首板"},
+                {"thscode": "600001.SH", "name": "昨日二板"},
+                {"thscode": "600002.SH", "name": "昨日三板"},
+                {"thscode": "600003.SH", "name": "不在天梯"},
+            ],
+        },
+    )
+
+    result = service.jijiang_realtime_view()
+
+    assert [row["yesterday_boards"] for row in result["rows"]] == [1, 2, 3, 0]
+
+
+def test_load_prior_ladder_boards_matches_limit_board_statuses(monkeypatch):
+    screener = ScreenerService(FakeRepo())
+    prior_date = date(2026, 8, 26)
+    monkeypatch.setattr(screener, "_find_prior_enriched_date", lambda _as_of: prior_date)
+    monkeypatch.setattr(
+        screener,
+        "_load_enriched_for_date",
+        lambda _date: pl.DataFrame({
+            "symbol": ["600000.SH", "600001.SH", "600002.SH", "600003.SH"],
+            "signal_limit_up": [True, False, False, False],
+            "signal_broken_limit_up": [False, True, False, False],
+            "consecutive_limit_ups": [2, 0, 0, 0],
+        }),
+    )
+    monkeypatch.setattr(
+        screener,
+        "load_prior_consecutive",
+        lambda _as_of, _column: pl.DataFrame({
+            "symbol": ["600001.SH", "600002.SH"],
+            "prev_consec": [1, 2],
+        }),
+    )
+
+    result = screener.load_prior_ladder_boards(date(2026, 8, 27))
+
+    assert result.sort("symbol").to_dicts() == [
+        {"symbol": "600000.SH", "boards": 2},
+        {"symbol": "600001.SH", "boards": 2},
+        {"symbol": "600002.SH", "boards": 3},
+    ]
 
 
 def test_top_sector_rows_returns_top_fifteen():

@@ -398,25 +398,25 @@ class LimitBoardService:
         return {**value, "rows": rows}
 
     def _load_yesterday_boards(self, today: date) -> dict[str, int]:
-        """Load the prior trading day's consecutive-limit-up counts once per day."""
+        """Load the prior trading day's system ladder board counts once per day."""
         if self._yesterday_boards_date == today:
             return self._yesterday_boards
         try:
-            frame = self._screener.load_prior_consecutive(today, "consecutive_limit_ups")
+            frame = self._screener.load_prior_ladder_boards(today)
         except Exception:  # noqa: BLE001
             logger.debug("读取昨日连板数据失败", exc_info=True)
             frame = pl.DataFrame()
         values: dict[str, int] = {}
-        if frame is not None and not frame.is_empty() and {"symbol", "prev_consec"}.issubset(frame.columns):
+        if frame is not None and not frame.is_empty() and {"symbol", "boards"}.issubset(frame.columns):
             prior = (
-                frame.select("symbol", "prev_consec")
+                frame.select("symbol", "boards")
                 .with_columns(
-                    pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0),
+                    pl.col("boards").cast(pl.Int64, strict=False).fill_null(0),
                 )
-                .filter(pl.col("prev_consec") > 0)
+                .filter(pl.col("boards") > 0)
             )
             values = {
-                str(row["symbol"]).strip().upper(): max(1, int(row["prev_consec"]))
+                str(row["symbol"]).strip().upper(): max(1, int(row["boards"]))
                 for row in prior.iter_rows(named=True)
                 if str(row.get("symbol") or "").strip()
             }

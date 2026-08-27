@@ -140,6 +140,79 @@ class ScreenerService:
                 return pl.DataFrame()
         return pl.DataFrame()
 
+    def _find_prior_enriched_date(self, as_of: date) -> date | None:
+        """Find the nearest earlier date partition, skipping weekends and holidays."""
+        enriched_dir = self.repo.store.data_dir / self._enriched_dirname
+        for delta in range(1, 10):
+            candidate = as_of - timedelta(days=delta)
+            target_parquet = enriched_dir / f"date={candidate.isoformat()}" / "part.parquet"
+            if target_parquet.exists():
+                return candidate
+        return None
+
+    def load_prior_ladder_boards(self, as_of: date) -> pl.DataFrame:
+        """Return the prior up-limit ladder's ``symbol`` and calculated ``boards``.
+
+        This mirrors ``/api/screener/limit-ladder?direction=up`` before its
+        sealed-depth overlay, including limit-up, broken-limit-up, and failed
+        promotion rows.  The result is used by the intraday radar so its
+        "昨日首板/昨日 N 板" labels come from the system ladder rather than the
+        upstream approaching-limit response.
+        """
+        prior_date = self._find_prior_enriched_date(as_of)
+        if prior_date is None:
+            fallback = self.load_prior_consecutive(as_of, "consecutive_limit_ups")
+            if fallback.is_empty() or not {"symbol", "prev_consec"}.issubset(fallback.columns):
+                return pl.DataFrame()
+            return fallback.select(
+                "symbol",
+                pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0).alias("boards"),
+            ).filter(pl.col("boards") > 0)
+
+        current = self._load_enriched_for_date(prior_date)
+        if current.is_empty() or "symbol" not in current.columns:
+            fallback = self.load_prior_consecutive(as_of, "consecutive_limit_ups")
+            if fallback.is_empty() or not {"symbol", "prev_consec"}.issubset(fallback.columns):
+                return pl.DataFrame()
+            return fallback.select(
+                "symbol",
+                pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0).alias("boards"),
+            ).filter(pl.col("boards") > 0)
+
+        previous = self.load_prior_consecutive(prior_date, "consecutive_limit_ups")
+        if previous.is_empty():
+            current = current.with_columns(pl.lit(0).cast(pl.Int64).alias("prev_consec"))
+        else:
+            current = current.join(
+                previous.select(
+                    "symbol",
+                    pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0),
+                ),
+                on="symbol",
+                how="left",
+            ).with_columns(pl.col("prev_consec").fill_null(0))
+
+        is_limit = pl.col("signal_limit_up").fill_null(False) if "signal_limit_up" in current.columns else pl.lit(False)
+        is_broken = pl.col("signal_broken_limit_up").fill_null(False) if "signal_broken_limit_up" in current.columns else pl.lit(False)
+        consecutive = (
+            pl.col("consecutive_limit_ups").cast(pl.Int64, strict=False).fill_null(0)
+            if "consecutive_limit_ups" in current.columns
+            else pl.lit(0).cast(pl.Int64)
+        )
+        previous_count = pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0)
+        is_failed = ~is_limit & ~is_broken & (previous_count > 0)
+        return (
+            current.with_columns(
+                pl.when(is_limit).then(consecutive)
+                .when(is_broken | is_failed).then(previous_count + 1)
+                .otherwise(0)
+                .cast(pl.Int64)
+                .alias("boards"),
+            )
+            .select("symbol", "boards")
+            .filter(pl.col("boards") > 0)
+        )
+
     def _compute_enriched_full(self, df_target: pl.DataFrame, target_date: date) -> pl.DataFrame:
         """从 17 列基础数据即时计算完整 enriched (含全部指标和信号)。
 
