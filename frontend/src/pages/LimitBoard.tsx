@@ -1133,7 +1133,7 @@ function SectorStrengthTable({
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
     <div className="overflow-x-auto overscroll-x-contain">
-    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_20%_34%_24%]' : 'lg:grid-cols-[25%_30%_45%]'}`}>
+    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_16%_38%_24%]' : 'lg:grid-cols-[25%_24%_51%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-1 border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
@@ -1186,7 +1186,7 @@ function SectorStrengthTable({
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[360px] table-fixed border-collapse">
-          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[24%] px-2 py-1.5">板块</th><th className="w-[20%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[56%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
+          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[31%] px-2 py-1.5">板块</th><th className="w-[14%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[55%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
           <tbody>{rows.length ? rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
             const linked = linkedPlateIds.has(row.plate_id)
