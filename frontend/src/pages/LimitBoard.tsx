@@ -369,6 +369,14 @@ function auctionAmount(value: unknown): string {
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 
+function auctionMarketCap(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--'
+  if (Math.abs(value) >= 1_000_000_000_000) return `${(value / 1_000_000_000_000).toFixed(2)}万亿`
+  if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toFixed(2)}亿`
+  if (Math.abs(value) >= 10_000) return `${(value / 10_000).toFixed(1)}万`
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
 function auctionTone(value: unknown): string {
   return typeof value === 'number' && Number.isFinite(value) ? (value > 0 ? 'text-bull' : value < 0 ? 'text-bear' : 'text-secondary') : 'text-muted'
 }
@@ -440,7 +448,7 @@ function AuctionTable({
         <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] border-collapse text-[10px]">
+          <table className="w-full min-w-[1120px] border-collapse text-[10px]">
             <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">股票</th>
               <th className="px-2 py-2 text-right font-medium">时点</th>
@@ -448,8 +456,10 @@ function AuctionTable({
               <th className="px-2 py-2 text-right font-medium">竞价涨幅</th>
               <th className="px-2 py-2 text-right font-medium">竞价量</th>
               <th className="px-2 py-2 text-right font-medium">竞价额</th>
+              <th className="px-2 py-2 text-right font-medium">竞价换手率</th>
               <th className="px-2 py-2 text-right font-medium">未匹配</th>
               <th className="px-2 py-2 text-right font-medium">量比</th>
+              <th className="px-2 py-2 text-right font-medium">流通市值</th>
               <th className="px-2 py-2 text-right font-medium">昨收价</th>
               <th className="px-3 py-2 text-right font-medium">开盘价</th>
             </tr></thead>
@@ -461,8 +471,10 @@ function AuctionTable({
                 <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.auction_volume)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
+                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
                 <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
               </tr>)}
