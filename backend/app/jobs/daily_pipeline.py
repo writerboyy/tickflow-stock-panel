@@ -281,10 +281,23 @@ def run_now(
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
 
+    # 范围修复后清理未被批量接口返回的标的遗留的盘中时间戳。
+    # 否则 merge-upsert 会保留旧 quote_ts, 下一次启动仍会被判定为快照。
+    repair_start = override_start_date if override_start_date is not None else stale_day
+    if repair_start is not None:
+        try:
+            cleared = repo.clear_historical_snapshot_timestamps(repair_start, today)
+            if cleared:
+                logger.info(
+                    "integrity: 已清理 %d 个历史日K分区的盘中 quote_ts (范围 %s~%s)",
+                    cleared, repair_start, today,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("历史盘中 quote_ts 清理失败 (soft): %s", e)
+
     # 完整性修复时删除股票 enriched 的坏分区: 增量重算只算 enriched 里不存在
     # 的日期, 盘中快照日分区已存在(虽是错的), 不删永远不会被重算。删除后
     # Step 2 把这些日期当"新日期"重算 (剩余分区最近 60 天做历史前缀, 窗口 ≤5 天回看充足)。
-    repair_start = override_start_date if override_start_date is not None else stale_day
     if repair_start is not None:
         try:
             from app.services.data_integrity import prune_enriched_partitions

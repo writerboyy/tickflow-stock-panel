@@ -178,6 +178,28 @@ def test_prune_enriched_partitions_removes_only_range(tmp_path):
     assert not (base / f"date={TODAY.isoformat()}").exists()
 
 
+def test_clear_historical_snapshot_timestamps_keeps_close_final(tmp_path):
+    from app.tickflow.repository import DataStore, KlineRepository
+
+    part = tmp_path / "kline_daily" / f"date={FRIDAY.isoformat()}"
+    part.mkdir(parents=True)
+    snapshot = _ts_ms(FRIDAY, time(11, 58))
+    close_final = _ts_ms(FRIDAY, time(15, 1))
+    pl.DataFrame({
+        "symbol": ["a", "b", "c"],
+        "date": [FRIDAY] * 3,
+        "quote_ts": [snapshot, close_final, None],
+    }).write_parquet(part / "part.parquet")
+
+    repo = KlineRepository(DataStore(tmp_path))
+    changed = repo.clear_historical_snapshot_timestamps(FRIDAY, TODAY)
+
+    assert changed == 1
+    result = pl.read_parquet(part / "part.parquet")
+    assert result["quote_ts"].to_list() == [None, close_final, None]
+    assert scan_recent_integrity(tmp_path, today=TODAY) == []
+
+
 # ── 管道起点决策 (分支3降级后的起点) ────────────────────────────────
 
 

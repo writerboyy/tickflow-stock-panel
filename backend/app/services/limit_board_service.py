@@ -264,15 +264,25 @@ class LimitBoardService:
         except Exception as exc:  # noqa: BLE001
             self._last_error = f"行情标的订阅初始化失败：{exc}"
             logger.warning("打板专区行情标的订阅初始化失败", exc_info=True)
+        from app.services import preferences
+
         acquire_polling = getattr(self.quote_service, "acquire_temporary_polling", None)
         get_min_interval = getattr(self.quote_service, "get_min_interval", None)
-        if callable(acquire_polling):
+        realtime_enabled = preferences.get_realtime_quotes_enabled()
+        monitor_enabled = preferences.get_limit_ladder_monitor_enabled()
+        if callable(acquire_polling) and realtime_enabled and monitor_enabled:
             try:
                 interval = max(1.0, float(get_min_interval())) if callable(get_min_interval) else 3.0
                 acquire_polling(interval)
                 self._polling_lease = True
             except ValueError as exc:
                 self._last_error = str(exc)
+        elif callable(acquire_polling):
+            logger.info(
+                "打板专区行情轮询未启动: realtime_quotes_enabled=%s, limit_ladder_monitor_enabled=%s",
+                realtime_enabled,
+                monitor_enabled,
+            )
         hub = self._hub()
         if hub is not None:
             try:

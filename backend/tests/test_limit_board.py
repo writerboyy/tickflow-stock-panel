@@ -336,6 +336,33 @@ def test_start_registers_limit_board_consumer(tmp_path):
         service.stop()
 
 
+def test_start_does_not_acquire_polling_when_realtime_is_disabled(tmp_path, monkeypatch):
+    class LeaseQuotes(FakeQuotes):
+        def __init__(self):
+            super().__init__()
+            self.acquired = False
+
+        def acquire_temporary_polling(self, _interval):
+            self.acquired = True
+
+    quotes = LeaseQuotes()
+    service = LimitBoardService(
+        tmp_path,
+        FakeRepo(),
+        quotes,
+        SimpleNamespace(paper_supervisor=None, qmt_trading_service=None),
+    )
+    monkeypatch.setattr("app.services.preferences.get_realtime_quotes_enabled", lambda: False)
+    monkeypatch.setattr("app.services.preferences.get_limit_ladder_monitor_enabled", lambda: True)
+
+    service.start()
+    try:
+        assert quotes.acquired is False
+        assert service._polling_lease is False
+    finally:
+        service.stop()
+
+
 def test_start_keeps_service_available_when_initial_refresh_fails(tmp_path, monkeypatch):
     service, quotes, _config = make_service(tmp_path)
 

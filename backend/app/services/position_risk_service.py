@@ -389,6 +389,14 @@ class PositionRiskService:
             return
         self._mark_quote_gap("正在建立持仓行情连续性基线", symbols)
 
+        from app.services import preferences
+
+        if not preferences.get_realtime_quotes_enabled():
+            self._runtime_status = "data_unavailable"
+            self._runtime_reason = "实时行情已关闭"
+            self._notify_updated()
+            return
+
         set_intraday = getattr(self.quote_service, "set_intraday_consumer", None)
         if callable(set_intraday):
             for asset_type in ("stock", "etf"):

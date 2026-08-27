@@ -2485,6 +2485,61 @@ class KlineRepository:
         elif asset_type == "etf":
             self.append_etf_daily(df)
 
+    def clear_historical_snapshot_timestamps(self, start: date, end: date) -> int:
+        """清理历史日K分区中由实时行情遗留的盘中 quote_ts。
+
+        范围修复的批量日K接口不一定返回每个标的；仅做 merge-upsert 会让
+        未返回标的继续保留旧的盘中时间戳，启动完整性检查便会反复触发修复。
+        保留收盘后定版时间戳，只清除早于当日 15:00 的值。
+        """
+        if start >= end:
+            return 0
+        from datetime import time as dt_time
+
+        cutoff_cache: dict[date, int] = {}
+        tables = ("kline_daily", "kline_etf_daily", "kline_index_daily")
+        changed = 0
+        with self._write_lock:
+            for table in tables:
+                base = self.store.data_dir / table
+                if not base.exists():
+                    continue
+                for part in base.glob("date=*"):
+                    try:
+                        day = date.fromisoformat(part.name[5:])
+                    except ValueError:
+                        continue
+                    if not start <= day < end:
+                        continue
+                    cutoff = cutoff_cache.get(day)
+                    if cutoff is None:
+                        from app.market_time import CN_TZ
+
+                        cutoff = int(
+                            datetime.combine(day, dt_time(15, 0), tzinfo=CN_TZ).timestamp() * 1000
+                        )
+                        cutoff_cache[day] = cutoff
+                    for out in part.glob("*.parquet"):
+                        try:
+                            frame = pl.read_parquet(out)
+                        except Exception:  # noqa: BLE001
+                            logger.warning("清理 quote_ts 时读取失败: %s", out)
+                            continue
+                        if "quote_ts" not in frame.columns or frame.is_empty():
+                            continue
+                        timestamps = pl.col("quote_ts").cast(pl.Int64, strict=False)
+                        updated = frame.with_columns(
+                            pl.when(timestamps.is_not_null() & (timestamps < cutoff))
+                            .then(pl.lit(None, dtype=pl.Int64))
+                            .otherwise(timestamps)
+                            .alias("quote_ts")
+                        )
+                        if updated.equals(frame):
+                            continue
+                        self._atomic_write_parquet(updated, out)
+                        changed += 1
+        return changed
+
     def append_enriched_asset(self, asset_type: str, df: pl.DataFrame) -> None:
         """按资产类型写入 enriched；stock/index 保持旧目录兼容。"""
         if asset_type == "stock":

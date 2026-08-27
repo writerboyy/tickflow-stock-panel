@@ -2478,13 +2478,14 @@ def test_depth_state_isolated_between_trading_dates(tmp_path: Path):
     assert state["resealed"] is False
 
 
-def test_stock_and_etf_use_separate_intraday_routes(tmp_path: Path):
+def test_stock_and_etf_use_separate_intraday_routes(tmp_path: Path, monkeypatch):
     class _MixedRepo(_Repo):
         def resolve_asset_type(self, symbol: str) -> str:
             return "etf" if symbol == "510300.SH" else "stock"
 
     quotes = _AssetAwareQuotes()
     service = PositionRiskService(tmp_path, _MixedRepo(), quotes, SimpleNamespace(paper_supervisor=None))
+    monkeypatch.setattr("app.services.preferences.get_realtime_quotes_enabled", lambda: True)
     service.store.replace({
         "account": {"name": "账户", "cash": 90_000, "total_asset": 100_000},
         "positions": [
@@ -3173,7 +3174,7 @@ def test_position_risk_sse_channel_is_independent():
     service.unsubscribe(subscriber)
 
 
-def test_ws_capacity_failure_falls_back_with_entire_portfolio(tmp_path: Path):
+def test_ws_capacity_failure_falls_back_with_entire_portfolio(tmp_path: Path, monkeypatch):
     class _Hub:
         def __init__(self):
             self.registered = None
@@ -3200,6 +3201,7 @@ def test_ws_capacity_failure_falls_back_with_entire_portfolio(tmp_path: Path):
         capabilities=CapabilitySet({Cap.WEBSOCKET: CapabilityLimits(subscribe=1)}),
     )
     service = PositionRiskService(tmp_path, _Repo(), quotes, state)
+    monkeypatch.setattr("app.services.preferences.get_realtime_quotes_enabled", lambda: True)
     service.store.replace({
         "account": {"name": "账户", "cash": 1000, "total_asset": 2000, "previous_close_total_asset": 2000},
         "positions": [
@@ -3211,3 +3213,27 @@ def test_ws_capacity_failure_falls_back_with_entire_portfolio(tmp_path: Path):
     assert hub.registered == {"600036.SH", "000001.SZ"}
     assert quotes.consumer_symbols == hub.registered
     assert service.view()["runtime"]["status"] == "polling_degraded"
+
+
+def test_position_risk_does_not_poll_when_realtime_is_disabled(tmp_path: Path, monkeypatch):
+    class _TrackingQuotes(_Quotes):
+        def __init__(self):
+            super().__init__()
+            self.acquired = False
+
+        def acquire_temporary_polling(self, _interval):
+            self.acquired = True
+
+    quotes = _TrackingQuotes()
+    service = PositionRiskService(tmp_path, _Repo(), quotes, SimpleNamespace(paper_supervisor=None))
+    monkeypatch.setattr("app.services.preferences.get_realtime_quotes_enabled", lambda: False)
+    service.store.replace({
+        "account": {"name": "账户", "cash": 1000, "total_asset": 2000},
+        "positions": [{"symbol": "600036.SH", "name": "招商银行", "quantity": 10, "available": 10, "cost_price": 35}],
+    }, 0)
+
+    service.refresh_subscription()
+
+    assert quotes.acquired is False
+    assert service.view()["runtime"]["status"] == "data_unavailable"
+    assert service.view()["runtime"]["reason"] == "实时行情已关闭"
