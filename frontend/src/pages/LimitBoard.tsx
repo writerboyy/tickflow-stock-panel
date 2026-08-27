@@ -791,7 +791,7 @@ function Table(props: TableProps) {
   )
 }
 
-type SectorSortKey = 'strength' | 'main_net' | 'institution_increase'
+type SectorSortKey = 'strength' | 'main_net'
 const SECTOR_TIMELINE_START = 9 * 3600 + 25 * 60
 const SECTOR_TIMELINE_END = 15 * 3600
 
@@ -1186,7 +1186,7 @@ function SectorStrengthTable({
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-[360px] table-fixed border-collapse">
-          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[31%] px-2 py-1.5">板块</th><th className="w-[14%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[26%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th><th className="w-[29%] px-2 py-1.5 text-right">{header('institution_increase', activeSnapshot?.institution_label || '机构增仓')}</th></tr></thead>
+          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[24%] px-2 py-1.5">板块</th><th className="w-[20%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[56%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
           <tbody>{rows.length ? rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
             const linked = linkedPlateIds.has(row.plate_id)
@@ -1207,9 +1207,8 @@ function SectorStrengthTable({
               <td className="px-2 py-1.5"><div className={row.is_child ? 'relative ml-2 pl-3 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1 text-[11px] font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="font-mono text-[8px] text-muted">{row.plate_id}</div></div></td>
               <td className="px-2 py-1.5 text-right font-mono text-xs font-semibold tabular-nums text-secondary">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className="px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.main_net)}</td>
-              <td className="px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.institution_increase)}</td>
             </tr>
-          }) : <tr><td colSpan={4} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
+          }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
         </table>
       </div>
       <div className="min-w-0">
