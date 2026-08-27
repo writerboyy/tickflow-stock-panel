@@ -337,10 +337,10 @@ class _AnalysisRepo:
 
 def test_entry_analysis_keeps_missing_intraday_benchmark_explicit(tmp_path):
     for day, net_amount in ((date(2026, 8, 12), -100.0), (date(2026, 8, 13), 1_000.0)):
-        path = tmp_path / f"ext_data/ext_tushare_moneyflow/timeseries/date={day}/part.parquet"
+        path = tmp_path / f"ext_data/ext_kpl_funds/timeseries/date={day}/part.parquet"
         path.parent.mkdir(parents=True)
         pl.DataFrame([{
-            "symbol": "X", "trade_date": day.isoformat(), "net_mf_amount": net_amount,
+            "symbol": "X", "trade_date": day.isoformat(), "main_net": net_amount,
         }]).write_parquet(path)
     result = {"strategy_signals": [{
         "id": "entry-1",
@@ -362,9 +362,9 @@ def test_entry_analysis_keeps_missing_intraday_benchmark_explicit(tmp_path):
     assert event["excess"]["30m"] is None
     assert event["segment"] == "out_of_sample"
     assert analysis["money_flow"]["excluded_sources"] == ["ext_money_flow"]
-    tushare = next(
+    kpl = next(
         source for source in analysis["money_flow"]["sources"]
-        if source["source"] == "Tushare资金流"
+        if source["source"] == "开盘啦资金"
     )
-    assert tushare["matched_signals"] == 1
-    assert next(group for group in tushare["groups"] if not group["confirmed"])["signal_count"] == 1
+    assert kpl["matched_signals"] == 1
+    assert next(group for group in kpl["groups"] if not group["confirmed"])["signal_count"] == 1

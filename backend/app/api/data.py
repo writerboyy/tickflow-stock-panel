@@ -1,7 +1,6 @@
 """数据画像 API —— 让前端知道"我们本地有什么数据"。"""
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
@@ -19,84 +18,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
-
-def _load_latest_tushare_capability_matrix(data_dir: Path) -> dict[str, Any]:
-    root = data_dir / "backfill_state" / "tushare_proxy"
-    try:
-        candidates = [path for path in root.glob("*/capability_matrix.json") if path.is_file()]
-    except OSError as exc:
-        raise ValueError("Tushare capability matrix directory is unreadable") from exc
-
-    empty = {
-        "available": False,
-        "generated_at": None,
-        "schema_version": 1,
-        "run_id": None,
-        "run_ids": [],
-        "run_count": 0,
-        "source": "tushare_proxy",
-        "runtime_source": "local_parquet_only",
-        "history_start": None,
-        "history_end": None,
-        "datasets": {},
-        "formal_publish": {},
-        "legacy_phases": {},
-    }
-    if not candidates:
-        return empty
-
-    try:
-        candidates.sort(key=lambda item: item.stat().st_mtime_ns)
-        loaded: list[tuple[dict[str, Any], float]] = []
-        for path in candidates:
-            modified_at = path.stat().st_mtime
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or not isinstance(payload.get("datasets"), dict):
-                raise ValueError("latest Tushare capability matrix has an invalid schema")
-            loaded.append((payload, modified_at))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("latest Tushare capability matrix is unreadable") from exc
-
-    populated = [(payload, modified_at) for payload, modified_at in loaded if payload["datasets"]]
-    chosen_runs = populated or loaded[-1:]
-    if not chosen_runs:  # candidates was non-empty, but keep the response fail-closed.
-        raise ValueError("latest Tushare capability matrix is unreadable")
-    latest, modified_at = chosen_runs[-1]
-    datasets: dict[str, Any] = {}
-    formal_publish: dict[str, Any] = {}
-    legacy_phases: dict[str, Any] = {}
-    run_ids: list[str] = []
-    history_starts: list[str] = []
-    history_ends: list[str] = []
-    for payload, _ in chosen_runs:
-        datasets.update(payload["datasets"])
-        formal_publish.update(payload.get("formal_publish") or {})
-        legacy_phases.update(payload.get("legacy_phases") or {})
-        run_id = payload.get("run_id")
-        if run_id and str(run_id) not in run_ids:
-            run_ids.append(str(run_id))
-        if isinstance(payload.get("history_start"), str):
-            history_starts.append(payload["history_start"])
-        if isinstance(payload.get("history_end"), str):
-            history_ends.append(payload["history_end"])
-
-    return {
-        "available": True,
-        "generated_at": datetime.fromtimestamp(modified_at, tz=timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-        "schema_version": latest.get("schema_version", 1),
-        "run_id": latest.get("run_id"),
-        "run_ids": run_ids,
-        "run_count": len(run_ids),
-        "source": latest.get("source", "tushare_proxy"),
-        "runtime_source": latest.get("runtime_source", "local_parquet_only"),
-        "history_start": min(history_starts) if history_starts else latest.get("history_start"),
-        "history_end": max(history_ends) if history_ends else latest.get("history_end"),
-        "datasets": datasets,
-        "formal_publish": formal_publish,
-        "legacy_phases": legacy_phases,
-    }
 
 # ===== 缓存:storage(文件扫描) + 每张表 aggregate 各自缓存 =====
 # 同步期间前端 2s 轮一次 status,每张表 aggregate 全表 count + min/max + distinct
@@ -707,16 +628,6 @@ def status(request: Request) -> dict:
         # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
         "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }
-
-
-@router.get("/tushare-capability-matrix")
-def tushare_capability_matrix(request: Request) -> dict[str, Any]:
-    data_dir = request.app.state.repo.store.data_dir
-    try:
-        return _load_latest_tushare_capability_matrix(data_dir)
-    except ValueError as exc:
-        logger.warning("failed to load Tushare capability matrix: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/clear")

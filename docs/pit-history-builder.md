@@ -21,9 +21,6 @@ Important boundaries:
   trading date. It never invents a change date.
 - CSI 800 history is published only when the exact same-day CSI 300 and CSI 500
   union contains 800 unique members.
-- CSI 1000 can be supplemented temporarily from exact Tushare monthly
-  `index_weight` snapshots. Monthly snapshots are never expanded to daily dates,
-  and BaoStock remains the default historical source for CSI 300/500.
 - HiThink supplies forward daily snapshots for CSI 300/500/800/1000. BaoStock
   cross-checks CSI 300/500; a same-date disagreement rejects the whole incoming
   snapshot without changing the canonical table.
@@ -61,11 +58,6 @@ Examples:
       --index-history-file ../raw/hs300_snapshots.csv \
       --index-symbol 000300.SH \
       --index-source manual_export
-
-    # Temporary exact monthly CSI 1000 supplement. This does not change the
-    # default BaoStock historical path.
-    uv run python scripts/supplement_tushare_index_membership.py \
-      --indices 000852.SH
 
     # Inspect the local range without network calls or publication.
     uv run python scripts/backfill_index_membership_history.py --dry-run

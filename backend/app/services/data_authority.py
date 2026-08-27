@@ -352,35 +352,6 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
 }
 
 
-def _register_tushare_extension_policies() -> None:
-    """Register the frozen Tushare factor datasets without runtime routing."""
-    from app.services.tushare_datasets import DATASET_SPECS
-
-    for spec in DATASET_SPECS.values():
-        if spec.kind != "extension":
-            continue
-        has_overlap = bool(spec.overlap_fields)
-        EXTENSION_POLICIES[spec.table_id] = ExtensionAuthority(
-            spec.table_id,
-            "deprecated-overlap" if has_overlap else "extension",
-            (
-                "tickflow.canonical_market_data"
-                if has_overlap
-                else f"tushare_proxy.{spec.api_name}"
-            ),
-            (
-                "tushare_factor_fields_allowed; overlapping_market_fields_context_only"
-                if has_overlap
-                else "audited_tushare_factor_input"
-            ),
-            (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE, FACTOR_USAGE),
-            spec.overlap_fields,
-        )
-
-
-_register_tushare_extension_policies()
-
-
 REFERENCE_DATASETS: dict[tuple[ReferenceAssetType, ReferenceTimeframe], str] = {
     ("stock", "1d"): "kline_daily",
     ("stock", "1m"): "kline_minute",
@@ -388,22 +359,6 @@ REFERENCE_DATASETS: dict[tuple[ReferenceAssetType, ReferenceTimeframe], str] = {
     ("etf", "1m"): "kline_etf_minute",
     ("index", "1d"): "kline_index_daily",
 }
-
-# Temporary historical imports are subordinate to the existing provider.  A
-# caller may use these fields to label coverage reports, but must not route
-# daily or minute reads to the proxy after the key expires.
-TUSHARE_HISTORY_OVERLAP_POLICY = {
-    "overlap_key_owner": "tickflow",
-    "gap_fill_source": "tushare_proxy",
-    "conflict_action": "block_partition",
-    "runtime_source": "local_parquet_only",
-}
-
-
-def tushare_history_policy() -> dict[str, str]:
-    """Return a copy suitable for coverage manifests and capability reports."""
-    return dict(TUSHARE_HISTORY_OVERLAP_POLICY)
-
 
 def dataset_authority(dataset: str) -> DatasetAuthority | None:
     return PRIMARY_DATASETS.get(dataset) or DERIVED_DATASETS.get(dataset)

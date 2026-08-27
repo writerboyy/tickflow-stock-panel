@@ -218,7 +218,7 @@ export function DataSourceEditor({
               <input
                 value={config.name}
                 onChange={e => setConfig({ ...config, name: e.target.value })}
-                placeholder="my_tushare"
+                placeholder="my_source"
                 disabled={!isNew}
                 className={`${INPUT_CLS} w-full disabled:opacity-60`}
               />
@@ -227,7 +227,7 @@ export function DataSourceEditor({
               <input
                 value={config.display_name}
                 onChange={e => setConfig({ ...config, display_name: e.target.value })}
-                placeholder="我的 Tushare"
+                placeholder="我的数据源"
                 className={`${INPUT_CLS} w-full`}
               />
             </Field>

@@ -53,7 +53,6 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { ExtDataStatCard } from '@/components/ext-data/ExtDataStatCard'
 import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
-import { TushareCapabilityMatrixPanel } from '@/components/data/TushareCapabilityMatrix'
 
 type ExtPlatform = 'easytdx' | 'kaipanla' | 'fuyao' | 'other'
 
@@ -153,12 +152,6 @@ export function Data() {
       if (activeJobId || data?.indicators_ready === false) return 2_000
       return 30_000
     },
-  })
-
-  const tushareMatrix = useQuery({
-    queryKey: QK.tushareCapabilityMatrix,
-    queryFn: api.tushareCapabilityMatrix,
-    refetchInterval: 60_000,
   })
 
   const fuyaoAuction = useQuery({
@@ -1210,18 +1203,6 @@ export function Data() {
                 onCollect={() => collectFuyaoAuction.mutate()}
               />,
             )}
-          </div>
-        </div>
-
-        <div>
-          <SectionTitle icon={Database}>Tushare 缺口补齐</SectionTitle>
-          <div className="mt-3">
-            <TushareCapabilityMatrixPanel
-              matrix={tushareMatrix.data}
-              isLoading={tushareMatrix.isLoading}
-              isError={tushareMatrix.isError}
-              onRetry={() => { void tushareMatrix.refetch() }}
-            />
           </div>
         </div>
 

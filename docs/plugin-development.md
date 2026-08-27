@@ -48,7 +48,7 @@ TickFlow 的「先探后存」语义:
 
 | runtime | 含义 | 典型场景 |
 |---|---|---|
-| `python` | 纯 Python 依赖, `pip install` | akshare、tushare |
+| `python` | 纯 Python 依赖, `pip install` | 需要 Python 依赖的插件 |
 | `node` | 需要 Node.js 运行时, `npm install` | stock-sdk(Docker 默认不打包,见 [deployment.md](./deployment.md)) |
 
 > stock-sdk 在 Docker 中默认不打包(合规考虑);如需启用,构建时传 `--build-arg INCLUDE_STOCKSDK=1`,开发模式下需手动 `npm install`。
@@ -133,14 +133,6 @@ class MyConfig:
   - `bridge.py` — Python↔Node 桥接 + availability 检测
   - `bridge.mjs` — Node 端(并发池、重试、SDK 解析)
   - `provider.py` — Provider 实现(归一化、分批、错误降级)
-- **`backend/app/plugins/tushare/`** — 无额外依赖的 Tushare 历史行情插件
-  - 通过固定的 HTTPS 代理调用标准 Tushare HTTP 协议,不安装 Tushare SDK。
-  - 在「设置 -> 数据源」卡片中配置并验证 Key,可选择股票/ETF/指数日K、股票/ETF
-    复权因子及股票/ETF 1分钟K；实时行情继续使用 TickFlow。
-  - 日线保持系统的手口径、成交额从千元转换为元；分钟原始归档保留供应商的股口径，进入 provider 或 canonical 发布前转换为手，成交额保持元。
-  - 分钟价格在写入 canonical 表前按累计复权因子转换为前复权价格。Key 只保存在本机
-    `data/user_data/secrets.json`；清除 Key 后未来拉取回到 TickFlow,已落盘 Parquet 不受影响。
-
 ## StockDB 独立数据源接入限制
 
 StockDB 是独立的数据源服务, 与项目内的 `stock-sdk` 插件没有关联, 不得混用两者的能力、配置或可用性结论。本节以 [AI 策略界面接口文档](https://a.123128.xyz/docs/AI%E7%AD%96%E7%95%A5%E7%95%8C%E9%9D%A2%E5%BC%80%E5%8F%91%E6%8E%A5%E5%8F%A3%E6%96%87%E6%A1%A3.md) 为 StockDB 上游能力说明; 文档中的浏览器 SDK 能力不等于本项目已经接入的后端数据集。

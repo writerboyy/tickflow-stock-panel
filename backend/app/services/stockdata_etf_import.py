@@ -24,7 +24,7 @@ import pyarrow.parquet as pq
 
 from app.indicators.pipeline import ENRICHED_STORAGE_COLS, compute_enriched
 from app.parquet import scan_daily_parquet
-from app.services.tushare_history import assert_disk_reserve
+from app.services.storage_safety import assert_disk_reserve
 
 
 class StockDataEtfImportBlocked(RuntimeError):
@@ -775,7 +775,7 @@ class StockDataEtfImporter:
                 "symbols": len(records),
                 "complete_symbols": len(records),
                 "incomplete_symbols": 0,
-                "source": "stockdata_tushare",
+                "source": "stockdata",
                 "ownership": "existing_tickflow_rows_win",
                 "representation": "fixed_clock_grid",
                 "zero_volume_rows": sum(int(row["zero_volume_rows"]) for row in records),

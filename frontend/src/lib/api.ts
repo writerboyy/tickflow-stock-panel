@@ -2568,20 +2568,6 @@ export interface DataSourcesResponse {
   config_dir: string
 }
 
-export interface TushareProbeResult {
-  status: 'ok' | 'empty' | 'blocked' | 'error'
-  rows: number
-  fields: string[]
-}
-
-export interface TushareStatus {
-  configured: boolean
-  api_key_masked: string
-  endpoint: string
-  datasets: string[]
-  probes?: Record<string, TushareProbeResult>
-}
-
 export interface DataSourceTestResult {
   provider: string
   dataset: string
@@ -3269,16 +3255,6 @@ export const api = {
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
-  tushareStatus: () => request<TushareStatus>('/api/settings/tushare'),
-  saveTushareKey: (apiKey: string) =>
-    request<TushareStatus>('/api/settings/tushare', {
-      method: 'PUT',
-      body: JSON.stringify({ api_key: apiKey }),
-    }),
-  testTushare: () =>
-    request<TushareStatus>('/api/settings/tushare/test', { method: 'POST' }),
-  clearTushareKey: () =>
-    request<TushareStatus>('/api/settings/tushare', { method: 'DELETE' }),
   kaipanlaStatus: () => request<KaipanlaStatus>('/api/settings/kaipanla'),
   fuyaoAuctionStatus: () => request<FuyaoAuctionStatus>('/api/settings/fuyao-auction/status'),
   collectFuyaoAuction: (checkpoint?: string) =>
@@ -4276,8 +4252,6 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
-  tushareCapabilityMatrix: () =>
-    request<TushareCapabilityMatrix>('/api/data/tushare-capability-matrix'),
   pitReferenceStatus: () => request<PitReferenceStatus>('/api/pit-reference/status'),
   syncPitReferenceSnapshots: () =>
     request<PitReferenceSyncResult>('/api/pit-reference/sync-snapshots', { method: 'POST' }),
@@ -5069,38 +5043,6 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
-}
-
-export interface TushareCapabilityDataset {
-  status: string
-  staged_rows?: number
-  published_rows?: number
-  batches?: number
-  failed_batches?: string[]
-  empty_unconfirmed_batches?: string[]
-  logical_date?: string | null
-  primary_key?: string[]
-  symbols?: number
-  min_date?: string | null
-  max_date?: string | null
-  field_non_null_rate?: Record<string, number>
-  factor_input?: boolean
-}
-
-export interface TushareCapabilityMatrix {
-  available: boolean
-  generated_at: string | null
-  schema_version: number
-  run_id: string | null
-  run_ids: string[]
-  run_count: number
-  source: string
-  runtime_source: string
-  history_start: string | null
-  history_end: string | null
-  datasets: Record<string, TushareCapabilityDataset>
-  formal_publish: Record<string, string | null>
-  legacy_phases: Record<string, string | null>
 }
 
 export interface PitReferenceTableStatus {

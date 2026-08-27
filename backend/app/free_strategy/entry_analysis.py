@@ -179,10 +179,6 @@ def _read_partitioned(root: Path) -> pl.DataFrame:
 
 def _flow_maps(data_dir: Path) -> dict[str, dict[tuple[str, date], bool]]:
     specs = {
-        "Tushare资金流": (
-            _read_partitioned(data_dir / "ext_data/ext_tushare_moneyflow/timeseries"),
-            "net_mf_amount",
-        ),
         "开盘啦资金": (
             _read_partitioned(data_dir / "ext_data/ext_kpl_funds/timeseries"),
             "main_net",

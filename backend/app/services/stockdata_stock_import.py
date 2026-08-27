@@ -23,7 +23,7 @@ from app.services.stockdata_etf_import import (
     _parquet_source,
     _sql_string,
 )
-from app.services.tushare_history import assert_disk_reserve
+from app.services.storage_safety import assert_disk_reserve
 
 
 class StockDataStockImportBlocked(RuntimeError):

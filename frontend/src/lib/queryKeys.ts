@@ -15,7 +15,6 @@ export const QK = {
   version:        ['version'] as const,
   preferences:    ['preferences'] as const,
   dataSources:    ['data-sources'] as const,
-  tushare:        ['tushare'] as const,
   kaipanla:       ['kaipanla'] as const,
   quoteStatus:    ['quote-status'] as const,
   quoteInterval:  ['quote-interval'] as const,
@@ -88,7 +87,6 @@ export const QK = {
 
   // Data / Pipeline
   dataStatus:           ['data-status'] as const,
-  tushareCapabilityMatrix: ['tushare-capability-matrix'] as const,
   pitReferenceStatus:   ['pit-reference-status'] as const,
   pipelineJobs:         ['pipeline-jobs'] as const,
   pipelineJob:          (id: string) => ['pipeline-job', id] as const,
