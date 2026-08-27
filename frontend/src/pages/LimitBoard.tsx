@@ -430,7 +430,7 @@ function AuctionTable({
         <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] border-collapse text-[10px]">
+          <table className="w-full min-w-[980px] border-collapse text-[10px]">
             <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">股票</th>
               <th className="px-2 py-2 text-right font-medium">时点</th>
@@ -440,7 +440,8 @@ function AuctionTable({
               <th className="px-2 py-2 text-right font-medium">竞价额</th>
               <th className="px-2 py-2 text-right font-medium">未匹配</th>
               <th className="px-2 py-2 text-right font-medium">量比</th>
-              <th className="px-3 py-2 text-right font-medium">昨收/开盘</th>
+              <th className="px-2 py-2 text-right font-medium">昨收价</th>
+              <th className="px-3 py-2 text-right font-medium">开盘价</th>
             </tr></thead>
             <tbody>
               {visibleRows.map((row, index) => <tr key={`${row.symbol}-${row.checkpoint}-${index}`} className="border-b border-border/70 hover:bg-elevated/30">
@@ -452,7 +453,8 @@ function AuctionTable({
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
-                <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)} / {auctionPrice(row.open_price)}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
+                <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
               </tr>)}
             </tbody>
           </table>
