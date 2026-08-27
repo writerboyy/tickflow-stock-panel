@@ -146,6 +146,31 @@ def test_publish_is_idempotent_per_checkpoint(tmp_path):
     assert read_status(tmp_path, day)["rows"] == 2
 
 
+def test_status_does_not_reuse_previous_trade_date_state(tmp_path, monkeypatch):
+    today = date(2026, 8, 28)
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    monkeypatch.setattr(collector_module, "cn_today", lambda: today)
+    collector = FuyaoAuctionCollector(tmp_path)
+    collector._status = {
+        "state": "completed",
+        "checkpoint": "0925",
+        "stage": "final",
+        "rows": 10,
+        "symbols": 10,
+        "message": "采集完成",
+        "error_code": None,
+        "collected_at": "2026-08-27T09:25:00+08:00",
+    }
+
+    status = collector.status()
+
+    assert status["trade_date"] == today.isoformat()
+    assert status["state"] == "not_ready"
+    assert status["checkpoint"] is None
+    assert status["rows"] == 0
+    assert status["message"] == "今日暂无竞价数据"
+
+
 def test_client_auction_snapshot_builds_documented_query(monkeypatch):
     seen = {}
 

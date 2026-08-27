@@ -1659,14 +1659,16 @@ export function LimitBoard() {
     queryFn: api.fuyaoAuctionStatus,
     enabled: tab === 'auction',
     staleTime: 15_000,
+    refetchInterval: 15_000,
     placeholderData: previous => previous,
   })
+  const auctionDate = fuyaoAuctionStatus.data?.trade_date
   const fuyaoAuctionRows = useQuery({
-    queryKey: QK.extDataRows('ext_fuyao_auction', undefined, 20_000),
-    queryFn: () => api.extDataRows('ext_fuyao_auction', { limit: 20_000 }),
-    enabled: tab === 'auction',
+    queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 20_000),
+    queryFn: () => api.extDataRows('ext_fuyao_auction', { date: auctionDate, limit: 20_000 }),
+    enabled: tab === 'auction' && Boolean(auctionDate),
     staleTime: 15_000,
-    placeholderData: previous => previous,
+    refetchInterval: 15_000,
   })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({

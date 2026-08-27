@@ -270,6 +270,22 @@ class FuyaoAuctionCollector:
     def status(self) -> dict:
         day = cn_today()
         result = dict(self._status)
+        collected_at = result.get("collected_at")
+        if (
+            isinstance(collected_at, str)
+            and collected_at[:10]
+            and collected_at[:10] != day.isoformat()
+        ):
+            result.update({
+                "state": "not_ready" if self.configured else "unconfigured",
+                "checkpoint": None,
+                "stage": None,
+                "rows": 0,
+                "symbols": 0,
+                "message": "今日暂无竞价数据" if self.configured else "未配置 FUYAO_API_KEY",
+                "error_code": None,
+                "collected_at": None,
+            })
         if not self.configured and result.get("state") != "running":
             result.update({"state": "unconfigured", "message": "未配置 FUYAO_API_KEY"})
         result.update({"configured": self.configured, "trade_date": day.isoformat()})
