@@ -1661,6 +1661,38 @@ export interface LimitBoardApproachingLimitUpSnapshot {
   rows: LimitBoardApproachingLimitUpItem[]
 }
 
+export interface LimitBoardFourModeFirstBoardItem {
+  thscode: string
+  ticker: string
+  name: string
+  rank: number
+  score?: number | null
+  static_score?: number | null
+  change_pct?: number | null
+  current_rise_pct?: number | null
+  last_price?: number | null
+  yesterday_change_pct?: number | null
+  volume_ratio?: number | null
+  vwap?: number | null
+  upper_half?: boolean
+  attack_count?: number
+  vwap_volume_met?: boolean
+  branch?: 'standard' | 'strong' | 'pending' | string
+  buy_eligible?: boolean
+  tags?: string[]
+}
+
+export interface LimitBoardFourModeFirstBoardSnapshot {
+  provider: 'four_mode_snapshot' | string
+  state: 'ready' | 'waiting_data' | 'unavailable' | string
+  as_of: string | null
+  refreshed_at: string | null
+  data_gaps?: string[]
+  evaluated_count?: number
+  filtered_count?: number
+  rows: LimitBoardFourModeFirstBoardItem[]
+}
+
 export interface LimitBoardSectorStrengthRow {
   plate_id: string
   plate_name?: string | null
@@ -3506,6 +3538,8 @@ export const api = {
     }),
   limitBoardApproachingLimitUp: (quiet = false) =>
     request<LimitBoardApproachingLimitUpSnapshot>('/api/limit-board/approaching-limit-up', { quiet }),
+  limitBoardFourModeFirstBoard: (quiet = false) =>
+    request<LimitBoardFourModeFirstBoardSnapshot>('/api/limit-board/four-mode-first-board', { quiet }),
   limitBoardAdvancedSettingsUpdate: (
     settings: LimitBoardView['settings'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {

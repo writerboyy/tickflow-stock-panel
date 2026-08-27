@@ -394,8 +394,6 @@ def sb_static_score(rows: list[dict[str, Any]], valuation: dict[str, Any] | None
     if len(rows) < 60:
         return None, "需要至少60个交易日日线"
     last, prev = rows[-1], rows[-2]
-    if any(_is_limit(rows[index], rows[index - 1] if index else None) for index in range(max(1, len(rows) - 10), len(rows))):
-        return None, "近10日已有涨停"
     change = _pct(_finite(last.get("close"), 0.0) or 0.0, _finite(prev.get("close"), 0.0) or 0.0) * 100
     amplitude = ((_finite(last.get("high"), 0.0) or 0.0) - (_finite(last.get("low"), 0.0) or 0.0)) / (_finite(prev.get("close"), 0.0) or 1.0) * 100
     vol_ma5_prev = sum((_finite(row.get("volume"), 0.0) or 0.0) for row in rows[-6:-1]) / 5
@@ -993,9 +991,15 @@ class FourModeSnapshotCache:
                 row for payload in static_modes.values()
                 for row in payload["candidates"]
             ]
+            visible_dates = [
+                row["date"]
+                for history in grouped.values()
+                for row in history
+                if row.get("date") and row["date"] < day
+            ]
             self._snapshots[day] = {
                 "date": day.isoformat(),
-                "as_of": (day - timedelta(days=1)).isoformat(),
+                "as_of": max(visible_dates).isoformat() if visible_dates else None,
                 "state": snapshot_state,
                 "static_state": "ready" if not member_gap else "waiting_data",
                 "data_gaps": [*mode_gaps, *([member_gap] if member_gap else [])],

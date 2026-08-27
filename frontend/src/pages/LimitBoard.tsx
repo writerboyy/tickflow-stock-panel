@@ -41,6 +41,8 @@ import {
   type QmtCreditBuyMode,
   type LimitBoardEvent,
   type LimitBoardApproachingLimitUpItem,
+  type LimitBoardFourModeFirstBoardItem,
+  type LimitBoardFourModeFirstBoardSnapshot,
   type LimitBoardQuoteSnapshot,
   type LimitBoardRow,
   type LimitBoardSectorConstituent,
@@ -285,6 +287,7 @@ function financialTone(value: number | null | undefined): string {
 
 type HotQuoteState = 'limit' | 'near_limit' | 'normal' | 'sharp_drop' | 'unavailable'
 type HotSortKey = 'change_pct' | 'rise_speed_pct'
+type HotPanelTab = 'approaching' | 'first_board'
 
 // Only used for visual highlighting when a quote snapshot lacks an authoritative limit_up.
 function fallbackLimitGap(symbol: string | null | undefined, change: number | null | undefined): number | null {
@@ -1035,6 +1038,9 @@ function sectorNameKey(value: string | null | undefined): string {
 function SectorStrengthTable({
   snapshot,
   hotRows = [],
+  firstBoardSnapshot,
+  firstBoardLoading = false,
+  firstBoardError = false,
   hotQuotes = {},
   hotSectorLinks = {},
   hotLoading = false,
@@ -1050,6 +1056,9 @@ function SectorStrengthTable({
 }: {
   snapshot: LimitBoardView['sector_strength']
   hotRows?: LimitBoardApproachingLimitUpItem[]
+  firstBoardSnapshot?: LimitBoardFourModeFirstBoardSnapshot
+  firstBoardLoading?: boolean
+  firstBoardError?: boolean
   hotQuotes?: LimitBoardQuoteSnapshot['quotes']
   hotSectorLinks?: LimitBoardQuoteSnapshot['sector_links']
   hotLoading?: boolean
@@ -1069,6 +1078,7 @@ function SectorStrengthTable({
   const [requestedAt, setRequestedAt] = useState<string | null>(null)
   const [selectedPlateId, setSelectedPlateId] = useState<string | null>(null)
   const [selectedStockSymbol, setSelectedStockSymbol] = useState<string | null>(null)
+  const [hotPanelTab, setHotPanelTab] = useState<HotPanelTab>('approaching')
   const [hotSortKey, setHotSortKey] = useState<HotSortKey>('change_pct')
   const [rankingWindowMinutes, setRankingWindowMinutes] = useState<5 | 30>(5)
   const [rankingOpen, setRankingOpen] = useState(false)
@@ -1149,6 +1159,7 @@ function SectorStrengthTable({
       return (rightNumber - leftNumber) || (left.rank - right.rank)
     })
   }, [hotQuotes, hotRows, hotSortKey])
+  const firstBoardRows = firstBoardSnapshot?.rows ?? []
   const linkedPlateIds = useMemo(() => {
     if (!selectedStockSymbol) return new Set<string>()
     const heatLinks = hotSectorLinks[selectedStockSymbol] ?? []
@@ -1317,15 +1328,21 @@ function SectorStrengthTable({
     <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_16%_38%_24%]' : 'lg:grid-cols-[25%_24%_51%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-1 border-b border-border px-2 py-1.5">
-          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1 text-[8px] font-medium">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="inline-flex h-6 shrink-0 overflow-hidden rounded-btn border border-border bg-base" aria-label="选择股票信号列表">
+              <button type="button" aria-pressed={hotPanelTab === 'approaching'} onClick={() => setHotPanelTab('approaching')} className={`inline-flex items-center gap-1 px-1.5 text-[10px] font-medium ${hotPanelTab === 'approaching' ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}><Flame className="h-3.5 w-3.5" />即将涨停</button>
+              <button type="button" aria-pressed={hotPanelTab === 'first_board'} onClick={() => setHotPanelTab('first_board')} className={`inline-flex items-center gap-1 border-l border-border px-1.5 text-[10px] font-medium ${hotPanelTab === 'first_board' ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}><CircleDot className="h-3.5 w-3.5" />首板</button>
+            </div>
+            <div className="min-w-0"><div className="truncate text-[8px] text-muted">{hotPanelTab === 'approaching' ? '行情5秒' : firstBoardSnapshot?.as_of ? `日线截至 ${firstBoardSnapshot.as_of} 收盘 · 盘中评分` : '四合一静态筛选'}</div></div>
+          </div>
+          {hotPanelTab === 'approaching' ? <div className="flex shrink-0 flex-wrap items-center justify-end gap-1 text-[8px] font-medium">
             <div className="inline-flex h-5 overflow-hidden rounded border border-border" aria-label="即将涨停排序">
               {([['change_pct', '涨幅'], ['rise_speed_pct', '涨速']] as const).map(([key, label]) => <button key={key} type="button" aria-pressed={hotSortKey === key} onClick={() => setHotSortKey(key)} className={`px-1.5 ${hotSortKey === key ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{label}</button>)}
             </div>
             <span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">≤0.5%</span><span className="rounded border border-orange-400/40 bg-orange-400/10 px-1 py-0.5 text-orange-400">≤1%</span><span className="rounded border border-yellow-300/40 bg-yellow-300/10 px-1 py-0.5 text-yellow-300">≤3%</span>
-          </div>
+          </div> : <span className="shrink-0 text-[8px] text-muted">{`通过 ${firstBoardSnapshot?.filtered_count ?? 0} / 初筛 ${firstBoardSnapshot?.evaluated_count ?? '--'}`}</span>}
         </div>
-        {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
+        {hotPanelTab === 'approaching' ? (hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
             {sortedHotRows.map((item, index) => {
               const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
@@ -1363,7 +1380,46 @@ function SectorStrengthTable({
               </div>
             })}
           </div>
-        </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
+        </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>) : (firstBoardRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
+          <div className="flex w-max gap-2 lg:w-full lg:flex-col">
+            {firstBoardRows.map((item: LimitBoardFourModeFirstBoardItem) => {
+              const symbol = item.thscode.toUpperCase()
+              const quote = hotQuotes[symbol] ?? {
+                symbol,
+                name: item.name,
+                last_price: item.last_price,
+                change_pct: item.change_pct,
+              }
+              const selected = symbol === selectedStockSymbol
+              const visual = hotQuoteVisual(quote)
+              const actionRow = manualActionRow(symbol, item.name, quote?.last_price, quote?.change_pct ?? item.change_pct, quote?.limit_up)
+              const inPool = poolSymbols.has(actionRow.symbol)
+              const inBuyPool = buyPoolSymbols.has(actionRow.symbol)
+              return <div
+                key={symbol}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selected}
+                onClick={() => selectStock(symbol)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    selectStock(symbol)
+                  }
+                }}
+                className={`h-[68px] w-[184px] shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''}`}
+                title="四合一首板候选"
+              >
+                <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(symbol, item.name) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct ?? item.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{item.rank}</span><div className="flex shrink-0 items-center gap-0.5">
+                  <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
+                  <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
+                </div></div>
+                <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{symbol}</span><span className="shrink-0 rounded border border-accent/40 bg-accent/10 px-1 text-accent">初筛 {item.static_score?.toFixed(0) ?? '--'} · 盘中评分 {item.score?.toFixed(0) ?? '--'}</span><span className="shrink-0 text-secondary">{item.branch === 'pending' ? '待盘中确认' : item.branch === 'strong' ? '强势快速' : '标准确认'}</span></div>
+                <div className="mt-0.5 flex items-center gap-2 truncate text-[9px]"><span className="shrink-0 font-mono text-muted">今涨 {percentValue(item.current_rise_pct)}</span><span className="shrink-0 font-mono text-muted">量比 {item.volume_ratio?.toFixed(2) ?? '--'}</span><span className="shrink-0 font-mono text-muted">攻击 {item.attack_count ?? 0}/5</span></div>
+              </div>
+            })}
+          </div>
+        </div> : <div className={`px-3 py-10 text-center text-xs ${firstBoardError || firstBoardSnapshot?.state === 'unavailable' ? 'text-warning' : 'text-muted'}`}>{firstBoardLoading ? '正在读取四合一首板' : firstBoardSnapshot?.state === 'waiting_data' ? `首板数据待就绪${firstBoardSnapshot.data_gaps?.length ? `：${firstBoardSnapshot.data_gaps[0]}` : ''}` : firstBoardError || firstBoardSnapshot?.state === 'unavailable' ? '首板算法暂不可用' : '暂无首板候选'}</div>)}
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
         <table className="w-full min-w-0 table-fixed border-collapse">
@@ -1692,10 +1748,19 @@ export function LimitBoard() {
     staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
-  const heatRows = approachingLimitUp.data?.rows ?? []
+  const fourModeFirstBoard = useQuery({
+    queryKey: [...QK.limitBoardFourModeFirstBoard, isTradingHours] as const,
+    queryFn: () => api.limitBoardFourModeFirstBoard(true),
+    enabled: tab === 'sector',
+    refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
+    staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
+    placeholderData: previous => previous,
+  })
+  const heatRows = useMemo(() => approachingLimitUp.data?.rows ?? [], [approachingLimitUp.data?.rows])
+  const firstBoardRows = useMemo(() => fourModeFirstBoard.data?.rows ?? [], [fourModeFirstBoard.data?.rows])
   const heatSymbols = useMemo(
-    () => heatRows.map(item => item.thscode.toUpperCase()),
-    [heatRows],
+    () => [...new Set([...heatRows, ...firstBoardRows].map(item => item.thscode.toUpperCase()))].slice(0, 30),
+    [firstBoardRows, heatRows],
   )
   const heatQuotes = useQuery({
     queryKey: QK.limitBoardQuotes(heatSymbols.join(',')),
@@ -1910,7 +1975,7 @@ export function LimitBoard() {
           onDateChange={setSelectedAuctionDate}
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} firstBoardSnapshot={fourModeFirstBoard.data} firstBoardLoading={fourModeFirstBoard.isPending} firstBoardError={fourModeFirstBoard.isError} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
