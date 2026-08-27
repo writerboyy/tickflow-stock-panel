@@ -384,6 +384,23 @@ function auctionTone(value: unknown): string {
   return typeof value === 'number' && Number.isFinite(value) ? (value > 0 ? 'text-bull' : value < 0 ? 'text-bear' : 'text-secondary') : 'text-muted'
 }
 
+function auctionFiniteNumber(value: unknown): number | null {
+  if (value == null || value === '') return null
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function auctionRushPct(row: Record<string, any>): number | null {
+  // 通达信 DYNAINFO(104) 只对应开盘竞价；15:00 是收盘竞价，不能套用这个口径。
+  if (String(row.checkpoint || '') !== '0925') return null
+  const sourceValue = auctionFiniteNumber(row.opening_rush_pct ?? row.opening_rush)
+  if (sourceValue != null) return sourceValue
+  const matchedPrice = auctionFiniteNumber(row.auction_price)
+  const openPrice = auctionFiniteNumber(row.open_price)
+  if (matchedPrice == null || matchedPrice === 0 || openPrice == null) return null
+  return (openPrice - matchedPrice) / matchedPrice * 100
+}
+
 function AuctionTable({
   rows,
   status,
@@ -407,7 +424,7 @@ function AuctionTable({
 }) {
   const [checkpoint, setCheckpoint] = useState('')
   const [search, setSearch] = useState('')
-  const [sortKey, setSortKey] = useState<'auction_pct' | 'auction_amount' | 'auction_volume_ratio'>('auction_pct')
+  const [sortKey, setSortKey] = useState<'auction_pct' | 'auction_amount' | 'auction_volume_ratio' | 'opening_rush_pct'>('auction_pct')
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
 
   const toggleSort = (key: typeof sortKey) => {
@@ -438,10 +455,10 @@ function AuctionTable({
       .filter(row => !term || String(row.symbol || '').toLowerCase().includes(term) || String(row.code || '').toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
       .slice()
       .sort((left, right) => {
-        const leftValue = Number(left[sortKey])
-        const rightValue = Number(right[sortKey])
-        const leftMissing = !Number.isFinite(leftValue)
-        const rightMissing = !Number.isFinite(rightValue)
+        const leftValue = sortKey === 'opening_rush_pct' ? auctionRushPct(left) : auctionFiniteNumber(left[sortKey])
+        const rightValue = sortKey === 'opening_rush_pct' ? auctionRushPct(right) : auctionFiniteNumber(right[sortKey])
+        const leftMissing = leftValue == null || !Number.isFinite(leftValue)
+        const rightMissing = rightValue == null || !Number.isFinite(rightValue)
         if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : leftMissing ? 1 : -1
         const result = rightValue - leftValue
         return sortDirection === 'desc' ? result : -result
@@ -485,7 +502,8 @@ function AuctionTable({
               <th className="px-2 py-2 text-right">{sortableHeader('auction_amount', '竞价额')}</th>
               <th className="px-2 py-2 text-right font-medium">竞价换手率</th>
               <th className="px-2 py-2 text-right font-medium">未匹配</th>
-              <th className="px-2 py-2 text-right">{sortableHeader('auction_volume_ratio', '抢筹强度（量比）')}</th>
+              <th className="px-2 py-2 text-right">{sortableHeader('auction_volume_ratio', '量比')}</th>
+              <th className="px-2 py-2 text-right">{sortableHeader('opening_rush_pct', '抢筹幅度')}</th>
               <th className="px-2 py-2 text-right font-medium">流通市值</th>
               <th className="px-2 py-2 text-right font-medium">昨收价</th>
               <th className="px-3 py-2 text-right font-medium">开盘价</th>
@@ -501,7 +519,8 @@ function AuctionTable({
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
-                <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="竞价量比">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
+                <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="扶摇接口原始竞价量比">{auctionFiniteNumber(row.auction_volume_ratio)?.toFixed(2) ?? '--'}</td>
+                <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(auctionRushPct(row))}`} title="(开盘价 - 09:25 最后一次集合竞价匹配价) / 最后一次集合竞价匹配价 × 100">{auctionPercent(auctionRushPct(row))}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
                 <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
