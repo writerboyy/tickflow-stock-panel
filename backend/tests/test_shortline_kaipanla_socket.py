@@ -203,7 +203,7 @@ def test_shortline_heat_quotes_fail_closed_for_non_tickflow_provider(
     assert snapshot["missing_symbols"] == ["600000.SH"]
 
 
-def test_shortline_scope_keeps_top_ten_target_when_upstream_returns_nine(
+def test_shortline_scope_keeps_top_fifteen_target_when_upstream_returns_nine(
     tmp_path,
 ):
     today = date(2026, 8, 18)
@@ -241,7 +241,7 @@ def test_shortline_scope_keeps_top_ten_target_when_upstream_returns_nine(
     assert len(symbols) == 9
     assert service._sector_candidate_scope["state"] == "live"
     assert service._sector_candidate_scope["reason"].startswith(
-        "仅扫描开盘啦实时板块强度前 10 名范围（当前返回 9 个有效板块）"
+        "仅扫描开盘啦实时板块强度前 15 名范围（当前返回 9 个有效板块）"
     )
 
 

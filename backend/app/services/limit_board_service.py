@@ -25,6 +25,7 @@ from app.services.limit_board_scoring import (
 from app.services.limit_board_store import LimitBoardStore
 from app.services.limit_up_queue import LimitUpQueueService
 from app.services.qmt_trading import QmtOrderPreflightError
+from app.services.screener import ScreenerService
 
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ _PREMIUM_FILTER_COLUMNS = {
 }
 _SCORE_REFRESH_SECONDS = 5.0
 _SCORE_DISPLAY_CACHE_SECONDS = 60.0
-_SECTOR_CANDIDATE_LIMIT = 10
+_SECTOR_CANDIDATE_LIMIT = 15
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_NEAR_LIMIT_PER_SECTOR = 5
 _AUTOMATIC_CANDIDATE_LIMIT = 30
@@ -199,6 +200,9 @@ class LimitBoardService:
         self._first_board_eligible: set[str] = set()
         self._rebound_board_eligible: set[str] = set()
         self._premium_stats: dict[str, dict[str, Any]] = {}
+        self._screener = ScreenerService(repo)
+        self._yesterday_boards_date: date | None = None
+        self._yesterday_boards: dict[str, int] = {}
         self._sector_membership_date: date | None = None
         self._sector_memberships = pl.DataFrame()
         self._sector_live_quotes: dict[str, dict[str, Any]] = {}
@@ -210,7 +214,7 @@ class LimitBoardService:
             "state": "unavailable",
             "plate_count": 0,
             "symbol_count": 0,
-            "reason": "正在读取实时板块强度前 10 名",
+            "reason": "正在读取实时板块强度前 15 名",
         }
         self._sector_trend_cache: dict[
             tuple[date, int, str, str],
@@ -381,7 +385,44 @@ class LimitBoardService:
                 "refreshed_at": None,
                 "rows": [],
             }
-        return value
+        today = cn_today()
+        yesterday_boards = self._load_yesterday_boards(today)
+        rows = []
+        for raw in value.get("rows") or []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            symbol = str(row.get("thscode") or "").strip().upper()
+            row["yesterday_boards"] = yesterday_boards.get(symbol, 0)
+            rows.append(row)
+        return {**value, "rows": rows}
+
+    def _load_yesterday_boards(self, today: date) -> dict[str, int]:
+        """Load the prior trading day's consecutive-limit-up counts once per day."""
+        if self._yesterday_boards_date == today:
+            return self._yesterday_boards
+        try:
+            frame = self._screener.load_prior_consecutive(today, "consecutive_limit_ups")
+        except Exception:  # noqa: BLE001
+            logger.debug("读取昨日连板数据失败", exc_info=True)
+            frame = pl.DataFrame()
+        values: dict[str, int] = {}
+        if frame is not None and not frame.is_empty() and {"symbol", "prev_consec"}.issubset(frame.columns):
+            prior = (
+                frame.select("symbol", "prev_consec")
+                .with_columns(
+                    pl.col("prev_consec").cast(pl.Int64, strict=False).fill_null(0),
+                )
+                .filter(pl.col("prev_consec") > 0)
+            )
+            values = {
+                str(row["symbol"]).strip().upper(): max(1, int(row["prev_consec"]))
+                for row in prior.iter_rows(named=True)
+                if str(row.get("symbol") or "").strip()
+            }
+        self._yesterday_boards_date = today
+        self._yesterday_boards = values
+        return values
 
     def _fresh_tickflow_quotes(self, symbols: set[str]) -> dict[str, Any]:
         provider_getter = getattr(self.quote_service, "realtime_provider", None)
@@ -1392,10 +1433,10 @@ class LimitBoardService:
     def _refresh_sector_candidate_universe(self, today: date) -> set[str]:
         view = self._sector_strength_view(today)
         if not view or view.get("state") != "live":
-            return self._set_sector_candidate_unavailable("实时板块强度前 10 名暂不可用")
+            return self._set_sector_candidate_unavailable("实时板块强度前 15 名暂不可用")
         top_rows = self._top_sector_rows(view.get("rows") or [])
         if not top_rows:
-            return self._set_sector_candidate_unavailable("实时板块强度前 10 名为空")
+            return self._set_sector_candidate_unavailable("实时板块强度前 15 名为空")
         plate_ids = tuple(str(row["plate_id"]) for row in top_rows)
         snapshot_at = str(view.get("refreshed_at") or "")
         candidate_key = (today, snapshot_at, plate_ids)
@@ -1448,7 +1489,7 @@ class LimitBoardService:
             pl.col("plate_id").is_in(plate_ids),
         )
         if selected.is_empty():
-            return self._set_sector_candidate_unavailable("前 10 板块未匹配开盘啦当日成分")
+            return self._set_sector_candidate_unavailable("前 15 板块未匹配开盘啦当日成分")
         matched_plate_ids = set(selected.get_column("plate_id").unique().to_list())
         missing_plate_ids = set(plate_ids) - matched_plate_ids
         names = {str(row["plate_id"]): str(row.get("plate_name") or "") for row in top_rows}
@@ -1738,7 +1779,7 @@ class LimitBoardService:
         self._rebound_board_eligible = (rebound & universe) - self._first_board_eligible
         self._history_ready = True
         self._history_reason = (
-            f"已核对前 {lookback} 个交易日；自动候选仅来自实时板块强度前 10 名，"
+            f"已核对前 {lookback} 个交易日；自动候选仅来自实时板块强度前 15 名，"
             "涨停基因用于 10 分个股排序"
         )
 

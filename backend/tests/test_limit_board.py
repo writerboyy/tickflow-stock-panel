@@ -191,6 +191,54 @@ def make_service(tmp_path, qmt=None):
     return service, quotes, config
 
 
+def test_jijiang_realtime_view_adds_cached_yesterday_boards(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    today = date(2026, 8, 27)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: today)
+    calls = []
+
+    def load_prior(_as_of, _column):
+        calls.append(1)
+        return pl.DataFrame({
+            "symbol": ["600000.SH", "600001.SH"],
+            "prev_consec": [1, 3],
+        })
+
+    monkeypatch.setattr(service._screener, "load_prior_consecutive", load_prior)
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        jijiang_realtime_snapshot=lambda: {
+            "provider": "kaipanla_socket",
+            "state": "live",
+            "as_of": today.isoformat(),
+            "refreshed_at": "2026-08-27T10:00:00+08:00",
+            "rows": [
+                {"thscode": "600000.SH", "name": "浦发银行"},
+                {"thscode": "600001.SH", "name": "邯郸钢铁"},
+                {"thscode": "600002.SH", "name": "无连板"},
+            ],
+        },
+    )
+
+    first = service.jijiang_realtime_view()
+    second = service.jijiang_realtime_view()
+
+    assert [row["yesterday_boards"] for row in first["rows"]] == [1, 3, 0]
+    assert second["rows"] == first["rows"]
+    assert len(calls) == 1
+
+
+def test_top_sector_rows_returns_top_fifteen():
+    rows = [
+        {"plate_id": f"P{rank:02d}", "plate_name": f"板块{rank:02d}", "rank": rank, "strength": 100 - rank}
+        for rank in range(1, 21)
+    ]
+
+    selected = LimitBoardService._top_sector_rows(rows)
+
+    assert len(selected) == 15
+    assert [row["rank"] for row in selected] == list(range(1, 16))
+
+
 def premium_snapshot(*symbols: str) -> pl.DataFrame:
     return pl.DataFrame({
         "symbol": list(symbols),

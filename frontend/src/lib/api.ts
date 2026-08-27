@@ -1649,6 +1649,7 @@ export interface LimitBoardApproachingLimitUpItem {
   sector?: string | null
   main_force?: number | null
   turnover_amount?: number | null
+  yesterday_boards?: number
   tags?: string[]
 }
 
