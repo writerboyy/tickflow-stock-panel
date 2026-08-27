@@ -15,6 +15,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Radio,
+  Search,
   RefreshCw,
   Settings2,
   ShieldAlert,
@@ -43,6 +44,7 @@ import {
   type LimitBoardSentimentPoint,
   type LimitBoardView,
   type LimitLadderStock,
+  type FuyaoAuctionStatus,
   type PremiumGene,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -51,7 +53,7 @@ import { useChartTheme } from '@/lib/theme'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
 
-type Tab = 'ladder' | 'sector' | 'buy_pool' | 'pool' | 'events'
+type Tab = 'ladder' | 'auction' | 'sector' | 'buy_pool' | 'pool' | 'events'
 type TableMode = 'buy_pool' | 'pool'
 type AdvancedSettings = LimitBoardView['settings']
 type PoolAllocationMode = 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
@@ -343,6 +345,121 @@ function queueStatusLabel(row: LimitBoardRow): string {
   if (queue.order_status === 'queueing_unmatched') return '待匹配'
   if (queue.order_status === 'cancelled') return '已撤'
   return '监听中'
+}
+
+function auctionPrice(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '--'
+}
+
+function auctionPercent(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+    : '--'
+}
+
+function auctionNumber(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) : '--'
+}
+
+function auctionAmount(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '--'
+  if (Math.abs(value) >= 100_000_000) return `${(value / 100_000_000).toFixed(2)}亿`
+  if (Math.abs(value) >= 10_000) return `${(value / 10_000).toFixed(1)}万`
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+function auctionTone(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? (value > 0 ? 'text-bull' : value < 0 ? 'text-bear' : 'text-secondary') : 'text-muted'
+}
+
+function AuctionTable({
+  rows,
+  status,
+  loading,
+  onOpen,
+}: {
+  rows: Record<string, any>[]
+  status?: FuyaoAuctionStatus
+  loading: boolean
+  onOpen: (symbol: string, name?: string) => void
+}) {
+  const [checkpoint, setCheckpoint] = useState('')
+  const [search, setSearch] = useState('')
+  const [sortKey, setSortKey] = useState<'auction_pct' | 'auction_amount' | 'auction_volume_ratio'>('auction_pct')
+
+  const checkpoints = useMemo(
+    () => [...new Set(rows.map(row => String(row.checkpoint || '')).filter(Boolean))].sort(),
+    [rows],
+  )
+  const visibleRows = useMemo(() => {
+    const term = search.trim().toLowerCase()
+    return rows
+      .filter(row => !checkpoint || String(row.checkpoint || '') === checkpoint)
+      .filter(row => !term || String(row.symbol || '').toLowerCase().includes(term) || String(row.code || '').toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
+      .slice()
+      .sort((left, right) => Number(right[sortKey] ?? Number.NEGATIVE_INFINITY) - Number(left[sortKey] ?? Number.NEGATIVE_INFINITY))
+  }, [checkpoint, rows, search, sortKey])
+
+  return (
+    <section className="overflow-hidden rounded-btn border border-border bg-surface">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
+        <div>
+          <div className="text-xs font-medium">集合竞价</div>
+          <div className="mt-0.5 text-[10px] text-muted">
+            {loading ? '正在读取扶摇数据' : status?.configured ? `${status.trade_date} · ${status.rows} 条 · ${status.state === 'completed' ? '已落库' : status.message || '待更新'}` : '未配置扶摇 API Key'}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+            <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索代码/名称" aria-label="搜索集合竞价股票" className="h-7 w-32 rounded-btn border border-border bg-base pl-7 pr-2 text-[10px] text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60" />
+          </div>
+          <select value={checkpoint} onChange={event => setCheckpoint(event.target.value)} aria-label="选择集合竞价时点" className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60">
+            <option value="">全部时点</option>
+            {checkpoints.map(value => <option key={value} value={value}>{value.slice(0, 2)}:{value.slice(2)}</option>)}
+          </select>
+          <select value={sortKey} onChange={event => setSortKey(event.target.value as typeof sortKey)} aria-label="选择集合竞价排序" className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60">
+            <option value="auction_pct">按竞价涨幅</option>
+            <option value="auction_amount">按竞价金额</option>
+            <option value="auction_volume_ratio">按量比</option>
+          </select>
+        </div>
+      </div>
+      {status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
+      {visibleRows.length === 0 ? (
+        <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[900px] border-collapse text-[10px]">
+            <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-medium">股票</th>
+              <th className="px-2 py-2 text-right font-medium">时点</th>
+              <th className="px-2 py-2 text-right font-medium">竞价价</th>
+              <th className="px-2 py-2 text-right font-medium">竞价涨幅</th>
+              <th className="px-2 py-2 text-right font-medium">竞价量</th>
+              <th className="px-2 py-2 text-right font-medium">竞价额</th>
+              <th className="px-2 py-2 text-right font-medium">未匹配</th>
+              <th className="px-2 py-2 text-right font-medium">量比</th>
+              <th className="px-3 py-2 text-right font-medium">昨收/开盘</th>
+            </tr></thead>
+            <tbody>
+              {visibleRows.map((row, index) => <tr key={`${row.symbol}-${row.checkpoint}-${index}`} className="border-b border-border/70 hover:bg-elevated/30">
+                <td className="px-3 py-2"><button type="button" onClick={() => onOpen(String(row.symbol || ''), row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.code || row.symbol || '--'}</div></button></td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
+                <td className="px-2 py-2 text-right font-mono text-foreground">{auctionPrice(row.auction_price)}</td>
+                <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.auction_volume)}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
+                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
+                <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)} / {auctionPrice(row.open_price)}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  )
 }
 
 function queueCell(row: LimitBoardRow): JSX.Element {
@@ -1197,8 +1314,8 @@ function SectorStrengthTable({
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
       </div>
       <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
-        <table className="w-full min-w-[360px] table-fixed border-collapse">
-          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[31%] px-2 py-1.5">板块</th><th className="w-[14%] px-2 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[55%] px-2 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
+        <table className="w-full min-w-0 table-fixed border-collapse">
+          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[35%] px-1.5 py-1.5">板块</th><th className="w-[23%] px-1.5 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[42%] px-1.5 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
           <tbody>{rows.length ? rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
             const linked = linkedPlateIds.has(row.plate_id)
@@ -1216,9 +1333,9 @@ function SectorStrengthTable({
               }}
               className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected && linked ? 'bg-warning/25 ring-1 ring-inset ring-warning/60' : linked ? 'bg-warning/10' : selected ? 'bg-accent/20' : ''}`}
             >
-              <td className="px-2 py-1.5"><div className={row.is_child ? 'relative ml-2 pl-3 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1 text-[11px] font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="font-mono text-[8px] text-muted">{row.plate_id}</div></div></td>
-              <td className="px-2 py-1.5 text-right font-mono text-xs font-semibold tabular-nums text-secondary">{row.strength?.toFixed(0) ?? '--'}</td>
-              <td className="px-2 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.main_net)}</td>
+              <td className="px-1.5 py-1.5"><div className={row.is_child ? 'relative ml-2 pl-3 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1 text-[11px] font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="font-mono text-[8px] text-muted">{row.plate_id}</div></div></td>
+              <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-xs font-semibold tabular-nums text-secondary">{row.strength?.toFixed(0) ?? '--'}</td>
+              <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.main_net)}</td>
             </tr>
           }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
         </table>
@@ -1489,6 +1606,7 @@ export function LimitBoard() {
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
+  const [batchRemoveConfirmOpen, setBatchRemoveConfirmOpen] = useState(false)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const [selectedBuyPoolSymbols, setSelectedBuyPoolSymbols] = useState<Set<string>>(() => new Set())
   const [selectedPoolSymbols, setSelectedPoolSymbols] = useState<Set<string>>(() => new Set())
@@ -1534,6 +1652,20 @@ export function LimitBoard() {
     staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
+  const fuyaoAuctionStatus = useQuery({
+    queryKey: QK.fuyaoAuctionStatus,
+    queryFn: api.fuyaoAuctionStatus,
+    enabled: tab === 'auction',
+    staleTime: 15_000,
+    placeholderData: previous => previous,
+  })
+  const fuyaoAuctionRows = useQuery({
+    queryKey: QK.extDataRows('ext_fuyao_auction', undefined, 20_000),
+    queryFn: () => api.extDataRows('ext_fuyao_auction', { limit: 20_000 }),
+    enabled: tab === 'auction',
+    staleTime: 15_000,
+    placeholderData: previous => previous,
+  })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number; creditBuyMode: QmtCreditBuyMode }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
@@ -1557,11 +1689,11 @@ export function LimitBoard() {
   })
   const removePoolBatch = useMutation({
     mutationFn: (symbols: string[]) => api.limitBoardPoolBatchRemove(symbols, view.data?.revision ?? 0),
-    onSuccess: async () => { setSelectedPoolSymbols(new Set()); await refresh() },
+    onSuccess: async () => { setSelectedPoolSymbols(new Set()); setBatchRemoveConfirmOpen(false); await refresh() },
   })
   const removeBuyPoolBatch = useMutation({
     mutationFn: (symbols: string[]) => api.limitBoardBuyPoolBatchRemove(symbols, view.data?.revision ?? 0),
-    onSuccess: async () => { setSelectedBuyPoolSymbols(new Set()); await refresh() },
+    onSuccess: async () => { setSelectedBuyPoolSymbols(new Set()); setBatchRemoveConfirmOpen(false); await refresh() },
   })
   const updateAdvanced = useMutation({
     mutationFn: (settings: AdvancedSettings) => (
@@ -1666,6 +1798,7 @@ export function LimitBoard() {
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
           ['ladder', '连板天梯', null, Flame],
+          ['auction', '集合竞价', fuyaoAuctionStatus.data?.rows ?? null, Radio],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['buy_pool', '买入池', data.buy_pool.length, ShoppingCart],
           ['pool', '打板池', data.board_pool.length, Crosshair],
@@ -1686,7 +1819,12 @@ export function LimitBoard() {
             initialMode: 'lot',
             initialValue: null,
           })}
-        /></Suspense> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /></Suspense> : tab === 'auction' ? <AuctionTable
+          rows={fuyaoAuctionRows.data?.rows ?? []}
+          status={fuyaoAuctionStatus.data}
+          loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
+          onOpen={(symbol, name) => setPreview({ symbol, name })}
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
@@ -1694,9 +1832,7 @@ export function LimitBoard() {
                 {selectedSymbols.size > 0 ? <button
                   type="button"
                   disabled={busy}
-                  onClick={() => {
-                    if (window.confirm(`确认移出选中的 ${selectedSymbols.size} 只股票？`)) removeBatch.mutate([...selectedSymbols])
-                  }}
+                  onClick={() => setBatchRemoveConfirmOpen(true)}
                   className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2 text-danger hover:bg-danger/10 disabled:opacity-40"
                 ><Trash2 className="h-3.5 w-3.5" />批量移除 ({selectedSymbols.size})</button> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
@@ -1794,6 +1930,26 @@ export function LimitBoard() {
           })
         }}
       /> : null}
+      {batchRemoveConfirmOpen ? <Modal
+        labelledBy="limit-board-batch-remove-title"
+        onClose={() => { if (!removeBatch.isPending) setBatchRemoveConfirmOpen(false) }}
+        closeOnBackdrop={!removeBatch.isPending}
+        panelClassName="w-[92vw] max-w-sm rounded-card border border-border bg-surface shadow-xl"
+      >
+        <div className="p-5">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-danger/10 text-danger"><AlertTriangle className="h-4 w-4" /></div>
+            <div className="min-w-0">
+              <h2 id="limit-board-batch-remove-title" className="text-sm font-semibold">确认批量移除？</h2>
+              <p className="mt-1.5 text-xs leading-5 text-muted">将移出选中的 {selectedSymbols.size} 只股票。移出买入池不会自动撤销已发委托。</p>
+            </div>
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <button type="button" disabled={removeBatch.isPending} onClick={() => setBatchRemoveConfirmOpen(false)} className="rounded-btn border border-border px-3 py-1.5 text-xs text-muted hover:text-foreground disabled:opacity-50">取消</button>
+            <button type="button" disabled={removeBatch.isPending} onClick={() => removeBatch.mutate([...selectedSymbols])} className="rounded-btn bg-danger px-3 py-1.5 text-xs font-medium text-white hover:bg-danger/90 disabled:opacity-50">{removeBatch.isPending ? '移除中…' : '确认移除'}</button>
+          </div>
+        </div>
+      </Modal> : null}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} onClose={() => setPreview(null)} />
     </div>
   )
