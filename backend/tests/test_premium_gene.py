@@ -98,6 +98,28 @@ def test_get_for_symbol_returns_unavailable_without_enriched_date(tmp_path):
     }
 
 
+def test_get_for_symbol_can_read_stale_snapshot_without_refresh(tmp_path, monkeypatch):
+    class _Repo:
+        class store:
+            data_dir = tmp_path
+
+        @staticmethod
+        def latest_enriched_date(_asset_type):
+            return date(2026, 8, 14)
+
+    premium_gene.persist_snapshot(tmp_path, premium_gene.calculate(_history()))
+    monkeypatch.setattr(
+        premium_gene,
+        "refresh",
+        lambda *_args, **_kwargs: pytest.fail("snapshot mode must not refresh the full universe"),
+    )
+
+    result = premium_gene.get_for_symbol(_Repo(), "A", refresh_if_stale=False)
+
+    assert result["available"] is True
+    assert result["as_of"] == "2026-01-12"
+
+
 def test_premium_gene_api_contract(tmp_path):
     class _Repo:
         class store:
@@ -121,6 +143,31 @@ def test_premium_gene_api_contract(tmp_path):
         "as_of": None,
         "window_days": 200,
     }
+
+
+def test_premium_gene_api_snapshot_mode_avoids_live_lookup(tmp_path, monkeypatch):
+    class _Repo:
+        class store:
+            data_dir = tmp_path
+
+    expected = {"available": False, "symbol": "000001.SZ", "as_of": "2026-08-14", "window_days": 200}
+
+    monkeypatch.setattr(premium_gene, "get_for_symbol", lambda *_args, **_kwargs: expected)
+
+    async def _unexpected_live(*_args, **_kwargs):
+        pytest.fail("snapshot mode must not call the live provider")
+
+    monkeypatch.setattr(premium_gene, "get_for_symbol_async", _unexpected_live)
+    app = FastAPI()
+    app.state.repo = _Repo()
+    app.include_router(stock_analysis.router)
+
+    response = TestClient(app).get(
+        "/api/stock-analysis/premium-gene?symbol=000001.SZ&live=false"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == expected
 
 
 @pytest.mark.asyncio

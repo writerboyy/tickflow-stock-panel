@@ -110,6 +110,13 @@ function ratioPct(value: number | null | undefined, digits = 0): string {
   return value == null || !Number.isFinite(value) ? '--' : `${(value * 100).toFixed(digits)}%`
 }
 
+function geneRateTone(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return 'text-secondary'
+  if (value >= 0.6) return 'text-bull'
+  if (value < 0.4) return 'text-bear'
+  return 'text-warning'
+}
+
 function scoreTime(value: string | null | undefined): string {
   if (!value) return '--'
   const parsed = new Date(value)
@@ -421,13 +428,14 @@ function LimitBoardAllocationDialog({
     && geneDetail.first_board_broken_rate != null,
   )
   const premiumGeneQuery = useQuery({
-    queryKey: QK.stockPremiumGene(row.symbol),
-    queryFn: () => api.stockAnalysisPremiumGene(row.symbol),
+    queryKey: QK.stockPremiumGene(row.symbol, false),
+    queryFn: () => api.stockAnalysisPremiumGene(row.symbol, false),
     // Limit-board rows already carry the latest computed gene snapshot. Avoid
     // an extra live request when that detail is complete; it delayed the dialog
     // without changing the displayed score.
     enabled: kind === 'board' && Boolean(row.symbol) && !localGeneReady,
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
+    gcTime: 15 * 60_000,
     retry: false,
   })
   const geneData: PremiumGene | undefined = premiumGeneQuery.data?.available ? premiumGeneQuery.data : undefined
@@ -560,8 +568,8 @@ function LimitBoardAllocationDialog({
           {geneScore != null ? <span className="col-span-2">综合评分 <b className="font-mono text-foreground">{geneScore.toFixed(1)} / {geneMaxScore.toFixed(1)}</b>{genePassed != null ? <em className={genePassed ? 'ml-1 not-italic text-bull' : 'ml-1 not-italic text-warning'}>{genePassed ? '达标' : '未达标'}</em> : null}</span> : null}
           <span>近{geneData?.window_days ?? geneDetail?.window_days ?? '--'}日涨停 <b className="font-mono text-foreground">{geneData?.limit_up_count ?? geneDetail?.limit_up_count ?? '--'} 次</b></span>
           <span>溢价5% <b className="font-mono text-foreground">{geneData?.premium_5_count != null ? String(geneData.premium_5_count) + ' 次' : ratioPct(geneDetail?.premium_5_rate, 1)}</b></span>
-          <span>次日收红 <b className="font-mono text-foreground">{ratioPct(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate, 1)}</b></span>
-          <span>首板封板 <b className="font-mono text-foreground">{ratioPct(geneData?.first_board_seal_rate ?? geneDetail?.first_board_seal_rate, 1)}</b></span>
+          <span>次日收红 <b className={`font-mono font-semibold ${geneRateTone(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate)}`}>{ratioPct(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate, 1)}</b></span>
+          <span>首板封板 <b className={`font-mono font-semibold ${geneRateTone(geneData?.first_board_seal_rate ?? geneDetail?.first_board_seal_rate)}`}>{ratioPct(geneData?.first_board_seal_rate ?? geneDetail?.first_board_seal_rate, 1)}</b></span>
           <span>首板破板 <b className="font-mono text-foreground">{ratioPct(geneData?.first_board_broken_rate ?? geneDetail?.first_board_broken_rate, 1)}</b></span>
           <span>连板率 <b className="font-mono text-foreground">{ratioPct(geneData?.consecutive_rate ?? geneDetail?.consecutive_rate, 1)}</b></span>
         </div> : premiumGeneQuery.isLoading ? <div className="text-muted">正在读取涨停基因…</div> : <div className="text-muted">暂无涨停基因数据</div>}
@@ -991,7 +999,7 @@ function SectorStrengthTable({
   const constituents = useQuery({
     queryKey: QK.limitBoardSectorConstituents(
       selectedPlate?.plate_id ?? '',
-      activeCapturedAt ?? '',
+      isLive ? 'live' : activeCapturedAt ?? '',
     ),
     queryFn: () => api.limitBoardSectorConstituents(
       selectedPlate!.plate_id,
@@ -999,6 +1007,8 @@ function SectorStrengthTable({
     ),
     enabled: selectedPlate != null && activeCapturedAt != null && activeSnapshotReady,
     placeholderData: previous => previous,
+    refetchInterval: isLive ? Math.max(5_000, refreshIntervalSeconds * 3_000) : false,
+    staleTime: isLive ? Math.max(1_000, refreshIntervalSeconds * 1_000 - 1_000) : 60_000,
   })
   const constituentData = constituents.data?.plate_id === selectedPlate?.plate_id
     ? constituents.data

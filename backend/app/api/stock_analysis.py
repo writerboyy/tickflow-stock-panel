@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import date, timedelta
@@ -152,11 +153,20 @@ def get_levels(
 async def get_premium_gene(
     request: Request,
     symbol: str = Query(..., description="标的代码,如 000001.SZ"),
+    live: bool = Query(True, description="是否优先请求开盘啦实时结果"),
 ):
     """返回个股近 200 个交易日的涨停/溢价基因统计。"""
     symbol = symbol.strip()
     if not symbol:
         raise HTTPException(400, "symbol 不能为空")
+    if not live:
+        # 下单弹窗只需要已有快照，避免远端请求或过期快照触发全市场重算阻塞页面。
+        return await asyncio.to_thread(
+            premium_gene.get_for_symbol,
+            request.app.state.repo,
+            symbol,
+            refresh_if_stale=False,
+        )
     return await premium_gene.get_for_symbol_async(request.app.state.repo, symbol)
 
 

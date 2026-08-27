@@ -105,7 +105,7 @@ export const QK = {
   kline:                (symbol: string, start: string, end: string, extColumns?: string) =>
                            ['kline', symbol, start, end, extColumns ?? ''] as const,
   stockLevels:          (symbol: string, days?: number) => ['stock-levels', symbol, days ?? 120] as const,
-  stockPremiumGene:     (symbol: string) => ['stock-premium-gene', symbol] as const,
+  stockPremiumGene:     (symbol: string, live = true) => ['stock-premium-gene', symbol, live ? 'live' : 'snapshot'] as const,
   stockAnalysisLatest:  (symbols?: string[]) => ['stock-analysis-latest', ...(symbols ?? []).slice().sort()] as const,
   klineMinute:          (symbol: string, date: string) =>
                              ['kline-minute', symbol, date] as const,

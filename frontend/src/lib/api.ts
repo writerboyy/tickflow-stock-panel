@@ -4531,8 +4531,8 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
-  stockAnalysisPremiumGene: (symbol: string) =>
-    request<PremiumGene>(`/api/stock-analysis/premium-gene?symbol=${encodeURIComponent(symbol)}`),
+  stockAnalysisPremiumGene: (symbol: string, live = true) =>
+    request<PremiumGene>(`/api/stock-analysis/premium-gene?symbol=${encodeURIComponent(symbol)}&live=${live ? 'true' : 'false'}`),
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),

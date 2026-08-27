@@ -336,8 +336,14 @@ def refresh(repo, *, window_days: int = WINDOW_DAYS, force: bool = False) -> pl.
     return rows
 
 
-def get_for_symbol(repo, symbol: str, *, window_days: int = WINDOW_DAYS) -> dict:
-    """获取单只股票的最新指标，快照过期时按需补算。"""
+def get_for_symbol(
+    repo,
+    symbol: str,
+    *,
+    window_days: int = WINDOW_DAYS,
+    refresh_if_stale: bool = True,
+) -> dict:
+    """获取单只股票指标；默认在快照过期时按需补算。"""
     as_of = repo.latest_enriched_date("stock")
     if as_of is None:
         return {
@@ -349,7 +355,7 @@ def get_for_symbol(repo, symbol: str, *, window_days: int = WINDOW_DAYS) -> dict
     rows = load_snapshot(repo.store.data_dir)
     snapshot_date = rows["as_of"].drop_nulls().max() if not rows.is_empty() else None
     snapshot_window = rows["window_days"].drop_nulls().max() if not rows.is_empty() else None
-    if snapshot_date != as_of or snapshot_window != window_days:
+    if refresh_if_stale and (snapshot_date != as_of or snapshot_window != window_days):
         rows = refresh(repo, window_days=window_days)
 
     match = rows.filter(pl.col("symbol") == symbol) if not rows.is_empty() else _empty_snapshot()
