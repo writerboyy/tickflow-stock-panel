@@ -384,6 +384,7 @@ function auctionTone(value: unknown): string {
 function AuctionTable({
   rows,
   status,
+  conceptBySymbol,
   date,
   minDate,
   maxDate,
@@ -393,6 +394,7 @@ function AuctionTable({
 }: {
   rows: Record<string, any>[]
   status?: FuyaoAuctionStatus
+  conceptBySymbol: Map<string, string>
   date: string
   minDate?: string
   maxDate?: string
@@ -448,9 +450,10 @@ function AuctionTable({
         <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1120px] border-collapse text-[10px]">
+          <table className="w-full min-w-[1240px] border-collapse text-[10px]">
             <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">股票</th>
+              <th className="px-2 py-2 text-left font-medium">概念</th>
               <th className="px-2 py-2 text-right font-medium">时点</th>
               <th className="px-2 py-2 text-right font-medium">竞价价</th>
               <th className="px-2 py-2 text-right font-medium">竞价涨幅</th>
@@ -458,7 +461,7 @@ function AuctionTable({
               <th className="px-2 py-2 text-right font-medium">竞价额</th>
               <th className="px-2 py-2 text-right font-medium">竞价换手率</th>
               <th className="px-2 py-2 text-right font-medium">未匹配</th>
-              <th className="px-2 py-2 text-right font-medium">量比</th>
+              <th className="px-2 py-2 text-right font-medium">抢筹强度（量比）</th>
               <th className="px-2 py-2 text-right font-medium">流通市值</th>
               <th className="px-2 py-2 text-right font-medium">昨收价</th>
               <th className="px-3 py-2 text-right font-medium">开盘价</th>
@@ -466,6 +469,7 @@ function AuctionTable({
             <tbody>
               {visibleRows.map((row, index) => <tr key={`${row.symbol}-${row.checkpoint}-${index}`} className="border-b border-border/70 hover:bg-elevated/30">
                 <td className="px-3 py-2"><button type="button" onClick={() => onOpen(String(row.symbol || ''), row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.code || row.symbol || '--'}</div></button></td>
+                <td className="max-w-[180px] px-2 py-2 text-left text-secondary"><div className="truncate" title={conceptBySymbol.get(String(row.symbol || '').toUpperCase())}>{conceptBySymbol.get(String(row.symbol || '').toUpperCase()) || '--'}</div></td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
                 <td className="px-2 py-2 text-right font-mono text-foreground">{auctionPrice(row.auction_price)}</td>
                 <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
@@ -473,7 +477,7 @@ function AuctionTable({
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
                 <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
+                <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="竞价量比">{typeof row.auction_volume_ratio === 'number' && Number.isFinite(row.auction_volume_ratio) ? row.auction_volume_ratio.toFixed(2) : '--'}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
                 <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
                 <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
@@ -1691,6 +1695,23 @@ export function LimitBoard() {
     enabled: tab === 'auction',
     staleTime: 60_000,
   })
+  const conceptExtData = useQuery({
+    queryKey: QK.extDataRows('ext_gn_ths', undefined, 20_000),
+    queryFn: () => api.extDataRows('ext_gn_ths', { limit: 20_000 }),
+    enabled: tab === 'auction',
+    staleTime: 60_000,
+  })
+  const auctionConceptBySymbol = useMemo(() => {
+    const result = new Map<string, string>()
+    for (const row of conceptExtData.data?.rows ?? []) {
+      const symbol = String(row.symbol || row.code || '').trim().toUpperCase()
+      if (!symbol) continue
+      const value = row['所属概念'] ?? row.concept ?? row.concepts ?? row.theme
+      const labels = themes(value)
+      if (labels.length > 0) result.set(symbol, labels.slice(0, 3).join('、'))
+    }
+    return result
+  }, [conceptExtData.data?.rows])
   const fuyaoAuctionConfig = fuyaoExtData.data?.items.find(item => item.id === 'ext_fuyao_auction')
   const auctionDate = selectedAuctionDate ?? fuyaoAuctionStatus.data?.trade_date ?? ''
   const auctionDateRange = fuyaoAuctionConfig?.date_range
@@ -1858,6 +1879,7 @@ export function LimitBoard() {
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
           status={fuyaoAuctionStatus.data}
+          conceptBySymbol={auctionConceptBySymbol}
           date={auctionDate}
           minDate={auctionDateRange?.[0]}
           maxDate={auctionMaxDate}
