@@ -46,6 +46,7 @@ import {
   type PremiumGene,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { getBoardType } from '@/lib/board'
 import { useChartTheme } from '@/lib/theme'
 
 const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => ({ default: module.LimitUpLadder })))
@@ -811,6 +812,11 @@ function sectorConstituentStatus(row: LimitBoardSectorConstituent): string {
   return '--'
 }
 
+function isMainBoardSymbol(symbol: string): boolean {
+  const board = getBoardType(symbol)
+  return board === '沪主板' || board === '深主板'
+}
+
 function manualActionRow(
   symbol: string,
   name: string | null | undefined,
@@ -877,6 +883,7 @@ function SectorStrengthTable({
   const [hotSortKey, setHotSortKey] = useState<HotSortKey>('change_pct')
   const [rankingWindowMinutes, setRankingWindowMinutes] = useState<5 | 30>(5)
   const [rankingOpen, setRankingOpen] = useState(false)
+  const [mainBoardOnly, setMainBoardOnly] = useState(false)
   const [progressClock, setProgressClock] = useState(() => Date.now())
   const [cycleStartedAt, setCycleStartedAt] = useState(() => Date.now())
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
@@ -1015,6 +1022,10 @@ function SectorStrengthTable({
       .map(symbol => bySymbol.get(symbol))
       .filter((row): row is LimitBoardSectorConstituent => row != null)
   }, [activeCapturedAt, constituentData?.rows, isLive, selectedPlate?.plate_id])
+  const visibleConstituentRows = useMemo(
+    () => mainBoardOnly ? constituentRows.filter(row => isMainBoardSymbol(row.symbol)) : constituentRows,
+    [constituentRows, mainBoardOnly],
+  )
   useEffect(() => {
     if (!selectedStockSymbol || !selectedPlate || !constituentData?.rows.some(row => row.symbol === selectedStockSymbol)) return
     const scrollKey = `${selectedPlate.plate_id}:${selectedStockSymbol}`
@@ -1192,10 +1203,28 @@ function SectorStrengthTable({
         </table>
       </div>
       <div className="min-w-0">
-        {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : constituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
+        <div className="flex min-h-12 items-center justify-between gap-1.5 border-b border-border px-2 py-1.5">
+          <div className="min-w-0">
+            <div className="truncate text-[11px] font-medium">{selectedPlate?.plate_name || '板块成分股'}</div>
+            <div className="mt-0.5 truncate text-[8px] text-muted">
+              {mainBoardOnly ? `主板 ${visibleConstituentRows.length}/${constituentRows.length}` : `全部 ${constituentRows.length} 只`}
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-pressed={mainBoardOnly}
+            onClick={() => setMainBoardOnly(value => !value)}
+            className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-btn border px-2 text-[9px] transition-colors ${mainBoardOnly ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-muted hover:bg-elevated hover:text-foreground'}`}
+            title={mainBoardOnly ? '显示全部板块成分股' : '仅显示主板成分股'}
+          >
+            {mainBoardOnly ? <Check className="h-3 w-3" /> : null}
+            主板
+          </button>
+        </div>
+        {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : visibleConstituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[540px] table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[29%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[13%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
-            <tbody>{constituentRows.map(row => {
+            <tbody>{visibleConstituentRows.map(row => {
               const linked = row.symbol === selectedStockSymbol
               const visual = hotQuoteVisual({ symbol: row.symbol, last_price: row.last_price, limit_up: row.limit_up, change_pct: row.change_pct })
               return <tr
@@ -1221,7 +1250,7 @@ function SectorStrengthTable({
               </tr>
             })}</tbody>
           </table>
-        </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending || constituents.isFetching ? '正在读取实时板块成分股' : '该时间点没有可用的成分股数据'}</div>}
+        </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending || constituents.isFetching ? '正在读取实时板块成分股' : mainBoardOnly && constituentRows.length ? '当前板块没有主板成分股' : '该时间点没有可用的成分股数据'}</div>}
       </div>
       {rankingOpen ? <div id="sector-interval-ranking" className="min-w-0 border-b border-border lg:border-b-0">
         <div className="flex min-h-12 items-center gap-1.5 border-b border-border px-2 py-1.5">
