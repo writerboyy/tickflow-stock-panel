@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import polars as pl
 import pytest
@@ -9,6 +10,11 @@ from app.plugins.fuyao import client as fuyao_client
 from app.plugins.fuyao_auction import collector as collector_module
 from app.plugins.fuyao_auction.collector import FuyaoAuctionCollector
 from app.plugins.fuyao_auction.storage import TABLE_ID, partition_path, publish, read_status
+import app.plugins.fuyao_auction.router as router_module
+
+
+def _request_for(collector):
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(fuyao_auction_collector=collector)))
 
 
 def _row(symbol: str = "600519.SH", **over) -> dict:
@@ -48,6 +54,14 @@ class _FakeClient:
         pass
 
 
+class _UnknownSymbolClient(_FakeClient):
+    def auction_snapshot(self, thscodes, stage):
+        self.calls.append((list(thscodes), stage))
+        if "000003.SZ" in thscodes:
+            raise fuyao_client.FuyaoError("unknown", code=1002)
+        return {"timestamp": 123, "auction_phase": "open", "data_status": "ready", "item": [_row(thscodes[0])]}
+
+
 @pytest.mark.asyncio
 async def test_collect_batches_symbols_and_publishes(tmp_path, monkeypatch):
     symbols = ["600519.SH", "000001.SZ"]
@@ -66,6 +80,37 @@ async def test_collect_batches_symbols_and_publishes(tmp_path, monkeypatch):
     assert frame.height == 2
     assert set(frame["checkpoint"].to_list()) == {"0915"}
     assert collector.status()["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_collect_respects_fuyao_symbol_batch_limit(tmp_path, monkeypatch):
+    symbols = [f"{600000 + i:06d}.SH" for i in range(101)]
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": symbols}).write_parquet(inst / "instruments.parquet")
+    fake = _FakeClient({"timestamp": 123, "auction_phase": "open", "data_status": "ready", "item": [_row()]})
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    collector = FuyaoAuctionCollector(tmp_path)
+    collector._client = fake
+
+    assert await collector.collect("0915", date(2026, 8, 27)) == 101
+    assert [len(batch) for batch, _stage in fake.calls] == [100, 1]
+
+
+@pytest.mark.asyncio
+async def test_collect_skips_unknown_symbol_without_discarding_batch(tmp_path, monkeypatch):
+    inst = tmp_path / "instruments"
+    inst.mkdir()
+    pl.DataFrame({"symbol": ["000001.SZ", "000003.SZ", "600519.SH"]}).write_parquet(inst / "instruments.parquet")
+    fake = _UnknownSymbolClient({})
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    collector = FuyaoAuctionCollector(tmp_path)
+    collector._client = fake
+
+    assert await collector.collect("0915", date(2026, 8, 27)) == 2
+    assert collector.status()["state"] == "completed"
+    frame = pl.read_parquet(partition_path(tmp_path, date(2026, 8, 27)))
+    assert set(frame["symbol"].to_list()) == {"000001.SZ", "600519.SH"}
 
 
 @pytest.mark.asyncio
@@ -124,3 +169,51 @@ def test_client_auction_snapshot_builds_documented_query(monkeypatch):
     assert result["data_status"] == "ready"
     assert seen["path"] == "/api/a-share/auction/snapshot"
     assert seen["params"] == {"thscodes": "600519.SH,000001.SZ", "stage": "live"}
+
+
+def test_save_api_key_rejects_invalid_key_without_persisting(monkeypatch):
+    collector = SimpleNamespace(status=lambda: {"state": "unconfigured"}, stop=lambda: None)
+    request = _request_for(collector)
+    saved = {}
+    monkeypatch.setattr(router_module, "probe_api_key", lambda key: (False, "Key 无效"))
+    monkeypatch.setattr(router_module.secrets_store, "save", lambda updates: saved.update(updates))
+    monkeypatch.setattr(router_module, "get_api_key", lambda: "")
+
+    result = router_module.save_api_key(router_module.FuyaoApiKeyIn(api_key="bad"), request)
+
+    assert result["ok"] is False
+    assert saved == {}
+
+
+def test_save_api_key_persists_and_refreshes_collector(monkeypatch):
+    stopped = []
+    collector = SimpleNamespace(status=lambda: {"state": "completed"}, stop=lambda: stopped.append(True))
+    request = _request_for(collector)
+    saved = {}
+    monkeypatch.setattr(router_module, "probe_api_key", lambda key: (True, "ok"))
+    monkeypatch.setattr(router_module.secrets_store, "save", lambda updates: saved.update(updates))
+    monkeypatch.setattr(router_module.secrets_store, "mask", lambda value: "sk-f••••••••key")
+    monkeypatch.setattr(router_module, "get_api_key", lambda: "new-key")
+
+    result = router_module.save_api_key(router_module.FuyaoApiKeyIn(api_key="new-key"), request)
+
+    assert result["ok"] is True
+    assert result["api_key_masked"] == "sk-f••••••••key"
+    assert saved == {"fuyao_api_key": "new-key"}
+    assert stopped == [True]
+
+
+def test_clear_api_key_removes_local_secret_and_refreshes_collector(monkeypatch):
+    stopped = []
+    collector = SimpleNamespace(status=lambda: {"state": "unconfigured"}, stop=lambda: stopped.append(True))
+    request = _request_for(collector)
+    cleared = []
+    monkeypatch.setattr(router_module.secrets_store, "clear", lambda *keys: cleared.extend(keys))
+    monkeypatch.setattr(router_module.secrets_store, "mask", lambda value: "")
+    monkeypatch.setattr(router_module, "get_api_key", lambda: "")
+
+    result = router_module.clear_api_key(request)
+
+    assert result["ok"] is True
+    assert cleared == ["fuyao_api_key"]
+    assert stopped == [True]

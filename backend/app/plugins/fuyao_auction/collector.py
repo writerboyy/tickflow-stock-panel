@@ -32,7 +32,8 @@ _CHECKPOINTS = {
     "1457": ("live", 14, 57),
     "1500": ("final", 15, 0),
 }
-_BATCH_SIZE = 300
+# 扶摇接口约束: 单次 thscodes 不得超过 100 个。
+_BATCH_SIZE = 100
 
 
 def _symbols(data_dir: Path) -> list[str]:
@@ -40,9 +41,16 @@ def _symbols(data_dir: Path) -> list[str]:
     if not path.exists():
         return []
     try:
-        frame = pl.read_parquet(path, columns=["symbol"])
+        frame = pl.read_parquet(path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("读取集合竞价标的列表失败: %s", exc)
+        return []
+    # 维表同时保留历史退市标的；扶摇集合竞价只接受当前在市股票。
+    if "status" in frame.columns:
+        frame = frame.filter(pl.col("status").cast(pl.String).str.to_lowercase() == "active")
+    if "asset_type" in frame.columns:
+        frame = frame.filter(pl.col("asset_type").cast(pl.String).str.to_lowercase() == "stock")
+    if "symbol" not in frame.columns:
         return []
     return sorted({str(value).strip().upper() for value in frame["symbol"].drop_nulls().to_list() if "." in str(value)})
 
@@ -126,6 +134,40 @@ class FuyaoAuctionCollector:
     async def _scheduled_collect(self, checkpoint: str) -> int:
         return await self.collect(checkpoint)
 
+    async def _fetch_batch(
+        self, batch: list[str], stage: str,
+    ) -> tuple[list[dict], list[str], int | None, str | None]:
+        """拉取一批标的；未知标的会递归拆分，避免整批被扶摇拒绝。"""
+        try:
+            data = await asyncio.to_thread(self._get_client().auction_snapshot, batch, stage)
+        except FuyaoError as exc:
+            if str(getattr(exc, "code", "")) != "1002":
+                raise
+            if len(batch) == 1:
+                logger.warning("扶摇集合竞价跳过未知标的: %s", batch[0])
+                return [], [], None, None
+            middle = len(batch) // 2
+            left = await self._fetch_batch(batch[:middle], stage)
+            right = await self._fetch_batch(batch[middle:], stage)
+            return (
+                [*left[0], *right[0]],
+                [*left[1], *right[1]],
+                left[2] or right[2],
+                left[3] or right[3],
+            )
+
+        data = data if isinstance(data, dict) else {}
+        rows = data.get("item") if isinstance(data.get("item"), list) else data.get("data")
+        if not isinstance(rows, list):
+            rows = []
+        status = str(data.get("data_status") or "ready")
+        return (
+            [row for row in rows if isinstance(row, dict)],
+            [status],
+            _int_or_none(data.get("timestamp")),
+            _text_or_none(data.get("auction_phase")),
+        )
+
     async def collect(self, checkpoint: str | None = None, trade_date: date | None = None) -> int:
         checkpoint = checkpoint or self.default_checkpoint()
         if checkpoint not in _CHECKPOINTS:
@@ -160,18 +202,13 @@ class FuyaoAuctionCollector:
             try:
                 for start in range(0, len(symbols), _BATCH_SIZE):
                     batch = symbols[start : start + _BATCH_SIZE]
-                    data = await asyncio.to_thread(self._get_client().auction_snapshot, batch, stage)
-                    data = data if isinstance(data, dict) else {}
-                    rows = data.get("item") if isinstance(data.get("item"), list) else data.get("data")
-                    if not isinstance(rows, list):
-                        rows = []
-                    all_rows.extend(row for row in rows if isinstance(row, dict))
-                    payload_items.extend(row for row in rows if isinstance(row, dict))
-                    status = str(data.get("data_status") or "ready")
-                    statuses.append(status)
-                    server_timestamp = server_timestamp or _int_or_none(data.get("timestamp"))
-                    auction_phase = auction_phase or _text_or_none(data.get("auction_phase"))
-                    if status == "not_ready":
+                    rows, batch_statuses, batch_timestamp, batch_phase = await self._fetch_batch(batch, stage)
+                    all_rows.extend(rows)
+                    payload_items.extend(rows)
+                    statuses.extend(batch_statuses)
+                    server_timestamp = server_timestamp or batch_timestamp
+                    auction_phase = auction_phase or batch_phase
+                    if "not_ready" in batch_statuses:
                         break
             except FuyaoError as exc:
                 return self._fail(day, checkpoint, stage, str(exc), getattr(exc, "code", None), _status_from_error(exc))

@@ -451,6 +451,118 @@ function KaipanlaConnection() {
   )
 }
 
+function FuyaoAuctionConnection() {
+  const qc = useQueryClient()
+  const [apiKey, setApiKey] = useState('')
+  const [revealing, setRevealing] = useState(false)
+  const status = useQuery({ queryKey: QK.fuyaoAuctionStatus, queryFn: api.fuyaoAuctionStatus })
+  const configured = status.data?.configured ?? false
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: QK.fuyaoAuctionStatus })
+    qc.invalidateQueries({ queryKey: QK.extData })
+    qc.invalidateQueries({ queryKey: QK.dataSources })
+  }
+
+  const save = useMutation({
+    mutationFn: () => api.saveFuyaoAuctionKey(apiKey.trim()),
+    onSuccess: (data) => {
+      if (data.ok) {
+        setApiKey('')
+        invalidate()
+        toast('扶摇集合竞价连接已保存', 'success')
+      } else {
+        toast(data.error || 'API Key 无效,未保存', 'error')
+      }
+    },
+    onError: (error: Error) => toast(`保存失败: ${error.message}`, 'error'),
+  })
+
+  const clear = useMutation({
+    mutationFn: api.clearFuyaoAuctionKey,
+    onSuccess: (data) => {
+      if (data.ok) {
+        invalidate()
+        toast('扶摇集合竞价连接已清除', 'success')
+      }
+    },
+    onError: (error: Error) => toast(`清除失败: ${error.message}`, 'error'),
+  })
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div className="flex items-center gap-2.5">
+          <Link2 className="h-4 w-4 text-secondary" />
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-medium text-foreground">扶摇集合竞价</h2>
+              <span className="text-[9px] uppercase tracking-wider text-muted/60 border border-border rounded px-1.5 py-0.5">辅助数据</span>
+            </div>
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+              <span className={`h-1.5 w-1.5 rounded-full ${configured ? 'bg-accent' : 'bg-muted/40'}`} />
+              {status.isLoading ? '检查中' : configured ? '已连接 · 自动采集' : '未连接'}
+            </div>
+          </div>
+        </div>
+        {configured && (
+          <button
+            type="button"
+            title="清除扶摇集合竞价连接"
+            aria-label="清除扶摇集合竞价连接"
+            disabled={clear.isPending}
+            onClick={() => { if (window.confirm('确认清除扶摇集合竞价凭据？')) clear.mutate() }}
+            className="h-8 w-8 inline-flex items-center justify-center rounded-btn text-muted hover:text-danger hover:bg-danger/10 transition-colors disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {configured && status.data && (
+        <div className="flex flex-wrap gap-x-5 gap-y-1 mb-3 text-[10px] text-muted font-mono">
+          <span>API Key {status.data.api_key_masked || '已配置'}</span>
+          <span>表 {status.data.table_id}</span>
+          <span>记录 {status.data.rows}</span>
+        </div>
+      )}
+      <form
+        className="flex flex-col sm:flex-row gap-2"
+        onSubmit={(event) => { event.preventDefault(); if (apiKey.trim()) save.mutate() }}
+      >
+        <div className="relative min-w-0 flex-1">
+          <input
+            type={revealing ? 'text' : 'password'}
+            value={apiKey}
+            onChange={event => setApiKey(event.target.value)}
+            placeholder={configured ? '粘贴新 API Key 替换当前' : '粘贴扶摇 API Key'}
+            autoComplete="off"
+            aria-label="扶摇 API Key"
+            className="w-full rounded-btn border border-border bg-base px-3 py-2 pr-9 text-xs text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60 font-mono"
+          />
+          <button
+            type="button"
+            onClick={() => setRevealing(value => !value)}
+            tabIndex={-1}
+            aria-label={revealing ? '隐藏 API Key' : '显示 API Key'}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-foreground transition-colors"
+          >
+            {revealing ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </button>
+        </div>
+        <button
+          type="submit"
+          disabled={!apiKey.trim() || save.isPending}
+          className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-btn bg-accent text-white text-xs font-medium hover:bg-accent/90 transition-colors disabled:opacity-50"
+        >
+          {save.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Link2 className="h-3.5 w-3.5" />}
+          {save.isPending ? '验证中...' : '保存连接'}
+        </button>
+      </form>
+      <p className="mt-2 text-[10px] text-muted/60">保存前会先验证接口，成功后写入本地密钥存储；集合竞价数据独立入库，不覆盖主行情。</p>
+    </section>
+  )
+}
+
 export function SettingsDataSourcesPanel() {
   const qc = useQueryClient()
   const prefs = usePreferences()
@@ -866,6 +978,7 @@ export function SettingsDataSourcesPanel() {
       </section>
 
       <KaipanlaConnection />
+      <FuyaoAuctionConnection />
 
       {/* ===== 下方: 编辑区 ===== */}
       <AnimatePresence mode="wait">

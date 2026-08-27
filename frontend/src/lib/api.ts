@@ -3293,6 +3293,13 @@ export const api = {
     }),
   clearKaipanlaConnection: () =>
     request<KaipanlaStatus>('/api/settings/kaipanla', { method: 'DELETE' }),
+  saveFuyaoAuctionKey: (apiKey: string) =>
+    request<FuyaoAuctionKeyResult>('/api/settings/fuyao-auction', {
+      method: 'PUT',
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  clearFuyaoAuctionKey: () =>
+    request<FuyaoAuctionKeyResult>('/api/settings/fuyao-auction', { method: 'DELETE' }),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
@@ -5255,6 +5262,7 @@ export interface ExtDataConfig {
 
 export interface FuyaoAuctionStatus {
   configured: boolean
+  api_key_masked?: string
   state: string
   trade_date: string
   table_id: string
@@ -5270,6 +5278,11 @@ export interface FuyaoAuctionStatus {
   server_timestamp?: number | null
   auction_phase?: string | null
   partition_exists?: boolean
+}
+
+export interface FuyaoAuctionKeyResult extends FuyaoAuctionStatus {
+  ok: boolean
+  error?: string
 }
 
 export interface ExtDataRowsResult {
