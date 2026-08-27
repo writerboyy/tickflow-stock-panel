@@ -2309,6 +2309,165 @@ def test_depth_processing_uses_configured_sweep_price_levels(tmp_path, monkeypat
     assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "sweep"
 
 
+def test_close_auction_depth_does_not_mark_board_broken(tmp_path, monkeypatch):
+    service, quotes, config = make_service(tmp_path)
+    now = [datetime(2026, 8, 13, 14, 57, tzinfo=CN_TZ)]
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now[0])
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now[0].date())
+    service._quotes["600000.SH"] = {**quote(), "timestamp": now[0].isoformat()}
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "sealed", "sealed": True}
+    service.store.save_runtime(runtime)
+    open_depth = {
+        "symbol": "600000.SH",
+        "timestamp": now[0].isoformat(),
+        "bid_prices": [10.99],
+        "bid_volumes": [100],
+        "ask_prices": [11.0],
+        "ask_volumes": [100],
+    }
+
+    service._process_depth([open_depth])
+
+    state = service._runtime_for_today()["symbols"]["600000.SH"]
+    assert state["sealed"] is True
+    assert state["status"] == "sealed"
+    assert quotes.events == []
+    assert service.store.events(now[0].date().isoformat()) == []
+
+    now[0] = datetime(2026, 8, 13, 15, 0, tzinfo=CN_TZ)
+    service._quotes["600000.SH"]["timestamp"] = now[0].isoformat()
+    final_sealed = {
+        **open_depth,
+        "timestamp": now[0].isoformat(),
+        "bid_prices": [11.0],
+        "bid_volumes": [100],
+        "ask_prices": [0],
+        "ask_volumes": [0],
+    }
+    service._process_depth([final_sealed])
+
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["sealed"] is True
+    assert service.store.events(now[0].date().isoformat()) == []
+
+def test_close_auction_final_depth_marks_break_only_after_15h(tmp_path, monkeypatch):
+    service, _quotes, config = make_service(tmp_path)
+    now = [datetime(2026, 8, 13, 14, 57, tzinfo=CN_TZ)]
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now[0])
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now[0].date())
+    service._quotes["600000.SH"] = {**quote(), "timestamp": now[0].isoformat()}
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "sealed", "sealed": True}
+    service.store.save_runtime(runtime)
+    open_depth = {
+        "symbol": "600000.SH",
+        "timestamp": now[0].isoformat(),
+        "bid_prices": [10.99],
+        "bid_volumes": [100],
+        "ask_prices": [11.0],
+        "ask_volumes": [100],
+    }
+
+    service._process_depth([open_depth])
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["sealed"] is True
+
+    now[0] = datetime(2026, 8, 13, 15, 0, tzinfo=CN_TZ)
+    service._quotes["600000.SH"]["timestamp"] = now[0].isoformat()
+    open_depth["timestamp"] = now[0].isoformat()
+    service._process_depth([open_depth])
+
+    state = service._runtime_for_today()["symbols"]["600000.SH"]
+    assert state["sealed"] is False
+    assert state["status"] == "broken"
+    event = service.store.events(now[0].date().isoformat())[0]
+    assert event["type"] == "broken"
+    assert "收盘集合竞价结束时卖一恢复" in event["reasons"][0]
+
+
+def test_close_auction_final_without_ask_does_not_mark_break(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 13, 15, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    service._quotes["600000.SH"] = {**quote(), "timestamp": now.isoformat()}
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "sealed", "sealed": True}
+    service.store.save_runtime(runtime)
+
+    service._process_depth([{
+        "symbol": "600000.SH",
+        "timestamp": now.isoformat(),
+        "bid_prices": [10.99],
+        "bid_volumes": [0],
+        "ask_prices": [0],
+        "ask_volumes": [0],
+    }])
+
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["sealed"] is True
+    assert service.store.events(now.date().isoformat()) == []
+
+
+def test_close_auction_depth_is_not_reused_across_trading_dates(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    service._close_auction_date = date(2026, 8, 12)
+    service._close_auction_depth = {
+        "600000.SH": {
+            "timestamp": datetime(2026, 8, 12, 14, 59, tzinfo=CN_TZ),
+            "bid_prices": [10.99],
+            "bid_volumes": [100],
+            "ask_prices": [11.0],
+            "ask_volumes": [100],
+        },
+    }
+    now = datetime(2026, 8, 13, 15, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    service._quotes["600000.SH"] = {**quote(), "timestamp": now.isoformat()}
+    runtime = service._runtime_for_today()
+    runtime["symbols"]["600000.SH"] = {"status": "sealed", "sealed": True}
+    service.store.save_runtime(runtime)
+
+    service._process_depth([])
+
+    assert service._close_auction_depth == {}
+    assert service._runtime_for_today()["symbols"]["600000.SH"]["sealed"] is True
+    assert service.store.events(now.date().isoformat()) == []
+
+
+def test_close_auction_finalizes_symbols_independently_across_batches(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 13, 15, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr("app.services.limit_board_service.cn_now", lambda: now)
+    monkeypatch.setattr("app.services.limit_board_service.cn_today", lambda: now.date())
+    service._quotes.update({
+        symbol: {**quote(), "symbol": symbol, "timestamp": now.isoformat()}
+        for symbol in ("600000.SH", "600001.SH")
+    })
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        symbol: {"status": "sealed", "sealed": True}
+        for symbol in ("600000.SH", "600001.SH")
+    }
+    service.store.save_runtime(runtime)
+
+    def broken_depth(symbol: str) -> dict:
+        return {
+            "symbol": symbol,
+            "timestamp": now.isoformat(),
+            "bid_prices": [10.99],
+            "bid_volumes": [100],
+            "ask_prices": [11.0],
+            "ask_volumes": [100],
+        }
+
+    service._process_depth([broken_depth("600000.SH")])
+    service._process_depth([broken_depth("600001.SH")])
+
+    assert {event["symbol"] for event in service.store.events(now.date().isoformat())} == {
+        "600000.SH", "600001.SH",
+    }
+
+
 def test_queue_waits_from_first_touch_before_submitting(tmp_path, monkeypatch):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)

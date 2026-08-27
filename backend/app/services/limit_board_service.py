@@ -56,6 +56,8 @@ _ENTRY_MAX_LIMIT_GAP_PCT = 0.03
 _ENTRY_QUOTE_FRESH_SECONDS = 10.0
 _ENTRY_SCORE_RISING_DELTA = 0.05
 _POOL_ALLOCATION_MODES = frozenset({"global", "available", "sixth", "fifth", "quarter", "lot", "fixed", "volume"})
+_CLOSE_AUCTION_START = clock_time(14, 57)
+_CLOSE_AUCTION_END = clock_time(15, 0)
 _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
@@ -96,8 +98,20 @@ def _is_trading_time(value: datetime) -> bool:
     current = value.timetz().replace(tzinfo=None)
     return (
         clock_time(9, 30) <= current < clock_time(11, 30)
-        or clock_time(13, 0) <= current < clock_time(15, 0)
+        or clock_time(13, 0) <= current < _CLOSE_AUCTION_START
     )
+
+
+def _is_close_auction_time(value: datetime) -> bool:
+    current = value.timetz().replace(tzinfo=None)
+    return (
+        value.weekday() < 5
+        and _CLOSE_AUCTION_START <= current < _CLOSE_AUCTION_END
+    )
+
+
+def _is_after_close_auction(value: datetime) -> bool:
+    return value.weekday() < 5 and value.timetz().replace(tzinfo=None) >= _CLOSE_AUCTION_END
 
 
 def _is_main_board_symbol(symbol: str) -> bool:
@@ -191,6 +205,9 @@ class LimitBoardService:
         self._sector_quote_symbols: set[str] = set()
         self._heat_quote_symbols: set[str] = set()
         self._depth: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=10))
+        self._close_auction_depth: dict[str, dict[str, Any]] = {}
+        self._close_auction_date: date | None = None
+        self._close_auction_finalized_symbols: set[str] = set()
         self._history_date: date | None = None
         self._name_map_date: date | None = None
         self._name_map: dict[str, str] = {}
@@ -2120,20 +2137,78 @@ class LimitBoardService:
         )
         runtime = self._runtime_for_today()
         now = cn_now()
-        if not _is_trading_time(now):
+        close_auction = _is_close_auction_time(now)
+        after_close_auction = _is_after_close_auction(now)
+        if not _is_trading_time(now) and not close_auction and not after_close_auction:
             return
+        if (close_auction or after_close_auction) and self._close_auction_date != now.date():
+            self._close_auction_depth = {}
+            self._close_auction_date = now.date()
+            self._close_auction_finalized_symbols = set()
+        if after_close_auction:
+            # The final auction snapshot may arrive just before 15:00 and no
+            # depth event is guaranteed after the auction ends.
+            latest: dict[str, dict[str, Any]] = {}
+            cached = [
+                {**value, "symbol": symbol}
+                for symbol, value in self._close_auction_depth.items()
+            ]
+            for raw in [*cached, *records]:
+                symbol = str(raw.get("symbol") or "").strip().upper()
+                if not symbol:
+                    continue
+                normalized = self._normalize_depth(raw, now)
+                if normalized is None:
+                    continue
+                if normalized["timestamp"].timetz().replace(tzinfo=None) < _CLOSE_AUCTION_START:
+                    continue
+                previous = latest.get(symbol)
+                if previous is None or normalized["timestamp"] >= previous["timestamp"]:
+                    latest[symbol] = {**normalized, "symbol": symbol}
+            records = list(latest.values())
         for raw in records:
             symbol = str(raw.get("symbol") or "").strip().upper()
             quote = self._quotes.get(symbol)
             state = runtime.setdefault("symbols", {}).get(symbol)
             if not quote or not state or symbol in set(runtime.get("blacklist") or []):
                 continue
+            if after_close_auction and symbol in self._close_auction_finalized_symbols:
+                continue
             quote_at = _quote_time(quote.get("timestamp"))
             now_aware = now if now.tzinfo else now.replace(tzinfo=CN_TZ)
-            if quote_at is None or (now_aware - quote_at).total_seconds() > _DEPTH_FRESH_SECONDS:
+            if (
+                not close_auction
+                and not after_close_auction
+                and (quote_at is None or (now_aware - quote_at).total_seconds() > _DEPTH_FRESH_SECONDS)
+            ):
                 continue
             normalized = self._normalize_depth(raw, now)
             if normalized is None:
+                continue
+            if close_auction:
+                # 14:57-15:00 is the closing auction. Its indicative order book
+                # must not change the intraday sealed/broken state; retain only
+                # the latest quote fields for display until the 15:00 final decision.
+                if normalized["timestamp"].timetz().replace(tzinfo=None) >= _CLOSE_AUCTION_START:
+                    previous = self._close_auction_depth.get(symbol)
+                    if previous is None or normalized["timestamp"] >= previous["timestamp"]:
+                        self._close_auction_depth[symbol] = normalized
+                state["bid1_volume"] = normalized["bid_volumes"][0] if normalized["bid_volumes"] else 0.0
+                state["ask1_volume"] = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
+                state["last_depth_at"] = normalized["timestamp"].isoformat()
+                continue
+            if after_close_auction:
+                # The first post-auction snapshot is the final board state. A
+                # recovered ask-one here is the only closing-auction break that
+                # should be recorded.
+                state["bid1_volume"] = normalized["bid_volumes"][0] if normalized["bid_volumes"] else 0.0
+                state["ask1_volume"] = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
+                state["last_depth_at"] = normalized["timestamp"].isoformat()
+                ask_price = normalized["ask_prices"][0] if normalized["ask_prices"] else 0.0
+                ask_volume = normalized["ask_volumes"][0] if normalized["ask_volumes"] else 0.0
+                if state.get("sealed") and ask_price > 0 and ask_volume > 0:
+                    self._mark_broken(quote, state, runtime, config, "收盘集合竞价结束时卖一恢复")
+                self._close_auction_finalized_symbols.add(symbol)
                 continue
             self._depth[symbol].append(normalized)
             recent = [
