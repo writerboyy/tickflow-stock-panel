@@ -279,7 +279,6 @@ function financialTone(value: number | null | undefined): string {
 
 type HotQuoteState = 'limit' | 'near_limit' | 'normal' | 'sharp_drop' | 'unavailable'
 type HotSortKey = 'change_pct' | 'rise_speed_pct'
-const HOT_DISPLAY_LIMIT = 15
 
 // Only used for visual highlighting when a quote snapshot lacks an authoritative limit_up.
 function fallbackLimitGap(symbol: string | null | undefined, change: number | null | undefined): number | null {
@@ -1137,7 +1136,7 @@ function SectorStrengthTable({
     <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_20%_34%_24%]' : 'lg:grid-cols-[25%_30%_45%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-1 border-b border-border px-2 py-1.5">
-          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停 Top{HOT_DISPLAY_LIMIT}</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
+          <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情5秒</div></div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-1 text-[8px] font-medium">
             <div className="inline-flex h-5 overflow-hidden rounded border border-border" aria-label="即将涨停排序">
               {([['change_pct', '涨幅'], ['rise_speed_pct', '涨速']] as const).map(([key, label]) => <button key={key} type="button" aria-pressed={hotSortKey === key} onClick={() => setHotSortKey(key)} className={`px-1.5 ${hotSortKey === key ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}>{label}</button>)}
@@ -1147,7 +1146,7 @@ function SectorStrengthTable({
         </div>
         {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
           <div className="flex w-max gap-2 lg:w-full lg:flex-col">
-            {sortedHotRows.slice(0, HOT_DISPLAY_LIMIT).map((item, index) => {
+            {sortedHotRows.map((item, index) => {
               const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
                 symbol: item.thscode,
                 name: item.name,
