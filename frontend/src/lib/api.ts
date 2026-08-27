@@ -3280,6 +3280,12 @@ export const api = {
   clearTushareKey: () =>
     request<TushareStatus>('/api/settings/tushare', { method: 'DELETE' }),
   kaipanlaStatus: () => request<KaipanlaStatus>('/api/settings/kaipanla'),
+  fuyaoAuctionStatus: () => request<FuyaoAuctionStatus>('/api/settings/fuyao-auction/status'),
+  collectFuyaoAuction: (checkpoint?: string) =>
+    request<{ ok: boolean; rows: number; status: FuyaoAuctionStatus }>(
+      '/api/settings/fuyao-auction/collect',
+      { method: 'POST', body: JSON.stringify({ checkpoint }) },
+    ),
   saveKaipanlaConnection: (sourceUrl: string) =>
     request<KaipanlaStatus>('/api/settings/kaipanla', {
       method: 'PUT',
@@ -5245,6 +5251,25 @@ export interface ExtDataConfig {
   latest_sync_date?: string | null
   date_range?: string[] | null
   pull?: PullConfig | null
+}
+
+export interface FuyaoAuctionStatus {
+  configured: boolean
+  state: string
+  trade_date: string
+  table_id: string
+  checkpoint?: string | null
+  stage?: string | null
+  rows: number
+  symbols: number
+  checkpoints: string[]
+  latest_collected_at?: string | null
+  collected_at?: string | null
+  message?: string | null
+  error_code?: string | number | null
+  server_timestamp?: number | null
+  auction_phase?: string | null
+  partition_exists?: boolean
 }
 
 export interface ExtDataRowsResult {

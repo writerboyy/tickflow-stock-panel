@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { EndpointTestDialog } from '@/components/EndpointTestDialog'
-import { api, type ExtDataConfig, type PitReferenceTableStatus } from '@/lib/api'
+import { api, type ExtDataConfig, type FuyaoAuctionStatus, type PitReferenceTableStatus } from '@/lib/api'
 import {
   useCapabilities,
   useSettings,
@@ -55,11 +55,83 @@ import { CreateExtDialog } from '@/components/ext-data/CreateExtDialog'
 import { EditExtDialog } from '@/components/ext-data/EditExtDialog'
 import { TushareCapabilityMatrixPanel } from '@/components/data/TushareCapabilityMatrix'
 
-type ExtPlatform = 'easytdx' | 'kaipanla' | 'other'
+type ExtPlatform = 'easytdx' | 'kaipanla' | 'fuyao' | 'other'
+
+function FuyaoAuctionCard({
+  status,
+  loading,
+  collecting,
+  onCollect,
+}: {
+  status?: FuyaoAuctionStatus
+  loading: boolean
+  collecting: boolean
+  onCollect: () => void
+}) {
+  const labels: Record<string, string> = {
+    unconfigured: '未配置', running: '运行中', completed: '已落盘', empty: '暂无数据',
+    not_ready: '数据未就绪', unauthenticated: '认证失败', forbidden: '权限不足',
+    rate_limited: '频率超限', upstream_error: '上游异常', error: '采集失败',
+  }
+  const state = status?.state ?? 'unconfigured'
+  const stateLabel = labels[state] ?? state
+  const stateClass = state === 'completed'
+    ? 'text-bear'
+    : state === 'running'
+      ? 'text-accent'
+      : state === 'unconfigured' || state === 'empty'
+        ? 'text-muted'
+        : 'text-warning'
+  return (
+    <div className="rounded-card border border-border bg-surface flex flex-col transition-all duration-300">
+      <div className="flex items-center justify-between px-4 pt-4 pb-2">
+        <h3 className="text-sm font-medium text-foreground">集合竞价</h3>
+        <div className="flex items-center gap-1.5">
+          <span className={`inline-flex items-center gap-1 text-[10px] font-medium ${stateClass}`}>
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${state === 'completed' ? 'bg-bear' : state === 'running' ? 'bg-accent animate-pulse' : 'bg-muted'}`} />
+            {stateLabel}
+          </span>
+          <button
+            onClick={onCollect}
+            disabled={loading || collecting || !status?.configured}
+            className="p-0.5 rounded hover:bg-elevated transition-colors text-secondary hover:text-accent disabled:opacity-40"
+            title="立即采集集合竞价"
+          >
+            <Play className={`h-3.5 w-3.5 ${collecting ? 'animate-pulse' : ''}`} />
+          </button>
+        </div>
+      </div>
+      <div className="px-4 pb-1 text-[10px] text-muted">09:15-09:25 · 14:57-15:00 · 扶摇 API</div>
+      <div className="px-4 pb-2">
+        {loading ? <Skeleton w="w-20" h="h-8" /> : (
+          <>
+            <div className="font-mono text-2xl font-bold tracking-tight tabular-nums text-foreground">
+              {status?.rows ? status.rows.toLocaleString() : '—'}
+            </div>
+            <div className="text-[11px] text-muted mt-0.5">
+              {status?.rows ? `${status.symbols.toLocaleString()} 个标的 · ${status.checkpoints.length} 个时点` : (status?.message ?? '暂无数据')}
+            </div>
+          </>
+        )}
+      </div>
+      <div className="mt-auto px-4 pb-4 pt-2 border-t border-border space-y-0.5">
+        <div className="flex justify-between text-[11px]">
+          <span className="text-muted">交易日</span>
+          <span className="font-mono text-secondary">{status?.trade_date ?? '—'}</span>
+        </div>
+        <div className="flex justify-between text-[11px]">
+          <span className="text-muted">最近采集</span>
+          <span className="font-mono text-secondary">{status?.latest_collected_at ?? status?.collected_at ?? '—'}</span>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 function extPlatform(config: ExtDataConfig): ExtPlatform {
   const id = config.id.toLowerCase()
   if (id.startsWith('ext_kpl_')) return 'kaipanla'
+  if (id === 'ext_fuyao_auction') return 'fuyao'
   if (id.startsWith('ext_tdx_') || id.includes('_tdx')) return 'easytdx'
   return 'other'
 }
@@ -87,6 +159,17 @@ export function Data() {
     queryKey: QK.tushareCapabilityMatrix,
     queryFn: api.tushareCapabilityMatrix,
     refetchInterval: 60_000,
+  })
+
+  const fuyaoAuction = useQuery({
+    queryKey: QK.fuyaoAuctionStatus,
+    queryFn: api.fuyaoAuctionStatus,
+    refetchInterval: 10_000,
+  })
+
+  const collectFuyaoAuction = useMutation({
+    mutationFn: () => api.collectFuyaoAuction(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.fuyaoAuctionStatus }),
   })
 
   // 市场环境(regime) 覆盖画像 —— 走独立接口(/api/regime/coverage), 不在 data/status 内。
@@ -689,6 +772,7 @@ export function Data() {
   const extItems = extConfigs.data?.items ?? []
   const easyTdxExt = extItems.filter(ext => extPlatform(ext) === 'easytdx')
   const kaipanlaExt = extItems.filter(ext => extPlatform(ext) === 'kaipanla')
+  const fuyaoExt = extItems.filter(ext => extPlatform(ext) === 'fuyao')
   const otherExt = extItems.filter(ext => extPlatform(ext) === 'other')
   const renderExtCard = (ext: ExtDataConfig) => (
     <ExtDataStatCard
@@ -1114,6 +1198,17 @@ export function Data() {
               '非主口径辅助数据',
               otherExt.length,
               otherExt.map(renderExtCard),
+            )}
+            {renderPlatformSection(
+              '扶摇 / 同花顺',
+              '集合竞价辅助数据 · 独立扩展表',
+              Math.max(1, fuyaoExt.length),
+              <FuyaoAuctionCard
+                status={fuyaoAuction.data}
+                loading={fuyaoAuction.isLoading}
+                collecting={collectFuyaoAuction.isPending}
+                onCollect={() => collectFuyaoAuction.mutate()}
+              />,
             )}
           </div>
         </div>

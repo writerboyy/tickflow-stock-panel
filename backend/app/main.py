@@ -56,6 +56,7 @@ from app.extensions.loader import (
 )
 from app.jobs import daily_pipeline
 from app.plugins.kaipanla.router import router as kaipanla_router
+from app.plugins.fuyao_auction.router import router as fuyao_auction_router
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock
 from app.services.quote_service import QuoteService
@@ -239,6 +240,17 @@ async def _application_lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("EasyTDX collector not started: %s", e)
         app.state.easy_tdx_collector = None
+
+    # 扶摇/同花顺集合竞价辅助数据: 独立扩展表，复用主调度器；未配置 Key 时仅显示未配置。
+    try:
+        from app.plugins.fuyao_auction import FuyaoAuctionCollector
+
+        fuyao_auction_collector = FuyaoAuctionCollector(store.data_dir)
+        fuyao_auction_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
+        app.state.fuyao_auction_collector = fuyao_auction_collector
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fuyao auction collector not started: %s", e)
+        app.state.fuyao_auction_collector = None
 
     # depth sealed: 启动补跑(当天文件不存在) + 盘中轮询(有能力时)
     try:
@@ -450,6 +462,9 @@ async def _application_lifespan(app: FastAPI):
         easy_tdx_collector = getattr(app.state, "easy_tdx_collector", None)
         if easy_tdx_collector:
             easy_tdx_collector.stop()
+        fuyao_auction_collector = getattr(app.state, "fuyao_auction_collector", None)
+        if fuyao_auction_collector:
+            fuyao_auction_collector.stop()
         if app.state.scheduler:
             app.state.scheduler.shutdown(wait=False)
         ps = getattr(app.state, "pull_scheduler", None)
@@ -588,6 +603,7 @@ app.include_router(large_orders.router)
 app.include_router(position_risk.router)
 app.include_router(limit_board.router)
 app.include_router(kaipanla_router)
+app.include_router(fuyao_auction_router)
 app.include_router(free_strategy.router)
 app.include_router(market_heat.router)
 app.include_router(strategy.router)

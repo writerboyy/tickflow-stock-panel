@@ -233,6 +233,13 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
             "realtime_change_pct_0925",
         ),
     ),
+    "ext_fuyao_auction": ExtensionAuthority(
+        "ext_fuyao_auction",
+        "extension",
+        "fuyao.auction_snapshot",
+        "auction_snapshot_context_only",
+        (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
+    ),
     "ext_kpl_limitup": ExtensionAuthority(
         "ext_kpl_limitup",
         "deprecated-overlap",
