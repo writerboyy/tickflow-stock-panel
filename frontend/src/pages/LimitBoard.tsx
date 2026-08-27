@@ -3,6 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowDownUp,
+  ArrowUp,
   Ban,
   Bell,
   Check,
@@ -405,6 +408,24 @@ function AuctionTable({
   const [checkpoint, setCheckpoint] = useState('')
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState<'auction_pct' | 'auction_amount' | 'auction_volume_ratio'>('auction_pct')
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+
+  const toggleSort = (key: typeof sortKey) => {
+    if (sortKey === key) {
+      setSortDirection(current => current === 'desc' ? 'asc' : 'desc')
+      return
+    }
+    setSortKey(key)
+    setSortDirection('desc')
+  }
+
+  const sortableHeader = (key: typeof sortKey, label: string) => {
+    const active = sortKey === key
+    const Icon = active ? sortDirection === 'desc' ? ArrowDown : ArrowUp : ArrowDownUp
+    return <button type="button" onClick={() => toggleSort(key)} className={`inline-flex items-center gap-1 font-medium ${active ? 'text-foreground' : 'text-muted'} hover:text-foreground`} aria-label={`按${label}${active ? sortDirection === 'desc' ? '降序' : '升序' : '排序'}`}>
+      {label}<Icon className="h-3 w-3" />
+    </button>
+  }
 
   const checkpoints = useMemo(
     () => [...new Set(rows.map(row => String(row.checkpoint || '')).filter(Boolean))].sort(),
@@ -416,8 +437,16 @@ function AuctionTable({
       .filter(row => !checkpoint || String(row.checkpoint || '') === checkpoint)
       .filter(row => !term || String(row.symbol || '').toLowerCase().includes(term) || String(row.code || '').toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
       .slice()
-      .sort((left, right) => Number(right[sortKey] ?? Number.NEGATIVE_INFINITY) - Number(left[sortKey] ?? Number.NEGATIVE_INFINITY))
-  }, [checkpoint, rows, search, sortKey])
+      .sort((left, right) => {
+        const leftValue = Number(left[sortKey])
+        const rightValue = Number(right[sortKey])
+        const leftMissing = !Number.isFinite(leftValue)
+        const rightMissing = !Number.isFinite(rightValue)
+        if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : leftMissing ? 1 : -1
+        const result = rightValue - leftValue
+        return sortDirection === 'desc' ? result : -result
+      })
+  }, [checkpoint, rows, search, sortDirection, sortKey])
 
   return (
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
@@ -438,11 +467,6 @@ function AuctionTable({
             <option value="">全部时点</option>
             {checkpoints.map(value => <option key={value} value={value}>{value.slice(0, 2)}:{value.slice(2)}</option>)}
           </select>
-          <select value={sortKey} onChange={event => setSortKey(event.target.value as typeof sortKey)} aria-label="选择集合竞价排序" className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60">
-            <option value="auction_pct">按竞价涨幅</option>
-            <option value="auction_amount">按竞价金额</option>
-            <option value="auction_volume_ratio">按量比</option>
-          </select>
         </div>
       </div>
       {date === status?.trade_date && status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
@@ -456,12 +480,12 @@ function AuctionTable({
               <th className="px-2 py-2 text-left font-medium">概念</th>
               <th className="px-2 py-2 text-right font-medium">时点</th>
               <th className="px-2 py-2 text-right font-medium">竞价价</th>
-              <th className="px-2 py-2 text-right font-medium">竞价涨幅</th>
+              <th className="px-2 py-2 text-right">{sortableHeader('auction_pct', '竞价涨幅')}</th>
               <th className="px-2 py-2 text-right font-medium">竞价量</th>
-              <th className="px-2 py-2 text-right font-medium">竞价额</th>
+              <th className="px-2 py-2 text-right">{sortableHeader('auction_amount', '竞价额')}</th>
               <th className="px-2 py-2 text-right font-medium">竞价换手率</th>
               <th className="px-2 py-2 text-right font-medium">未匹配</th>
-              <th className="px-2 py-2 text-right font-medium">抢筹强度（量比）</th>
+              <th className="px-2 py-2 text-right">{sortableHeader('auction_volume_ratio', '抢筹强度（量比）')}</th>
               <th className="px-2 py-2 text-right font-medium">流通市值</th>
               <th className="px-2 py-2 text-right font-medium">昨收价</th>
               <th className="px-3 py-2 text-right font-medium">开盘价</th>
