@@ -1797,8 +1797,8 @@ export function LimitBoard() {
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
-          ['ladder', '连板天梯', null, Flame],
           ['auction', '集合竞价', fuyaoAuctionStatus.data?.rows ?? null, Radio],
+          ['ladder', '连板天梯', null, Flame],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['buy_pool', '买入池', data.buy_pool.length, ShoppingCart],
           ['pool', '打板池', data.board_pool.length, Crosshair],
