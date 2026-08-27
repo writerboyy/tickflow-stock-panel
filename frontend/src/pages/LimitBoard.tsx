@@ -26,6 +26,7 @@ import {
   X,
 } from 'lucide-react'
 import { EmptyState } from '@/components/EmptyState'
+import { DatePicker } from '@/components/DatePicker'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
 import { type QmtAllocationMode } from '@/components/QmtTradePanel'
@@ -375,11 +376,19 @@ function auctionTone(value: unknown): string {
 function AuctionTable({
   rows,
   status,
+  date,
+  minDate,
+  maxDate,
+  onDateChange,
   loading,
   onOpen,
 }: {
   rows: Record<string, any>[]
   status?: FuyaoAuctionStatus
+  date: string
+  minDate?: string
+  maxDate?: string
+  onDateChange: (value: string) => void
   loading: boolean
   onOpen: (symbol: string, name?: string) => void
 }) {
@@ -406,10 +415,11 @@ function AuctionTable({
         <div>
           <div className="text-xs font-medium">集合竞价</div>
           <div className="mt-0.5 text-[10px] text-muted">
-            {loading ? '正在读取扶摇数据' : status?.configured ? `${status.trade_date} · ${status.rows} 条 · ${status.state === 'completed' ? '已落库' : status.message || '待更新'}` : '未配置扶摇 API Key'}
+            {loading ? '正在读取扶摇数据' : date ? `${date} · ${rows.length} 条 · ${date !== status?.trade_date ? '历史数据' : status?.configured ? status.state === 'completed' ? '已落库' : status.message || '待更新' : '未配置扶摇 API Key'}` : '未配置扶摇 API Key'}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <DatePicker value={date} onChange={onDateChange} min={minDate} max={maxDate} buttonClassName="h-7 px-2 text-[10px]" />
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索代码/名称" aria-label="搜索集合竞价股票" className="h-7 w-32 rounded-btn border border-border bg-base pl-7 pr-2 text-[10px] text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60" />
@@ -425,7 +435,7 @@ function AuctionTable({
           </select>
         </div>
       </div>
-      {status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
+      {date === status?.trade_date && status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
       {visibleRows.length === 0 ? (
         <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
       ) : (
@@ -1609,6 +1619,7 @@ export function LimitBoard() {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
   const [batchRemoveConfirmOpen, setBatchRemoveConfirmOpen] = useState(false)
+  const [selectedAuctionDate, setSelectedAuctionDate] = useState<string | null>(null)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const [selectedBuyPoolSymbols, setSelectedBuyPoolSymbols] = useState<Set<string>>(() => new Set())
   const [selectedPoolSymbols, setSelectedPoolSymbols] = useState<Set<string>>(() => new Set())
@@ -1662,13 +1673,22 @@ export function LimitBoard() {
     refetchInterval: 15_000,
     placeholderData: previous => previous,
   })
-  const auctionDate = fuyaoAuctionStatus.data?.trade_date
+  const fuyaoExtData = useQuery({
+    queryKey: QK.extData,
+    queryFn: api.extDataList,
+    enabled: tab === 'auction',
+    staleTime: 60_000,
+  })
+  const fuyaoAuctionConfig = fuyaoExtData.data?.items.find(item => item.id === 'ext_fuyao_auction')
+  const auctionDate = selectedAuctionDate ?? fuyaoAuctionStatus.data?.trade_date ?? ''
+  const auctionDateRange = fuyaoAuctionConfig?.date_range
+  const auctionMaxDate = fuyaoAuctionStatus.data?.trade_date ?? auctionDateRange?.[1]
   const fuyaoAuctionRows = useQuery({
     queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 20_000),
     queryFn: () => api.extDataRows('ext_fuyao_auction', { date: auctionDate, limit: 20_000 }),
     enabled: tab === 'auction' && Boolean(auctionDate),
     staleTime: 15_000,
-    refetchInterval: 15_000,
+    refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
   })
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({
@@ -1801,7 +1821,7 @@ export function LimitBoard() {
 
       <div className="flex items-center gap-1 overflow-x-auto border-b border-border px-4 pt-2 sm:px-5">
         {([
-          ['auction', '集合竞价', fuyaoAuctionStatus.data?.rows ?? null, Radio],
+          ['auction', '集合竞价', fuyaoAuctionRows.data?.total ?? fuyaoAuctionStatus.data?.rows ?? null, Radio],
           ['ladder', '连板天梯', null, Flame],
           ['sector', '板块强度', data.sector_strength?.rows.length ?? 0, Layers3],
           ['buy_pool', '买入池', data.buy_pool.length, ShoppingCart],
@@ -1826,6 +1846,10 @@ export function LimitBoard() {
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
           status={fuyaoAuctionStatus.data}
+          date={auctionDate}
+          minDate={auctionDateRange?.[0]}
+          maxDate={auctionMaxDate}
+          onDateChange={setSelectedAuctionDate}
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
         /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
