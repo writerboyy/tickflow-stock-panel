@@ -4248,15 +4248,23 @@ class LimitBoardService:
 
     def remove_buy_pool(self, symbol: str, revision: int) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
+        return self.remove_buy_pool_batch([cleaned], revision)
+
+    def remove_buy_pool_batch(self, symbols: list[str], revision: int) -> dict[str, Any]:
+        cleaned_symbols = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        if not cleaned_symbols:
+            raise ValueError("至少选择一只股票")
         saved = self.store.update(
             revision,
             lambda value: value.__setitem__(
                 "buy_pool",
-                [item for item in value.get("buy_pool", []) if str(item.get("symbol")) != cleaned],
+                [item for item in value.get("buy_pool", []) if str(item.get("symbol")).strip().upper() not in cleaned_symbols],
             ),
         )
         runtime = self._runtime_for_today()
-        runtime.setdefault("buy_orders", {}).pop(cleaned, None)
+        buy_orders = runtime.setdefault("buy_orders", {})
+        for cleaned in cleaned_symbols:
+            buy_orders.pop(cleaned, None)
         self._persist_runtime(runtime)
         self._refresh_symbol_consumer()
         self._sync_websocket(runtime, saved)
@@ -4266,11 +4274,17 @@ class LimitBoardService:
 
     def remove_pool(self, symbol: str, revision: int) -> dict[str, Any]:
         cleaned = str(symbol).strip().upper()
+        return self.remove_pool_batch([cleaned], revision)
+
+    def remove_pool_batch(self, symbols: list[str], revision: int) -> dict[str, Any]:
+        cleaned_symbols = {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        if not cleaned_symbols:
+            raise ValueError("至少选择一只股票")
         saved = self.store.update(
             revision,
             lambda value: value.__setitem__(
                 "board_pool",
-                [item for item in value["board_pool"] if str(item.get("symbol")) != cleaned],
+                [item for item in value["board_pool"] if str(item.get("symbol")).strip().upper() not in cleaned_symbols],
             ),
         )
         self._sync_websocket(self._runtime_for_today(), saved)

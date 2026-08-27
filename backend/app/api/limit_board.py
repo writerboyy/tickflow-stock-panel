@@ -15,6 +15,11 @@ class SelectedWrite(BaseModel):
     symbol: str = Field(min_length=1, max_length=20)
 
 
+class PoolBatchDelete(BaseModel):
+    revision: int = Field(ge=0)
+    symbols: list[str] = Field(min_length=1, max_length=100)
+
+
 class PoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
     allocation_mode: str = Field(default="global", pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
@@ -209,6 +214,17 @@ def remove_pool(symbol: str, revision: int, request: Request):
     return {"ok": True, "config": config}
 
 
+@router.delete("/pool")
+def remove_pool_batch(payload: PoolBatchDelete, request: Request):
+    try:
+        config = _service(request).remove_pool_batch(payload.symbols, payload.revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
 @router.post("/buy-pool")
 def add_buy_pool(payload: BuyPoolWrite, request: Request):
     try:
@@ -236,4 +252,15 @@ def remove_buy_pool(symbol: str, revision: int, request: Request):
         config = _service(request).remove_buy_pool(symbol, revision)
     except RevisionConflict as exc:
         raise HTTPException(409, str(exc)) from exc
+    return {"ok": True, "config": config}
+
+
+@router.delete("/buy-pool")
+def remove_buy_pool_batch(payload: PoolBatchDelete, request: Request):
+    try:
+        config = _service(request).remove_buy_pool_batch(payload.symbols, payload.revision)
+    except RevisionConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "config": config}

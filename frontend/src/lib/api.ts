@@ -3520,6 +3520,10 @@ export const api = {
       `/api/limit-board/pool/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
+  limitBoardPoolBatchRemove: (symbols: string[], revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
+      method: 'DELETE', body: JSON.stringify({ symbols, revision }),
+    }),
   limitBoardBuyPoolAdd: (
     symbol: string,
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual',
@@ -3537,6 +3541,10 @@ export const api = {
       `/api/limit-board/buy-pool/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
+  limitBoardBuyPoolBatchRemove: (symbols: string[], revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/buy-pool', {
+      method: 'DELETE', body: JSON.stringify({ symbols, revision }),
+    }),
   largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
   largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all', mode: LargeOrderEvidenceMode = 'combined') =>
     request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; mode: LargeOrderEvidenceMode; stale: boolean; last_updated_ms: number | null }>(

@@ -3758,6 +3758,73 @@ def test_limit_board_buy_pool_api_submits_and_removes_order(tmp_path, monkeypatc
     assert service._runtime_for_today()["buy_orders"] == {}
 
 
+def test_limit_board_pool_batch_remove_api_is_atomic(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.store.update(0, lambda value: value.update({
+        "board_pool": [
+            {"symbol": "600000.SH"},
+            {"symbol": "600001.SH"},
+            {"symbol": "600002.SH"},
+        ],
+        "buy_pool": [{"symbol": "600003.SH"}],
+    }))
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    removed = client.request(
+        "DELETE",
+        "/api/limit-board/pool",
+        json={"symbols": ["600000.SH", "600002.SH", "600000.SH"], "revision": 1},
+    )
+
+    assert removed.status_code == 200
+    assert removed.json()["config"]["revision"] == 2
+    assert [item["symbol"] for item in removed.json()["config"]["board_pool"]] == ["600001.SH"]
+    assert removed.json()["config"]["buy_pool"] == [{"symbol": "600003.SH"}]
+
+    stale = client.request(
+        "DELETE",
+        "/api/limit-board/pool",
+        json={"symbols": ["600001.SH"], "revision": 1},
+    )
+    assert stale.status_code == 409
+
+    empty = client.request(
+        "DELETE",
+        "/api/limit-board/pool",
+        json={"symbols": [], "revision": 2},
+    )
+    assert empty.status_code == 422
+
+
+def test_limit_board_buy_pool_batch_remove_api_clears_runtime_orders(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.store.update(0, lambda value: value.update({
+        "buy_pool": [{"symbol": "600000.SH"}, {"symbol": "600001.SH"}],
+        "board_pool": [{"symbol": "600002.SH"}],
+    }))
+    runtime = service._runtime_for_today()
+    runtime["buy_orders"] = {"600000.SH": {"order_status": "accepted_pending"}, "600001.SH": {"order_status": "blocked"}}
+    service._persist_runtime(runtime)
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    removed = client.request(
+        "DELETE",
+        "/api/limit-board/buy-pool",
+        json={"symbols": ["600000.SH", "600001.SH"], "revision": 1},
+    )
+
+    assert removed.status_code == 200
+    assert removed.json()["config"]["buy_pool"] == []
+    assert removed.json()["config"]["board_pool"] == [{"symbol": "600002.SH"}]
+    assert service._runtime_for_today()["buy_orders"] == {}
+
+
 def test_limit_board_buy_pool_api_accepts_after_hours_order_price(tmp_path, monkeypatch):
     qmt = FakeQmt()
     service, _quotes, _config = make_service(tmp_path, qmt)

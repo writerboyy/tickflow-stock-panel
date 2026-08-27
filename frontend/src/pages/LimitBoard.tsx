@@ -618,6 +618,7 @@ function LimitBoardAllocationDialog({
 interface RowProps {
   row: LimitBoardRow
   mode: TableMode
+  selected: boolean
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
@@ -627,11 +628,13 @@ interface RowProps {
   onToggleAuto: (enabled: boolean) => void
   onChangeOrderMode: (mode: 'sweep' | 'queue') => void
   onRemovePool: () => void
+  onToggleSelect: (checked: boolean) => void
 }
 
 function Row({
   row,
   mode,
+  selected,
   busy,
   sweepPriceLevels,
   queueWaitSeconds,
@@ -641,6 +644,7 @@ function Row({
   onToggleAuto,
   onChangeOrderMode,
   onRemovePool,
+  onToggleSelect,
 }: RowProps) {
   const status = STATUS[row.status || 'watching'] || STATUS.watching
   const gap = row.limit_gap_pct == null ? '--' : `${(row.limit_gap_pct * 100).toFixed(2)}%`
@@ -658,6 +662,7 @@ function Row({
 
   if (mode === 'buy_pool') {
     return <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
+      <td className="w-9 px-2"><input type="checkbox" checked={selected} disabled={busy} onChange={event => onToggleSelect(event.target.checked)} aria-label={`选择${row.name || row.symbol}`} /></td>
       <td className="sticky left-0 z-30 w-[128px] min-w-[128px] max-w-[128px] overflow-hidden bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
         <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
           <div className="truncate font-medium">{row.name || row.symbol}</div>
@@ -678,6 +683,7 @@ function Row({
 
   return (
     <tr className="group border-t border-border/70 text-[11px] hover:bg-elevated/30">
+      <td className="w-9 px-2"><input type="checkbox" checked={selected} disabled={busy} onChange={event => onToggleSelect(event.target.checked)} aria-label={`选择${row.name || row.symbol}`} /></td>
       <td className="sticky left-0 z-30 w-[128px] min-w-[128px] max-w-[128px] overflow-hidden bg-surface py-2.5 pl-3 pr-2 group-hover:bg-elevated">
         <button type="button" onClick={onOpen} className="block w-full text-left hover:text-accent" title="查看 K 线与分时">
           <div className="truncate font-medium">{row.name || row.symbol}</div>
@@ -742,6 +748,7 @@ function Row({
 interface TableProps {
   rows: LimitBoardRow[]
   mode: TableMode
+  selectedSymbols: ReadonlySet<string>
   busy: boolean
   sweepPriceLevels: number
   queueWaitSeconds: number
@@ -751,6 +758,8 @@ interface TableProps {
   onToggleAuto: (row: LimitBoardRow, enabled: boolean) => void
   onChangeOrderMode: (row: LimitBoardRow, mode: 'sweep' | 'queue') => void
   onRemovePool: (row: LimitBoardRow) => void
+  onToggleSelect: (symbol: string, checked: boolean) => void
+  onToggleAll: (checked: boolean) => void
 }
 
 function Table(props: TableProps) {
@@ -761,6 +770,7 @@ function Table(props: TableProps) {
       <table className={`w-full border-collapse ${mode === 'buy_pool' ? 'min-w-[980px]' : 'min-w-[1210px]'}`}>
         <thead className="text-left text-[10px] text-muted">
           <tr>
+            <th className="w-9 bg-surface px-2"><input type="checkbox" checked={rows.length > 0 && rows.every(row => props.selectedSymbols.has(row.symbol))} disabled={props.busy} onChange={event => props.onToggleAll(event.target.checked)} aria-label="全选" /></th>
             <th className="sticky left-0 z-40 w-[128px] overflow-hidden bg-surface py-2 pl-3 pr-2">标的</th>
             <th className="w-[160px] px-2">题材</th>
             {mode === 'buy_pool' ? <><th className="px-2">限价</th><th className="px-2">数量</th><th className="px-2">金额</th><th className="px-2">委托状态</th><th className="px-2">行情</th></> : null}
@@ -774,6 +784,7 @@ function Table(props: TableProps) {
               key={row.symbol}
               row={row}
               mode={mode}
+              selected={props.selectedSymbols.has(row.symbol)}
               busy={props.busy}
               sweepPriceLevels={props.sweepPriceLevels}
               queueWaitSeconds={props.queueWaitSeconds}
@@ -783,6 +794,7 @@ function Table(props: TableProps) {
               onToggleAuto={enabled => props.onToggleAuto(row, enabled)}
               onChangeOrderMode={mode => props.onChangeOrderMode(row, mode)}
               onRemovePool={() => props.onRemovePool(row)}
+              onToggleSelect={checked => props.onToggleSelect(row.symbol, checked)}
             />
           ))}
         </tbody>
@@ -1478,6 +1490,8 @@ export function LimitBoard() {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
+  const [selectedBuyPoolSymbols, setSelectedBuyPoolSymbols] = useState<Set<string>>(() => new Set())
+  const [selectedPoolSymbols, setSelectedPoolSymbols] = useState<Set<string>>(() => new Set())
   const view = useQuery({
     queryKey: QK.limitBoard,
     queryFn: api.limitBoard,
@@ -1541,6 +1555,14 @@ export function LimitBoard() {
     mutationFn: (row: LimitBoardRow) => api.limitBoardBuyPoolRemove(row.symbol, view.data?.revision ?? 0),
     onSuccess: refresh,
   })
+  const removePoolBatch = useMutation({
+    mutationFn: (symbols: string[]) => api.limitBoardPoolBatchRemove(symbols, view.data?.revision ?? 0),
+    onSuccess: async () => { setSelectedPoolSymbols(new Set()); await refresh() },
+  })
+  const removeBuyPoolBatch = useMutation({
+    mutationFn: (symbols: string[]) => api.limitBoardBuyPoolBatchRemove(symbols, view.data?.revision ?? 0),
+    onSuccess: async () => { setSelectedBuyPoolSymbols(new Set()); await refresh() },
+  })
   const updateAdvanced = useMutation({
     mutationFn: (settings: AdvancedSettings) => (
       api.limitBoardAdvancedSettingsUpdate(settings, view.data?.revision ?? 0)
@@ -1553,7 +1575,7 @@ export function LimitBoard() {
 
   const poolSymbols = useMemo(() => new Set((view.data?.board_pool ?? []).map(row => row.symbol)), [view.data?.board_pool])
   const buyPoolSymbols = useMemo(() => new Set((view.data?.buy_pool ?? []).map(row => row.symbol)), [view.data?.buy_pool])
-  const busy = addPool.isPending || addBuyPool.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || updateAdvanced.isPending
+  const busy = addPool.isPending || addBuyPool.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || removePoolBatch.isPending || removeBuyPoolBatch.isPending || updateAdvanced.isPending
   const data = view.data
   const sentimentHistory = useMemo(() => mergeSentimentHistory(
     data?.market_sentiment?.emotion_history,
@@ -1575,6 +1597,9 @@ export function LimitBoard() {
   const rows = tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
   const tableMode: TableMode = tab === 'pool' ? 'pool' : 'buy_pool'
   const tableTitle = tab === 'buy_pool' ? '买入池' : '实盘打板池'
+  const selectedSymbols = tableMode === 'buy_pool' ? selectedBuyPoolSymbols : selectedPoolSymbols
+  const setSelectedSymbols = tableMode === 'buy_pool' ? setSelectedBuyPoolSymbols : setSelectedPoolSymbols
+  const removeBatch = tableMode === 'buy_pool' ? removeBuyPoolBatch : removePoolBatch
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
     : '加入后立即按当前 TickFlow 价格发送限价买入委托；移出买入池不会自动撤销已发委托'
@@ -1665,7 +1690,15 @@ export function LimitBoard() {
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
-              <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[10px]">
+              <div className="flex flex-wrap items-center justify-end gap-2 text-[10px]">
+                {selectedSymbols.size > 0 ? <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    if (window.confirm(`确认移出选中的 ${selectedSymbols.size} 只股票？`)) removeBatch.mutate([...selectedSymbols])
+                  }}
+                  className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2 text-danger hover:bg-danger/10 disabled:opacity-40"
+                ><Trash2 className="h-3.5 w-3.5" />批量移除 ({selectedSymbols.size})</button> : null}
                 {runtime.last_error ? <span className="text-warning">{runtime.last_error}</span> : null}
               </div>
             </div>
@@ -1676,6 +1709,7 @@ export function LimitBoard() {
               sweepPriceLevels={data.settings.sweep_price_levels}
               queueWaitSeconds={data.settings.queue_wait_seconds}
               queueConfirmSnapshots={data.settings.queue_confirm_snapshots}
+              selectedSymbols={selectedSymbols}
               onOpen={setPreview}
               onEditAllocation={row => setAllocationDialog({
                 row,
@@ -1685,7 +1719,22 @@ export function LimitBoard() {
               })}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
               onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
-              onRemovePool={row => tableMode === 'buy_pool' ? removeBuyPool.mutate(row) : removePool.mutate(row)}
+              onRemovePool={row => {
+                setSelectedSymbols(previous => {
+                  const next = new Set(previous)
+                  next.delete(row.symbol)
+                  return next
+                })
+                if (tableMode === 'buy_pool') removeBuyPool.mutate(row)
+                else removePool.mutate(row)
+              }}
+              onToggleSelect={(symbol, checked) => setSelectedSymbols(previous => {
+                const next = new Set(previous)
+                if (checked) next.add(symbol)
+                else next.delete(symbol)
+                return next
+              })}
+              onToggleAll={checked => setSelectedSymbols(checked ? new Set(rows.map(row => row.symbol)) : new Set())}
             />
           </section>
         ) : (
