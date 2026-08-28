@@ -451,12 +451,20 @@ class QmtZmqRpcClient:
                 raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}")
             if available > volume:
                 raise QmtRpcError(f"QMT 可用数量大于持仓数量: {symbol}")
+            market_value = _float(item.get("market_value"))
+            price = _float(item.get("price") or item.get("last_price"))
+            if (price is None or price <= 0) and market_value is not None and market_value > 0 and volume > 0:
+                price = market_value / volume
+            if market_value is None and price is not None and price > 0:
+                market_value = price * volume
             normalized_positions.append({
                 "symbol": symbol,
                 "name": str(item.get("stock_name") or item.get("name") or symbol),
                 "quantity": volume,
                 "available": available,
                 "cost_price": cost,
+                "price": price if price is not None and price > 0 else None,
+                "market_value": market_value,
                 "asset_type": "etf" if symbol.startswith(("15", "16", "50", "51", "56", "58")) else "stock",
                 "entry_date": entry_dates.get(symbol),
             })

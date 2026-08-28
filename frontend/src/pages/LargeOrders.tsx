@@ -143,6 +143,11 @@ function holdingPnl(value: number | null | undefined) {
   return `${value >= 0 ? '+' : ''}${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function todayPnl(totalAsset: number | null | undefined, previousCloseTotalAsset: number | null | undefined) {
+  if (totalAsset == null || previousCloseTotalAsset == null || !Number.isFinite(totalAsset) || !Number.isFinite(previousCloseTotalAsset)) return null
+  return totalAsset - previousCloseTotalAsset
+}
+
 function pct(value: number | null | undefined) {
   return value == null ? '—' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
 }
@@ -589,6 +594,7 @@ export function LargeOrders() {
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
+  const accountTodayPnl = todayPnl(data.account.total_asset, data.account.previous_close_total_asset)
   const runtimeReason = compactRuntimeReason(data.runtime.reason)
   const openTradeForRow = (row: PositionRiskPosition) => {
     setSelected(null)
@@ -636,6 +642,7 @@ export function LargeOrders() {
           <span className="font-medium">{data.account.name}</span>
           <span className="text-muted">持仓 <b className="font-mono text-foreground">{data.positions.length}</b></span>
           <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(data.account.total_asset)}</b></span>
+          <span className={cn('text-muted', accountTodayPnl != null && (accountTodayPnl >= 0 ? 'text-bull' : 'text-bear'))}>今日盈亏 <b className="font-mono">{holdingPnl(accountTodayPnl)}</b></span>
           <span className={cn('inline-flex items-center gap-1.5', data.runtime.status === 'websocket' ? 'text-bear' : data.runtime.status === 'polling_degraded' || data.runtime.status === 'reconnecting' ? 'text-warning' : 'text-muted')}><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
           <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bear' : qmt.data?.configured ? 'text-warning' : 'text-muted')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
           <span className="inline-flex items-center rounded-btn bg-elevated p-0.5" title="切换 QMT 连接位置">

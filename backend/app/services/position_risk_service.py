@@ -2806,6 +2806,12 @@ class PositionRiskService:
                 or quantity < 0 or available < 0 or available > quantity
             ):
                 raise ValueError(f"QMT 持仓字段无效: {symbol or 'unknown'}")
+            market_value = _finite(row.get("market_value"))
+            price = _finite(row.get("price"))
+            if (price is None or price <= 0) and market_value is not None and market_value > 0 and quantity > 0:
+                price = market_value / quantity
+            if market_value is None and price is not None and price > 0:
+                market_value = price * quantity
             positions.append({
                 "symbol": symbol,
                 "name": str(row.get("name") or symbol),
@@ -2813,7 +2819,8 @@ class PositionRiskService:
                 "quantity": int(quantity),
                 "available": int(available),
                 "cost_price": round(cost, 4),
-                "import_price": _finite(row.get("price")) or round(cost, 4),
+                "import_price": price if price is not None and price > 0 else None,
+                "market_value": market_value,
                 "price_source": "qmt_position",
                 "entry_date": str(row.get("entry_date") or row.get("opened_at") or "").strip() or None,
             })
@@ -2827,11 +2834,16 @@ class PositionRiskService:
             "previous_close_total_asset": _finite(current["account"].get("previous_close_total_asset")) or total_asset,
         }
         position_fields = ("symbol", "name", "asset_type", "quantity", "available", "cost_price", "entry_date")
+        snapshot_fields = (*position_fields, "import_price", "market_value")
 
         def position_signature(rows: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
             return sorted(tuple(row.get(field) for field in position_fields) for row in rows)
 
         positions_changed = position_signature(current.get("positions") or []) != position_signature(positions)
+        snapshot_changed = (
+            sorted(tuple(row.get(field) for field in snapshot_fields) for row in current.get("positions") or [])
+            != sorted(tuple(row.get(field) for field in snapshot_fields) for row in positions)
+        )
         account_changed = any(
             current.get("account", {}).get(field) != account_value.get(field)
             for field in ("name", "cash", "total_asset")
@@ -2839,7 +2851,7 @@ class PositionRiskService:
         first_qmt_sync = self.store.get_runtime("qmt_account_id") != account_id
         sync_state = {"synced_at": snapshot.get("synced_at"), "account_id": account_id}
         self.store.set_runtime("qmt_sync", sync_state)
-        if not first_qmt_sync and not positions_changed and not account_changed:
+        if not first_qmt_sync and not positions_changed and not snapshot_changed and not account_changed:
             return current
 
         if first_qmt_sync:
@@ -2855,6 +2867,7 @@ class PositionRiskService:
         else:
             saved = self.store.update_system(lambda stored: stored.update({
                 "account": account_value,
+                "positions": positions,
                 "imported_at": value["imported_at"],
             }))
         self.store.set_runtime("qmt_account_id", account_id)
@@ -2898,7 +2911,7 @@ class PositionRiskService:
             price = _finite(quote.get("last_price")) or _finite(position.get("import_price"))
             quantity = float(position.get("quantity") or 0)
             cost = _finite(position.get("cost_price"))
-            market_value = price * quantity if price is not None else None
+            market_value = price * quantity if price is not None else _finite(position.get("market_value"))
             pnl = (price - cost) * quantity if price is not None and cost is not None else None
             rows.append({
                 **position,
