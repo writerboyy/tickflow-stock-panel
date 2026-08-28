@@ -1867,17 +1867,10 @@ export function LimitBoard() {
     staleTime: 15_000,
     refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
   })
-  const auctionConceptSymbols = useMemo(
-    () => (fuyaoAuctionRows.data?.rows ?? [])
-      .map(row => String(row.symbol || '').trim().toUpperCase())
-      .filter(Boolean)
-      .slice(0, 500),
-    [fuyaoAuctionRows.data?.rows],
-  )
   const conceptExtData = useQuery({
-    queryKey: QK.extDataRows('ext_gn_ths', undefined, 500, '所属概念', undefined, auctionConceptSymbols.join(',')),
-    queryFn: () => api.extDataRows('ext_gn_ths', { limit: 500, columns: ['所属概念'], symbols: auctionConceptSymbols }),
-    enabled: tab === 'auction' && auctionConceptSymbols.length > 0,
+    queryKey: QK.extDataRows('ext_gn_ths', undefined, 6_000, '所属概念'),
+    queryFn: () => api.extDataRows('ext_gn_ths', { limit: 6_000, columns: ['所属概念'] }),
+    enabled: tab === 'auction',
     staleTime: 60_000,
   })
   const auctionConceptBySymbol = useMemo(() => {
