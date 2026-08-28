@@ -154,7 +154,7 @@ export function QmtTradePanel({
   const cachedBuyingPower = tradeAction === 'BUY'
     ? creditBuy
       ? creditBuyMode === 'financing'
-        ? cachedAccount?.fin_enbuy_balance ?? cachedAccount?.credit_financing_buying_power
+        ? cachedAccount?.fin_enbuy_balance
         : cachedAccount?.assure_enbuy_balance ?? cachedAccount?.credit_assure_buying_power
       : cachedAccount?.cash
     : null
@@ -167,7 +167,7 @@ export function QmtTradePanel({
     ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
-    ?? cachedAccount?.credit_financing_buying_power
+    ?? null
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
   const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
   const previewRequestMode = allocationMode === 'fixed' ? 'fixed' : 'quarter'
