@@ -341,7 +341,7 @@ function hotQuoteVisual(quote: LimitBoardQuoteSnapshot['quotes'][string] | undef
   const changeText = changeTextForLimitGap(changeLimitGap, fallbackChangeText)
   const atLimit = actualLimitGap != null && price != null && limitUp != null && price >= limitUp - 0.001
   if (atLimit) return { state: 'limit', label: '已涨停', changeText }
-  if (actualLimitGap != null && actualLimitGap >= 0 && actualLimitGap <= 0.01) return { state: 'near_limit', label: '临板', changeText }
+  if (actualLimitGap != null && actualLimitGap >= 0 && actualLimitGap <= 0.01) return { state: 'near_limit', label: '', changeText }
   if (change != null && Number.isFinite(change) && change <= -0.05) return { state: 'sharp_drop', label: '', changeText: fallbackChangeText }
   if (price == null && change == null) return { state: 'unavailable', label: '行情待更新', changeText: 'text-muted' }
   return { state: 'normal', label: '', changeText }
@@ -1180,6 +1180,7 @@ function SectorStrengthTable({
   hotRows = [],
   hotQuotes = {},
   hotMinuteData = {},
+  hotBreakCounts = {},
   hotSectorLinks = {},
   hotLoading = false,
   hotError = false,
@@ -1203,6 +1204,7 @@ function SectorStrengthTable({
   hotRows?: LimitBoardApproachingLimitUpItem[]
   hotQuotes?: LimitBoardQuoteSnapshot['quotes']
   hotMinuteData?: Record<string, MinuteKlineRow[]>
+  hotBreakCounts?: Readonly<Record<string, number>>
   hotSectorLinks?: LimitBoardQuoteSnapshot['sector_links']
   hotLoading?: boolean
   hotError?: boolean
@@ -1490,17 +1492,22 @@ function SectorStrengthTable({
         {hotRows.length ? <div className="max-w-full overflow-y-auto overscroll-contain p-2 lg:max-h-[62vh]">
           <div className="flex w-full flex-col gap-2">
             {sortedHotRows.map((item, index) => {
-              const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
+              const symbol = item.thscode.toUpperCase()
+              const quote = hotQuotes[symbol] ?? {
                 symbol: item.thscode,
                 name: item.name,
                 last_price: item.last_price,
                 change_pct: item.change_pct,
               }
-              const selected = item.thscode.toUpperCase() === selectedStockSymbol
+              const todayBreakCount = hotBreakCounts[symbol] ?? 0
+              const selected = symbol === selectedStockSymbol
               const visual = hotQuoteVisual(quote)
-              const actionRow = manualActionRow(item.thscode.toUpperCase(), item.name || item.ticker, quote?.last_price, quote?.change_pct, quote?.limit_up)
+              const actionRow = manualActionRow(symbol, item.name || item.ticker, quote?.last_price, quote?.change_pct, quote?.limit_up)
               const inPool = poolSymbols.has(actionRow.symbol)
               const inBuyPool = buyPoolSymbols.has(actionRow.symbol)
+              const cardStateClass = todayBreakCount > 0
+                ? 'border-danger bg-danger/15 ring-2 ring-danger/80 shadow-[0_0_16px_rgba(239,68,68,0.28)]'
+                : selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''
               return <div
                 key={item.thscode}
                 role="button"
@@ -1513,16 +1520,16 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`relative h-[304px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''}`}
+                className={`relative h-[304px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
                   <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
-                <div className="mt-2 flex items-center gap-2 font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{item.yesterday_boards && item.yesterday_boards > 0 ? <span className="shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-warning">{item.yesterday_boards === 1 ? '昨日首板' : `昨日${item.yesterday_boards}板`}</span> : null}{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
+                <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-[9px]"><span className="min-w-0 truncate text-muted">{item.thscode}</span>{item.yesterday_boards && item.yesterday_boards > 0 ? <span className="shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-warning">{item.yesterday_boards === 1 ? '昨日首板' : `昨日${item.yesterday_boards}板`}</span> : null}{todayBreakCount > 0 ? <span className="inline-flex shrink-0 items-center gap-0.5 rounded border border-danger bg-danger/20 px-1 py-0.5 font-semibold text-danger shadow-[0_0_8px_rgba(239,68,68,0.35)]"><AlertTriangle className="h-3 w-3" />今日炸板 {todayBreakCount} 次</span> : null}{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
                 <div className="mt-1 flex items-center gap-2 truncate text-[9px]"><span className="shrink-0 font-mono text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}</span>{item.sector ? <span className="truncate text-warning">{item.sector}</span> : null}</div>
-                {hotIntradayAvailable && hotIntradayVisible ? <div className="pointer-events-none absolute inset-x-2.5 bottom-2.5 top-[150px] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[item.thscode.toUpperCase()] ?? []} changePct={quote?.change_pct} width={320} height={140} className="block h-full w-full" /></div> : null}
+                {hotIntradayAvailable && hotIntradayVisible ? <div className="pointer-events-none absolute inset-x-2.5 bottom-2.5 top-[150px] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[symbol] ?? []} changePct={quote?.change_pct} width={320} height={140} className="block h-full w-full" /></div> : null}
               </div>
             })}
           </div>
@@ -2020,6 +2027,18 @@ export function LimitBoard() {
   const buyPoolSymbols = useMemo(() => new Set((view.data?.buy_pool ?? []).map(row => row.symbol)), [view.data?.buy_pool])
   const busy = addPool.isPending || addBuyPool.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || removePoolBatch.isPending || removeBuyPoolBatch.isPending || updateAdvanced.isPending
   const data = view.data
+  const hotBreakCounts = useMemo(() => {
+    const counts: Record<string, number> = {}
+    for (const event of data?.events ?? []) {
+      if (event.type !== 'broken') continue
+      const symbol = String(event.symbol || '').trim().toUpperCase()
+      if (!symbol) continue
+      const recordedCount = Number(event.break_count)
+      const count = Number.isFinite(recordedCount) && recordedCount > 0 ? recordedCount : 1
+      counts[symbol] = Math.max(counts[symbol] ?? 0, count)
+    }
+    return counts
+  }, [data?.events])
   const sentimentHistory = useMemo(() => mergeSentimentHistory(
     data?.market_sentiment?.emotion_history,
     data?.market_sentiment?.emotion_strength == null || !data.market_sentiment.as_of
@@ -2145,7 +2164,7 @@ export function LimitBoard() {
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
