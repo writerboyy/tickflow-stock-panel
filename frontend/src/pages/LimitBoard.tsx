@@ -56,7 +56,6 @@ import {
   type LimitLadderStock,
   type MinuteKlineRow,
   type FuyaoAuctionStatus,
-  type PremiumGene,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { getBoardType } from '@/lib/board'
@@ -132,13 +131,6 @@ function scorePct(value: number | null | undefined, digits = 1): string {
 
 function ratioPct(value: number | null | undefined, digits = 0): string {
   return value == null || !Number.isFinite(value) ? '--' : `${(value * 100).toFixed(digits)}%`
-}
-
-function geneRateTone(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return 'text-secondary'
-  if (value >= 0.6) return 'text-bull'
-  if (value < 0.4) return 'text-bear'
-  return 'text-warning'
 }
 
 function scoreTime(value: string | null | undefined): string {
@@ -726,28 +718,6 @@ function LimitBoardAllocationDialog({
     ?? null
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
-  const geneDetail = row.candidate_score_detail?.premium_gene
-  const localGeneReady = Boolean(
-    geneDetail
-    && geneDetail.limit_up_count != null
-    && geneDetail.next_day_red_rate != null
-    && geneDetail.first_board_broken_rate != null,
-  )
-  const premiumGeneQuery = useQuery({
-    queryKey: QK.stockPremiumGene(row.symbol, false),
-    queryFn: () => api.stockAnalysisPremiumGene(row.symbol, false),
-    // Limit-board rows already carry the latest computed gene snapshot. Avoid
-    // an extra live request when that detail is complete; it delayed the dialog
-    // without changing the displayed score.
-    enabled: kind === 'board' && Boolean(row.symbol) && !localGeneReady,
-    staleTime: 5 * 60_000,
-    gcTime: 15 * 60_000,
-    retry: false,
-  })
-  const geneData: PremiumGene | undefined = premiumGeneQuery.data?.available ? premiumGeneQuery.data : undefined
-  const geneScore = geneData?.score ?? geneDetail?.score
-  const geneMaxScore = geneData?.max_score ?? geneDetail?.max_score ?? 10
-  const genePassed = geneData?.passed ?? geneDetail?.passed
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
   // Fetch one authoritative account basis and derive the other lot/ratio modes
   // locally. Switching the selector should not issue another QMT RPC request.
@@ -843,6 +813,10 @@ function LimitBoardAllocationDialog({
     && (!requiresPreview || estimatedVolume >= 100),
   )
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
+  const comprehensive = row.candidate_score_detail?.comprehensive
+  const scoreUnavailableReason = row.candidate_score_state === 'unavailable'
+    ? '实时板块或分时数据暂未就绪，当前只显示交易配置。'
+    : '当前标的尚未进入自动评分候选，等待评分数据返回。'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
     { value: 'available', label: poolAllocationLabel('available') },
     { value: 'sixth', label: poolAllocationLabel('sixth') },
@@ -857,7 +831,7 @@ function LimitBoardAllocationDialog({
     labelledBy="limit-board-allocation-title"
     onClose={() => { if (!pending) onClose() }}
     closeOnBackdrop={!pending}
-    panelClassName="w-[92vw] max-w-md rounded-card border border-border bg-surface shadow-xl"
+    panelClassName="flex max-h-[92vh] w-[96vw] max-w-5xl flex-col rounded-card border border-border bg-surface shadow-xl"
   >
     <div className="flex items-start gap-3 border-b border-border px-4 py-4">
       <div className="grid h-8 w-8 shrink-0 place-items-center rounded-btn bg-warning/10 text-warning"><AlertTriangle className="h-4 w-4" /></div>
@@ -867,83 +841,92 @@ function LimitBoardAllocationDialog({
       </div>
       <button type="button" disabled={pending} onClick={onClose} className="ml-auto grid h-7 w-7 shrink-0 place-items-center rounded-btn text-muted hover:bg-elevated disabled:opacity-40" aria-label="关闭金额设置"><X className="h-4 w-4" /></button>
     </div>
-    <div className="space-y-3 px-4 py-4 text-xs">
-      <div className="grid grid-cols-2 gap-3">
-        <div><div className="text-[10px] text-muted">当前限价参考</div><div className="mt-1 font-mono text-foreground">{price == null ? '--' : price.toFixed(3)}</div></div>
-        <div><div className="text-[10px] text-muted">预计委托金额</div><div className="mt-1 font-mono text-foreground">{moneyValue(estimatedAmount)}</div></div>
-      </div>
-      {kind === 'board' && row.candidate_score_detail?.comprehensive ? (
-        <div className="border-y border-border py-3">
-          <ComprehensiveScore
-            score={row.candidate_score_detail.comprehensive.comprehensive_score}
-            maxScore={row.candidate_score_detail.comprehensive.max_score}
-            grade={row.candidate_score_detail.comprehensive.grade}
-            gradeLabel={row.candidate_score_detail.comprehensive.grade_label}
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs">
+      <div className={kind === 'board' ? 'grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]' : ''}>
+        {kind === 'board' ? <section className="min-w-0 rounded-btn border border-border bg-base p-3">
+          <div className="mb-3 flex items-center justify-between gap-2 border-b border-border pb-2">
+            <div>
+              <h3 className="text-xs font-semibold text-secondary">综合评分 v5</h3>
+              <p className="mt-0.5 text-[10px] text-muted">100 分制 · 历史基因、板块情绪、拉升健康度</p>
+            </div>
+            <span className="font-mono text-[10px] text-muted">打板决策参考</span>
+          </div>
+          {comprehensive ? <ComprehensiveScore
+            score={comprehensive.comprehensive_score}
+            maxScore={comprehensive.max_score}
+            grade={comprehensive.grade}
+            gradeLabel={comprehensive.grade_label}
             dimensions={{
               history: {
-                ...row.candidate_score_detail.comprehensive.dimensions.history,
-                maxScore: row.candidate_score_detail.comprehensive.dimensions.history.max_score,
+                ...comprehensive.dimensions.history,
+                maxScore: comprehensive.dimensions.history.max_score,
               },
               sentiment: {
-                ...row.candidate_score_detail.comprehensive.dimensions.sentiment,
-                maxScore: row.candidate_score_detail.comprehensive.dimensions.sentiment.max_score,
+                ...comprehensive.dimensions.sentiment,
+                maxScore: comprehensive.dimensions.sentiment.max_score,
               },
               health: {
-                ...row.candidate_score_detail.comprehensive.dimensions.health,
-                maxScore: row.candidate_score_detail.comprehensive.dimensions.health.max_score,
+                ...comprehensive.dimensions.health,
+                maxScore: comprehensive.dimensions.health.max_score,
               },
             }}
-            warnings={row.candidate_score_detail.comprehensive.warnings}
-            strengths={row.candidate_score_detail.comprehensive.strengths}
+            warnings={comprehensive.warnings}
+            strengths={comprehensive.strengths}
+          /> : <div className="space-y-3 py-3">
+            <div className="rounded-btn border border-warning/30 bg-warning/5 px-3 py-3">
+              <div className="text-sm font-semibold text-warning">综合评分暂不可用</div>
+              <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {['历史涨停基因', '板块情绪周期', '拉升健康度'].map(label => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
+                <div className="text-[10px] text-muted">{label}</div>
+                <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
+              </div>)}
+            </div>
+          </div>}
+        </section> : null}
+        <section className="min-w-0">
+          <div className="mb-3 grid grid-cols-2 gap-3 border-b border-border pb-3">
+            <div><div className="text-[10px] text-muted">当前限价参考</div><div className="mt-1 font-mono text-foreground">{price == null ? '--' : price.toFixed(3)}</div></div>
+            <div><div className="text-[10px] text-muted">预计委托金额</div><div className="mt-1 font-mono text-foreground">{moneyValue(estimatedAmount)}</div></div>
+          </div>
+          <QmtTradeAllocationControls
+            action="BUY"
+            mode={mode as QmtTradeAllocationMode}
+            value={value}
+            onModeChange={next => setMode(next as PoolAllocationMode)}
+            onValueChange={setValue}
+            disabled={pending}
+            options={allocationOptions}
+            disabledModes={{ available: !qmtReady }}
+            basisLabel={previewOrder?.basis_label ?? cachedBasisLabel}
+            basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
+            accountType={qmt.data?.account_type}
+            cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
+            financingBuyingPowerAmount={previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower}
+            financingBuyingPowerLabel={
+              previewOrder?.credit_opvolume?.status === 'ready'
+                ? '该股票最大可买'
+                : undefined
+            }
+            previewState={allocationPreviewState}
+            previewMessage={allocationPreviewMessage}
           />
-        </div>
-      ) : kind === 'board' ? <div className="border-y border-border py-3 text-[10px]">
-        <div className="mb-2 font-medium text-secondary">涨停基因</div>
-        {geneData || geneDetail ? <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-          {geneScore != null ? <span className="col-span-2">综合评分 <b className="font-mono text-foreground">{geneScore.toFixed(1)} / {geneMaxScore.toFixed(1)}</b>{genePassed != null ? <em className={genePassed ? 'ml-1 not-italic text-bull' : 'ml-1 not-italic text-warning'}>{genePassed ? '达标' : '未达标'}</em> : null}</span> : null}
-          <span>近{geneData?.window_days ?? geneDetail?.window_days ?? '--'}日涨停 <b className="font-mono text-foreground">{geneData?.limit_up_count ?? geneDetail?.limit_up_count ?? '--'} 次</b></span>
-          <span>溢价5% <b className="font-mono text-foreground">{geneData?.premium_5_count != null ? String(geneData.premium_5_count) + ' 次' : ratioPct(geneDetail?.premium_5_rate, 1)}</b></span>
-          <span>次日收红 <b className={`font-mono font-semibold ${geneRateTone(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate)}`}>{ratioPct(geneData?.next_day_red_rate ?? geneDetail?.next_day_red_rate, 1)}</b></span>
-          <span>首板封板 <b className={`font-mono font-semibold ${geneRateTone(geneData?.first_board_seal_rate ?? geneDetail?.first_board_seal_rate)}`}>{ratioPct(geneData?.first_board_seal_rate ?? geneDetail?.first_board_seal_rate, 1)}</b></span>
-          <span>首板破板 <b className="font-mono text-foreground">{ratioPct(geneData?.first_board_broken_rate ?? geneDetail?.first_board_broken_rate, 1)}</b></span>
-          <span>连板率 <b className="font-mono text-foreground">{ratioPct(geneData?.consecutive_rate ?? geneDetail?.consecutive_rate, 1)}</b></span>
-        </div> : premiumGeneQuery.isLoading ? <div className="text-muted">正在读取涨停基因…</div> : <div className="text-muted">暂无涨停基因数据</div>}
-      </div> : null}
-      <QmtTradeAllocationControls
-        action="BUY"
-        mode={mode as QmtTradeAllocationMode}
-        value={value}
-        onModeChange={next => setMode(next as PoolAllocationMode)}
-        onValueChange={setValue}
-        disabled={pending}
-        options={allocationOptions}
-        disabledModes={{ available: !qmtReady }}
-        basisLabel={previewOrder?.basis_label ?? cachedBasisLabel}
-        basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
-        accountType={qmt.data?.account_type}
-        cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
-        financingBuyingPowerAmount={previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower}
-        financingBuyingPowerLabel={
-          previewOrder?.credit_opvolume?.status === 'ready'
-            ? '该股票最大可买'
-            : undefined
-        }
-        previewState={allocationPreviewState}
-        previewMessage={allocationPreviewMessage}
-      />
-      {creditBuy ? <label className="block text-[10px] text-muted">信用账户买入方式
-        <select
-          value={creditBuyMode}
-          disabled={pending}
-          onChange={event => setCreditBuyMode(event.target.value as QmtCreditBuyMode)}
-          className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50"
-        >
-          <option value="collateral">担保品买入</option>
-          <option value="financing">融资买入</option>
-        </select>
-      </label> : null}
-      {previewOrder?.credit_buy_mode_switched ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际委托将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</div> : null}
-      {kind === 'buy' ? <div className="border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : null}
+          {creditBuy ? <label className="mt-3 block text-[10px] text-muted">信用账户买入方式
+            <select
+              value={creditBuyMode}
+              disabled={pending}
+              onChange={event => setCreditBuyMode(event.target.value as QmtCreditBuyMode)}
+              className="mt-1 h-8 w-full rounded border border-border bg-surface px-2 text-xs outline-none focus:border-accent disabled:opacity-50"
+            >
+              <option value="collateral">担保品买入</option>
+              <option value="financing">融资买入</option>
+            </select>
+          </label> : null}
+          {previewOrder?.credit_buy_mode_switched ? <div className="mt-3 border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际委托将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</div> : null}
+          {kind === 'buy' ? <div className="mt-3 border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : null}
+        </section>
+      </div>
     </div>
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
       <button type="button" disabled={pending} onClick={onClose} className="h-8 rounded-btn border border-border px-3 text-xs text-muted hover:bg-elevated disabled:opacity-40">取消</button>
@@ -2059,6 +2042,26 @@ export function LimitBoard() {
   const buyPoolSymbols = useMemo(() => new Set((view.data?.buy_pool ?? []).map(row => row.symbol)), [view.data?.buy_pool])
   const busy = addPool.isPending || addBuyPool.isPending || updatePool.isPending || removePool.isPending || removeBuyPool.isPending || removePoolBatch.isPending || removeBuyPoolBatch.isPending || updateAdvanced.isPending
   const data = view.data
+  const scoredRowsBySymbol = useMemo(() => {
+    const result = new Map<string, LimitBoardRow>()
+    for (const row of [...(data?.first_board ?? []), ...(data?.rebound_board ?? []), ...(data?.candidate_pool ?? [])]) {
+      const symbol = String(row.symbol || '').trim().toUpperCase()
+      if (symbol && row.candidate_score_detail?.comprehensive) result.set(symbol, row)
+    }
+    return result
+  }, [data?.candidate_pool, data?.first_board, data?.rebound_board])
+  const withCandidateScore = (row: LimitBoardRow): LimitBoardRow => {
+    const scored = scoredRowsBySymbol.get(String(row.symbol || '').trim().toUpperCase())
+    if (!scored) return row
+    return {
+      ...row,
+      candidate_score: scored.candidate_score,
+      candidate_rank: scored.candidate_rank,
+      candidate_score_state: scored.candidate_score_state,
+      candidate_score_as_of: scored.candidate_score_as_of,
+      candidate_score_detail: scored.candidate_score_detail,
+    }
+  }
   const hotBreakCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const event of data?.events ?? []) {
@@ -2176,7 +2179,7 @@ export function LimitBoard() {
         {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder
           headerContent={sentimentPanel}
           onAddToPool={(stock: LimitLadderStock) => setAllocationDialog({
-            row: manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null),
+            row: withCandidateScore(manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null)),
             kind: 'board',
             initialMode: 'lot',
             initialValue: null,
