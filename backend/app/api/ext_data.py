@@ -181,10 +181,19 @@ def _safe_json_value(value):
     return value
 
 
+def _read_parquet(path: Path, columns: list[str] | None = None) -> pl.DataFrame:
+    if not columns:
+        return pl.read_parquet(path)
+    available = set(pl.read_parquet_schema(path))
+    selected = [column for column in columns if column in available]
+    return pl.read_parquet(path, columns=selected or None)
+
+
 def _read_ext_dataframe(
     config: ExtConfig,
     data_dir: Path,
     snapshot_date: str | None = None,
+    columns: list[str] | None = None,
 ) -> tuple[pl.DataFrame, str | None]:
     cfg_dir = data_dir / "ext_data" / config.id
 
@@ -192,7 +201,7 @@ def _read_ext_dataframe(
         path = cfg_dir / "part.parquet"
         if not path.exists():
             return pl.DataFrame(), None
-        return pl.read_parquet(path), _latest_sync_date(config, data_dir)
+        return _read_parquet(path, columns), _latest_sync_date(config, data_dir)
 
     base = cfg_dir / "timeseries"
     if not base.exists():
@@ -201,7 +210,7 @@ def _read_ext_dataframe(
     if snapshot_date:
         path = base / f"date={snapshot_date}" / "part.parquet"
         if path.exists():
-            return pl.read_parquet(path), snapshot_date
+            return _read_parquet(path, columns), snapshot_date
         files = sorted(base.rglob("*.parquet"))
         if not files:
             return pl.DataFrame(), snapshot_date
@@ -441,7 +450,9 @@ def list_rows(
         raise HTTPException(404, f"配置 '{config_id}' 不存在")
 
     data_dir = _data_dir(request)
-    df, active_date = _read_ext_dataframe(config, data_dir, snapshot_date)
+    requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
+    read_columns = ["symbol", "code", "name", *requested] if requested else None
+    df, active_date = _read_ext_dataframe(config, data_dir, snapshot_date, read_columns)
     df = _with_instrument_name(df, data_dir)
     if checkpoint and "checkpoint" in df.columns:
         df = df.filter(pl.col("checkpoint").cast(pl.String) == checkpoint.strip())
@@ -449,7 +460,6 @@ def list_rows(
         requested_symbols = [value.strip().upper() for value in symbols.split(",") if value.strip()]
         if requested_symbols:
             df = df.filter(pl.col("symbol").cast(pl.String).str.to_uppercase().is_in(requested_symbols))
-    requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
     if requested:
         keep = [c for c in ["symbol", "code", "name", *requested] if c in df.columns]
         if keep:

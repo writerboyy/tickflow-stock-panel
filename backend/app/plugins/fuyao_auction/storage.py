@@ -222,7 +222,7 @@ def read_status(data_dir: Path, trade_date: date) -> dict:
     if not path.exists():
         return {"rows": 0, "symbols": 0, "checkpoints": [], "latest_collected_at": None}
     try:
-        frame = pl.read_parquet(path)
+        frame = pl.read_parquet(path, columns=["symbol", "checkpoint", "collected_at"])
     except Exception:
         return {"rows": 0, "symbols": 0, "checkpoints": [], "latest_collected_at": None}
     return {

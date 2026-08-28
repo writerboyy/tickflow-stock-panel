@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual'
 import * as echarts from 'echarts'
 import {
   AlertTriangle,
@@ -36,6 +37,7 @@ import { type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { useQuoteStatus } from '@/lib/useSharedQueries'
+import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import {
   api,
   type QmtCreditBuyMode,
@@ -510,6 +512,47 @@ function AuctionTable({
   ] as const
   const displayRows = comparison ? visibleComparisonRows : visibleRows
   const displayCount = comparison ? comparisonRows.length : rows.length
+  const tableContainerRef = useRef<HTMLDivElement>(null)
+  const virtualized = !comparison && visibleRows.length > VIRTUAL_LIST_THRESHOLD
+  const { getScrollElement, scrollMargin } = useParentScroll(tableContainerRef, virtualized)
+  const rowVirtualizer = useVirtualizer({
+    count: virtualized ? visibleRows.length : 0,
+    getScrollElement,
+    estimateSize: () => 42,
+    getItemKey: index => `${visibleRows[index]?.symbol || ''}-${visibleRows[index]?.checkpoint || ''}-${index}`,
+    overscan: 12,
+    scrollMargin,
+  })
+  const virtualRows = virtualized ? rowVirtualizer.getVirtualItems() : []
+  const totalSize = virtualized ? rowVirtualizer.getTotalSize() : 0
+  const firstVirtualRow = virtualRows[0]
+  const lastVirtualRow = virtualRows[virtualRows.length - 1]
+  const topPadding = firstVirtualRow ? firstVirtualRow.start - scrollMargin : 0
+  const bottomPadding = lastVirtualRow ? totalSize - (lastVirtualRow.end - scrollMargin) : totalSize
+
+  const renderStandardRow = (row: Record<string, any>, index: number, virtualRow?: VirtualItem) => (
+    <tr
+      key={`${row.symbol}-${row.checkpoint}-${index}`}
+      ref={virtualRow ? rowVirtualizer.measureElement : undefined}
+      data-index={virtualRow?.index}
+      className="border-b border-border/70 hover:bg-elevated/30"
+    >
+      <td className="px-3 py-2"><button type="button" onClick={() => onOpen(String(row.symbol || ''), row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.code || row.symbol || '--'}</div></button></td>
+      <td className="max-w-[180px] px-2 py-2 text-left text-secondary"><div className="truncate" title={conceptBySymbol.get(String(row.symbol || '').toUpperCase())}>{conceptBySymbol.get(String(row.symbol || '').toUpperCase()) || '--'}</div></td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
+      <td className="px-2 py-2 text-right font-mono text-foreground">{auctionPrice(row.auction_price)}</td>
+      <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.auction_volume)}</td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
+      <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
+      <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
+      <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="扶摇接口原始竞价量比">{auctionFiniteNumber(row.auction_volume_ratio)?.toFixed(2) ?? '--'}</td>
+      <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(auctionRushPct(row))}`} title="(开盘价 - 09:25 最后一次集合竞价匹配价) / 最后一次集合竞价匹配价 × 100">{auctionPercent(auctionRushPct(row))}</td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
+      <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
+    </tr>
+  )
 
   return (
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
@@ -536,7 +579,7 @@ function AuctionTable({
       {displayRows.length === 0 ? (
         <EmptyState icon={Flame} title={loading || comparisonLoading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
       ) : comparison ? (
-        <div className="overflow-x-auto">
+        <div ref={tableContainerRef} className="overflow-x-auto">
           <table className="w-full min-w-[980px] border-collapse text-[10px]">
             <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">股票</th>
@@ -593,22 +636,9 @@ function AuctionTable({
               <th className="px-3 py-2 text-right font-medium">开盘价</th>
             </tr></thead>
             <tbody>
-              {visibleRows.map((row, index) => <tr key={`${row.symbol}-${row.checkpoint}-${index}`} className="border-b border-border/70 hover:bg-elevated/30">
-                <td className="px-3 py-2"><button type="button" onClick={() => onOpen(String(row.symbol || ''), row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.code || row.symbol || '--'}</div></button></td>
-                <td className="max-w-[180px] px-2 py-2 text-left text-secondary"><div className="truncate" title={conceptBySymbol.get(String(row.symbol || '').toUpperCase())}>{conceptBySymbol.get(String(row.symbol || '').toUpperCase()) || '--'}</div></td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
-                <td className="px-2 py-2 text-right font-mono text-foreground">{auctionPrice(row.auction_price)}</td>
-                <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.auction_volume)}</td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.auction_amount)}</td>
-                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
-                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
-                <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="扶摇接口原始竞价量比">{auctionFiniteNumber(row.auction_volume_ratio)?.toFixed(2) ?? '--'}</td>
-                <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(auctionRushPct(row))}`} title="(开盘价 - 09:25 最后一次集合竞价匹配价) / 最后一次集合竞价匹配价 × 100">{auctionPercent(auctionRushPct(row))}</td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
-                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
-                <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
-              </tr>)}
+              {virtualized && topPadding > 0 ? <tr aria-hidden="true"><td colSpan={15} className="p-0 border-0" style={{ height: topPadding }} /></tr> : null}
+              {virtualized ? virtualRows.map(virtualRow => renderStandardRow(visibleRows[virtualRow.index], virtualRow.index, virtualRow)) : visibleRows.map((row, index) => renderStandardRow(row, index))}
+              {virtualized && bottomPadding > 0 ? <tr aria-hidden="true"><td colSpan={15} className="p-0 border-0" style={{ height: bottomPadding }} /></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1823,16 +1853,31 @@ export function LimitBoard() {
     refetchInterval: 15_000,
     placeholderData: previous => previous,
   })
-  const fuyaoExtData = useQuery({
-    queryKey: QK.extData,
-    queryFn: api.extDataList,
-    enabled: tab === 'auction',
-    staleTime: 60_000,
+  const auctionDate = selectedAuctionDate ?? fuyaoAuctionStatus.data?.trade_date ?? ''
+  const auctionMaxDate = fuyaoAuctionStatus.data?.trade_date
+  const fuyaoAuctionRows = useQuery({
+    queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 5_000, AUCTION_COLUMNS.join(','), auctionComparison ? '0925' : auctionCheckpoint),
+    queryFn: () => api.extDataRows('ext_fuyao_auction', {
+      date: auctionDate,
+      limit: 5_000,
+      checkpoint: auctionComparison ? '0925' : auctionCheckpoint,
+      columns: AUCTION_COLUMNS,
+    }),
+    enabled: tab === 'auction' && Boolean(auctionDate),
+    staleTime: 15_000,
+    refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
   })
+  const auctionConceptSymbols = useMemo(
+    () => (fuyaoAuctionRows.data?.rows ?? [])
+      .map(row => String(row.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 500),
+    [fuyaoAuctionRows.data?.rows],
+  )
   const conceptExtData = useQuery({
-    queryKey: QK.extDataRows('ext_gn_ths', undefined, 20_000),
-    queryFn: () => api.extDataRows('ext_gn_ths', { limit: 20_000 }),
-    enabled: tab === 'auction',
+    queryKey: QK.extDataRows('ext_gn_ths', undefined, 500, '所属概念', undefined, auctionConceptSymbols.join(',')),
+    queryFn: () => api.extDataRows('ext_gn_ths', { limit: 500, columns: ['所属概念'], symbols: auctionConceptSymbols }),
+    enabled: tab === 'auction' && auctionConceptSymbols.length > 0,
     staleTime: 60_000,
   })
   const auctionConceptBySymbol = useMemo(() => {
@@ -1846,22 +1891,6 @@ export function LimitBoard() {
     }
     return result
   }, [conceptExtData.data?.rows])
-  const fuyaoAuctionConfig = fuyaoExtData.data?.items.find(item => item.id === 'ext_fuyao_auction')
-  const auctionDate = selectedAuctionDate ?? fuyaoAuctionStatus.data?.trade_date ?? ''
-  const auctionDateRange = fuyaoAuctionConfig?.date_range
-  const auctionMaxDate = fuyaoAuctionStatus.data?.trade_date ?? auctionDateRange?.[1]
-  const fuyaoAuctionRows = useQuery({
-    queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 5_000, AUCTION_COLUMNS.join(','), auctionComparison ? '0925' : auctionCheckpoint),
-    queryFn: () => api.extDataRows('ext_fuyao_auction', {
-      date: auctionDate,
-      limit: 5_000,
-      checkpoint: auctionComparison ? '0925' : auctionCheckpoint,
-      columns: AUCTION_COLUMNS,
-    }),
-    enabled: tab === 'auction' && Boolean(auctionDate),
-    staleTime: 15_000,
-    refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
-  })
   const comparisonSymbols = useMemo(() => {
     if (!auctionComparison) return []
     return (fuyaoAuctionRows.data?.rows ?? [])
@@ -2062,7 +2091,6 @@ export function LimitBoard() {
           status={fuyaoAuctionStatus.data}
           conceptBySymbol={auctionConceptBySymbol}
           date={auctionDate}
-          minDate={auctionDateRange?.[0]}
           maxDate={auctionMaxDate}
           onDateChange={setSelectedAuctionDate}
           checkpoint={auctionCheckpoint}

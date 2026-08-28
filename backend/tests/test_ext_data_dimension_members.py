@@ -61,7 +61,12 @@ def test_ext_rows_can_filter_auction_checkpoint_and_symbols(tmp_path) -> None:
 
     response = TestClient(app).get(
         "/api/ext-data/ext_fuyao_auction/rows",
-        params={"date": "2026-08-28", "checkpoint": "0925", "symbols": "000001.SZ"},
+        params={
+            "date": "2026-08-28",
+            "checkpoint": "0925",
+            "symbols": "000001.SZ",
+            "columns": "checkpoint,auction_pct",
+        },
     )
 
     assert response.status_code == 200
