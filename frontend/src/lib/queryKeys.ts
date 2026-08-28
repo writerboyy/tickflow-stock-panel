@@ -35,6 +35,7 @@ export const QK = {
   ),
   limitBoard: ['limit-board'] as const,
   limitBoardApproachingLimitUp: ['limit-board', 'approaching-limit-up'] as const,
+  limitBoardFourModeFirstBoard: ['limit-board', 'four-mode-first-board'] as const,
   limitBoardQuotes: (symbols: string) => ['limit-board', 'quotes', symbols] as const,
   limitBoardSectorStrength: (capturedAt: string) => ['limit-board', 'sector-strength', capturedAt] as const,
   limitBoardSectorConstituents: (plateId: string, capturedAt: string) => ['limit-board', 'sector-constituents', plateId, capturedAt] as const,

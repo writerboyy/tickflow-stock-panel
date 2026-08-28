@@ -10,6 +10,7 @@ from app.api.limit_board import router
 from app.market_time import CN_TZ
 from app.services.limit_board_service import (
     LimitBoardService,
+    _score_four_mode_first_board,
     _qualified_premium_stats,
     _sweep_ready,
 )
@@ -311,6 +312,28 @@ def premium_snapshot(*symbols: str) -> pl.DataFrame:
         "next_day_red_rate": [0.80] * len(symbols),
         "first_board_broken_rate": [0.75] * len(symbols),
     })
+
+
+def test_four_mode_intraday_rise_uses_quote_change_from_previous_close():
+    feature = {
+        "fresh": True,
+        "session_bars": [
+            {"open": 10.5, "high": 10.7, "low": 10.4, "close": close, "volume": volume}
+            for close, volume in [(10.55, 100), (10.6, 140), (10.62, 180), (10.65, 200), (10.7, 300)]
+        ],
+        "session_vwap": 10.2,
+        "last_price": 10.7,
+        "as_of": "2026-08-27T10:00:00+08:00",
+    }
+    scored, reason = _score_four_mode_first_board(
+        {"symbol": "600000.SH", "score": 80},
+        feature,
+        {"last_price": 10.7, "change_pct": 0.07},
+    )
+
+    assert reason is None
+    assert scored is not None
+    assert scored["current_rise_pct"] == 7.0
 
 
 def quote(price=11.0, limit=11.0):
@@ -3702,6 +3725,171 @@ def test_limit_board_api_exposes_selected_sector_strength_snapshot(tmp_path):
     assert response.status_code == 200
     assert response.json()["refreshed_at"] == captured_at
     assert response.json()["rows"][0]["strength"] == 16807
+
+
+def test_limit_board_api_exposes_four_mode_first_board_snapshot(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 27, 10, 0, tzinfo=CN_TZ),
+    )
+
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def snapshot(_day):
+            return {
+                "as_of": "2026-08-26",
+                "static_modes": {
+                    "sb": {
+                        "state": "ready",
+                        "candidates": [
+                            {"symbol": "600000.SH", "score": 88.5, "chg_pct": 4.2, "vol_ratio": 2.1},
+                        ],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("app.services.limit_board_service.FourModeSnapshotCache", FakeCache)
+    monkeypatch.setattr(
+        service,
+        "_candidate_intraday_features",
+        lambda _symbols, _now: {
+            "600000.SH": {
+                "fresh": True,
+                "session_bars": [
+                    {"open": 10.0, "high": 10.2, "low": 9.9, "close": close, "volume": volume}
+                    for close, volume in [(10.1, 100), (10.2, 140), (10.3, 180), (10.5, 200), (10.7, 300)]
+                ],
+                "session_vwap": 10.2,
+                "last_price": 10.7,
+                "as_of": "2026-08-27T10:00:00+08:00",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        service,
+        "_fresh_tickflow_quotes",
+        lambda _symbols: {"quotes": {"600000.SH": {"symbol": "600000.SH", "last_price": 10.7, "change_pct": 0.07}}},
+    )
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/limit-board/four-mode-first-board")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"] == "ready"
+    assert payload["as_of"] == "2026-08-26"
+    assert payload["rows"] == [{
+        "thscode": "600000.SH",
+        "ticker": "600000",
+        "name": "浦发银行",
+        "rank": 1,
+        "score": 90.0,
+        "static_score": 88.5,
+        "change_pct": 0.07,
+        "current_rise_pct": 7.0,
+        "last_price": 10.7,
+        "yesterday_change_pct": 4.2,
+        "volume_ratio": 1.7307692307692306,
+        "vwap": 10.2,
+        "upper_half": True,
+        "attack_count": 4,
+        "vwap_volume_met": True,
+        "branch": "standard",
+        "buy_eligible": True,
+        "tags": ["四合一首板", "标准确认"],
+    }]
+
+
+def test_four_mode_first_board_snapshot_reports_waiting_data(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def snapshot(_day):
+            return {"state": "waiting_data", "data_gaps": ["缺少股票日线"]}
+
+    monkeypatch.setattr("app.services.limit_board_service.FourModeSnapshotCache", FakeCache)
+
+    payload = service.four_mode_first_board_view()
+
+    assert payload["state"] == "waiting_data"
+    assert payload["rows"] == []
+    assert payload["data_gaps"] == ["缺少股票日线"]
+
+
+def test_four_mode_first_board_snapshot_waits_after_market_close(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 27, 15, 1, tzinfo=CN_TZ),
+    )
+
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def snapshot(_day):
+            return {
+                "as_of": "2026-08-27",
+                "static_modes": {"sb": {"state": "ready", "candidates": [{"symbol": "600000.SH", "score": 80}] }},
+            }
+
+    monkeypatch.setattr("app.services.limit_board_service.FourModeSnapshotCache", FakeCache)
+
+    payload = service.four_mode_first_board_view()
+
+    assert payload["state"] == "waiting_data"
+    assert len(payload["rows"]) == 1
+    assert payload["rows"][0]["score"] is None
+    assert payload["rows"][0]["static_score"] == 80
+    assert payload["rows"][0]["buy_eligible"] is False
+    assert payload["evaluated_count"] == 1
+    assert "下一交易日盘中" in payload["data_gaps"][0]
+
+
+def test_four_mode_first_board_snapshot_waits_before_continuous_trading(tmp_path, monkeypatch):
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        "app.services.limit_board_service.cn_now",
+        lambda: datetime(2026, 8, 28, 9, 15, tzinfo=CN_TZ),
+    )
+
+    class FakeCache:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def snapshot(_day):
+            return {
+                "as_of": "2026-08-27",
+                "static_modes": {
+                    "sb": {
+                        "state": "ready",
+                        "candidates": [{"symbol": "600000.SH", "score": 80}],
+                    },
+                },
+            }
+
+    monkeypatch.setattr("app.services.limit_board_service.FourModeSnapshotCache", FakeCache)
+
+    payload = service.four_mode_first_board_view()
+
+    assert payload["state"] == "waiting_data"
+    assert len(payload["rows"]) == 1
+    assert payload["rows"][0]["branch"] == "pending"
+    assert payload["rows"][0]["buy_eligible"] is False
+    assert "非连续竞价时段" in payload["data_gaps"][0]
 
 
 def test_limit_board_api_exposes_sector_constituents_at_selected_time(tmp_path):

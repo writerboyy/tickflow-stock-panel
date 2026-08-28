@@ -47,6 +47,34 @@ def test_trend_static_evaluation_does_not_consume_auction(monkeypatch):
     assert snapshot.confirm_trend_candidate(candidate, 2.0)["combo_type"] == "combo_6"
 
 
+def test_sb_static_score_does_not_require_ten_limit_free_days(monkeypatch):
+    rows = []
+    for index in range(60):
+        close = 10.0 + index * 0.01
+        volume = 100.0
+        if index >= 55:
+            volume = [180.0, 250.0, 330.0, 420.0, 700.0][index - 55]
+        rows.append({
+            "symbol": "600000.SH",
+            "open": close - 0.05,
+            "high": close + 0.08,
+            "low": close - 0.08,
+            "close": close,
+            "volume": volume,
+            "amount": 200_000_000.0,
+        })
+    rows[-1].update({"open": 10.95, "high": 11.3, "low": 10.7, "close": 11.0})
+    monkeypatch.setattr(snapshot, "_is_limit", lambda *_args: True)
+
+    candidate, reason = snapshot.sb_static_score(
+        rows,
+        {"market_cap": 100e8, "float_market_cap": 100e8, "pe_ttm": 20},
+    )
+
+    assert reason is None
+    assert candidate["symbol"] == "600000.SH"
+
+
 def test_snapshot_day_normalization_handles_datetime_index():
     class Repo:
         def get_daily_asset(self, *_args, **_kwargs):
