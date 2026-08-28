@@ -1065,6 +1065,7 @@ function SectorStrengthTable({
   firstBoardSnapshot,
   firstBoardLoading = false,
   firstBoardError = false,
+  onRequestFirstBoard,
   hotQuotes = {},
   hotSectorLinks = {},
   hotLoading = false,
@@ -1083,6 +1084,7 @@ function SectorStrengthTable({
   firstBoardSnapshot?: LimitBoardFourModeFirstBoardSnapshot
   firstBoardLoading?: boolean
   firstBoardError?: boolean
+  onRequestFirstBoard: () => void
   hotQuotes?: LimitBoardQuoteSnapshot['quotes']
   hotSectorLinks?: LimitBoardQuoteSnapshot['sector_links']
   hotLoading?: boolean
@@ -1355,7 +1357,7 @@ function SectorStrengthTable({
           <div className="flex min-w-0 items-center gap-2">
             <div className="inline-flex h-6 shrink-0 overflow-hidden rounded-btn border border-border bg-base" aria-label="选择股票信号列表">
               <button type="button" aria-pressed={hotPanelTab === 'approaching'} onClick={() => setHotPanelTab('approaching')} className={`inline-flex items-center gap-1 px-1.5 text-[10px] font-medium ${hotPanelTab === 'approaching' ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}><Flame className="h-3.5 w-3.5" />即将涨停</button>
-              <button type="button" aria-pressed={hotPanelTab === 'first_board'} onClick={() => setHotPanelTab('first_board')} className={`inline-flex items-center gap-1 border-l border-border px-1.5 text-[10px] font-medium ${hotPanelTab === 'first_board' ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}><CircleDot className="h-3.5 w-3.5" />首板</button>
+              <button type="button" aria-pressed={hotPanelTab === 'first_board'} onClick={() => { onRequestFirstBoard(); setHotPanelTab('first_board') }} className={`inline-flex items-center gap-1 border-l border-border px-1.5 text-[10px] font-medium ${hotPanelTab === 'first_board' ? 'bg-accent/15 text-accent' : 'text-muted hover:bg-elevated hover:text-foreground'}`}><CircleDot className="h-3.5 w-3.5" />首板</button>
             </div>
             <div className="min-w-0"><div className="truncate text-[8px] text-muted">{hotPanelTab === 'approaching' ? '行情5秒' : firstBoardSnapshot?.as_of ? `日线截至 ${firstBoardSnapshot.as_of} 收盘 · 盘中评分` : '四合一静态筛选'}</div></div>
           </div>
@@ -1735,6 +1737,7 @@ export function LimitBoard() {
   const { data: quoteStatus } = useQuoteStatus({ poll: true })
   const isTradingHours = quoteStatus?.is_trading_hours ?? false
   const [tab, setTab] = useState<Tab>('sector')
+  const [firstBoardRequested, setFirstBoardRequested] = useState(false)
   const [preview, setPreview] = useState<{ symbol: string; name?: string } | null>(null)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
@@ -1775,8 +1778,8 @@ export function LimitBoard() {
   const fourModeFirstBoard = useQuery({
     queryKey: [...QK.limitBoardFourModeFirstBoard, isTradingHours] as const,
     queryFn: () => api.limitBoardFourModeFirstBoard(true),
-    enabled: tab === 'sector',
-    refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
+    enabled: tab === 'sector' && firstBoardRequested,
+    refetchInterval: tab === 'sector' && firstBoardRequested && isTradingHours ? unifiedRefreshIntervalMs : false,
     staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
     placeholderData: previous => previous,
   })
@@ -1999,7 +2002,7 @@ export function LimitBoard() {
           onDateChange={setSelectedAuctionDate}
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} firstBoardSnapshot={fourModeFirstBoard.data} firstBoardLoading={fourModeFirstBoard.isPending} firstBoardError={fourModeFirstBoard.isError} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} firstBoardSnapshot={fourModeFirstBoard.data} firstBoardLoading={fourModeFirstBoard.isPending} firstBoardError={fourModeFirstBoard.isError} onRequestFirstBoard={() => setFirstBoardRequested(true)} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
