@@ -596,6 +596,79 @@ def test_qmt_zmq_client_times_out_without_server():
         client.call("ping")
 
 
+def test_qmt_zmq_client_reads_credit_opvolume_from_async_bridge():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    calls = []
+
+    def fake_call(method, params):
+        calls.append((method, params))
+        if method == "query_credit_opvolume":
+            return {"status": "pending", "seq": 1001}
+        if method == "get_credit_opvolume":
+            return {
+                "status": "ready",
+                "stock_code": "600000.SH",
+                "max_volume": 2_800,
+                "max_amount": 28_000,
+            }
+        raise AssertionError(method)
+
+    client.call = fake_call
+    result = client.get_credit_opvolume("600000.SH", 10.0, "financing", timeout_seconds=0.5)
+
+    assert result["status"] == "ready"
+    assert result["max_volume"] == 2_800
+    assert calls[0] == (
+        "query_credit_opvolume",
+        {
+            "account_id": "account-1",
+            "stock_code": "600000.SH",
+            "op_type": 27,
+            "price_type": 11,
+            "price": 10.0,
+        },
+    )
+    assert calls[1][0] == "get_credit_opvolume"
+
+
+def test_credit_order_preview_uses_symbol_max_when_account_fields_are_unavailable(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._last_account = {
+        "cash": 152_684.08,
+        "fin_enable_quota": 500_000,
+    }
+    service._last_account_monotonic = time.monotonic()
+
+    seen = []
+
+    def fake_opvolume(symbol, price, mode):
+        seen.append((symbol, price, mode))
+        if mode == "financing":
+            return {
+                "status": "ready",
+                "stock_code": symbol,
+                "max_volume": 28_000,
+                "max_amount": 280_000,
+            }
+        return {"status": "unavailable", "stock_code": symbol, "max_volume": None}
+
+    service.client.get_credit_opvolume = fake_opvolume
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600000.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["basis_label"] == "该股票最大可买金额"
+    assert preview["buying_power_amount"] == 280_000
+    assert preview["volume"] == 28_000
+    assert preview["credit_opvolume"]["status"] == "ready"
+    assert seen == [("600000.SH", 10.0, "financing"), ("600000.SH", 10.0, "collateral")]
+
+
 def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings())
     with pytest.raises(QmtRpcError, match="交易开关"):

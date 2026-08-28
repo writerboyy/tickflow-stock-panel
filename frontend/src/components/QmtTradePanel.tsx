@@ -346,8 +346,13 @@ export function QmtTradePanel({
             basisAmount={serverPreview?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
             cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
-            financingBuyingPowerAmount={cachedFinancingBuyingPower}
+            financingBuyingPowerAmount={serverPreview?.buying_power_amount ?? cachedFinancingBuyingPower}
             financingAvailableAmount={serverPreview?.financing_available_amount ?? cachedFinancingAvailable}
+            financingBuyingPowerLabel={
+              serverPreview?.credit_opvolume?.status === 'ready'
+                ? '该股票最大可买 / 授信余额'
+                : undefined
+            }
             previewState={allocationPreviewState}
             previewMessage={allocationPreviewMessage}
             disabledModes={{ available: !qmtReady }}

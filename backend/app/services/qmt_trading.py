@@ -142,7 +142,7 @@ def _credit_buying_power(
         return (
             financing_buying_power
             if financing_buying_power is not None
-            else financing_available if financing_available is not None else 0.0,
+            else financing_available,
             "可买融资标的资金",
             financing_available,
         )
@@ -292,6 +292,7 @@ class QmtZmqRpcClient:
         self._dealer = None
         self._lock = threading.Lock()
         self._retired = False
+        self._credit_opvolume_cache: dict[tuple[str, float, str], dict[str, Any]] = {}
 
     @staticmethod
     def _normalise_connection_mode(value: Any) -> str:
@@ -459,6 +460,68 @@ class QmtZmqRpcClient:
             if value is not None:
                 merged[targets[0]] = value
         return merged
+
+    def get_credit_opvolume(
+        self,
+        stock_code: str,
+        price: float,
+        credit_buy_mode: str = "financing",
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Return QMT's broker-calculated max volume for one credit buy.
+
+        ``query_credit_opvolume`` is asynchronous in Big QMT. The bridge starts
+        the query once, then this client polls its short-lived cache; it never
+        treats the account's credit quota or ``DBL_MAX`` sentinel as buying
+        power.
+        """
+        symbol = str(stock_code or "").strip().upper()
+        if not symbol or price <= 0:
+            return {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
+        mode = str(credit_buy_mode or "financing").strip().lower()
+        op_type = 27 if mode == "financing" else 33
+        key = (symbol, round(float(price), 6), mode)
+        with self._lock:
+            cached = self._credit_opvolume_cache.get(key)
+        if cached is not None and cached.get("status") in {"ready", "error"}:
+            return dict(cached)
+
+        query = self.call(
+            "query_credit_opvolume",
+            {
+                "account_id": self.account_id,
+                "stock_code": symbol,
+                "op_type": op_type,
+                "price_type": 11,
+                "price": float(price),
+            },
+        )
+        if not isinstance(query, dict):
+            return {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
+        if isinstance(query, dict) and query.get("status") == "error":
+            return query
+        if query.get("status") == "unavailable":
+            return query
+        deadline = time.monotonic() + max(0.5, float(timeout_seconds or min(self.timeout, 4.0)))
+        latest = {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
+        while time.monotonic() < deadline:
+            latest = self.call(
+                "get_credit_opvolume",
+                {
+                    "account_id": self.account_id,
+                    "stock_code": symbol,
+                    "op_type": op_type,
+                    "price_type": 11,
+                    "price": float(price),
+                },
+            )
+            if isinstance(latest, dict) and latest.get("status") in {"ready", "error", "unavailable"}:
+                if latest.get("status") == "ready":
+                    with self._lock:
+                        self._credit_opvolume_cache[key] = dict(latest)
+                return latest
+            time.sleep(0.2)
+        return latest if isinstance(latest, dict) else {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
 
     def snapshot(self) -> dict[str, Any]:
         """同一轮读取账户、持仓、委托和成交；任一步失败则整轮失败。"""
@@ -997,6 +1060,34 @@ class QmtTradingService:
             return amount, label or "信用账户可买额度", financing_available
         return _float(account.get("cash")), "可用资金", None
 
+    def _credit_symbol_buying_power(
+        self,
+        symbol: str,
+        price: float,
+        credit_buy_mode: str,
+        account: dict[str, Any],
+    ) -> tuple[float | None, str, float | None, dict[str, Any] | None]:
+        """Prefer QMT's per-symbol limit when account-level fields are absent."""
+        amount, label, financing_available = self._buying_power(account, credit_buy_mode)
+        if self.account_type != "CREDIT" or amount not in (None, 0.0):
+            return amount, label, financing_available, None
+        getter = getattr(self.client, "get_credit_opvolume", None)
+        if not callable(getter):
+            return amount, label, financing_available, None
+        try:
+            detail = getter(symbol, price, credit_buy_mode)
+        except Exception:  # noqa: BLE001 - an unavailable bridge can use the fallback mode
+            detail = {"status": "unavailable", "stock_code": symbol, "max_volume": None}
+        if not isinstance(detail, dict) or detail.get("status") != "ready":
+            return amount, label, financing_available, detail if isinstance(detail, dict) else None
+        max_volume = int(detail.get("max_volume") or 0)
+        return (
+            round(max_volume * price, 2),
+            "该股票最大可买金额",
+            financing_available,
+            detail,
+        )
+
     def _validate_order(self, request: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.trade_enabled:
             raise QmtRpcError("真实交易开关未开启")
@@ -1027,10 +1118,14 @@ class QmtTradingService:
                 raise ValueError("QMT 可用持仓不足，已拒绝卖出")
         elif price_type == "LIMIT":
             account = snapshot.get("account") or {}
-            buying_power, _label, _financing_available = self._buying_power(account, credit_buy_mode)
+            buying_power, _label, _financing_available, detail = self._credit_symbol_buying_power(
+                symbol, price, credit_buy_mode, account,
+            )
             if self.account_type == "CREDIT":
                 fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
-                fallback_power, _fallback_label, _ = self._buying_power(account, fallback_mode)
+                fallback_power, _fallback_label, _, _fallback_detail = self._credit_symbol_buying_power(
+                    symbol, price, fallback_mode, account,
+                )
                 if (
                     (buying_power is None or buying_power < price * volume)
                     and
@@ -1043,7 +1138,8 @@ class QmtTradingService:
                     switched_credit_buy_mode = True
             if buying_power is None:
                 if self.account_type == "CREDIT":
-                    raise QmtRpcError("QMT 未返回信用账户可买额度，已拒绝买入")
+                    status = str((detail or {}).get("status") or "unavailable")
+                    raise QmtRpcError("QMT 未返回信用账户可买额度（该股票最大可买量：%s），已拒绝买入" % status)
             elif buying_power < price * volume:
                 raise ValueError("QMT 可用资金不足，已拒绝买入")
         return {
@@ -1079,15 +1175,27 @@ class QmtTradingService:
             raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
 
         financing_available = None
+        credit_opvolume = None
         requested_credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
         credit_buy_mode = requested_credit_buy_mode
         if action == "BUY":
             account = snapshot.get("account") or {}
-            basis_amount, basis_label, financing_available = self._buying_power(account, credit_buy_mode)
+            basis_amount, basis_label, financing_available, credit_opvolume = self._credit_symbol_buying_power(
+                symbol, price, credit_buy_mode, account,
+            )
             if basis_amount is None or basis_amount < 0:
-                if self.account_type == "CREDIT":
-                    raise QmtRpcError("QMT 未返回信用账户可买额度，无法计算委托金额")
-                raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
+                # A financing request may still fall back to collateral buying
+                # when the broker has no account-level financing field. Keep a
+                # zero primary candidate until that fallback is evaluated.
+                if self.account_type == "CREDIT" and credit_buy_mode == "financing":
+                    primary_basis_amount = 0.0
+                elif self.account_type == "CREDIT":
+                    status = str((credit_opvolume or {}).get("status") or "unavailable")
+                    raise QmtRpcError("QMT 未返回信用账户可买额度（该股票最大可买量：%s），无法计算委托金额" % status)
+                else:
+                    raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
+            else:
+                primary_basis_amount = basis_amount
             available_volume = None
         else:
             row = next(
@@ -1098,6 +1206,7 @@ class QmtTradingService:
             if row is None or available_volume <= 0:
                 raise ValueError("QMT 可用持仓不足，无法计算卖出金额")
             basis_amount = available_volume * price
+            primary_basis_amount = basis_amount
             basis_label = "可用持仓市值"
 
         fixed_amount = _float(request.get("allocation_value")) if mode == "fixed" else None
@@ -1128,22 +1237,34 @@ class QmtTradingService:
                 "reason": "金额不足一手" if candidate_volume < 100 else None,
             }
 
-        candidate = build_candidate(credit_buy_mode, basis_amount, basis_label)
+        candidate = build_candidate(credit_buy_mode, primary_basis_amount, basis_label)
         switched_credit_buy_mode = False
         if action == "BUY" and self.account_type == "CREDIT":
             fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
-            fallback_basis, fallback_label, _ = self._buying_power(account, fallback_mode)
+            fallback_basis, fallback_label, _, fallback_opvolume = self._credit_symbol_buying_power(
+                symbol, price, fallback_mode, account,
+            )
             if fallback_basis is not None and fallback_basis >= 0:
                 fallback_candidate = build_candidate(fallback_mode, fallback_basis, fallback_label)
                 primary_insufficient = (
-                    basis_amount <= 0
+                    primary_basis_amount <= 0
                     or candidate["capped"]
                     or candidate["volume"] < 100
                 )
                 if primary_insufficient and fallback_candidate["actual_amount"] > candidate["actual_amount"] and fallback_candidate["volume"] >= 100:
                     candidate = fallback_candidate
                     credit_buy_mode = fallback_mode
+                    credit_opvolume = fallback_opvolume
                     switched_credit_buy_mode = True
+
+        if (
+            action == "BUY"
+            and self.account_type == "CREDIT"
+            and (basis_amount is None or basis_amount < 0)
+            and not switched_credit_buy_mode
+        ):
+            status = str((credit_opvolume or {}).get("status") or "unavailable")
+            raise QmtRpcError("QMT 未返回信用账户可买额度（该股票最大可买量：%s），无法计算委托金额" % status)
 
         requested_amount = candidate["allocation_value"] if mode == "fixed" else candidate["target_amount"]
         return {
@@ -1161,6 +1282,7 @@ class QmtTradingService:
             "basis_amount": candidate["basis_amount"],
             "cash_amount": _float((snapshot.get("account") or {}).get("cash")),
             "financing_available_amount": financing_available,
+            "credit_opvolume": credit_opvolume,
             "buying_power_amount": candidate["basis_amount"],
             "target_amount": candidate["target_amount"],
             "actual_amount": candidate["actual_amount"],

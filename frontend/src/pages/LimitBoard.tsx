@@ -898,8 +898,13 @@ function LimitBoardAllocationDialog({
         basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
         accountType={qmt.data?.account_type}
         cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
-        financingBuyingPowerAmount={cachedFinancingBuyingPower}
+        financingBuyingPowerAmount={previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower}
         financingAvailableAmount={previewOrder?.financing_available_amount ?? cachedFinancingAvailable}
+        financingBuyingPowerLabel={
+          previewOrder?.credit_opvolume?.status === 'ready'
+            ? '该股票最大可买 / 授信余额'
+            : undefined
+        }
         previewState={allocationPreviewState}
         previewMessage={allocationPreviewMessage}
       />

@@ -1227,6 +1227,13 @@ export interface QmtOrderPreview {
   basis_amount: number
   cash_amount?: number | null
   financing_available_amount?: number | null
+  credit_opvolume?: {
+    status?: 'ready' | 'pending' | 'unavailable' | 'error' | string
+    stock_code?: string | null
+    max_volume?: number | null
+    max_amount?: number | null
+    ret?: number | null
+  } | null
   buying_power_amount?: number | null
   target_amount: number
   actual_amount: number
