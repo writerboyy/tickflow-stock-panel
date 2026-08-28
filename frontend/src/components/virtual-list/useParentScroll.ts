@@ -6,7 +6,7 @@ function findVerticalScrollParent(element: HTMLElement | null): HTMLElement | nu
   let current = element?.parentElement ?? null
   while (current) {
     const overflowY = window.getComputedStyle(current).overflowY
-    if (/(auto|scroll|overlay)/.test(overflowY) && current.scrollHeight > current.clientHeight) {
+    if (/(auto|scroll|overlay)/.test(overflowY)) {
       return current
     }
     current = current.parentElement

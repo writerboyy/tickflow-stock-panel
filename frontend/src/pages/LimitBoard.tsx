@@ -617,7 +617,7 @@ function AuctionTable({
           </table>
         </div>
       ) : (
-        <div className="overflow-x-auto">
+        <div ref={tableContainerRef} className="overflow-x-auto">
           <table className="w-full min-w-[1240px] border-collapse text-[10px]">
             <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">股票</th>
