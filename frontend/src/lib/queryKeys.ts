@@ -95,7 +95,7 @@ export const QK = {
                            ['free-data-health', strategyId, assetType, start, end, timeframe] as const,
   extData:              ['ext-data'] as const,
   fuyaoAuctionStatus:   ['fuyao-auction-status'] as const,
-  extDataRows:          (id: string, date?: string, limit?: number, columns?: string) => ['ext-data-rows', id, date, limit, columns] as const,
+  extDataRows:          (id: string, date?: string, limit?: number, columns?: string, checkpoint?: string, symbols?: string) => ['ext-data-rows', id, date, limit, columns, checkpoint, symbols] as const,
   dimensionMembers:     (id: string, field: string, value: string, date?: string) => ['dimension-members', id, field, value, date] as const,
   analysisMenus:        ['analysis-menus'] as const,
   analysisMenu:         (id: string) => ['analysis-menu', id] as const,

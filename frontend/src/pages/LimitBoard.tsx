@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as echarts from 'echarts'
 import {
   AlertTriangle,
@@ -59,6 +59,16 @@ const EmbeddedLimitLadder = lazy(() => import('./LimitUpLadder').then(module => 
 
 type Tab = 'ladder' | 'auction' | 'sector' | 'buy_pool' | 'pool' | 'events'
 type TableMode = 'buy_pool' | 'pool'
+type AuctionComparisonRow = {
+  symbol: string
+  name?: string
+  snapshots: Record<string, Record<string, any>>
+}
+const AUCTION_COLUMNS = [
+  'checkpoint', 'auction_price', 'auction_pct', 'auction_volume', 'auction_amount',
+  'auction_unmatched', 'auction_turnover_pct', 'auction_volume_ratio', 'pre_close_price',
+  'open_price', 'last_price', 'float_market_cap',
+]
 type AdvancedSettings = LimitBoardView['settings']
 type PoolAllocationMode = 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
 type AllocationDialogState = {
@@ -403,26 +413,37 @@ function auctionRushPct(row: Record<string, any>): number | null {
 
 function AuctionTable({
   rows,
+  comparisonRows,
   status,
   conceptBySymbol,
   date,
   minDate,
   maxDate,
   onDateChange,
+  checkpoint,
+  onCheckpointChange,
+  comparison,
+  onComparisonChange,
   loading,
+  comparisonLoading,
   onOpen,
 }: {
   rows: Record<string, any>[]
+  comparisonRows: AuctionComparisonRow[]
   status?: FuyaoAuctionStatus
   conceptBySymbol: Map<string, string>
   date: string
   minDate?: string
   maxDate?: string
   onDateChange: (value: string) => void
+  checkpoint: string
+  onCheckpointChange: (value: string) => void
+  comparison: boolean
+  onComparisonChange: (value: boolean) => void
   loading: boolean
+  comparisonLoading: boolean
   onOpen: (symbol: string, name?: string) => void
 }) {
-  const [checkpoint, setCheckpoint] = useState('')
   const [search, setSearch] = useState('')
   const [sortKey, setSortKey] = useState<'auction_pct' | 'auction_amount' | 'auction_volume_ratio' | 'opening_rush_pct'>('auction_pct')
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
@@ -444,14 +465,9 @@ function AuctionTable({
     </button>
   }
 
-  const checkpoints = useMemo(
-    () => [...new Set(rows.map(row => String(row.checkpoint || '')).filter(Boolean))].sort(),
-    [rows],
-  )
   const visibleRows = useMemo(() => {
     const term = search.trim().toLowerCase()
     return rows
-      .filter(row => !checkpoint || String(row.checkpoint || '') === checkpoint)
       .filter(row => !term || String(row.symbol || '').toLowerCase().includes(term) || String(row.code || '').toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
       .slice()
       .sort((left, right) => {
@@ -463,7 +479,37 @@ function AuctionTable({
         const result = rightValue - leftValue
         return sortDirection === 'desc' ? result : -result
       })
-  }, [checkpoint, rows, search, sortDirection, sortKey])
+  }, [rows, search, sortDirection, sortKey])
+
+  const visibleComparisonRows = useMemo(() => {
+    const term = search.trim().toLowerCase()
+    return comparisonRows
+      .filter(row => !term || row.symbol.toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
+      .slice()
+      .sort((left, right) => {
+        const leftValue = sortKey === 'opening_rush_pct'
+          ? auctionRushPct(left.snapshots['0925'] ?? {})
+          : auctionFiniteNumber(left.snapshots['0925']?.[sortKey])
+        const rightValue = sortKey === 'opening_rush_pct'
+          ? auctionRushPct(right.snapshots['0925'] ?? {})
+          : auctionFiniteNumber(right.snapshots['0925']?.[sortKey])
+        const leftMissing = leftValue == null || !Number.isFinite(leftValue)
+        const rightMissing = rightValue == null || !Number.isFinite(rightValue)
+        if (leftMissing || rightMissing) return leftMissing === rightMissing ? 0 : leftMissing ? 1 : -1
+        const result = rightValue - leftValue
+        return sortDirection === 'desc' ? result : -result
+      })
+  }, [comparisonRows, search, sortDirection, sortKey])
+
+  const checkpointOptions = [
+    ['0915', '09:15'],
+    ['0920', '09:20'],
+    ['0925', '09:25'],
+    ['1457', '14:57'],
+    ['1500', '15:00'],
+  ] as const
+  const displayRows = comparison ? visibleComparisonRows : visibleRows
+  const displayCount = comparison ? comparisonRows.length : rows.length
 
   return (
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
@@ -471,7 +517,7 @@ function AuctionTable({
         <div>
           <div className="text-xs font-medium">集合竞价</div>
           <div className="mt-0.5 text-[10px] text-muted">
-            {loading ? '正在读取扶摇数据' : date ? `${date} · ${rows.length} 条 · ${date !== status?.trade_date ? '历史数据' : status?.configured ? status.state === 'completed' ? '已落库' : status.message || '待更新' : '未配置扶摇 API Key'}` : '未配置扶摇 API Key'}
+            {loading || comparisonLoading ? '正在读取扶摇数据' : date ? `${date} · ${displayCount}${comparison ? ' 只重点股票' : ' 条'} · ${date !== status?.trade_date ? '历史数据' : status?.configured ? status.state === 'completed' ? '已落库' : status.message || '待更新' : '未配置扶摇 API Key'}` : '未配置扶摇 API Key'}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -480,15 +526,53 @@ function AuctionTable({
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索代码/名称" aria-label="搜索集合竞价股票" className="h-7 w-32 rounded-btn border border-border bg-base pl-7 pr-2 text-[10px] text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60" />
           </div>
-          <select value={checkpoint} onChange={event => setCheckpoint(event.target.value)} aria-label="选择集合竞价时点" className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60">
-            <option value="">全部时点</option>
-            {checkpoints.map(value => <option key={value} value={value}>{value.slice(0, 2)}:{value.slice(2)}</option>)}
+          <select value={checkpoint} onChange={event => onCheckpointChange(event.target.value)} aria-label="选择集合竞价时点" disabled={comparison} className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60 disabled:opacity-50">
+            {checkpointOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
+          <button type="button" aria-pressed={comparison} onClick={() => onComparisonChange(!comparison)} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 text-[10px] font-medium ${comparison ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:border-accent/40 hover:text-foreground'}`}><Layers3 className="h-3.5 w-3.5" />三点对比</button>
         </div>
       </div>
       {date === status?.trade_date && status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
-      {visibleRows.length === 0 ? (
-        <EmptyState icon={Flame} title={loading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
+      {displayRows.length === 0 ? (
+        <EmptyState icon={Flame} title={loading || comparisonLoading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
+      ) : comparison ? (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] border-collapse text-[10px]">
+            <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-medium">股票</th>
+              <th className="px-2 py-2 text-left font-medium">概念</th>
+              <th className="px-2 py-2 text-right font-medium">09:15涨幅</th>
+              <th className="px-2 py-2 text-right font-medium">09:20涨幅</th>
+              <th className="px-2 py-2 text-right font-medium">09:25涨幅</th>
+              <th className="px-2 py-2 text-right font-medium">涨幅变化</th>
+              <th className="px-2 py-2 text-right font-medium">09:25竞价额</th>
+              <th className="px-3 py-2 text-right font-medium">未匹配变化</th>
+            </tr></thead>
+            <tbody>
+              {visibleComparisonRows.map(row => {
+                const early = row.snapshots['0915']
+                const middle = row.snapshots['0920']
+                const final = row.snapshots['0925']
+                const firstPct = auctionFiniteNumber(early?.auction_pct)
+                const finalPct = auctionFiniteNumber(final?.auction_pct)
+                const pctChange = firstPct != null && finalPct != null ? finalPct - firstPct : null
+                const firstUnmatched = auctionFiniteNumber(early?.auction_unmatched)
+                const finalUnmatched = auctionFiniteNumber(final?.auction_unmatched)
+                const unmatchedChange = firstUnmatched != null && finalUnmatched != null ? finalUnmatched - firstUnmatched : null
+                return <tr key={row.symbol} className="border-b border-border/70 hover:bg-elevated/30">
+                  <td className="px-3 py-2"><button type="button" onClick={() => onOpen(row.symbol, row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.symbol}</div></button></td>
+                  <td className="max-w-[180px] px-2 py-2 text-left text-secondary"><div className="truncate" title={conceptBySymbol.get(row.symbol)}>{conceptBySymbol.get(row.symbol) || '--'}</div></td>
+                  <td className={`px-2 py-2 text-right font-mono ${auctionTone(early?.auction_pct)}`}>{auctionPercent(early?.auction_pct)}</td>
+                  <td className={`px-2 py-2 text-right font-mono ${auctionTone(middle?.auction_pct)}`}>{auctionPercent(middle?.auction_pct)}</td>
+                  <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(final?.auction_pct)}`}>{auctionPercent(final?.auction_pct)}</td>
+                  <td className={`px-2 py-2 text-right font-mono ${auctionTone(pctChange)}`}>{auctionPercent(pctChange)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(final?.auction_amount)}</td>
+                  <td className={`px-3 py-2 text-right font-mono ${auctionTone(unmatchedChange)}`}>{auctionNumber(unmatchedChange)}</td>
+                </tr>
+              })}
+            </tbody>
+          </table>
+        </div>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1240px] border-collapse text-[10px]">
@@ -1684,6 +1768,8 @@ export function LimitBoard() {
   const [sentimentChartOpen, setSentimentChartOpen] = useState(false)
   const [batchRemoveConfirmOpen, setBatchRemoveConfirmOpen] = useState(false)
   const [selectedAuctionDate, setSelectedAuctionDate] = useState<string | null>(null)
+  const [auctionCheckpoint, setAuctionCheckpoint] = useState('0925')
+  const [auctionComparison, setAuctionComparison] = useState(false)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const [selectedBuyPoolSymbols, setSelectedBuyPoolSymbols] = useState<Set<string>>(() => new Set())
   const [selectedPoolSymbols, setSelectedPoolSymbols] = useState<Set<string>>(() => new Set())
@@ -1765,12 +1851,58 @@ export function LimitBoard() {
   const auctionDateRange = fuyaoAuctionConfig?.date_range
   const auctionMaxDate = fuyaoAuctionStatus.data?.trade_date ?? auctionDateRange?.[1]
   const fuyaoAuctionRows = useQuery({
-    queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 20_000),
-    queryFn: () => api.extDataRows('ext_fuyao_auction', { date: auctionDate, limit: 20_000 }),
+    queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 5_000, AUCTION_COLUMNS.join(','), auctionComparison ? '0925' : auctionCheckpoint),
+    queryFn: () => api.extDataRows('ext_fuyao_auction', {
+      date: auctionDate,
+      limit: 5_000,
+      checkpoint: auctionComparison ? '0925' : auctionCheckpoint,
+      columns: AUCTION_COLUMNS,
+    }),
     enabled: tab === 'auction' && Boolean(auctionDate),
     staleTime: 15_000,
     refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
   })
+  const comparisonSymbols = useMemo(() => {
+    if (!auctionComparison) return []
+    return (fuyaoAuctionRows.data?.rows ?? [])
+      .slice()
+      .sort((left, right) => (auctionFiniteNumber(right.auction_pct) ?? -Infinity) - (auctionFiniteNumber(left.auction_pct) ?? -Infinity))
+      .map(row => String(row.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+      .slice(0, 100)
+  }, [auctionComparison, fuyaoAuctionRows.data?.rows])
+  const comparisonSnapshots = useQueries({
+    queries: (['0915', '0920'] as const).map(checkpoint => ({
+      queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 100, AUCTION_COLUMNS.join(','), checkpoint, comparisonSymbols.join(',')),
+      queryFn: () => api.extDataRows('ext_fuyao_auction', {
+        date: auctionDate,
+        limit: 100,
+        checkpoint,
+        symbols: comparisonSymbols,
+        columns: AUCTION_COLUMNS,
+      }),
+      enabled: tab === 'auction' && auctionComparison && Boolean(auctionDate) && comparisonSymbols.length > 0,
+      staleTime: 15_000,
+      refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
+    })),
+  })
+  const auctionComparisonRows = useMemo<AuctionComparisonRow[]>(() => {
+    if (!auctionComparison) return []
+    const rowsBySymbol = new Map<string, AuctionComparisonRow>()
+    for (const row of fuyaoAuctionRows.data?.rows ?? []) {
+      const symbol = String(row.symbol || '').trim().toUpperCase()
+      if (symbol) rowsBySymbol.set(symbol, { symbol, name: row.name, snapshots: { '0925': row } })
+    }
+    for (const query of comparisonSnapshots) {
+      for (const row of query.data?.rows ?? []) {
+        const symbol = String(row.symbol || '').trim().toUpperCase()
+        const current = rowsBySymbol.get(symbol)
+        if (current) current.snapshots[String(row.checkpoint || '')] = row
+      }
+    }
+    return [...rowsBySymbol.values()]
+  }, [auctionComparison, comparisonSnapshots, fuyaoAuctionRows.data?.rows])
+  const auctionComparisonLoading = comparisonSnapshots.some(query => query.isLoading || query.isFetching)
   const refresh = () => queryClient.invalidateQueries({ queryKey: QK.limitBoard })
   const addPool = useMutation({
     mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: PoolAllocationMode; allocationValue?: number; creditBuyMode: QmtCreditBuyMode }) => api.limitBoardPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode),
@@ -1926,13 +2058,19 @@ export function LimitBoard() {
           })}
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
+          comparisonRows={auctionComparisonRows}
           status={fuyaoAuctionStatus.data}
           conceptBySymbol={auctionConceptBySymbol}
           date={auctionDate}
           minDate={auctionDateRange?.[0]}
           maxDate={auctionMaxDate}
           onDateChange={setSelectedAuctionDate}
+          checkpoint={auctionCheckpoint}
+          onCheckpointChange={setAuctionCheckpoint}
+          comparison={auctionComparison}
+          onComparisonChange={setAuctionComparison}
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
+          comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
         /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">

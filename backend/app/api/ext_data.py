@@ -427,6 +427,8 @@ def list_rows(
     config_id: str,
     snapshot_date: str | None = Query(None, alias="date"),
     columns: str | None = Query(None, description="逗号分隔的字段列表"),
+    checkpoint: str | None = Query(None, description="按时点字段过滤"),
+    symbols: str | None = Query(None, description="按标的代码过滤，逗号分隔"),
     limit: int = Query(1000, ge=1, le=20000),
 ):
     """读取扩展数据明细。
@@ -441,6 +443,12 @@ def list_rows(
     data_dir = _data_dir(request)
     df, active_date = _read_ext_dataframe(config, data_dir, snapshot_date)
     df = _with_instrument_name(df, data_dir)
+    if checkpoint and "checkpoint" in df.columns:
+        df = df.filter(pl.col("checkpoint").cast(pl.String) == checkpoint.strip())
+    if symbols and "symbol" in df.columns:
+        requested_symbols = [value.strip().upper() for value in symbols.split(",") if value.strip()]
+        if requested_symbols:
+            df = df.filter(pl.col("symbol").cast(pl.String).str.to_uppercase().is_in(requested_symbols))
     requested = [c.strip() for c in (columns or "").split(",") if c.strip()]
     if requested:
         keep = [c for c in ["symbol", "code", "name", *requested] if c in df.columns]
