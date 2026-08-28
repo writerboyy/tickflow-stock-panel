@@ -11,7 +11,7 @@
 import { useId } from 'react'
 import type { MinuteKlineRow } from '@/lib/api'
 
-export function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56 }: {
+export function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56, className = 'block' }: {
   rows: MinuteKlineRow[]
   /** 昨收价 (前收), 用于基准线。无则用 close/changePct 反算 */
   prevClose?: number | null
@@ -19,13 +19,14 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   changePct?: number | null
   width?: number
   height?: number
+  className?: string
 }) {
   // 自选列表同屏多张图时需要唯一渐变 id；Hook 必须在提前返回之前调用。
   const gradId = useId().replace(/:/g, '')
 
   // 空数据：返回等尺寸占位
   if (!rows || rows.length < 2) {
-    return <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="block" aria-label="暂无分时" />
+    return <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className={className} preserveAspectRatio="none" aria-label="暂无分时" />
   }
 
   const BULL = '#C74040'
@@ -93,7 +94,7 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
   const prevCloseY = yScale(baseline)
 
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block">
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className={className} preserveAspectRatio="none">
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor={color} stopOpacity={0.4} />

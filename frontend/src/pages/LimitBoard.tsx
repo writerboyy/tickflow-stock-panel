@@ -1487,8 +1487,8 @@ function SectorStrengthTable({
             <span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">涨停</span><span className="rounded border border-danger/40 bg-danger/10 px-1 py-0.5 text-danger">≤0.5%</span><span className="rounded border border-orange-400/40 bg-orange-400/10 px-1 py-0.5 text-orange-400">≤1%</span><span className="rounded border border-yellow-300/40 bg-yellow-300/10 px-1 py-0.5 text-yellow-300">≤3%</span>
           </div>
         </div>
-        {hotRows.length ? <div className="max-w-full overflow-x-auto overscroll-contain p-2 lg:max-h-[62vh] lg:overflow-x-hidden lg:overflow-y-auto">
-          <div className="flex w-max gap-2 lg:w-full lg:flex-col">
+        {hotRows.length ? <div className="max-w-full overflow-y-auto overscroll-contain p-2 lg:max-h-[62vh]">
+          <div className="flex w-full flex-col gap-2">
             {sortedHotRows.map((item, index) => {
               const quote = hotQuotes[item.thscode.toUpperCase()] ?? {
                 symbol: item.thscode,
@@ -1513,16 +1513,16 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`relative h-[78px] w-[248px] shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning lg:w-full ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''}`}
+                className={`relative h-[152px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning ${selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
                   <button type="button" aria-label={inBuyPool ? '已在买入池' : '加入买入池'} title={inBuyPool ? '已在买入池' : '加入买入池'} disabled={inBuyPool || busy} onClick={event => { event.stopPropagation(); onAddBuyPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inBuyPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-bull/40 hover:text-bull'} disabled:opacity-50`}>{inBuyPool ? <Check className="h-3 w-3" /> : <ShoppingCart className="h-3 w-3" />}</button>
                   <button type="button" aria-label={inPool ? '已在打板池' : '加入打板池'} title={inPool ? '已在打板池' : '加入打板池'} disabled={inPool || busy} onClick={event => { event.stopPropagation(); onAddPool(actionRow) }} className={`grid h-6 w-6 place-items-center rounded-btn border ${inPool ? 'border-bear/30 text-bear' : 'border-border text-secondary hover:border-accent/40 hover:text-accent'} disabled:opacity-50`}>{inPool ? <Check className="h-3 w-3" /> : <Crosshair className="h-3 w-3" />}</button>
                 </div></div>
-                <div className="mt-0.5 flex items-center gap-2 pr-[78px] font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{item.yesterday_boards && item.yesterday_boards > 0 ? <span className="shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-warning">{item.yesterday_boards === 1 ? '昨日首板' : `昨日${item.yesterday_boards}板`}</span> : null}{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
-                <div className="mt-0.5 flex items-center gap-2 truncate pr-[78px] text-[9px]"><span className="shrink-0 font-mono text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}</span>{item.sector ? <span className="truncate text-warning">{item.sector}</span> : null}</div>
-                {hotIntradayAvailable && hotIntradayVisible ? <div className="pointer-events-none absolute bottom-2 right-2 h-[30px] w-[72px] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[item.thscode.toUpperCase()] ?? []} changePct={quote?.change_pct} width={72} height={30} /></div> : null}
+                <div className="mt-2 flex items-center gap-2 pr-[30%] font-mono text-[9px]"><span className="truncate text-muted">{item.thscode}</span>{item.yesterday_boards && item.yesterday_boards > 0 ? <span className="shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-warning">{item.yesterday_boards === 1 ? '昨日首板' : `昨日${item.yesterday_boards}板`}</span> : null}{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
+                <div className="mt-1 flex items-center gap-2 truncate pr-[30%] text-[9px]"><span className="shrink-0 font-mono text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}</span>{item.sector ? <span className="truncate text-warning">{item.sector}</span> : null}</div>
+                {hotIntradayAvailable && hotIntradayVisible ? <div className="pointer-events-none absolute bottom-2 right-2 h-[52px] w-[30%] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[item.thscode.toUpperCase()] ?? []} changePct={quote?.change_pct} width={160} height={52} className="block h-full w-full" /></div> : null}
               </div>
             })}
           </div>
