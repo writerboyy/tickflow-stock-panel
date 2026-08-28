@@ -54,6 +54,9 @@ export const storage = {
   /** 自选列表分时图显示状态 */
   watchlistIntraday:    kv<boolean>('watchlist_showIntraday'),
 
+  /** 短线猎手即将涨停分时图显示状态 */
+  limitBoardIntraday:   kv<boolean>('limit_board_showIntraday'),
+
   /** 策略结果列表日K蜡烛图显示状态 */
   screenerCandle:       kv<boolean>('screener_showCandle'),
 
