@@ -39,6 +39,7 @@ import { type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { ComprehensiveScore } from '@/components/ComprehensiveScore'
 import { useCapabilities, usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import {
@@ -721,8 +722,6 @@ function LimitBoardAllocationDialog({
   const cachedBasisLabel = creditBuy
     ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
     : '可用资金'
-  const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
-    ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
     ?? null
   const validPrice = price != null && Number.isFinite(price) && price > 0
@@ -766,7 +765,7 @@ function LimitBoardAllocationDialog({
       allocation_value: previewValue,
       credit_buy_mode: creditBuyMode,
     }, true),
-    enabled: Boolean(requiresPreview && qmtReady && validPrice),
+    enabled: Boolean(qmtReady && validPrice),
     retry: false,
     placeholderData: previous => previous,
     staleTime: 500,
@@ -873,7 +872,32 @@ function LimitBoardAllocationDialog({
         <div><div className="text-[10px] text-muted">当前限价参考</div><div className="mt-1 font-mono text-foreground">{price == null ? '--' : price.toFixed(3)}</div></div>
         <div><div className="text-[10px] text-muted">预计委托金额</div><div className="mt-1 font-mono text-foreground">{moneyValue(estimatedAmount)}</div></div>
       </div>
-      {kind === 'board' ? <div className="border-y border-border py-3 text-[10px]">
+      {kind === 'board' && row.candidate_score_detail?.comprehensive ? (
+        <div className="border-y border-border py-3">
+          <ComprehensiveScore
+            score={row.candidate_score_detail.comprehensive.comprehensive_score}
+            maxScore={row.candidate_score_detail.comprehensive.max_score}
+            grade={row.candidate_score_detail.comprehensive.grade}
+            gradeLabel={row.candidate_score_detail.comprehensive.grade_label}
+            dimensions={{
+              history: {
+                ...row.candidate_score_detail.comprehensive.dimensions.history,
+                maxScore: row.candidate_score_detail.comprehensive.dimensions.history.max_score,
+              },
+              sentiment: {
+                ...row.candidate_score_detail.comprehensive.dimensions.sentiment,
+                maxScore: row.candidate_score_detail.comprehensive.dimensions.sentiment.max_score,
+              },
+              health: {
+                ...row.candidate_score_detail.comprehensive.dimensions.health,
+                maxScore: row.candidate_score_detail.comprehensive.dimensions.health.max_score,
+              },
+            }}
+            warnings={row.candidate_score_detail.comprehensive.warnings}
+            strengths={row.candidate_score_detail.comprehensive.strengths}
+          />
+        </div>
+      ) : kind === 'board' ? <div className="border-y border-border py-3 text-[10px]">
         <div className="mb-2 font-medium text-secondary">涨停基因</div>
         {geneData || geneDetail ? <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
           {geneScore != null ? <span className="col-span-2">综合评分 <b className="font-mono text-foreground">{geneScore.toFixed(1)} / {geneMaxScore.toFixed(1)}</b>{genePassed != null ? <em className={genePassed ? 'ml-1 not-italic text-bull' : 'ml-1 not-italic text-warning'}>{genePassed ? '达标' : '未达标'}</em> : null}</span> : null}
@@ -899,10 +923,9 @@ function LimitBoardAllocationDialog({
         accountType={qmt.data?.account_type}
         cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
         financingBuyingPowerAmount={previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower}
-        financingAvailableAmount={previewOrder?.financing_available_amount ?? cachedFinancingAvailable}
         financingBuyingPowerLabel={
           previewOrder?.credit_opvolume?.status === 'ready'
-            ? '该股票最大可买 / 授信余额'
+            ? '该股票最大可买'
             : undefined
         }
         previewState={allocationPreviewState}

@@ -163,8 +163,6 @@ export function QmtTradePanel({
       ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
       : '可用资金'
     : null
-  const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
-    ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
     ?? null
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
@@ -347,10 +345,9 @@ export function QmtTradePanel({
             accountType={qmt.data?.account_type}
             cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
             financingBuyingPowerAmount={serverPreview?.buying_power_amount ?? cachedFinancingBuyingPower}
-            financingAvailableAmount={serverPreview?.financing_available_amount ?? cachedFinancingAvailable}
             financingBuyingPowerLabel={
               serverPreview?.credit_opvolume?.status === 'ready'
-                ? '该股票最大可买 / 授信余额'
+                ? '该股票最大可买'
                 : undefined
             }
             previewState={allocationPreviewState}

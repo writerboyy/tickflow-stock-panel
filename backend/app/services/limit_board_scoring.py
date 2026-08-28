@@ -539,3 +539,377 @@ def sector_detail(
 def _rotation_name(target: dict[str, Any]) -> str:
     name = str(target.get("name") or target.get("value") or "")
     return name.split(" / ")[-1].strip()
+
+
+def comprehensive_score(
+    candidate_score_detail: dict[str, Any] | None,
+    *,
+    board_quality: dict[str, Any] | None = None,
+    four_mode_score: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """计算打板池综合评分（100分制）：历史涨停基因(30分) + 板块情绪周期(30分) + 拉升健康度(40分)
+
+    适用于打板池，评估标的打板价值。买入池不使用此评分。
+
+    Args:
+        candidate_score_detail: 包含 premium_gene, intraday_flow, technical, sector 等维度的评分
+        board_quality: 封板质量数据（仅供参考，不用于打板前评分）
+        four_mode_score: 四合一策略评分数据（仅供参考）
+
+    Returns:
+        包含综合评分、各维度得分、评级等信息的字典
+    """
+    if not isinstance(candidate_score_detail, dict):
+        candidate_score_detail = {}
+
+    gene = candidate_score_detail.get("premium_gene") or {}
+    flow = candidate_score_detail.get("intraday_flow") or {}
+    tech = candidate_score_detail.get("technical") or {}
+    sector = candidate_score_detail.get("sector") or {}
+
+    # ========================================
+    # 一、历史涨停基因（30分）
+    # ========================================
+    history_components = {}
+
+    # 1. 次日收红率 (12分)
+    next_day_red_rate = finite(gene.get("next_day_red_rate"))
+    if next_day_red_rate is not None:
+        history_components["next_day_red"] = _clamp(next_day_red_rate) * 12.0
+    else:
+        history_components["next_day_red"] = 0.0
+
+    # 2. 封板成功率 (12分)
+    first_board_seal_rate = finite(gene.get("first_board_seal_rate"))
+    if first_board_seal_rate is not None:
+        history_components["seal_success"] = _clamp(first_board_seal_rate) * 12.0
+    else:
+        history_components["seal_success"] = 0.0
+
+    # 3. 连板能力 (6分)
+    consecutive_rate = finite(gene.get("consecutive_rate"))
+    if consecutive_rate is not None:
+        history_components["consecutive_ability"] = _clamp(consecutive_rate) * 6.0
+    else:
+        history_components["consecutive_ability"] = 0.0
+
+    history_score = sum(history_components.values())
+
+    # ========================================
+    # 二、板块情绪周期（30分）
+    # ========================================
+    sentiment_components = {}
+
+    # 1. 板块K线形态 (15分)
+    rotation_score = finite(sector.get("rotation_score")) or 0.0
+    rotation_max = 20.0  # rotation_detail 的 max_score
+    # 将 rotation_score 转换到15分制
+    sentiment_components["sector_pattern"] = (rotation_score / rotation_max) * 15.0
+
+    # 2. 板块过热风险 (10分)
+    five_day_change = finite(sector.get("five_day_change_pct")) or 0.0
+    days = sector.get("days") or []
+
+    # 2.1 5日涨幅风险 (5分)
+    if five_day_change < 0.05:
+        overheat_gain = 5.0
+    elif five_day_change < 0.10:
+        overheat_gain = 4.0
+    elif five_day_change < 0.15:
+        overheat_gain = 2.0
+    elif five_day_change < 0.20:
+        overheat_gain = 1.0
+    else:
+        overheat_gain = 0.0
+
+    # 2.2 连续上涨天数 (3分)
+    consecutive_up = 0
+    for day in reversed(days):
+        if finite(day.get("change_pct")) or 0.0 > 0:
+            consecutive_up += 1
+        else:
+            break
+    if consecutive_up <= 2:
+        overheat_streak = 3.0
+    elif consecutive_up <= 4:
+        overheat_streak = 2.0
+    elif consecutive_up <= 6:
+        overheat_streak = 1.0
+    else:
+        overheat_streak = 0.0
+
+    # 2.3 排名位置风险 (2分)
+    realtime_rank = finite(sector.get("realtime_rank"))
+    realtime_rank_count = finite(sector.get("realtime_rank_count"))
+    if realtime_rank is not None and realtime_rank_count is not None and realtime_rank_count > 0:
+        rank_percentile = realtime_rank / realtime_rank_count
+        if rank_percentile < 0.20:
+            overheat_rank = 0.0  # 顶部区域
+        elif rank_percentile < 0.40:
+            overheat_rank = 1.0  # 高位
+        else:
+            overheat_rank = 2.0  # 安全
+    else:
+        overheat_rank = 2.0  # 无数据默认安全
+
+    sentiment_components["overheat_risk"] = overheat_gain + overheat_streak + overheat_rank
+
+    # 3. 板块当日表现 (5分)
+    sector_change = finite(sector.get("change_pct")) or finite(sector.get("realtime_change_pct")) or 0.0
+    up_ratio = finite(sector.get("up_ratio")) or 0.0
+
+    # 3.1 当日涨跌幅 (3分)
+    if sector_change >= 0.04:
+        current_change = 3.0
+    elif sector_change >= 0.02:
+        current_change = _linear(sector_change, 0.02, 0.04, 1.0) + 2.0
+    elif sector_change >= 0.0:
+        current_change = _linear(sector_change, 0.0, 0.02, 1.0) + 1.0
+    else:
+        current_change = 0.0
+
+    # 3.2 上涨家数占比 (2分)
+    if up_ratio >= 0.80:
+        current_breadth = 2.0
+    elif up_ratio >= 0.60:
+        current_breadth = _linear(up_ratio, 0.60, 0.80, 1.0) + 1.0
+    else:
+        current_breadth = _linear(up_ratio, 0.0, 0.60, 1.0)
+
+    sentiment_components["sector_current"] = current_change + current_breadth
+
+    sentiment_score = sum(sentiment_components.values())
+
+    # ========================================
+    # 三、拉升健康度（40分）
+    # ========================================
+    health_components = {}
+
+    # 1. 板块内地位 (15分) - 权重最高
+    leadership = sector.get("leadership")
+    stock_rank = finite(sector.get("stock_rank"))
+    leader_gap_pct = finite(sector.get("leader_gap_pct")) or 0.0
+    is_leader = sector.get("is_sector_leader", False)
+
+    if is_leader and leader_gap_pct >= 0.01:
+        # 绝对龙头：排名第1且领先第2名≥1%
+        health_components["sector_position"] = 15.0
+    elif is_leader:
+        # 并列龙头：排名第1但领先不足1%
+        health_components["sector_position"] = 12.0
+    elif leadership == "front" and (stock_rank is None or stock_rank <= 3 or leader_gap_pct <= 0.01):
+        # 前排强势：排名2-3或与龙头差距≤1%
+        health_components["sector_position"] = 9.0
+    elif leadership == "front":
+        # 前排跟随：排名4-5
+        health_components["sector_position"] = 6.0
+    elif stock_rank is not None and stock_rank <= 10:
+        # 中游位置：排名6-10
+        health_components["sector_position"] = 3.0
+    else:
+        # 跟风位置：排名10以后
+        health_components["sector_position"] = 0.0
+
+    # 2. 分钟级量价 (10分)
+    trend_pct = finite(flow.get("trend_pct")) or 0.0
+    underwater_ratio = finite(flow.get("underwater_ratio")) or 0.0
+    amount_growth = finite(flow.get("amount_growth"))
+
+    # 2.1 价格走势 + 水上占比 (5分)
+    if trend_pct >= 0.05:
+        price_strength = 4.0
+    elif trend_pct >= 0.02:
+        price_strength = _linear(trend_pct, 0.02, 0.05, 2.0) + 2.0
+    elif trend_pct >= 0.0:
+        price_strength = _linear(trend_pct, 0.0, 0.02, 2.0)
+    else:
+        price_strength = 0.0
+
+    water_above_ratio = 1.0 - underwater_ratio
+    water_score = water_above_ratio * 1.0
+
+    # 2.2 量价配合 (5分)
+    if amount_growth is not None and trend_pct > 0:
+        if amount_growth > 0.50:
+            volume_coord = 5.0  # 放量突破
+        elif amount_growth > 0.0:
+            volume_coord = _linear(amount_growth, 0.0, 0.50, 2.0) + 3.0  # 温和放量
+        elif amount_growth > -0.20:
+            volume_coord = _linear(amount_growth, -0.20, 0.0, 2.0) + 1.0  # 缩量上涨
+        else:
+            volume_coord = 0.0  # 量价背离
+    else:
+        volume_coord = 0.0
+
+    health_components["intraday_volume_price"] = price_strength + water_score + volume_coord
+
+    # 3. 资金流向 (10分)
+    net_flow_ratio = finite(flow.get("net_flow_ratio"))
+    capital_score_raw = finite(flow.get("capital_score")) or 0.0
+    capital_max = finite(flow.get("capital_max_score")) or 25.0
+
+    if net_flow_ratio is not None:
+        # 基于净流入比例打分
+        if net_flow_ratio >= 0.40:
+            capital_flow = 10.0
+        elif net_flow_ratio >= 0.20:
+            capital_flow = _linear(net_flow_ratio, 0.20, 0.40, 3.0) + 7.0
+        elif net_flow_ratio >= 0.0:
+            capital_flow = _linear(net_flow_ratio, 0.0, 0.20, 3.0) + 4.0
+        elif net_flow_ratio >= -0.20:
+            capital_flow = _linear(net_flow_ratio, -0.20, 0.0, 3.0) + 1.0
+        else:
+            capital_flow = 0.0
+    elif capital_max > 0:
+        # 备选：使用 capital_score 转换
+        capital_flow = (capital_score_raw / capital_max) * 10.0
+    else:
+        capital_flow = 0.0
+
+    health_components["capital_flow"] = capital_flow
+
+    # 4. 日K形态 (5分)
+    price = finite(tech.get("price"))
+    ma5 = finite(tech.get("ma5"))
+    ma10 = finite(tech.get("ma10"))
+    ma20 = finite(tech.get("ma20"))
+    ma60 = finite(tech.get("ma60"))
+
+    # 4.1 均线排列 (3分)
+    if all(x is not None and x > 0 for x in [price, ma5, ma10, ma20, ma60]):
+        if price > ma5 > ma10 > ma20 > ma60:
+            ma_align = 3.0  # 完美多头
+        elif price > ma5 > ma10 > ma20:
+            ma_align = 2.5  # 强多头
+        elif price > ma5 > ma10:
+            ma_align = 2.0  # 中多头
+        elif price > ma5:
+            ma_align = 1.0  # 弱多头
+        else:
+            ma_align = 0.0  # 均线纠缠或空头
+    else:
+        ma_align = 0.0
+
+    # 4.2 K线实体和影线 (2分) - 需要日K数据，这里简化处理
+    # 如果有当日开高低收数据可以计算，否则给中间分
+    health_components["daily_k_pattern"] = ma_align + 1.0  # 暂时简化，均线3分+形态2分默认1分
+
+    health_score = sum(health_components.values())
+
+    # ========================================
+    # 综合评分与评级
+    # ========================================
+    total_score = history_score + sentiment_score + health_score
+
+    # 评级判定
+    if total_score >= 90:
+        grade = "S"
+        grade_label = "完美"
+    elif total_score >= 85:
+        grade = "A+"
+        grade_label = "优秀"
+    elif total_score >= 75:
+        grade = "A"
+        grade_label = "良好"
+    elif total_score >= 65:
+        grade = "B+"
+        grade_label = "中上"
+    elif total_score >= 55:
+        grade = "B"
+        grade_label = "中等"
+    elif total_score >= 45:
+        grade = "C"
+        grade_label = "一般"
+    else:
+        grade = "D"
+        grade_label = "较差"
+
+    # ========================================
+    # 智能警示和优势
+    # ========================================
+    warnings = []
+    strengths = []
+
+    # 历史基因
+    if history_components.get("next_day_red", 0) < 7.2:  # <60%
+        warnings.append("次日收红率偏低")
+    elif history_components.get("next_day_red", 0) >= 9.6:  # ≥80%
+        strengths.append("次日收红率高")
+
+    if history_components.get("consecutive_ability", 0) >= 4.2:  # ≥70%
+        strengths.append("连板能力强")
+
+    # 板块情绪
+    rotation_label = sector.get("rotation_label")
+    if rotation_label == "主线":
+        strengths.append("主线板块")
+    elif rotation_label == "上升":
+        strengths.append("板块快速走强")
+    elif rotation_label == "退潮":
+        warnings.append("板块退潮中")
+
+    if five_day_change > 0.15:
+        warnings.append("板块涨幅过大，注意回调风险")
+    elif five_day_change < 0.05:
+        strengths.append("板块涨幅不大，安全")
+
+    if consecutive_up > 5:
+        warnings.append("板块连续上涨多日，过热")
+
+    # 拉升健康度
+    if health_components.get("sector_position", 0) >= 15.0:
+        strengths.append("板块绝对龙头")
+    elif health_components.get("sector_position", 0) >= 9.0:
+        strengths.append("板块前排")
+    elif health_components.get("sector_position", 0) < 3.0:
+        warnings.append("非板块龙头")
+
+    if health_components.get("capital_flow", 0) >= 7.0:
+        strengths.append("主力大幅流入")
+    elif health_components.get("capital_flow", 0) < 4.0:
+        warnings.append("主力资金流出")
+
+    if ma_align >= 3.0:
+        strengths.append("完美多头排列")
+    elif ma_align < 1.0:
+        warnings.append("均线压制")
+
+    return {
+        "comprehensive_score": round(total_score, 1),
+        "max_score": 100.0,
+        "grade": grade,
+        "grade_label": grade_label,
+        "dimensions": {
+            "history": {
+                "score": round(history_score, 1),
+                "max_score": 30.0,
+                "percentage": round(history_score / 30.0 * 100, 1) if history_score > 0 else 0.0,
+                "components": {k: round(v, 1) for k, v in history_components.items()},
+                "label": "历史涨停基因",
+            },
+            "sentiment": {
+                "score": round(sentiment_score, 1),
+                "max_score": 30.0,
+                "percentage": round(sentiment_score / 30.0 * 100, 1) if sentiment_score > 0 else 0.0,
+                "components": {k: round(v, 1) for k, v in sentiment_components.items()},
+                "label": "板块情绪周期",
+            },
+            "health": {
+                "score": round(health_score, 1),
+                "max_score": 40.0,
+                "percentage": round(health_score / 40.0 * 100, 1) if health_score > 0 else 0.0,
+                "components": {k: round(v, 1) for k, v in health_components.items()},
+                "label": "拉升健康度",
+            },
+        },
+        "warnings": warnings,
+        "strengths": strengths,
+        "detail_available": {
+            "premium_gene": bool(gene),
+            "intraday_flow": bool(flow),
+            "technical": bool(tech),
+            "sector": bool(sector),
+            "four_mode": bool(four_mode_score),
+            "board_quality": bool(board_quality),
+        },
+    }

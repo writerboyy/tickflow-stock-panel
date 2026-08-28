@@ -17,6 +17,7 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.services import premium_gene, rps_rotation
 from app.services.limit_board_scoring import (
+    comprehensive_score,
     intraday_flow_detail,
     premium_gene_detail,
     sector_detail,
@@ -3558,6 +3559,21 @@ class LimitBoardService:
                     ):
                         detail[key] = previous_detail[key]
                         cached_component = True
+
+                # 计算综合评分（100分制）
+                board_quality_data = {
+                    "break_count": candidate.get("break_count"),
+                    "bid1_volume": candidate.get("bid1_volume"),
+                }
+                # TODO: 如果有四合一策略评分，可以传入 four_mode_score 参数
+                comprehensive = comprehensive_score(
+                    detail,
+                    board_quality=board_quality_data,
+                    four_mode_score=None,  # 暂时为空，后续可集成四合一策略
+                )
+                if comprehensive:
+                    detail["comprehensive"] = comprehensive
+
                 flow_detail = detail.get("intraday_flow") or {}
                 complete = (
                     bool(flow_detail.get("capital_available"))

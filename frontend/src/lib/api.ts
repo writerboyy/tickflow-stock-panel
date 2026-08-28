@@ -1597,6 +1597,57 @@ export interface LimitBoardRow {
       rsi_14?: number
       as_of?: string
     }
+    comprehensive?: {
+      comprehensive_score: number
+      max_score: number
+      grade: string
+      grade_label: string
+      dimensions: {
+        history: {
+          score: number
+          max_score: number
+          percentage: number
+          components: {
+            next_day_red?: number
+            seal_success?: number
+            consecutive_ability?: number
+          }
+          label: string
+        }
+        sentiment: {
+          score: number
+          max_score: number
+          percentage: number
+          components: {
+            sector_pattern?: number
+            overheat_risk?: number
+            sector_current?: number
+          }
+          label: string
+        }
+        health: {
+          score: number
+          max_score: number
+          percentage: number
+          components: {
+            sector_position?: number
+            intraday_volume_price?: number
+            capital_flow?: number
+            daily_k_pattern?: number
+          }
+          label: string
+        }
+      }
+      warnings?: string[]
+      strengths?: string[]
+      detail_available?: {
+        premium_gene?: boolean
+        intraday_flow?: boolean
+        technical?: boolean
+        sector?: boolean
+        board_quality?: boolean
+      }
+    }
   }
   candidate_reasons?: string[]
   limit_up_count?: number

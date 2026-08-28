@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import { Check, Pencil } from 'lucide-react'
 import { cn } from '@/lib/cn'
 
 export type QmtTradeAllocationMode =
@@ -23,7 +25,7 @@ export const QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtTradeAllocationMo
   { value: 'fixed', label: '固定金额' },
 ]
 
-export const QMT_QUICK_AMOUNT_PRESETS = [10_000, 20_000, 30_000] as const
+export const QMT_QUICK_AMOUNT_PRESETS = [10_000, 20_000, 30_000, 40_000] as const
 
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
@@ -52,8 +54,7 @@ export function QmtTradeAllocationControls({
   accountType,
   cashAmount,
   financingBuyingPowerAmount,
-  financingAvailableAmount,
-  financingBuyingPowerLabel = '融资可买 / 授信余额',
+  financingBuyingPowerLabel = '融资可买',
   previewState = 'idle',
   previewMessage,
   showQuickPresets = true,
@@ -73,7 +74,6 @@ export function QmtTradeAllocationControls({
   accountType?: string | null
   cashAmount?: number | null
   financingBuyingPowerAmount?: number | null
-  financingAvailableAmount?: number | null
   financingBuyingPowerLabel?: string
   previewState?: PreviewState
   previewMessage?: string | null
@@ -82,6 +82,8 @@ export function QmtTradeAllocationControls({
   className?: string
 }) {
   const hasValueInput = mode === 'fixed' || mode === 'volume'
+  const [quickAmounts, setQuickAmounts] = useState<number[]>(() => [...QMT_QUICK_AMOUNT_PRESETS])
+  const [editingQuickAmounts, setEditingQuickAmounts] = useState(false)
   const inputLabel = mode === 'volume' ? '确认数量（股）' : '确认金额'
   const creditAccount = String(accountType || '').toUpperCase() === 'CREDIT'
   const displayedBasisLabel = basisLabel === '可用资金'
@@ -94,7 +96,6 @@ export function QmtTradeAllocationControls({
   const basisText = basisAmount != null && Number.isFinite(basisAmount) ? `${MONEY.format(basisAmount)} 元` : '—'
   const cashText = cashAmount != null && Number.isFinite(cashAmount) ? `${MONEY.format(cashAmount)} 元` : '—'
   const financingBuyingPowerText = financingBuyingPowerAmount != null && Number.isFinite(financingBuyingPowerAmount) ? `${MONEY.format(financingBuyingPowerAmount)} 元` : '—'
-  const financingText = financingAvailableAmount != null && Number.isFinite(financingAvailableAmount) ? `${MONEY.format(financingAvailableAmount)} 元` : '—'
   const availableDisabled = disabled || disabledModes?.available === true
 
   return <div className={cn('space-y-3', className)}>
@@ -109,28 +110,62 @@ export function QmtTradeAllocationControls({
       </select>
     </label>
 
-    {showQuickPresets ? <div className="flex flex-wrap items-center gap-1.5">
-      <span className="text-[10px] text-muted">快捷金额</span>
-      {QMT_QUICK_AMOUNT_PRESETS.map(amount => <button
-        key={amount}
-        type="button"
-        disabled={disabled}
-        onClick={() => { onModeChange('fixed'); onValueChange(amount) }}
-        className="h-7 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
-      >{amount.toLocaleString('zh-CN')}</button>)}
-      {(['sixth', 'fifth', 'quarter'] as const).map(ratio => <button
-        key={ratio}
-        type="button"
-        disabled={disabled || disabledModes?.[ratio] === true}
-        onClick={() => onModeChange(ratio)}
-        className="h-7 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
-      >{ratio === 'sixth' ? '1/6' : ratio === 'fifth' ? '1/5' : '1/4'}</button>)}
-      <button
-        type="button"
-        disabled={availableDisabled}
-        onClick={() => onModeChange('available')}
-        className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
-      >当前可用</button>
+    {showQuickPresets ? <div className="space-y-1.5">
+      <div className="grid grid-cols-[80px_repeat(4,minmax(0,1fr))] items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="text-[10px] text-muted">快捷金额</span>
+          <button
+            type="button"
+            aria-label={editingQuickAmounts ? '完成快捷金额编辑' : '编辑快捷金额'}
+            title={editingQuickAmounts ? '完成快捷金额编辑' : '编辑快捷金额'}
+            disabled={disabled}
+            onClick={() => {
+              if (editingQuickAmounts) {
+                setQuickAmounts(current => current.map(amount => Number.isFinite(amount) && amount >= 100 ? amount : 100))
+              }
+              setEditingQuickAmounts(current => !current)
+            }}
+            className="grid h-5 w-5 place-items-center rounded text-muted hover:bg-elevated hover:text-accent disabled:opacity-40"
+          >{editingQuickAmounts ? <Check className="h-3 w-3" /> : <Pencil className="h-3 w-3" />}</button>
+        </div>
+        {editingQuickAmounts ? quickAmounts.map((amount, index) => <input
+          key={index}
+          type="number"
+          min={100}
+          step={100}
+          value={amount}
+          aria-label={`快捷金额 ${index + 1}`}
+          disabled={disabled}
+          onChange={event => {
+            const nextAmount = Number(event.target.value)
+            setQuickAmounts(current => current.map((value, itemIndex) => itemIndex === index ? nextAmount : value))
+          }}
+          onBlur={() => setQuickAmounts(current => current.map((value, itemIndex) => itemIndex === index && (!Number.isFinite(value) || value < 100) ? 100 : value))}
+          className="h-7 w-full min-w-0 rounded border border-accent/50 bg-accent/5 px-2 text-right font-mono text-[10px] text-foreground outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 disabled:opacity-40"
+        />) : quickAmounts.map((amount, index) => <button
+          key={index}
+          type="button"
+          disabled={disabled}
+          onClick={() => { onModeChange('fixed'); onValueChange(amount) }}
+          className="h-7 w-full min-w-0 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
+        >{amount.toLocaleString('zh-CN')}</button>)}
+      </div>
+      <div className="grid grid-cols-[80px_repeat(4,minmax(0,1fr))] items-center gap-1.5">
+        <span className="min-w-0 text-[10px] text-muted">快捷比例</span>
+        {(['sixth', 'fifth', 'quarter'] as const).map(ratio => <button
+          key={ratio}
+          type="button"
+          disabled={disabled || disabledModes?.[ratio] === true}
+          onClick={() => onModeChange(ratio)}
+          className="h-7 w-full min-w-0 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
+        >{ratio === 'sixth' ? '16.7%' : ratio === 'fifth' ? '20%' : '25%'}</button>)}
+        <button
+          type="button"
+          disabled={availableDisabled}
+          onClick={() => onModeChange('available')}
+          className="h-7 w-full min-w-0 rounded border border-border px-2 font-mono text-[10px] text-secondary hover:border-accent/50 hover:text-accent disabled:opacity-40"
+        >100%</button>
+      </div>
     </div> : null}
 
     {hasValueInput ? <label className="block text-[10px] text-muted">{inputLabel}
@@ -150,7 +185,7 @@ export function QmtTradeAllocationControls({
         {!(creditAccount && action === 'BUY') ? <div><span className="text-muted">{displayedBasisLabel}</span><div className="mt-0.5 font-mono text-foreground">{basisText}</div></div> : null}
         {creditAccount && action === 'BUY' ? <>
           <div><span className="text-muted">现金可用</span><div className="mt-0.5 font-mono text-foreground">{cashText}</div></div>
-          <div><span className="text-muted">{financingBuyingPowerLabel}</span><div className="mt-0.5 font-mono text-foreground">{financingBuyingPowerText} / {financingText}</div><div className="mt-0.5 text-[9px] text-muted">前者按当前股票和价格计算，后者为账户授信额度</div></div>
+          <div><span className="text-muted">{financingBuyingPowerLabel}</span><div className="mt-0.5 font-mono text-foreground">{financingBuyingPowerText}</div></div>
         </> : null}
       </div>
       {previewState === 'loading' ? <div className="mt-2 border-t border-accent/20 pt-2 text-muted">正在读取账户可用金额并计算委托…</div> : previewMessage ? <div className={cn('mt-2 border-t border-accent/20 pt-2', previewState === 'error' ? 'text-danger' : 'text-muted')}>{previewMessage}</div> : null}
