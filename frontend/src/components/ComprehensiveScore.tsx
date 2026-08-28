@@ -1,5 +1,17 @@
 import { AlertTriangle, CheckCircle } from 'lucide-react'
 
+export interface ScoreDetailRow {
+  label: string
+  value: string
+  tone?: string
+}
+
+export interface ComprehensiveScoreDetails {
+  history?: ScoreDetailRow[]
+  sentiment?: ScoreDetailRow[]
+  health?: ScoreDetailRow[]
+}
+
 interface ComprehensiveScoreProps {
   score: number
   maxScore: number
@@ -13,6 +25,7 @@ interface ComprehensiveScoreProps {
   warnings?: string[]
   strengths?: string[]
   compact?: boolean
+  details?: ComprehensiveScoreDetails
 }
 
 interface DimensionScore {
@@ -38,7 +51,7 @@ const COMPONENT_LABELS: Record<string, string> = {
   next_day_red: '次日收红',
   seal_success: '封板成功',
   consecutive_ability: '连板能力',
-  // 板块情绪周期
+  // 板块强度
   sector_pattern: '板块形态',
   overheat_risk: '过热风险',
   sector_current: '当日表现',
@@ -61,28 +74,36 @@ function ProgressBar({ value, max, color = 'bg-accent' }: { value: number; max: 
   )
 }
 
-function DimensionCard({ dimension, compact }: { dimension: DimensionScore; compact?: boolean }) {
+function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: DimensionScore; compact?: boolean; detailRows?: ScoreDetailRow[] }) {
   const percentage = dimension.percentage
   const color = percentage >= 80 ? 'bg-bull' : percentage >= 60 ? 'bg-accent' : 'bg-warning'
 
   return (
-    <div className="rounded border border-border bg-surface p-2.5">
+    <div className="min-w-0 rounded border border-border bg-surface p-2.5">
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-[10px] font-medium text-secondary">{dimension.label}</span>
-        <span className="font-mono text-xs text-foreground">
+        <span className="min-w-0 truncate text-[10px] font-medium text-secondary">{dimension.label}</span>
+        <span className="shrink-0 font-mono text-xs text-foreground">
           {dimension.score.toFixed(1)}/{dimension.maxScore.toFixed(0)}
         </span>
       </div>
       <ProgressBar value={dimension.score} max={dimension.maxScore} color={color} />
       {!compact && (
-        <div className="mt-2 space-y-1">
-          {Object.entries(dimension.components).map(([key, value]) => (
-            <div key={key} className="flex items-center justify-between text-[9px]">
-              <span className="text-muted">{COMPONENT_LABELS[key] || key}</span>
-              <span className="font-mono text-secondary">{value.toFixed(1)}</span>
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="mt-2 space-y-1 border-t border-border/70 pt-2">
+            {Object.entries(dimension.components).map(([key, value]) => (
+              <div key={key} className="flex items-center justify-between gap-2 text-[9px]">
+                <span className="min-w-0 truncate text-muted">{COMPONENT_LABELS[key] || key}</span>
+                <span className="shrink-0 font-mono text-secondary">{value.toFixed(1)} 分</span>
+              </div>
+            ))}
+          </div>
+          {detailRows.length > 0 ? <div className="mt-2 space-y-1 border-t border-border/70 pt-2">
+            {detailRows.map(row => <div key={row.label} className="flex items-center justify-between gap-2 text-[9px]">
+              <span className="min-w-0 truncate text-muted">{row.label}</span>
+              <span className={`shrink-0 text-right font-mono ${row.tone || 'text-secondary'}`}>{row.value}</span>
+            </div>)}
+          </div> : null}
+        </>
       )}
     </div>
   )
@@ -97,6 +118,7 @@ export function ComprehensiveScore({
   warnings = [],
   strengths = [],
   compact = false,
+  details,
 }: ComprehensiveScoreProps) {
   const gradeColor = GRADE_COLORS[grade] || GRADE_COLORS['B']
 
@@ -143,10 +165,10 @@ export function ComprehensiveScore({
       )}
 
       {/* 三个维度 */}
-      <div className="grid grid-cols-3 gap-2">
-        <DimensionCard dimension={dimensions.history} compact={compact} />
-        <DimensionCard dimension={dimensions.sentiment} compact={compact} />
-        <DimensionCard dimension={dimensions.health} compact={compact} />
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <DimensionCard dimension={dimensions.history} compact={compact} detailRows={details?.history} />
+        <DimensionCard dimension={dimensions.sentiment} compact={compact} detailRows={details?.sentiment} />
+        <DimensionCard dimension={dimensions.health} compact={compact} detailRows={details?.health} />
       </div>
     </div>
   )

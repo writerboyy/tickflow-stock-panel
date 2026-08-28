@@ -547,7 +547,7 @@ def comprehensive_score(
     board_quality: dict[str, Any] | None = None,
     four_mode_score: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """计算打板池综合评分（100分制）：历史涨停基因(30分) + 板块情绪周期(30分) + 拉升健康度(40分)
+    """计算打板池综合评分（100分制）：历史涨停基因(30分) + 板块强度(30分) + 拉升健康度(40分)
 
     适用于打板池，评估标的打板价值。买入池不使用此评分。
 
@@ -596,7 +596,7 @@ def comprehensive_score(
     history_score = sum(history_components.values())
 
     # ========================================
-    # 二、板块情绪周期（30分）
+    # 二、板块强度（30分）
     # ========================================
     sentiment_components = {}
 
@@ -839,7 +839,7 @@ def comprehensive_score(
     if history_components.get("consecutive_ability", 0) >= 4.2:  # ≥70%
         strengths.append("连板能力强")
 
-    # 板块情绪
+    # 板块强度
     rotation_label = sector.get("rotation_label")
     if rotation_label == "主线":
         strengths.append("主线板块")
@@ -892,7 +892,7 @@ def comprehensive_score(
                 "max_score": 30.0,
                 "percentage": round(sentiment_score / 30.0 * 100, 1) if sentiment_score > 0 else 0.0,
                 "components": {k: round(v, 1) for k, v in sentiment_components.items()},
-                "label": "板块情绪周期",
+                "label": "板块强度",
             },
             "health": {
                 "score": round(health_score, 1),

@@ -39,7 +39,7 @@ import { type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
-import { ComprehensiveScore } from '@/components/ComprehensiveScore'
+import { ComprehensiveScore, type ComprehensiveScoreDetails } from '@/components/ComprehensiveScore'
 import { useCapabilities, usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import {
@@ -137,6 +137,14 @@ function scoreTime(value: string | null | undefined): string {
   if (!value) return '--'
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? '--' : parsed.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function scoreDetailNumber(value: number | null | undefined, digits = 1): string {
+  return value == null || !Number.isFinite(value) ? '--' : value.toFixed(digits)
+}
+
+function scoreDetailSignedPercent(value: number | null | undefined, digits = 1): string {
+  return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(digits)}%`
 }
 
 function exactTime(value: string | number | null | undefined): string {
@@ -814,9 +822,10 @@ function LimitBoardAllocationDialog({
   )
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
   const comprehensive = row.candidate_score_detail?.comprehensive
+  const scoreDetails = comprehensive ? scoreDetailRows(row.candidate_score_detail ?? {}) : undefined
   const scoreUnavailableReason = row.candidate_score_state === 'unavailable'
-    ? '实时板块或分时数据暂未就绪，当前只显示交易配置。'
-    : '当前标的尚未进入自动评分候选，等待评分数据返回。'
+    ? '评分所需的实时板块、分时或资金数据暂未就绪。'
+    : '该标的来自板块强度手动入口，后端尚未生成 v5 评分快照。'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
     { value: 'available', label: poolAllocationLabel('available') },
     { value: 'sixth', label: poolAllocationLabel('sixth') },
@@ -847,7 +856,7 @@ function LimitBoardAllocationDialog({
           <div className="mb-3 flex items-center justify-between gap-2 border-b border-border pb-2">
             <div>
               <h3 className="text-xs font-semibold text-secondary">综合评分 v5</h3>
-              <p className="mt-0.5 text-[10px] text-muted">100 分制 · 历史基因、板块情绪、拉升健康度</p>
+              <p className="mt-0.5 text-[10px] text-muted">100 分制 · 历史基因、板块强度、拉升健康度</p>
             </div>
             <span className="font-mono text-[10px] text-muted">打板决策参考</span>
           </div>
@@ -864,6 +873,7 @@ function LimitBoardAllocationDialog({
               sentiment: {
                 ...comprehensive.dimensions.sentiment,
                 maxScore: comprehensive.dimensions.sentiment.max_score,
+                label: '板块强度',
               },
               health: {
                 ...comprehensive.dimensions.health,
@@ -872,13 +882,14 @@ function LimitBoardAllocationDialog({
             }}
             warnings={comprehensive.warnings}
             strengths={comprehensive.strengths}
+            details={scoreDetails}
           /> : <div className="space-y-3 py-3">
             <div className="rounded-btn border border-warning/30 bg-warning/5 px-3 py-3">
               <div className="text-sm font-semibold text-warning">综合评分暂不可用</div>
               <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              {['历史涨停基因', '板块情绪周期', '拉升健康度'].map(label => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {['历史涨停基因', '板块强度', '拉升健康度'].map(label => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
                 <div className="text-[10px] text-muted">{label}</div>
                 <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
               </div>)}
@@ -1173,6 +1184,53 @@ function manualActionRow(
     last_price: lastPrice ?? undefined,
     change_pct: changePct,
     limit_up: limitUp ?? undefined,
+  }
+}
+
+function scoreDetailRows(
+  detail: NonNullable<LimitBoardRow['candidate_score_detail']>,
+): ComprehensiveScoreDetails {
+  const gene = detail.premium_gene
+  const sector = detail.sector
+  const flow = detail.intraday_flow
+  const technical = detail.technical
+  return {
+    history: gene ? [
+      { label: `近${gene.window_days ?? '--'}日涨停`, value: gene.limit_up_count == null ? '--' : `${gene.limit_up_count} 次` },
+      { label: '次日收红率', value: ratioPct(gene.next_day_red_rate, 1) },
+      { label: '首板尝试数', value: gene.first_board_attempt_count == null ? '--' : `${gene.first_board_attempt_count} 次` },
+      { label: '首板封板率', value: ratioPct(gene.first_board_seal_rate, 1) },
+      { label: '首板破板率', value: ratioPct(gene.first_board_broken_rate, 1) },
+      { label: '连板率', value: ratioPct(gene.consecutive_rate, 1) },
+      { label: '5%溢价率', value: ratioPct(gene.premium_5_rate, 1) },
+      { label: '样本数', value: gene.next_day_observation_count == null ? '--' : `${gene.next_day_observation_count} 次` },
+    ] : [{ label: '历史细则', value: '暂无数据', tone: 'text-warning' }],
+    sentiment: sector ? [
+      { label: '板块名称', value: sector.name || '--' },
+      { label: '板块强度', value: scoreDetailNumber(sector.realtime_strength, 1) },
+      { label: '板块涨幅', value: scoreDetailSignedPercent(sector.realtime_change_pct ?? sector.change_pct, 2) },
+      { label: '板块强度排名', value: sector.realtime_rank != null && sector.realtime_rank_count ? `${sector.realtime_rank}/${sector.realtime_rank_count}` : '--' },
+      { label: '上涨占比', value: ratioPct(sector.up_ratio, 1) },
+      { label: '板块轮动', value: sector.rotation_label || '数据不足' },
+      { label: '个股板块排名', value: sector.stock_rank != null && sector.member_count ? `${sector.stock_rank}/${sector.member_count}` : '--' },
+      { label: '与龙头差距', value: scoreDetailSignedPercent(sector.leader_gap_pct, 2) },
+    ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
+    health: flow || technical ? [
+      ...(flow ? [
+        { label: '分时涨幅', value: scoreDetailSignedPercent(flow.trend_pct, 2) },
+        { label: '水下比例', value: ratioPct(flow.underwater_ratio, 1) },
+        { label: '量能变化', value: scoreDetailSignedPercent(flow.amount_growth, 1) },
+        { label: '净流向比例', value: scoreDetailSignedPercent(flow.net_flow_ratio, 1) },
+        { label: '资金状态', value: flow.flow_state || '不可用' },
+        { label: '分时样本', value: flow.bars == null ? '--' : `${flow.bars} 根` },
+      ] : []),
+      ...(technical ? [
+        { label: '均线排列', value: `${scoreDetailNumber(technical.price, 2)} / ${scoreDetailNumber(technical.ma5, 2)} / ${scoreDetailNumber(technical.ma20, 2)}` },
+        { label: '5日动量', value: scoreDetailSignedPercent(technical.momentum_5d, 2) },
+        { label: '5日量比', value: scoreDetailNumber(technical.vol_ratio_5d, 2) },
+        { label: 'RSI(14)', value: scoreDetailNumber(technical.rsi_14, 1) },
+      ] : []),
+    ] : [{ label: '拉升细则', value: '暂无数据', tone: 'text-warning' }],
   }
 }
 
@@ -2199,7 +2257,7 @@ export function LimitBoard() {
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row, kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row, kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
