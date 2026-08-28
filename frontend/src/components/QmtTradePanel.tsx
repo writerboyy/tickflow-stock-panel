@@ -164,7 +164,6 @@ export function QmtTradePanel({
       : '可用资金'
     : null
   const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
-    ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
     ?? null

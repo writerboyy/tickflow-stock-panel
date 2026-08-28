@@ -722,7 +722,6 @@ function LimitBoardAllocationDialog({
     ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
     : '可用资金'
   const cachedFinancingAvailable = cachedAccount?.fin_enable_balance
-    ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
     ?? null

@@ -19,7 +19,7 @@ from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict, default_rule_options
-from app.services.qmt_trading import QmtRpcError, QmtTradingService, QmtZmqRpcClient
+from app.services.qmt_trading import QmtRpcError, QmtTradingService, QmtZmqRpcClient, _normalise_account
 from app.services.quote_service import QuoteService
 from app.services.watchlist_ocr.provider import OcrProvider
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -779,13 +779,13 @@ def test_credit_order_preview_uses_financing_amount_when_buying_power_field_is_u
     assert preview["credit_buy_mode_switched"] is False
 
 
-def test_credit_order_preview_uses_credit_limit_when_financing_buying_power_is_unavailable(tmp_path: Path):
+def test_credit_order_preview_uses_financing_available_amount_before_quota(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
     service.client.call = lambda method, _params: {
         "cash": 100_000,
         "m_dAssureEnbuyBalance": 18_000,
-        "m_dFinEnableBalance": 500_000,
-        "credit_financing_buying_power": 500_000,
+        "m_dFinEnableBalance": 320_000,
+        "m_dFinEnableQuota": 500_000,
     } if method == "get_asset" else None
 
     preview = service.preview_order({
@@ -797,11 +797,53 @@ def test_credit_order_preview_uses_credit_limit_when_financing_buying_power_is_u
         "credit_buy_mode": "financing",
     })
 
-    assert preview["financing_available_amount"] == 500_000
-    assert preview["buying_power_amount"] == 500_000
+    assert preview["financing_available_amount"] == 320_000
+    assert preview["buying_power_amount"] == 320_000
     assert preview["requested_credit_buy_mode"] == "financing"
     assert preview["credit_buy_mode"] == "financing"
     assert preview["credit_buy_mode_switched"] is False
+
+
+def test_credit_order_preview_does_not_use_financing_quota_as_buying_power(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.call = lambda method, _params: {
+        "cash": 100_000,
+        "m_dAssureEnbuyBalance": 18_000,
+        "m_dFinEnableQuota": 500_000,
+    } if method == "get_asset" else None
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["financing_available_amount"] is None
+    assert preview["buying_power_amount"] == 18_000
+    assert preview["credit_buy_mode"] == "collateral"
+    assert preview["credit_buy_mode_switched"] is True
+
+
+def test_normalise_credit_account_keeps_quota_separate_from_financing_amount():
+    account = _normalise_account({
+        "m_dFinEnableBalance": 320_000,
+        "m_dFinEnableQuota": 500_000,
+    }, "CREDIT")
+
+    assert account["fin_enable_balance"] == 320_000
+    assert account["fin_enbuy_balance"] == 320_000
+    assert account["fin_enable_quota"] == 500_000
+
+
+def test_normalise_credit_account_does_not_promote_quota_to_buying_power():
+    account = _normalise_account({"m_dFinEnableQuota": 500_000}, "CREDIT")
+
+    assert account["fin_enable_quota"] == 500_000
+    assert "fin_enable_balance" not in account
+    assert "fin_enbuy_balance" not in account
 
 
 def test_credit_order_validation_switches_to_fallback_buy_mode_when_selected_amount_is_short(tmp_path: Path):
@@ -1529,6 +1571,56 @@ def test_qmt_snapshot_rejects_available_above_volume():
     client.call = lambda _method, _params=None: next(responses)
     with pytest.raises(QmtRpcError, match="可用数量大于持仓数量"):
         client.snapshot()
+
+
+def test_qmt_credit_asset_replaces_ambiguous_quota_alias_with_raw_account_fields():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+
+    def fake_call(method, _params=None):
+        if method == "get_asset":
+            return {
+                "cash": 152_684.08,
+                "assure_enbuy_balance": 152_684.08,
+                "fin_enable_balance": 500_000,
+            }
+        if method == "query_account_infos":
+            return [{
+                "m_dFinEnableBalance": 320_000,
+                "m_dFinEnbuyBalance": 1.7976931348623157e308,
+                "m_dFinEnableQuota": 500_000,
+            }]
+        raise AssertionError(method)
+
+    client.call = fake_call
+
+    asset = client.get_asset()
+
+    assert asset["fin_enable_balance"] == 320_000
+    assert asset["fin_enable_quota"] == 500_000
+    assert "fin_enbuy_balance" not in asset
+
+
+def test_qmt_credit_asset_removes_quota_mapped_as_financing_balance_when_raw_is_unset():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+
+    def fake_call(method, _params=None):
+        if method == "get_asset":
+            return {"cash": 152_684.08, "fin_enable_balance": 500_000}
+        if method == "query_account_infos":
+            return [{
+                "m_dFinEnableBalance": 1.7976931348623157e308,
+                "m_dFinEnbuyBalance": 1.7976931348623157e308,
+                "m_dFinEnableQuota": 500_000,
+            }]
+        raise AssertionError(method)
+
+    client.call = fake_call
+
+    asset = client.get_asset()
+
+    assert "fin_enable_balance" not in asset
+    assert "fin_enbuy_balance" not in asset
+    assert asset["fin_enable_quota"] == 500_000
 
 
 def test_qmt_snapshot_derives_latest_buy_entry_date():

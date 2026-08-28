@@ -94,16 +94,32 @@ _CREDIT_FINANCING_BUYING_POWER_FIELDS = (
 )
 _CREDIT_FINANCING_AVAILABLE_FIELDS = (
     "m_dFinEnableBalance",
-    "m_dFinEnableQuota",
     "fin_enable_balance",
     "financing_available_amount",
 )
+_CREDIT_FINANCING_QUOTA_FIELDS = (
+    "m_dFinEnableQuota",
+    "fin_enable_quota",
+)
+_CREDIT_ASSET_ALIASES = {
+    "assure_enbuy_balance": _CREDIT_ASSURE_BUYING_POWER_FIELDS,
+    "fin_enbuy_balance": _CREDIT_FINANCING_BUYING_POWER_FIELDS,
+    "fin_enable_balance": _CREDIT_FINANCING_AVAILABLE_FIELDS,
+    "fin_enable_quota": _CREDIT_FINANCING_QUOTA_FIELDS,
+}
 _CREDIT_ASSET_FIELDS = frozenset(
     (*_CREDIT_ASSURE_BUYING_POWER_FIELDS,
      *_CREDIT_FINANCING_BUYING_POWER_FIELDS,
-     *_CREDIT_FINANCING_AVAILABLE_FIELDS),
+     *_CREDIT_FINANCING_AVAILABLE_FIELDS,
+     *_CREDIT_FINANCING_QUOTA_FIELDS),
 )
 _CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
+
+_CREDIT_RAW_FIELD_TARGETS = {
+    "m_dFinEnbuyBalance": ("fin_enbuy_balance",),
+    "m_dFinEnableBalance": ("fin_enable_balance", "financing_available_amount"),
+    "m_dFinEnableQuota": ("fin_enable_quota",),
+}
 
 
 def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
@@ -117,7 +133,7 @@ def _first_number(row: dict[str, Any], fields: tuple[str, ...]) -> float | None:
 def _credit_buying_power(
     account: dict[str, Any], credit_buy_mode: str = "collateral",
 ) -> tuple[float | None, str | None, float | None]:
-    """Return the selected credit buying power, label and financing quota."""
+    """Return the selected buying power, label and actual financing amount."""
     if credit_buy_mode not in _CREDIT_BUY_MODES:
         raise ValueError("信用账户买入方式必须是担保品买入或融资买入")
     financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
@@ -151,11 +167,14 @@ def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -
         value = _float(asset.get(field))
         if value is not None and value >= 0:
             account[field] = value
+    for canonical, aliases in _CREDIT_ASSET_ALIASES.items():
+        value = _first_number(asset, aliases)
+        if value is not None:
+            account[canonical] = value
     account["account_type"] = str(account_type or asset.get("account_type") or "STOCK").upper()
     # Some Big QMT account rows expose financing buying power as an unset
-    # sentinel while still reporting the usable financing amount/quota.
-    # Preserve that positive amount instead of turning a valid credit account
-    # into a false zero; cash remains a separate collateral-buying field.
+    # sentinel while still reporting the usable financing amount. Preserve
+    # that positive amount; a financing quota is not buying power.
     if account["account_type"] == "CREDIT" and _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS) is None:
         financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
         if financing_available is not None:
@@ -407,10 +426,44 @@ class QmtZmqRpcClient:
             raise QmtRpcError("QMT RPC 返回的账户与本地配置不一致")
         return {"server_time": data.get("server_time") if isinstance(data, dict) else None}
 
+    def get_asset(self) -> dict[str, Any]:
+        """Read assets and disambiguate credit-account financing fields.
+
+        Older bridge versions returned the quota as ``fin_enable_balance``.
+        The raw ACCOUNT row is authoritative when available, so use it to
+        remove that ambiguous value and preserve the actual financing fields.
+        """
+        asset = self.call("get_asset", {"account_id": self.account_id})
+        if not isinstance(asset, dict):
+            raise QmtRpcError("QMT 账户资产响应格式无效")
+        if self.account_type != "CREDIT":
+            return asset
+        if any(field in asset for field in _CREDIT_RAW_FIELD_TARGETS):
+            return asset
+
+        try:
+            rows = self.call("query_account_infos", {"account_id": self.account_id})
+        except Exception:  # noqa: BLE001 - older bridges may not expose this query
+            return asset
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return asset
+
+        account_info = rows[0]
+        merged = dict(asset)
+        for raw_field, targets in _CREDIT_RAW_FIELD_TARGETS.items():
+            if raw_field not in account_info:
+                continue
+            value = _float(account_info.get(raw_field))
+            for target in targets:
+                merged.pop(target, None)
+            if value is not None:
+                merged[targets[0]] = value
+        return merged
+
     def snapshot(self) -> dict[str, Any]:
         """同一轮读取账户、持仓、委托和成交；任一步失败则整轮失败。"""
         self.probe()
-        asset = self.call("get_asset", {"account_id": self.account_id})
+        asset = self.get_asset()
         positions = self.call("get_positions", {"account_id": self.account_id})
         orders = self.call("query_orders", {"account_id": self.account_id, "strategy_name": ""})
         trades = self.call("query_trades", {"account_id": self.account_id, "strategy_name": ""})
@@ -813,9 +866,7 @@ class QmtTradingService:
         with self._lock:
             client = self.client
             generation = self._connection_generation
-        asset = client.call("get_asset", {"account_id": client.account_id})
-        if not isinstance(asset, dict):
-            raise QmtRpcError("QMT 资产响应格式无效")
+        asset = client.get_asset()
         account = {
             "name": self.client.account_id,
             **_normalise_account(asset, self.account_type),
@@ -1153,9 +1204,7 @@ class QmtTradingService:
 
     def _order_preflight(self, action: str) -> dict[str, Any]:
         if action == "BUY":
-            asset = self.client.call("get_asset", {"account_id": self.client.account_id})
-            if not isinstance(asset, dict):
-                raise QmtRpcError("QMT 资产响应格式无效")
+            asset = self.client.get_asset()
             account = _normalise_account(asset, self.account_type)
             self._remember_account(account)
             return {"account": account, "positions": []}
