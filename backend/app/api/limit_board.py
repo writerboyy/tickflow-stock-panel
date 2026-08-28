@@ -99,11 +99,6 @@ def jijiang_realtime(request: Request):
     return _service(request).jijiang_realtime_view()
 
 
-@router.get("/four-mode-first-board")
-def four_mode_first_board(request: Request):
-    return _service(request).four_mode_first_board_view()
-
-
 @router.get("/sector-strength/{plate_id}/constituents")
 async def sector_constituents(
     plate_id: str,
