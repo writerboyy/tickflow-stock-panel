@@ -1508,6 +1508,9 @@ function SectorStrengthTable({
               const cardStateClass = todayBreakCount > 0
                 ? 'border-danger bg-danger/15 ring-2 ring-danger/80 shadow-[0_0_16px_rgba(239,68,68,0.28)]'
                 : selected ? 'border-warning bg-warning/15 ring-1 ring-warning/60' : ''
+              const cardHoverClass = todayBreakCount > 0
+                ? 'hover:border-danger hover:bg-danger/20'
+                : 'hover:border-warning/60 hover:bg-warning/5'
               return <div
                 key={item.thscode}
                 role="button"
@@ -1520,7 +1523,7 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`relative h-[304px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors hover:border-warning/60 hover:bg-warning/5 focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
+                className={`relative h-[304px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors ${cardHoverClass} focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
