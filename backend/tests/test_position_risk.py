@@ -1546,6 +1546,46 @@ def test_qmt_snapshot_accepts_negative_amortized_cost():
     assert snapshot["positions"][0]["cost_price"] == pytest.approx(-0.025899966666666666)
 
 
+def test_qmt_snapshot_preserves_position_price_and_market_value():
+    client = QmtZmqRpcClient(_qmt_settings())
+    responses = iter([
+        {"account_id": "account-1"},
+        {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
+        {"600036.SH": {
+            "stock_code": "600036.SH", "volume": 100, "available": 100,
+            "cost": 10, "price": 12.5, "market_value": 1_250,
+        }},
+        [],
+        [],
+    ])
+    client.call = lambda _method, _params=None: next(responses)
+
+    position = client.snapshot()["positions"][0]
+
+    assert position["price"] == pytest.approx(12.5)
+    assert position["market_value"] == pytest.approx(1_250)
+
+
+def test_qmt_snapshot_derives_position_price_from_market_value():
+    client = QmtZmqRpcClient(_qmt_settings())
+    responses = iter([
+        {"account_id": "account-1"},
+        {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
+        {"600036.SH": {
+            "stock_code": "600036.SH", "volume": 100, "available": 100,
+            "cost": 10, "market_value": 1_250,
+        }},
+        [],
+        [],
+    ])
+    client.call = lambda _method, _params=None: next(responses)
+
+    position = client.snapshot()["positions"][0]
+
+    assert position["price"] == pytest.approx(12.5)
+    assert position["market_value"] == pytest.approx(1_250)
+
+
 class _Repo:
     def __init__(self) -> None:
         self.rows = pl.DataFrame({
@@ -1619,6 +1659,48 @@ def test_qmt_sync_preserves_negative_amortized_cost_and_skips_relative_pnl(tmp_p
     row = service.view()["positions"][0]
     assert row["profit_loss"] == pytest.approx((18.0 + 0.0259) * 100)
     assert row["profit_loss_pct"] is None
+
+
+def test_qmt_sync_updates_broker_price_without_resetting_position_identity(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    first = service.replace_from_qmt({
+        "account_id": "account-1",
+        "account": {"name": "account-1", "cash": 1_000, "total_asset": 2_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 100,
+            "available": 100, "cost_price": 10, "price": 12.5, "market_value": 1_250,
+        }],
+    })
+    service.store.set_runtime("position:600036.SH", {"stage": "holding"})
+    second = service.replace_from_qmt({
+        "account_id": "account-1",
+        "account": {"name": "account-1", "cash": 1_000, "total_asset": 2_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 100,
+            "available": 100, "cost_price": 10, "price": 13.0, "market_value": 1_300,
+        }],
+    })
+
+    assert first["revision"] == second["revision"]
+    assert service.view()["positions"][0]["price"] == pytest.approx(13.0)
+    assert service.view()["positions"][0]["profit_loss"] == pytest.approx(300.0)
+    assert service.store.get_runtime("position:600036.SH")["stage"] == "holding"
+
+
+def test_qmt_sync_does_not_use_cost_as_price_when_broker_price_is_missing(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    saved = service.replace_from_qmt({
+        "account_id": "account-1",
+        "account": {"name": "account-1", "cash": 1_000, "total_asset": 2_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 100,
+            "available": 100, "cost_price": 10,
+        }],
+    })
+
+    assert saved["positions"][0]["import_price"] is None
+    assert service.view()["positions"][0]["price"] is None
+    assert service.view()["positions"][0]["profit_loss"] is None
 
 
 class _AssetAwareQuotes(_Quotes):
