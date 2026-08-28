@@ -286,6 +286,12 @@ class FuyaoAuctionCollector:
                 "error_code": None,
                 "collected_at": None,
             })
+        if self.configured and result.get("state") == "unconfigured":
+            result.update({
+                "state": "not_ready",
+                "message": "今日暂无竞价数据",
+                "error_code": None,
+            })
         if not self.configured and result.get("state") != "running":
             result.update({"state": "unconfigured", "message": "未配置 FUYAO_API_KEY"})
         result.update({"configured": self.configured, "trade_date": day.isoformat()})

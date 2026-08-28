@@ -134,6 +134,17 @@ async def test_missing_key_is_non_blocking(tmp_path, monkeypatch):
     assert collector.status()["state"] == "unconfigured"
 
 
+def test_status_normalizes_initial_state_when_key_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    collector = FuyaoAuctionCollector(tmp_path)
+
+    status = collector.status()
+
+    assert status["configured"] is True
+    assert status["state"] == "not_ready"
+    assert status["message"] == "今日暂无竞价数据"
+
+
 def test_publish_is_idempotent_per_checkpoint(tmp_path):
     day = date(2026, 8, 27)
     payload = {"timestamp": 1, "auction_phase": "open", "data_status": "ready", "collected_at": "2026-08-27T09:15:00+08:00"}
