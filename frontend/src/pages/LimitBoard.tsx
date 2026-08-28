@@ -715,7 +715,7 @@ function LimitBoardAllocationDialog({
   const cachedAccount = qmt.data?.account
   const cachedBuyingPower = creditBuy
     ? creditBuyMode === 'financing'
-      ? cachedAccount?.fin_enbuy_balance ?? cachedAccount?.credit_financing_buying_power
+      ? cachedAccount?.fin_enbuy_balance
       : cachedAccount?.assure_enbuy_balance ?? cachedAccount?.credit_assure_buying_power
     : cachedAccount?.cash
   const cachedBasisLabel = creditBuy
@@ -725,7 +725,7 @@ function LimitBoardAllocationDialog({
     ?? cachedAccount?.fin_enable_quota
     ?? cachedAccount?.financing_available_amount
   const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
-    ?? cachedAccount?.credit_financing_buying_power
+    ?? null
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
   const geneDetail = row.candidate_score_detail?.premium_gene
@@ -1511,6 +1511,8 @@ function SectorStrengthTable({
               const cardHoverClass = todayBreakCount > 0
                 ? 'hover:border-danger hover:bg-danger/20'
                 : 'hover:border-warning/60 hover:bg-warning/5'
+              const showHotIntraday = hotIntradayAvailable && hotIntradayVisible
+              const cardHeightClass = showHotIntraday ? 'h-[304px]' : 'h-[104px]'
               return <div
                 key={item.thscode}
                 role="button"
@@ -1523,7 +1525,7 @@ function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`relative h-[304px] w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors ${cardHoverClass} focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
+                className={`relative ${cardHeightClass} w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors ${cardHoverClass} focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看 K 线与分时">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
@@ -1532,7 +1534,7 @@ function SectorStrengthTable({
                 </div></div>
                 <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-[9px]"><span className="min-w-0 truncate text-muted">{item.thscode}</span>{item.yesterday_boards && item.yesterday_boards > 0 ? <span className="shrink-0 rounded border border-warning/40 bg-warning/10 px-1 text-warning">{item.yesterday_boards === 1 ? '昨日首板' : `昨日${item.yesterday_boards}板`}</span> : null}{todayBreakCount > 0 ? <span className="inline-flex shrink-0 items-center gap-0.5 rounded border border-danger bg-danger/20 px-1 py-0.5 font-semibold text-danger shadow-[0_0_8px_rgba(239,68,68,0.35)]"><AlertTriangle className="h-3 w-3" />今日炸板 {todayBreakCount} 次</span> : null}{visual.label ? <span className="shrink-0 text-secondary">{visual.label}</span> : null}</div>
                 <div className="mt-1 flex items-center gap-2 truncate text-[9px]"><span className="shrink-0 font-mono text-muted">涨速 {scorePct(item.rise_speed_pct, 2)}</span>{item.sector ? <span className="truncate text-warning">{item.sector}</span> : null}</div>
-                {hotIntradayAvailable && hotIntradayVisible ? <div className="pointer-events-none absolute inset-x-2.5 bottom-2.5 top-[150px] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[symbol] ?? []} changePct={quote?.change_pct} width={320} height={140} className="block h-full w-full" /></div> : null}
+                {showHotIntraday ? <div className="pointer-events-none absolute inset-x-2.5 bottom-2.5 top-[150px] overflow-hidden" aria-label={`${item.name || item.ticker}分时信号`}><MiniIntraday rows={hotMinuteData[symbol] ?? []} changePct={quote?.change_pct} width={320} height={140} className="block h-full w-full" /></div> : null}
               </div>
             })}
           </div>

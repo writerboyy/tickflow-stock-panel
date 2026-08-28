@@ -751,7 +751,7 @@ def test_credit_order_preview_can_use_financing_buying_power(tmp_path: Path):
     assert preview["volume"] == 2_500
 
 
-def test_credit_order_preview_treats_missing_financing_buying_power_as_zero(tmp_path: Path):
+def test_credit_order_preview_uses_financing_amount_when_buying_power_field_is_unavailable(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
     service.client.call = lambda method, _params: {
         "cash": 100_000,
@@ -768,15 +768,40 @@ def test_credit_order_preview_treats_missing_financing_buying_power_as_zero(tmp_
         "credit_buy_mode": "financing",
     })
 
-    assert preview["basis_label"] == "可买担保品资金"
+    assert preview["basis_label"] == "可买融资标的资金"
     assert preview["financing_available_amount"] == 80_000
-    assert preview["buying_power_amount"] == 18_000
-    assert preview["target_amount"] == 18_000
-    assert preview["actual_amount"] == 18_000
-    assert preview["volume"] == 1_800
+    assert preview["buying_power_amount"] == 80_000
+    assert preview["target_amount"] == 80_000
+    assert preview["actual_amount"] == 80_000
+    assert preview["volume"] == 8_000
     assert preview["requested_credit_buy_mode"] == "financing"
-    assert preview["credit_buy_mode"] == "collateral"
-    assert preview["credit_buy_mode_switched"] is True
+    assert preview["credit_buy_mode"] == "financing"
+    assert preview["credit_buy_mode_switched"] is False
+
+
+def test_credit_order_preview_uses_credit_limit_when_financing_buying_power_is_unavailable(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.call = lambda method, _params: {
+        "cash": 100_000,
+        "m_dAssureEnbuyBalance": 18_000,
+        "m_dFinEnableBalance": 500_000,
+        "credit_financing_buying_power": 500_000,
+    } if method == "get_asset" else None
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600036.SH",
+        "price": 10,
+        "price_type": "LIMIT",
+        "allocation_mode": "available",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["financing_available_amount"] == 500_000
+    assert preview["buying_power_amount"] == 500_000
+    assert preview["requested_credit_buy_mode"] == "financing"
+    assert preview["credit_buy_mode"] == "financing"
+    assert preview["credit_buy_mode_switched"] is False
 
 
 def test_credit_order_validation_switches_to_fallback_buy_mode_when_selected_amount_is_short(tmp_path: Path):
@@ -1011,7 +1036,6 @@ def test_qmt_submit_sends_effective_credit_buy_mode_after_fallback(tmp_path: Pat
             return {
                 "cash": 3_800.52,
                 "m_dAssureEnbuyBalance": 18_000,
-                "m_dFinEnableBalance": 80_000,
             }
         if method == "submit_orders_batch":
             order = params["orders"][0]

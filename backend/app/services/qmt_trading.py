@@ -91,7 +91,6 @@ _CREDIT_ASSURE_BUYING_POWER_FIELDS = (
 _CREDIT_FINANCING_BUYING_POWER_FIELDS = (
     "m_dFinEnbuyBalance",
     "fin_enbuy_balance",
-    "credit_financing_buying_power",
 )
 _CREDIT_FINANCING_AVAILABLE_FIELDS = (
     "m_dFinEnableBalance",
@@ -123,8 +122,11 @@ def _credit_buying_power(
         raise ValueError("信用账户买入方式必须是担保品买入或融资买入")
     financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
     if credit_buy_mode == "financing":
+        financing_buying_power = _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS)
         return (
-            _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS) or 0.0,
+            financing_buying_power
+            if financing_buying_power is not None
+            else financing_available if financing_available is not None else 0.0,
             "可买融资标的资金",
             financing_available,
         )
@@ -150,11 +152,14 @@ def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -
         if value is not None and value >= 0:
             account[field] = value
     account["account_type"] = str(account_type or asset.get("account_type") or "STOCK").upper()
-    # QMT may omit the financing buying-power field when no financing quota is
-    # currently available. Treat the omission as an explicit zero at the
-    # normalized account boundary; it must never fall back to cash or credit.
+    # Some Big QMT account rows expose financing buying power as an unset
+    # sentinel while still reporting the usable financing amount/quota.
+    # Preserve that positive amount instead of turning a valid credit account
+    # into a false zero; cash remains a separate collateral-buying field.
     if account["account_type"] == "CREDIT" and _first_number(account, _CREDIT_FINANCING_BUYING_POWER_FIELDS) is None:
-        account["fin_enbuy_balance"] = 0.0
+        financing_available = _first_number(account, _CREDIT_FINANCING_AVAILABLE_FIELDS)
+        if financing_available is not None:
+            account["fin_enbuy_balance"] = financing_available
     return account
 
 
