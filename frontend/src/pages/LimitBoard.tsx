@@ -1464,7 +1464,7 @@ function scoreDetailRows(
         { label: '分时样本', value: flow.bars == null ? '--' : `${flow.bars} 根` },
       ] : []),
       ...(technical ? [
-        { label: '均线形态', value: `${maVerdict ? `${maVerdict} · ` : ''}${scoreDetailNumber(technical.price, 2)} / ${scoreDetailNumber(technical.ma5, 2)} / ${scoreDetailNumber(technical.ma20, 2)}`, tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
+        { label: '均线形态', value: maVerdict || '--', tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
         { label: 'RSI(14)', value: scoreDetailNumber(technical.rsi_14, 1) },
       ] : []),
     ] : [{ label: '拉升细则', value: '暂无数据', tone: 'text-warning' }],
