@@ -1018,13 +1018,6 @@ function LimitBoardAllocationDialog({
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs">
       <div className={kind === 'board' ? 'grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]' : ''}>
         {kind === 'board' ? <section className="min-w-0 rounded-btn border border-border bg-base p-3">
-          <div className="mb-3 flex items-center justify-between gap-2 border-b border-border pb-2">
-            <div>
-              <h3 className="text-xs font-semibold text-secondary">综合评分 v5</h3>
-              <p className="mt-0.5 text-[10px] text-muted">100 分制 · 历史基因、板块强度、拉升健康度</p>
-            </div>
-            <span className="font-mono text-[10px] text-muted">打板决策参考</span>
-          </div>
           {comprehensive ? <ComprehensiveScore
             score={comprehensive.comprehensive_score}
             maxScore={comprehensive.max_score}
