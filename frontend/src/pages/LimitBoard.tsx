@@ -1042,7 +1042,10 @@ function LimitBoardAllocationDialog({
                 ...comprehensive.dimensions.sentiment,
                 maxScore: comprehensive.dimensions.sentiment.max_score,
                 fullMaxScore: comprehensive.dimensions.sentiment.full_max_score,
-                unavailableComponents: comprehensive.dimensions.sentiment.unavailable_components,
+                components: Object.fromEntries(
+                  Object.entries(comprehensive.dimensions.sentiment.components).filter(([key]) => key !== 'leadership'),
+                ),
+                unavailableComponents: comprehensive.dimensions.sentiment.unavailable_components?.filter(key => key !== 'leadership'),
                 label: '板块强度',
                 displayValue: mergedDetail.sector ? sectorRankText(mergedDetail.sector) : undefined,
               },
