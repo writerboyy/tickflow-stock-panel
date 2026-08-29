@@ -2069,13 +2069,14 @@ def test_rotation_only_fallback_when_realtime_sector_unavailable(tmp_path, monke
     assert sector["data_source"] == "rps_rotation"
     assert sector["realtime_available"] is False
     assert sector["rotation_available"] is True
-    assert sector["rotation_label"] == "主线"
+    assert sector["rotation_label"] == "震荡"
+    assert sector["days"][-1]["date"] == "2026-08-27"
     comprehensive = detail["comprehensive"]
     sentiment = comprehensive["dimensions"]["sentiment"]
     assert sentiment["components"]["relative_momentum"] > 0
     assert "breadth" in sentiment["unavailable_components"]
     assert "sector_position" in comprehensive["dimensions"]["health"]["unavailable_components"]
-    assert "板块相对强度高" in comprehensive["strengths"]
+    assert "板块相对强度高" not in comprehensive["strengths"]
 
 
 def test_close_frozen_sector_inputs_score_realtime_components_after_hours(

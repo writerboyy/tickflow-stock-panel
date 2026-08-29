@@ -3329,10 +3329,21 @@ class LimitBoardService:
 
     def _candidate_stock_snapshot(
         self, now: datetime,
-    ) -> tuple[pl.DataFrame, dict[str, dict[str, Any]]]:
+        *,
+        with_date: bool = False,
+    ) -> tuple[pl.DataFrame, dict[str, dict[str, Any]]] | tuple[
+        pl.DataFrame, dict[str, dict[str, Any]], date | None
+    ]:
+        def result(
+            frame: pl.DataFrame,
+            rows: dict[str, dict[str, Any]],
+            snapshot_date: date | None = None,
+        ):
+            return (frame, rows, snapshot_date) if with_date else (frame, rows)
+
         getter = getattr(self.quote_service, "get_enriched_today", None)
         if not callable(getter):
-            return pl.DataFrame(), {}
+            return result(pl.DataFrame(), {})
         stock_df, stock_date = getter()
         if stock_date != now.date():
             # 日线锚定「最近已完成交易日」：交易时段内只接受当日实时快照；
@@ -3344,12 +3355,12 @@ class LimitBoardService:
                 and stock_date is not None
                 and 0 <= (now.date() - stock_date).days <= 7
             ):
-                return pl.DataFrame(), {}
+                return result(pl.DataFrame(), {})
         if stock_df is None or stock_df.is_empty():
-            return pl.DataFrame(), {}
+            return result(pl.DataFrame(), {}, stock_date if isinstance(stock_date, date) else None)
         columns = [column for column in stock_df.columns if column in _SCORE_STOCK_COLUMNS]
         if "symbol" not in columns:
-            return pl.DataFrame(), {}
+            return result(pl.DataFrame(), {}, stock_date if isinstance(stock_date, date) else None)
         rows = {}
         for raw in stock_df.select(columns).iter_rows(named=True):
             symbol = str(raw.get("symbol") or "").strip().upper()
@@ -3360,7 +3371,7 @@ class LimitBoardService:
                 "symbol": symbol,
                 "name": self._resolve_name(symbol, raw.get("name")),
             }
-        return stock_df, rows
+        return result(stock_df, rows, stock_date if isinstance(stock_date, date) else None)
 
     def _candidate_intraday_features(
         self, symbols: set[str], now: datetime,
@@ -3673,7 +3684,7 @@ class LimitBoardService:
             missing = any(symbol not in previous_cache for symbol in symbols)
             if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
                 return False
-            _, stock_rows = self._candidate_stock_snapshot(now)
+            _, stock_rows, stock_date = self._candidate_stock_snapshot(now, with_date=True)
             intraday_features = self._candidate_intraday_features(symbols, now)
             large_orders = getattr(self.app_state, "large_order_service", None)
             set_score_symbols = getattr(large_orders, "set_score_symbols", None)
@@ -3700,11 +3711,18 @@ class LimitBoardService:
                         "concept": concepts,
                         "industry": industries,
                     }
-            rotations = {
-                "concept": self._rotation("concept", None, now.date()),
-                "industry": self._rotation("industry", 2, now.date()),
-            } if sector_service is not None else {}
             realtime_sectors, realtime_anchor = self._sector_strength_snapshot(now.date())
+            rotation_cutoff = (
+                realtime_anchor
+                if isinstance(realtime_anchor, date)
+                else stock_date
+                if isinstance(stock_date, date)
+                else now.date()
+            )
+            rotations = {
+                "concept": self._rotation("concept", None, rotation_cutoff),
+                "industry": self._rotation("industry", 2, rotation_cutoff),
+            } if sector_service is not None else {}
 
             valid_snapshots = dict(runtime.get("candidate_score_snapshots") or {})
             for symbol, value in previous_cache.items():
@@ -3783,7 +3801,7 @@ class LimitBoardService:
                             rotation=rotations.get(kind) or {},
                             stock_rows=sector_stock_rows,
                             member_symbols=sector_members,
-                            today=now.date(),
+                            today=rotation_cutoff,
                             realtime=realtime,
                             realtime_snapshot=sector_snapshot,
                         )
@@ -3813,7 +3831,7 @@ class LimitBoardService:
                         if not targets:
                             continue
                         sector = rotation_only_detail(
-                            targets[0], rotations.get(kind) or {}, now.date(),
+                            targets[0], rotations.get(kind) or {}, rotation_cutoff,
                         )
                         if sector is not None:
                             sector["as_of"] = now.isoformat()
