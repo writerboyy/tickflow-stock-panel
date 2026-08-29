@@ -2072,8 +2072,8 @@ def test_rotation_only_fallback_when_realtime_sector_unavailable(tmp_path, monke
     assert sector["rotation_label"] == "主线"
     comprehensive = detail["comprehensive"]
     sentiment = comprehensive["dimensions"]["sentiment"]
-    assert sentiment["components"]["sector_pattern"] > 0
-    assert "sector_current" in sentiment["unavailable_components"]
+    assert sentiment["components"]["relative_momentum"] > 0
+    assert "breadth" in sentiment["unavailable_components"]
     assert "sector_position" in comprehensive["dimensions"]["health"]["unavailable_components"]
     assert "板块相对强度高" in comprehensive["strengths"]
 
@@ -2164,9 +2164,10 @@ def test_close_frozen_sector_inputs_score_realtime_components_after_hours(
     assert sector["realtime_rank"] == 1
     comprehensive = detail["comprehensive"]
     sentiment = comprehensive["dimensions"]["sentiment"]
-    # 当日表现（板块 +3%、上涨占比 4/6）与过热排名（1/10 顶部）按收盘值出分
-    assert sentiment["components"]["sector_current"] == pytest.approx(3.8, abs=0.05)
-    assert sentiment["components"]["overheat_risk"] < 10.0
+    # 机构分项使用冻结的横截面数据：广度 4/6 -> 4 分，龙头 10 -> 3 分。
+    assert sentiment["components"]["breadth"] == pytest.approx(4.0, abs=0.05)
+    assert sentiment["components"]["leadership"] == pytest.approx(3.0, abs=0.05)
+    assert "sector_current" not in sentiment["components"]
     health = comprehensive["dimensions"]["health"]
     assert health["components"]["sector_position"] >= 9.0
 

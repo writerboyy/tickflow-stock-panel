@@ -1563,6 +1563,7 @@ export interface LimitBoardRow {
       institutional_score?: number
       institutional_max_score?: number
       institutional_components?: Record<string, number>
+      institutional_component_max?: Record<string, number>
       days?: Array<{ date: string; change_pct: number; rank: number; rank_count: number; rank_percentile: number }>
       one_day_change_pct?: number | null
       three_day_change_pct?: number | null
@@ -1650,6 +1651,15 @@ export interface LimitBoardRow {
           full_max_score?: number
           percentage: number
           components: {
+            relative_momentum?: number
+            trend?: number
+            persistence?: number
+            stability?: number
+            breadth?: number
+            money_flow?: number
+            leadership?: number
+            liquidity?: number
+            // 旧缓存兼容字段
             sector_pattern?: number
             overheat_risk?: number
             sector_current?: number
@@ -1782,6 +1792,7 @@ export interface LimitBoardSectorStrengthRow {
   institutional_score?: number | null
   institutional_max_score?: number | null
   institutional_components?: Record<string, number>
+  institutional_component_max?: Record<string, number>
   one_day_change_pct?: number | null
   three_day_change_pct?: number | null
   five_day_change_pct?: number | null

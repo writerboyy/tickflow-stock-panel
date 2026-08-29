@@ -55,6 +55,15 @@ const COMPONENT_LABELS: Record<string, string> = {
   seal_success: '封板成功',
   consecutive_ability: '连板能力',
   // 板块强度
+  relative_momentum: '相对动量',
+  trend: '趋势',
+  persistence: '持续性',
+  stability: '稳定性',
+  breadth: '上涨广度',
+  money_flow: '资金流',
+  leadership: '龙头带动',
+  liquidity: '流动性',
+  // 旧缓存兼容字段
   sector_pattern: '板块形态',
   overheat_risk: '过热风险',
   sector_current: '当日表现',

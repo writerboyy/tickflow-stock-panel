@@ -637,13 +637,55 @@ def test_rotation_only_detail_scores_daily_rotation_and_gates_realtime_parts():
 
     result = comprehensive_score({"sector": detail})
     sentiment = result["dimensions"]["sentiment"]
-    # 日频组件正常计分：板块形态 + 过热（5日涨幅 + 连涨天数，排名缺）
-    assert sentiment["components"]["sector_pattern"] == pytest.approx(4.9, abs=0.05)
-    assert sentiment["components"]["overheat_risk"] == pytest.approx(6.0)
-    assert "sector_current" in sentiment["unavailable_components"]
+    # 机构日频分项按 0.3 折算到板块强度；实时分项缺失时不计分。
+    assert sentiment["components"] == {
+        "relative_momentum": pytest.approx(3.9, abs=0.05),
+        "trend": pytest.approx(3.0, abs=0.05),
+        "persistence": pytest.approx(1.2, abs=0.05),
+        "stability": pytest.approx(1.74, abs=0.05),
+    }
+    assert sentiment["max_score"] == pytest.approx(12.9, abs=0.05)
+    assert sentiment["unavailable_components"] == [
+        "breadth", "money_flow", "leadership", "liquidity",
+    ]
     health = result["dimensions"]["health"]
     assert "sector_position" in health["unavailable_components"]
     assert "板块相对强度高" in result["strengths"]
+
+
+def test_comprehensive_score_uses_all_institutional_sector_components():
+    components = {
+        "relative_momentum": 20.0,
+        "trend": 10.0,
+        "persistence": 5.0,
+        "stability": 7.0,
+        "breadth": 20.0,
+        "money_flow": 15.0,
+        "leadership": 10.0,
+        "liquidity": 5.0,
+    }
+    result = comprehensive_score({
+        "sector": {
+            "institutional_components": components,
+            "institutional_component_max": {
+                "relative_momentum": 20.0,
+                "trend": 10.0,
+                "persistence": 10.0,
+                "stability": 10.0,
+                "breadth": 20.0,
+                "money_flow": 15.0,
+                "leadership": 10.0,
+                "liquidity": 5.0,
+            },
+        },
+    })
+
+    sentiment = result["dimensions"]["sentiment"]
+    assert sentiment["score"] == pytest.approx(27.6)
+    assert sentiment["max_score"] == pytest.approx(30.0)
+    assert sentiment["unavailable_components"] == []
+    assert sentiment["components"]["relative_momentum"] == pytest.approx(6.0)
+    assert sentiment["components"]["money_flow"] == pytest.approx(4.5)
 
 
 def test_rotation_only_detail_returns_none_without_five_completed_days():

@@ -564,6 +564,12 @@ def rotation_detail(
             "persistence": round(persistence_score, 2),
             "stability": round(stability_score, 2),
         },
+        "institutional_component_max": {
+            "relative_momentum": round(momentum_max, 2),
+            "trend": round(trend_max, 2),
+            "persistence": round(persistence_max, 2),
+            "stability": round(stability_max, 2),
+        },
         "days": target_days[-20:],
         "one_day_change_pct": one_day[0] if one_day else None,
         "three_day_change_pct": three_day[0] if three_day else None,
@@ -697,11 +703,13 @@ def sector_detail(
     # 机构式当日确认：广度、资金、龙头和流动性各自独立计分，缺失时
     # 只减少可得满分，不把缺失数据当成中性分数。
     institutional_components = dict(history.get("institutional_components") or {})
+    institutional_component_max = dict(history.get("institutional_component_max") or {})
     institutional_score = float(history.get("institutional_score") or 0.0)
     institutional_max = float(history.get("institutional_max_score") or 0.0)
     breadth_available = up_ratio is not None
     if breadth_available:
         institutional_components["breadth"] = _clamp(up_ratio) * 20.0
+        institutional_component_max["breadth"] = 20.0
         institutional_score += institutional_components["breadth"]
         institutional_max += 20.0
     flow_amount = finite((realtime or {}).get("amount"))
@@ -709,16 +717,19 @@ def sector_detail(
     flow_ratio = flow_net / flow_amount if flow_net is not None and flow_amount and flow_amount > 0 else None
     if flow_ratio is not None:
         institutional_components["money_flow"] = _linear(flow_ratio, -0.20, 0.40, 15.0)
+        institutional_component_max["money_flow"] = 15.0
         institutional_score += institutional_components["money_flow"]
         institutional_max += 15.0
     if position_available:
         leadership_score = 10.0 if is_leader else 7.0 if is_front else 3.0 if candidate_index < 10 else 0.0
         institutional_components["leadership"] = leadership_score
+        institutional_component_max["leadership"] = 10.0
         institutional_score += leadership_score
         institutional_max += 10.0
     volume_ratio = finite((realtime or {}).get("volume_ratio"))
     if volume_ratio is not None:
         institutional_components["liquidity"] = _linear(volume_ratio, 0.8, 2.0, 5.0)
+        institutional_component_max["liquidity"] = 5.0
         institutional_score += institutional_components["liquidity"]
         institutional_max += 5.0
     rotation_fields = {
@@ -766,6 +777,9 @@ def sector_detail(
         "institutional_max_score": round(institutional_max, 2),
         "institutional_components": {
             key: round(float(value), 2) for key, value in institutional_components.items()
+        },
+        "institutional_component_max": {
+            key: round(float(value), 2) for key, value in institutional_component_max.items()
         },
     }
 
@@ -909,118 +923,162 @@ def comprehensive_score(
     realtime_rank = finite(sector.get("realtime_rank"))
     realtime_rank_count = finite(sector.get("realtime_rank_count"))
 
-    # 1. 板块K线形态 (15分)：依赖真实轮动数据，缺失即数据不足
-    sector_pattern_available = rotation_available and (
-        institutional_score is not None or rotation_score is not None
+    # 机构量化板块强度（30分）：原始机构分项是百分制，统一按 0.3 折算。
+    # component_max 同时决定可得满分；缺项不计分并在前端显示「数据不足」。
+    institutional_component_values = sector.get("institutional_components")
+    institutional_component_max_values = sector.get("institutional_component_max")
+    institutional_component_values = (
+        institutional_component_values
+        if isinstance(institutional_component_values, dict)
+        else {}
     )
-    sector_pattern = (
-        _clamp(institutional_score / 100.0) * 15.0
-        if institutional_score is not None
-        else (rotation_score / 20.0) * 15.0
-        if rotation_score is not None else 0.0
+    institutional_component_max_values = (
+        institutional_component_max_values
+        if isinstance(institutional_component_max_values, dict)
+        else {}
+    )
+    institutional_component_defaults = {
+        "relative_momentum": 20.0,
+        "trend": 10.0,
+        "persistence": 10.0,
+        "stability": 10.0,
+        "breadth": 20.0,
+        "money_flow": 15.0,
+        "leadership": 10.0,
+        "liquidity": 5.0,
+    }
+    institutional_keys = tuple(institutional_component_defaults)
+    has_institutional_components = any(
+        finite(institutional_component_values.get(key)) is not None
+        for key in institutional_keys
     )
 
-    # 2. 板块过热风险 (10分)：三个子项各自门控，缺哪项哪项不计分
-    overheat_gain_available = five_day_change is not None
-    if not overheat_gain_available:
-        overheat_gain = 0.0
-    elif five_day_change < 0.05:
-        overheat_gain = 5.0
-    elif five_day_change < 0.10:
-        overheat_gain = 4.0
-    elif five_day_change < 0.15:
-        overheat_gain = 2.0
-    elif five_day_change < 0.20:
-        overheat_gain = 1.0
+    if has_institutional_components:
+        institutional_dimension_components = []
+        for key in institutional_keys:
+            raw_score = finite(institutional_component_values.get(key))
+            raw_max = finite(institutional_component_max_values.get(key))
+            if raw_max is None and raw_score is not None:
+                # 兼容机构分项已存在、但尚未持久化 component_max 的旧快照。
+                raw_max = institutional_component_defaults[key]
+            available = raw_score is not None and raw_max is not None and raw_max > 0
+            scaled_max = raw_max * 0.3 if available and raw_max is not None else 0.0
+            scaled_score = (
+                min(max(raw_score, 0.0), raw_max) * 0.3
+                if available and raw_score is not None and raw_max is not None
+                else 0.0
+            )
+            institutional_dimension_components.append(
+                (key, scaled_score, scaled_max, available)
+            )
+        sentiment = _dimension_result(
+            "板块强度", 30.0, institutional_dimension_components,
+        )
     else:
-        overheat_gain = 0.0
+        # 兼容没有机构分项的历史缓存，继续使用旧的日频/实时三项评分。
+        # 1. 板块K线形态 (15分)：依赖真实轮动数据，缺失即数据不足
+        sector_pattern_available = rotation_available and rotation_score is not None
+        sector_pattern = (rotation_score / 20.0) * 15.0 if rotation_score is not None else 0.0
 
-    overheat_streak_available = bool(days)
-    consecutive_up = 0
-    for day in reversed(days):
-        if (finite(day.get("change_pct")) or 0.0) > 0:
-            consecutive_up += 1
+        # 2. 板块过热风险 (10分)：三个子项各自门控，缺哪项哪项不计分
+        overheat_gain_available = five_day_change is not None
+        if not overheat_gain_available:
+            overheat_gain = 0.0
+        elif five_day_change < 0.05:
+            overheat_gain = 5.0
+        elif five_day_change < 0.10:
+            overheat_gain = 4.0
+        elif five_day_change < 0.15:
+            overheat_gain = 2.0
+        elif five_day_change < 0.20:
+            overheat_gain = 1.0
         else:
-            break
-    if not overheat_streak_available:
-        overheat_streak = 0.0
-    elif consecutive_up <= 2:
-        overheat_streak = 3.0
-    elif consecutive_up <= 4:
-        overheat_streak = 2.0
-    elif consecutive_up <= 6:
-        overheat_streak = 1.0
-    else:
-        overheat_streak = 0.0
+            overheat_gain = 0.0
 
-    overheat_rank_available = (
-        realtime_rank is not None
-        and realtime_rank_count is not None
-        and realtime_rank_count > 0
-    )
-    if not overheat_rank_available:
-        overheat_rank = 0.0  # 缺数据不计分，不再默认「安全」送 2 分
-    else:
-        rank_percentile = realtime_rank / realtime_rank_count
-        if rank_percentile < 0.20:
-            overheat_rank = 0.0  # 顶部区域
-        elif rank_percentile < 0.40:
-            overheat_rank = 1.0  # 高位
+        overheat_streak_available = bool(days)
+        consecutive_up = 0
+        for day in reversed(days):
+            if (finite(day.get("change_pct")) or 0.0) > 0:
+                consecutive_up += 1
+            else:
+                break
+        if not overheat_streak_available:
+            overheat_streak = 0.0
+        elif consecutive_up <= 2:
+            overheat_streak = 3.0
+        elif consecutive_up <= 4:
+            overheat_streak = 2.0
+        elif consecutive_up <= 6:
+            overheat_streak = 1.0
         else:
-            overheat_rank = 2.0  # 安全
+            overheat_streak = 0.0
 
-    overheat_available = (
-        overheat_gain_available or overheat_streak_available or overheat_rank_available
-    )
-    overheat_score = overheat_gain + overheat_streak + overheat_rank
-    overheat_max = (
-        (5.0 if overheat_gain_available else 0.0)
-        + (3.0 if overheat_streak_available else 0.0)
-        + (2.0 if overheat_rank_available else 0.0)
-    )
+        overheat_rank_available = (
+            realtime_rank is not None
+            and realtime_rank_count is not None
+            and realtime_rank_count > 0
+        )
+        if not overheat_rank_available:
+            overheat_rank = 0.0
+        else:
+            rank_percentile = realtime_rank / realtime_rank_count
+            if rank_percentile < 0.20:
+                overheat_rank = 0.0
+            elif rank_percentile < 0.40:
+                overheat_rank = 1.0
+            else:
+                overheat_rank = 2.0
 
-    # 3. 板块当日表现 (5分)
-    sector_change = finite(sector.get("change_pct"))
-    if sector_change is None:
-        sector_change = finite(sector.get("realtime_change_pct"))
-    up_ratio = finite(sector.get("up_ratio"))
+        overheat_available = (
+            overheat_gain_available or overheat_streak_available or overheat_rank_available
+        )
+        overheat_score = overheat_gain + overheat_streak + overheat_rank
+        overheat_max = (
+            (5.0 if overheat_gain_available else 0.0)
+            + (3.0 if overheat_streak_available else 0.0)
+            + (2.0 if overheat_rank_available else 0.0)
+        )
 
-    # 3.1 当日涨跌幅 (3分)
-    current_change_available = sector_change is not None
-    if not current_change_available:
-        current_change = 0.0
-    elif sector_change >= 0.04:
-        current_change = 3.0
-    elif sector_change >= 0.02:
-        current_change = _linear(sector_change, 0.02, 0.04, 1.0) + 2.0
-    elif sector_change >= 0.0:
-        current_change = _linear(sector_change, 0.0, 0.02, 1.0) + 1.0
-    else:
-        current_change = 0.0
+        # 3. 板块当日表现 (5分)
+        sector_change = finite(sector.get("change_pct"))
+        if sector_change is None:
+            sector_change = finite(sector.get("realtime_change_pct"))
+        up_ratio = finite(sector.get("up_ratio"))
 
-    # 3.2 上涨家数占比 (2分)
-    current_breadth_available = up_ratio is not None
-    if not current_breadth_available:
-        current_breadth = 0.0
-    elif up_ratio >= 0.80:
-        current_breadth = 2.0
-    elif up_ratio >= 0.60:
-        current_breadth = _linear(up_ratio, 0.60, 0.80, 1.0) + 1.0
-    else:
-        current_breadth = _linear(up_ratio, 0.0, 0.60, 1.0)
+        current_change_available = sector_change is not None
+        if not current_change_available:
+            current_change = 0.0
+        elif sector_change >= 0.04:
+            current_change = 3.0
+        elif sector_change >= 0.02:
+            current_change = _linear(sector_change, 0.02, 0.04, 1.0) + 2.0
+        elif sector_change >= 0.0:
+            current_change = _linear(sector_change, 0.0, 0.02, 1.0) + 1.0
+        else:
+            current_change = 0.0
 
-    sector_current_available = current_change_available or current_breadth_available
-    sector_current_score = current_change + current_breadth
-    sector_current_max = (
-        (3.0 if current_change_available else 0.0)
-        + (2.0 if current_breadth_available else 0.0)
-    )
+        current_breadth_available = up_ratio is not None
+        if not current_breadth_available:
+            current_breadth = 0.0
+        elif up_ratio >= 0.80:
+            current_breadth = 2.0
+        elif up_ratio >= 0.60:
+            current_breadth = _linear(up_ratio, 0.60, 0.80, 1.0) + 1.0
+        else:
+            current_breadth = _linear(up_ratio, 0.0, 0.60, 1.0)
 
-    sentiment = _dimension_result("板块强度", 30.0, [
-        ("sector_pattern", sector_pattern, 15.0, sector_pattern_available),
-        ("overheat_risk", overheat_score, overheat_max, overheat_available),
-        ("sector_current", sector_current_score, sector_current_max, sector_current_available),
-    ])
+        sector_current_available = current_change_available or current_breadth_available
+        sector_current_score = current_change + current_breadth
+        sector_current_max = (
+            (3.0 if current_change_available else 0.0)
+            + (2.0 if current_breadth_available else 0.0)
+        )
+
+        sentiment = _dimension_result("板块强度", 30.0, [
+            ("sector_pattern", sector_pattern, 15.0, sector_pattern_available),
+            ("overheat_risk", overheat_score, overheat_max, overheat_available),
+            ("sector_current", sector_current_score, sector_current_max, sector_current_available),
+        ])
 
     # ========================================
     # 三、拉升健康度（40分）—— 全部使用打板决策时点已存在的数据
@@ -1280,14 +1338,15 @@ def comprehensive_score(
         elif rotation_available and rotation_label == "退潮":
             warnings.append("板块退潮中")
 
-    if five_day_change is not None:
-        if five_day_change > 0.15:
-            warnings.append("板块涨幅过大，注意回调风险")
-        elif five_day_change < 0.05:
-            strengths.append("板块涨幅不大，安全")
+    if not has_institutional_components:
+        if five_day_change is not None:
+            if five_day_change > 0.15:
+                warnings.append("板块涨幅过大，注意回调风险")
+            elif five_day_change < 0.05:
+                strengths.append("板块涨幅不大，安全")
 
-    if overheat_streak_available and consecutive_up > 5:
-        warnings.append("板块连续上涨多日，过热")
+        if overheat_streak_available and consecutive_up > 5:
+            warnings.append("板块连续上涨多日，过热")
 
     # 拉升健康度
     if position_available:
