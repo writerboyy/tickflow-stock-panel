@@ -733,7 +733,24 @@ function LimitBoardAllocationDialog({
     : '可用资金'
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
-  const geneDetail = row.candidate_score_detail?.premium_gene
+  const rowDetail = row.candidate_score_detail ?? {}
+  const candidateScoreQuery = useQuery({
+    queryKey: QK.limitBoardCandidateScore(row.symbol),
+    queryFn: () => api.limitBoardCandidateScore(row.symbol),
+    // 板块强度/雷达手动入口标的尚未进入评分扫描集（加入打板池前），
+    // 确认弹窗打开时按需拉一次完整 v5 评分；行上已有 comprehensive
+    // （打板池行后端直接带快照）时不请求。
+    enabled: kind === 'board' && Boolean(row.symbol) && !rowDetail.comprehensive,
+    staleTime: 5_000,
+    gcTime: 60_000,
+    retry: false,
+  })
+  // 行上数据（打板池快照）优先于按需端点结果。
+  const mergedDetail: LimitBoardRow['candidate_score_detail'] = {
+    ...(candidateScoreQuery.data?.candidate_score_detail ?? {}),
+    ...rowDetail,
+  }
+  const geneDetail = mergedDetail.premium_gene
   const localGeneReady = Boolean(
     geneDetail
     && geneDetail.limit_up_count != null
@@ -972,8 +989,8 @@ function LimitBoardAllocationDialog({
     && (!requiresPreview || estimatedVolume >= 100),
   )
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
-  const comprehensive = row.candidate_score_detail?.comprehensive
-  const scoreDetails = comprehensive ? scoreDetailRows(row.candidate_score_detail ?? {}) : undefined
+  const comprehensive = mergedDetail.comprehensive
+  const scoreDetails = comprehensive ? scoreDetailRows(mergedDetail) : undefined
   const scoreUnavailableReason = '后端尚未生成 v5 评分快照，等待板块强度、分时或资金数据返回后自动刷新。'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
     { value: 'available', label: poolAllocationLabel('available') },

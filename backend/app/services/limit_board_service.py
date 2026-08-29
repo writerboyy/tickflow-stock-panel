@@ -2033,13 +2033,10 @@ class LimitBoardService:
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected_rows, board_rows, buy_rows,
         )
-        scoring_rows = {
-            str(item.get("symbol") or "").strip().upper(): item
-            for item in self._strong_rows(rows)
-            if item.get("symbol")
-        }
-        self._refresh_candidate_scores(runtime, list(scoring_rows.values()), now)
-        self._trim_automatic_candidates(runtime)
+        scoring_rows = self._scoring_rows(rows, board_rows)
+        self._refresh_candidate_scores(runtime, scoring_rows, now)
+        board_symbols = {str(row.get("symbol") or "").strip().upper() for row in scoring_rows}
+        self._trim_automatic_candidates(runtime, keep_symbols=board_symbols)
         self._sync_websocket(runtime, config)
         self._last_scan_at = now.isoformat()
         self._persist_runtime(runtime)
@@ -2867,6 +2864,45 @@ class LimitBoardService:
             if {"first_board", "rebound_board"} & set(row.get("source_modes", []))
         ]
 
+    @classmethod
+    def _scoring_rows(
+        cls,
+        rows: list[dict[str, Any]],
+        board_pool: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Build the candidate-score scan set.
+
+        Strong-stock rows plus board-pool members (e.g. sector-strength manual
+        entries) whose confirm dialog needs the full v5 score. Selected-only
+        rows stay excluded; duplicate symbols keep the strong-stock row.
+        """
+        scoring = {
+            str(item.get("symbol") or "").strip().upper(): item
+            for item in cls._strong_rows(rows)
+            if item.get("symbol")
+        }
+        for item in board_pool:
+            symbol = str(item.get("symbol") or "").strip().upper()
+            if symbol and symbol not in scoring:
+                scoring[symbol] = item
+        return list(scoring.values())
+
+    @staticmethod
+    def _merge_candidate_score(
+        row: dict[str, Any], score_cache: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Attach the cached candidate-score snapshot onto a board-pool row."""
+        symbol = str(row.get("symbol") or "").strip().upper()
+        score = score_cache.get(symbol) if symbol else None
+        if not score:
+            return row
+        # The scoring snapshot may carry a stale change_pct; keep the row's own
+        # live quote value when present.
+        merged = {**row, **score}
+        if row.get("change_pct") is not None:
+            merged["change_pct"] = row.get("change_pct")
+        return merged
+
     @staticmethod
     def _rank_candidates(
         candidates: list[dict[str, Any]],
@@ -2964,9 +3000,17 @@ class LimitBoardService:
             "error": order.get("error"),
         }
 
-    def _trim_automatic_candidates(self, runtime: dict[str, Any]) -> set[str]:
+    def _trim_automatic_candidates(
+        self,
+        runtime: dict[str, Any],
+        *,
+        keep_symbols: set[str] | None = None,
+    ) -> set[str]:
         """Persist only the best scored automatic rows; manual tracking always survives."""
         runtime_by_symbol = runtime.setdefault("symbols", {})
+        # Board-pool members live outside runtime["symbols"], but their scores
+        # must survive trimming so the confirm dialog keeps its v5 snapshot.
+        extra_keep = set(keep_symbols or ())
         automatic_rows = [
             {"symbol": symbol, **state}
             for symbol, state in runtime_by_symbol.items()
@@ -3001,7 +3045,7 @@ class LimitBoardService:
                 state["source_modes"] = sorted(modes)
             else:
                 runtime_by_symbol.pop(symbol, None)
-        kept_symbols = set(runtime_by_symbol)
+        kept_symbols = set(runtime_by_symbol) | extra_keep
         runtime["candidate_scores"] = {
             symbol: value
             for symbol, value in (runtime.get("candidate_scores") or {}).items()
@@ -3678,16 +3722,16 @@ class LimitBoardService:
         candidates = self._candidate_rows_for_runtime(
             runtime, rows, selected, board_pool, buy_pool,
         )
-        scoring_rows = {
-            str(item.get("symbol") or "").strip().upper(): item
-            for item in self._strong_rows(rows)
-            if item.get("symbol")
-        }
-        if self._refresh_candidate_scores(runtime, list(scoring_rows.values()), cn_now()):
+        if self._refresh_candidate_scores(
+            runtime, self._scoring_rows(rows, board_pool), cn_now(),
+        ):
             self._persist_runtime(runtime)
-        # Keep both API projections on the same per-symbol score snapshot. The
-        # candidate queue only re-displays scores computed for strong-stock rows.
+        # Keep both API projections on the same per-symbol score snapshot.
         score_cache = runtime.get("candidate_scores") or {}
+        board_pool = [
+            self._merge_candidate_score(row, score_cache)
+            for row in board_pool
+        ]
         premium_stats_provider = (
             lambda symbol: self._premium_stats.get(str(symbol).strip().upper()) or {}
         )
@@ -3826,6 +3870,44 @@ class LimitBoardService:
                 "first_board_enabled": first_board_enabled,
                 "limit_up_queue": self._queue_watcher.status(),
             },
+        }
+
+    def candidate_score_snapshot(self, symbol: str) -> dict[str, Any]:
+        """On-demand v5 score for one symbol (confirm-dialog preview).
+
+        Sector-strength / radar entries are not part of the recurring scoring
+        scan set until they join the board pool, so the dialog triggers this
+        per-symbol refresh. The full scan set is always passed because
+        ``_refresh_candidate_scores`` replaces the whole candidate-score cache.
+        """
+        cleaned = str(symbol or "").strip().upper()
+        if not cleaned:
+            raise ValueError("缺少股票代码")
+        config = self.store.load_config()
+        runtime = self._runtime_for_today()
+        rows, _selected, board_pool, _buy_pool = self._view_collections(runtime, config)
+        scoring = self._scoring_rows(rows, board_pool)
+        known = {
+            str(item.get("symbol") or "").strip().upper() for item in scoring
+        }
+        if cleaned not in known:
+            row = next(
+                (
+                    item for item in [*board_pool, *rows]
+                    if str(item.get("symbol") or "").strip().upper() == cleaned
+                ),
+                None,
+            )
+            scoring = [*scoring, row or {"symbol": cleaned}]
+        self._refresh_candidate_scores(runtime, scoring, cn_now())
+        entry = (runtime.get("candidate_scores") or {}).get(cleaned) or {}
+        return {
+            "symbol": cleaned,
+            "candidate_score": entry.get("candidate_score"),
+            "candidate_score_state": entry.get("candidate_score_state") or "unavailable",
+            "candidate_score_as_of": entry.get("candidate_score_as_of"),
+            "candidate_score_detail": entry.get("candidate_score_detail") or {},
+            "candidate_reasons": entry.get("candidate_reasons") or [],
         }
 
     def update_advanced_settings(

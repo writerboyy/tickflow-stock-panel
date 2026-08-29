@@ -97,6 +97,14 @@ def jijiang_realtime(request: Request):
     return _service(request).jijiang_realtime_view()
 
 
+@router.get("/candidate-score/{symbol}")
+def candidate_score(symbol: str, request: Request):
+    try:
+        return _service(request).candidate_score_snapshot(symbol)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/sector-strength/{plate_id}/constituents")
 async def sector_constituents(
     plate_id: str,

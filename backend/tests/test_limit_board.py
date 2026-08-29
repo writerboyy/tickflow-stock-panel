@@ -2007,6 +2007,102 @@ def test_candidate_pool_reuses_strong_stock_scores_without_scoring_manual_rows(
     assert manual["candidate_score"] is None
 
 
+def test_view_scores_board_pool_members_and_merges_detail(tmp_path, monkeypatch):
+    """打板池成员（板块强度手动入口）进入评分扫描集，view() 的 board_pool 行直接携带评分快照。"""
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {
+        "600000.SH": {"source_modes": ["first_board"]},
+    }
+    service.store.update(
+        0,
+        lambda value: value["board_pool"].append({
+            "symbol": "605159.SH",
+            "name": "上海亚虹",
+            "source": "manual",
+            "auto_trade": True,
+            "order_mode": "sweep",
+        }),
+    )
+    service.store.save_runtime(runtime)
+    calls: list[list[str]] = []
+
+    def score(runtime, rows, _now):
+        calls.append(sorted(str(row["symbol"]) for row in rows))
+        runtime["candidate_scores"] = {
+            "605159.SH": {
+                "candidate_score": 82.5,
+                "candidate_rank": None,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": "2026-08-29T10:00:00+08:00",
+                "candidate_score_detail": {
+                    "comprehensive": {"comprehensive_score": 82.5, "max_score": 100.0},
+                },
+                "candidate_reasons": [],
+                "change_pct": 0.05,
+            },
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
+
+    view = service.view()
+    assert calls == [["600000.SH", "605159.SH"]]
+    pool_row = next(row for row in view["board_pool"] if row["symbol"] == "605159.SH")
+    assert pool_row["candidate_score"] == 82.5
+    assert pool_row["candidate_score_state"] == "live"
+    assert pool_row["candidate_score_detail"]["comprehensive"]["comprehensive_score"] == 82.5
+
+
+def test_view_board_pool_score_merge_keeps_row_change_pct(tmp_path):
+    """评分快照里的 change_pct 不得覆盖行上更新的行情值。"""
+    merged = LimitBoardService._merge_candidate_score(
+        {"symbol": "605159.SH", "name": "上海亚虹", "change_pct": 0.099},
+        {"605159.SH": {
+            "candidate_score": 70.0,
+            "candidate_score_detail": {},
+            "change_pct": 0.01,
+        }},
+    )
+    assert merged["candidate_score"] == 70.0
+    assert merged["change_pct"] == 0.099
+    # 行上没有 change_pct 时保留评分快照里的值
+    merged_none = LimitBoardService._merge_candidate_score(
+        {"symbol": "605159.SH", "name": "上海亚虹"},
+        {"605159.SH": {"candidate_score": 70.0, "change_pct": 0.01}},
+    )
+    assert merged_none["change_pct"] == 0.01
+    # 评分缓存没有该标的时行原样返回
+    merged_missing = LimitBoardService._merge_candidate_score(
+        {"symbol": "605159.SH", "name": "上海亚虹"},
+        {},
+    )
+    assert "candidate_score" not in merged_missing
+
+
+def test_trim_automatic_candidates_keeps_board_pool_scores(tmp_path):
+    """_trim_automatic_candidates 默认剪掉非 runtime 标的的分数；传入 keep_symbols（打板池成员）后保留。"""
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {"600000.SH": {"source_modes": ["first_board"]}}
+    runtime["candidate_scores"] = {
+        "600000.SH": {"candidate_score": 80.0, "candidate_score_detail": {}},
+        "605159.SH": {"candidate_score": 82.5, "candidate_score_detail": {}},
+    }
+
+    service._trim_automatic_candidates(runtime, keep_symbols={"605159.SH"})
+    assert "600000.SH" in runtime["candidate_scores"]
+    assert "605159.SH" in runtime["candidate_scores"]
+
+    runtime["candidate_scores"] = {
+        "600000.SH": {"candidate_score": 80.0, "candidate_score_detail": {}},
+        "605159.SH": {"candidate_score": 82.5, "candidate_score_detail": {}},
+    }
+    service._trim_automatic_candidates(runtime)
+    assert "605159.SH" not in runtime["candidate_scores"]
+    assert "600000.SH" in runtime["candidate_scores"]
+
+
 def test_remove_automatic_candidate_excludes_it_for_current_trading_day(tmp_path, monkeypatch):
     service, _quotes, _config = make_service(tmp_path)
     current_day = [datetime(2026, 8, 13).date()]
@@ -4203,3 +4299,105 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
     assert too_many_queue_snapshots.status_code == 422
     assert too_many_boards.status_code == 422
     assert service.store.load_config()["revision"] == 0
+
+
+def test_candidate_score_snapshot_appends_symbol_outside_scan_set(tmp_path, monkeypatch):
+    """按需评分：板块强度/雷达入口标的（不在评分扫描集）也能拿到完整 v5 快照。"""
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    runtime["symbols"] = {"600000.SH": {"source_modes": ["first_board"]}}
+    service.store.save_runtime(runtime)
+    calls: list[list[str]] = []
+
+    def score(runtime, rows, _now):
+        calls.append(sorted(str(row["symbol"]) for row in rows))
+        runtime["candidate_scores"] = {
+            "605159.SH": {
+                "candidate_score": 88.0,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": "2026-08-29T10:00:00+08:00",
+                "candidate_score_detail": {
+                    "comprehensive": {"comprehensive_score": 88.0, "max_score": 100.0},
+                },
+                "candidate_reasons": ["板块强度 27.5/30"],
+            },
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
+
+    snapshot = service.candidate_score_snapshot("605159.SH")
+    # 全量扫描集（strong rows）+ 追加的按需标的，一次传入，防止缓存被整体覆盖。
+    assert calls == [["600000.SH", "605159.SH"]]
+    assert snapshot["symbol"] == "605159.SH"
+    assert snapshot["candidate_score"] == 88.0
+    assert snapshot["candidate_score_state"] == "live"
+    assert snapshot["candidate_score_detail"]["comprehensive"]["comprehensive_score"] == 88.0
+
+    with pytest.raises(ValueError):
+        service.candidate_score_snapshot("")
+
+
+def test_candidate_score_snapshot_no_duplicates_for_board_pool_member(tmp_path, monkeypatch):
+    """按需评分：打板池成员已在扫描集内，不重复追加。"""
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = service._runtime_for_today()
+    service.store.update(
+        0,
+        lambda value: value["board_pool"].append({
+            "symbol": "605159.SH",
+            "name": "上海亚虹",
+            "source": "manual",
+            "auto_trade": True,
+            "order_mode": "sweep",
+        }),
+    )
+    service.store.save_runtime(runtime)
+    calls: list[list[str]] = []
+
+    def score(runtime, rows, _now):
+        calls.append([str(row["symbol"]) for row in rows])
+        runtime["candidate_scores"] = {
+            "605159.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_state": "live",
+                "candidate_score_detail": {},
+                "candidate_reasons": [],
+            },
+        }
+        return True
+
+    monkeypatch.setattr(service, "_refresh_candidate_scores", score)
+    snapshot = service.candidate_score_snapshot("605159.SH")
+    assert calls == [["605159.SH"]]
+    assert snapshot["candidate_score"] == 70.0
+
+
+def test_limit_board_api_exposes_candidate_score_snapshot(tmp_path, monkeypatch):
+    """GET /api/limit-board/candidate-score/{symbol} 返回按需 v5 评分快照。"""
+    service, _quotes, _config = make_service(tmp_path)
+    monkeypatch.setattr(
+        service,
+        "candidate_score_snapshot",
+        lambda symbol: {
+            "symbol": symbol,
+            "candidate_score": 88.0,
+            "candidate_score_state": "live",
+            "candidate_score_as_of": "2026-08-29T10:00:00+08:00",
+            "candidate_score_detail": {
+                "comprehensive": {"comprehensive_score": 88.0, "max_score": 100.0},
+            },
+            "candidate_reasons": [],
+        },
+    )
+    app = FastAPI()
+    app.state.limit_board_service = service
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get("/api/limit-board/candidate-score/605159.SH")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "605159.SH"
+    assert payload["candidate_score"] == 88.0
+    assert payload["candidate_score_detail"]["comprehensive"]["max_score"] == 100.0

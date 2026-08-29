@@ -1722,6 +1722,15 @@ export interface LimitBoardApproachingLimitUpSnapshot {
   rows: LimitBoardApproachingLimitUpItem[]
 }
 
+export interface LimitBoardCandidateScore {
+  symbol: string
+  candidate_score: number | null
+  candidate_score_state: 'live' | 'cached' | 'unavailable' | string
+  candidate_score_as_of: string | null
+  candidate_score_detail: NonNullable<LimitBoardRow['candidate_score_detail']>
+  candidate_reasons: string[]
+}
+
 export interface LimitBoardSectorStrengthRow {
   plate_id: string
   plate_name?: string | null
@@ -3543,6 +3552,8 @@ export const api = {
     }),
   limitBoardApproachingLimitUp: (quiet = false) =>
     request<LimitBoardApproachingLimitUpSnapshot>('/api/limit-board/approaching-limit-up', { quiet }),
+  limitBoardCandidateScore: (symbol: string, quiet = true) =>
+    request<LimitBoardCandidateScore>(`/api/limit-board/candidate-score/${encodeURIComponent(symbol)}`, { quiet }),
   limitBoardAdvancedSettingsUpdate: (
     settings: LimitBoardView['settings'], revision: number,
   ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {
