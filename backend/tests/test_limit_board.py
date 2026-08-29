@@ -15,6 +15,7 @@ from app.services.limit_board_service import (
     _qualified_premium_stats,
     _sweep_ready,
 )
+from app.services.limit_board_scoring import SCORE_MODEL_VERSION
 from app.services.limit_board_store import LimitBoardStore, default_config
 from app.services.quote_service import QuoteService
 from app.services.qmt_trading import QmtOrderPreflightError
@@ -1576,7 +1577,9 @@ def test_candidate_score_refresh_restores_persisted_snapshot_after_restart(tmp_p
             "candidate_score": 70.0,
             "candidate_score_state": "live",
             "candidate_score_as_of": captured_at.isoformat(),
-            "candidate_score_detail": {},
+            "candidate_score_detail": {
+                "comprehensive": {"score_model_version": SCORE_MODEL_VERSION},
+            },
             "candidate_reasons": [],
         },
     }
@@ -1593,6 +1596,32 @@ def test_candidate_score_refresh_restores_persisted_snapshot_after_restart(tmp_p
     current = restored["candidate_scores"]["600000.SH"]
     assert current["candidate_score"] == 70.0
     assert current["candidate_score_state"] == "cached"
+
+
+def test_candidate_score_refresh_ignores_snapshot_from_old_score_model_after_restart(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = datetime(2026, 8, 19, 10, 0, tzinfo=CN_TZ)
+    runtime = service._runtime_for_today()
+    runtime["candidate_score_snapshots"] = {
+        "600000.SH": {
+            "candidate_score": 70.0,
+            "candidate_score_state": "live",
+            "candidate_score_as_of": captured_at.isoformat(),
+            "candidate_score_detail": {
+                "comprehensive": {"score_model_version": "limit-board-v5-50-25-25"},
+            },
+        },
+    }
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        captured_at + timedelta(seconds=30),
+    )
+
+    current = runtime["candidate_scores"]["600000.SH"]
+    assert current["candidate_score"] is None
+    assert current["candidate_score_state"] == "unavailable"
 
 
 @pytest.mark.parametrize("hour,minute", [(11, 45), (15, 30)])
@@ -2165,13 +2194,13 @@ def test_close_frozen_sector_inputs_score_realtime_components_after_hours(
     assert sector["realtime_rank"] == 1
     comprehensive = detail["comprehensive"]
     sentiment = comprehensive["dimensions"]["sentiment"]
-    # 机构分项使用冻结的横截面数据：广度 4/6 -> 3.7 分（板块强度满分 25，按 1/3.6 折算）。
-    assert sentiment["components"]["breadth"] == pytest.approx(3.7, abs=0.05)
+    # 机构分项使用冻结的横截面数据：广度 4/6 -> 3.0 分（板块强度满分 20，按 90 -> 100 归一后缩放）。
+    assert sentiment["components"]["breadth"] == pytest.approx(3.0, abs=0.05)
     assert "leadership" not in sentiment["components"]
     assert "sector_current" not in sentiment["components"]
     health = comprehensive["dimensions"]["health"]
-    # 板块地位满分 9.6，龙头应落在「板块前排」档（≥5.8）及以上
-    assert health["components"]["sector_position"] >= 5.8
+    # 板块地位外层满分 7.7，龙头应落在「板块前排」档（≥4.6）及以上
+    assert health["components"]["sector_position"] >= 4.6
 
 
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):

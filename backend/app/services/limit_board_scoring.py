@@ -28,6 +28,7 @@ def _linear(value: float, low: float, high: float, points: float) -> float:
 
 _PREMIUM_GENE_MAX_SCORE = 10.0
 _PREMIUM_GENE_CRITERION_SCORE = _PREMIUM_GENE_MAX_SCORE / 3.0
+SCORE_MODEL_VERSION = "limit-board-v6-60-20-20"
 
 
 def premium_gene_detail(values: dict[str, Any]) -> dict[str, Any] | None:
@@ -845,13 +846,17 @@ def _dimension_result(
 ) -> dict[str, Any]:
     """装配一个评分维度。
 
-    components 为 (key, score, available_max, available) 四元组：
+    components 为 (key, score, available_max, available) 四元组，score 和
+    available_max 统一使用 100 分内部刻度；full_max 是该卡片在综合评分中的
+    外层满分，最终按比例缩放到 full_max：
     - available=False 的组件不计分、不出现在 components 里，
       只列入 unavailable_components，由前端显示「数据不足」而不是 0 分；
     - max_score 是「可得满分」，缺项时小于 full_max_score，总分按它折算。
     """
-    score = sum(item[1] for item in components if item[3])
-    available_max = sum(item[2] for item in components if item[3])
+    internal_max = 100.0
+    scale = full_max / internal_max
+    score = sum(item[1] for item in components if item[3]) * scale
+    available_max = sum(item[2] for item in components if item[3]) * scale
     return {
         "score": round(score, 1),
         "max_score": round(available_max, 1),
@@ -860,7 +865,7 @@ def _dimension_result(
             round(score / available_max * 100, 1) if available_max > 0 else 0.0
         ),
         "components": {
-            item[0]: round(item[1], 1) for item in components if item[3]
+            item[0]: round(item[1] * scale, 1) for item in components if item[3]
         },
         "unavailable_components": [item[0] for item in components if not item[3]],
         "data_complete": available_max >= full_max - 1e-9,
@@ -874,7 +879,7 @@ def comprehensive_score(
     board_quality: dict[str, Any] | None = None,
     four_mode_score: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """计算打板池综合评分（100分制）：历史涨停基因(30分) + 板块强度(30分) + 拉升健康度(40分)
+    """计算打板池综合评分（100分制）：历史涨停基因(60分) + 板块强度(20分) + 拉升健康度(20分)
 
     适用于打板池，评估标的打板价值。买入池不使用此评分。
 
@@ -899,19 +904,19 @@ def comprehensive_score(
     sector = candidate_score_detail.get("sector") or {}
 
     # ========================================
-    # 一、历史涨停基因（50分）—— 综合评分中权重最高
+    # 一、历史涨停基因（60分）；内部按 100 分制计算
     # ========================================
     next_day_red_rate = finite(gene.get("next_day_red_rate"))
     first_board_seal_rate = finite(gene.get("first_board_seal_rate"))
     consecutive_rate = finite(gene.get("consecutive_rate"))
-    history = _dimension_result("历史涨停基因", 50.0, [
-        ("next_day_red", _clamp(next_day_red_rate or 0.0) * 20.0, 20.0, next_day_red_rate is not None),
-        ("seal_success", _clamp(first_board_seal_rate or 0.0) * 20.0, 20.0, first_board_seal_rate is not None),
-        ("consecutive_ability", _clamp(consecutive_rate or 0.0) * 10.0, 10.0, consecutive_rate is not None),
+    history = _dimension_result("历史涨停基因", 60.0, [
+        ("next_day_red", _clamp(next_day_red_rate or 0.0) * 40.0, 40.0, next_day_red_rate is not None),
+        ("seal_success", _clamp(first_board_seal_rate or 0.0) * 40.0, 40.0, first_board_seal_rate is not None),
+        ("consecutive_ability", _clamp(consecutive_rate or 0.0) * 20.0, 20.0, consecutive_rate is not None),
     ])
 
     # ========================================
-    # 二、板块强度（25分）
+    # 二、板块强度（20分）；内部按 100 分制计算
     # ========================================
     rotation_available = bool(sector.get("rotation_available", False))
     rotation_score = finite(sector.get("rotation_score"))
@@ -921,7 +926,7 @@ def comprehensive_score(
     realtime_rank = finite(sector.get("realtime_rank"))
     realtime_rank_count = finite(sector.get("realtime_rank_count"))
 
-    # 机构量化板块强度（25分）：原始机构分项是百分制，统一按 1/3.6 折算。
+    # 机构量化板块强度（20分）：原始机构分项合计 90 分，先归一到内部 100 分。
     # component_max 同时决定可得满分；缺项不计分并在前端显示「数据不足」。
     institutional_component_values = sector.get("institutional_components")
     institutional_component_max_values = sector.get("institutional_component_max")
@@ -951,6 +956,7 @@ def comprehensive_score(
     )
 
     if has_institutional_components:
+        institutional_raw_total_max = sum(institutional_component_defaults.values())
         institutional_dimension_components = []
         for key in institutional_keys:
             raw_score = finite(institutional_component_values.get(key))
@@ -959,37 +965,42 @@ def comprehensive_score(
                 # 兼容机构分项已存在、但尚未持久化 component_max 的旧快照。
                 raw_max = institutional_component_defaults[key]
             available = raw_score is not None and raw_max is not None and raw_max > 0
-            # 剩余 7 项原始满分为 90，等比例缩放到板块强度 25 分。
-            scaled_max = raw_max / 3.6 if available and raw_max is not None else 0.0
-            scaled_score = (
-                min(max(raw_score, 0.0), raw_max) / 3.6
+            internal_component_max = (
+                raw_max / institutional_raw_total_max * 100.0
+                if available and raw_max is not None
+                else 0.0
+            )
+            internal_component_score = (
+                min(max(raw_score, 0.0), raw_max)
+                / institutional_raw_total_max
+                * 100.0
                 if available and raw_score is not None and raw_max is not None
                 else 0.0
             )
             institutional_dimension_components.append(
-                (key, scaled_score, scaled_max, available)
+                (key, internal_component_score, internal_component_max, available)
             )
         sentiment = _dimension_result(
-            "板块强度", 25.0, institutional_dimension_components,
+            "板块强度", 20.0, institutional_dimension_components,
         )
     else:
         # 兼容没有机构分项的历史缓存，继续使用旧的日频/实时三项评分。
-        # 1. 板块K线形态 (15分)：依赖真实轮动数据，缺失即数据不足
+        # 内部 100 分制：板块形态 50 分、过热风险 33.2 分、当日表现 16.8 分。
         sector_pattern_available = rotation_available and rotation_score is not None
-        sector_pattern = (rotation_score / 20.0) * 12.5 if rotation_score is not None else 0.0
+        sector_pattern = (rotation_score / 20.0) * 50.0 if rotation_score is not None else 0.0
 
-        # 2. 板块过热风险 (8.3分)：三个子项各自门控，缺哪项哪项不计分
+        # 2. 板块过热风险 (内部 33.2 分)：三个子项各自门控，缺哪项哪项不计分
         overheat_gain_available = five_day_change is not None
         if not overheat_gain_available:
             overheat_gain = 0.0
         elif five_day_change < 0.05:
-            overheat_gain = 4.2
+            overheat_gain = 16.8
         elif five_day_change < 0.10:
-            overheat_gain = 3.3
+            overheat_gain = 13.2
         elif five_day_change < 0.15:
-            overheat_gain = 1.7
+            overheat_gain = 6.8
         elif five_day_change < 0.20:
-            overheat_gain = 0.8
+            overheat_gain = 3.2
         else:
             overheat_gain = 0.0
 
@@ -1003,11 +1014,11 @@ def comprehensive_score(
         if not overheat_streak_available:
             overheat_streak = 0.0
         elif consecutive_up <= 2:
-            overheat_streak = 2.5
+            overheat_streak = 10.0
         elif consecutive_up <= 4:
-            overheat_streak = 1.7
+            overheat_streak = 6.8
         elif consecutive_up <= 6:
-            overheat_streak = 0.8
+            overheat_streak = 3.2
         else:
             overheat_streak = 0.0
 
@@ -1023,21 +1034,21 @@ def comprehensive_score(
             if rank_percentile < 0.20:
                 overheat_rank = 0.0
             elif rank_percentile < 0.40:
-                overheat_rank = 0.8
+                overheat_rank = 3.2
             else:
-                overheat_rank = 1.6
+                overheat_rank = 6.4
 
         overheat_available = (
             overheat_gain_available or overheat_streak_available or overheat_rank_available
         )
         overheat_score = overheat_gain + overheat_streak + overheat_rank
         overheat_max = (
-            (4.2 if overheat_gain_available else 0.0)
-            + (2.5 if overheat_streak_available else 0.0)
-            + (1.6 if overheat_rank_available else 0.0)
+            (16.8 if overheat_gain_available else 0.0)
+            + (10.0 if overheat_streak_available else 0.0)
+            + (6.4 if overheat_rank_available else 0.0)
         )
 
-        # 3. 板块当日表现 (4.2分)
+        # 3. 板块当日表现 (16.8内部点)
         sector_change = finite(sector.get("change_pct"))
         if sector_change is None:
             sector_change = finite(sector.get("realtime_change_pct"))
@@ -1047,11 +1058,11 @@ def comprehensive_score(
         if not current_change_available:
             current_change = 0.0
         elif sector_change >= 0.04:
-            current_change = 2.5
+            current_change = 10.0
         elif sector_change >= 0.02:
-            current_change = _linear(sector_change, 0.02, 0.04, 0.8) + 1.7
+            current_change = _linear(sector_change, 0.02, 0.04, 3.2) + 6.8
         elif sector_change >= 0.0:
-            current_change = _linear(sector_change, 0.0, 0.02, 0.8) + 0.8
+            current_change = _linear(sector_change, 0.0, 0.02, 3.2) + 3.2
         else:
             current_change = 0.0
 
@@ -1059,29 +1070,29 @@ def comprehensive_score(
         if not current_breadth_available:
             current_breadth = 0.0
         elif up_ratio >= 0.80:
-            current_breadth = 1.7
+            current_breadth = 6.8
         elif up_ratio >= 0.60:
-            current_breadth = _linear(up_ratio, 0.60, 0.80, 0.85) + 0.85
+            current_breadth = _linear(up_ratio, 0.60, 0.80, 3.4) + 3.4
         else:
-            current_breadth = _linear(up_ratio, 0.0, 0.60, 0.85)
+            current_breadth = _linear(up_ratio, 0.0, 0.60, 3.4)
 
         sector_current_available = current_change_available or current_breadth_available
         sector_current_score = current_change + current_breadth
         sector_current_max = (
-            (2.5 if current_change_available else 0.0)
-            + (1.7 if current_breadth_available else 0.0)
+            (10.0 if current_change_available else 0.0)
+            + (6.8 if current_breadth_available else 0.0)
         )
 
-        sentiment = _dimension_result("板块强度", 25.0, [
-            ("sector_pattern", sector_pattern, 12.5, sector_pattern_available),
+        sentiment = _dimension_result("板块强度", 20.0, [
+            ("sector_pattern", sector_pattern, 50.0, sector_pattern_available),
             ("overheat_risk", overheat_score, overheat_max, overheat_available),
             ("sector_current", sector_current_score, sector_current_max, sector_current_available),
         ])
 
     # ========================================
-    # 三、拉升健康度（25分）—— 全部使用打板决策时点已存在的数据
+    # 三、拉升健康度（20分）；内部按 100 分制计算
     # ========================================
-    # 1. 板块内地位 (9.6分) - 拉升健康度内权重最高
+    # 1. 板块内地位 (内部 38.4 分) - 拉升健康度内权重最高
     leadership = sector.get("leadership")
     stock_rank = finite(sector.get("stock_rank"))
     leader_gap_pct = finite(sector.get("leader_gap_pct")) or 0.0
@@ -1094,73 +1105,73 @@ def comprehensive_score(
         sector_position = 0.0
     elif is_leader and leader_gap_pct >= 0.10:
         # 绝对龙头：排名第1且领先≥10%涨停进度（主板≈1%、20cm≈2%）
-        sector_position = 9.6
+        sector_position = 38.4
     elif is_leader:
         # 并列龙头：排名第1但领先不足10%涨停进度
-        sector_position = 7.7
+        sector_position = 30.8
     elif leadership == "front" and (stock_rank is None or stock_rank <= 3 or leader_gap_pct <= 0.10):
         # 前排强势：排名2-3或与龙头差距≤10%涨停进度
-        sector_position = 5.8
+        sector_position = 23.2
     elif leadership == "front":
         # 前排跟随：排名4-5
-        sector_position = 3.8
+        sector_position = 15.2
     elif stock_rank is not None and stock_rank <= 10:
         # 中游位置：排名6-10
-        sector_position = 1.9
+        sector_position = 7.6
     else:
         # 跟风位置：排名10以后
         sector_position = 0.0
 
-    # 2. 拉升形态 (7.1分)：启动点之后的拉升用时、流畅度、封板前量能。
+    # 2. 拉升形态 (内部 28.4 分)：启动点之后的拉升用时、流畅度、封板前量能。
     #    封死后缩量是强势特征，只统计触板前的量能，不按「量价背离」惩罚。
     pull_up_minutes = flow.get("pull_up_minutes")
     pull_up_max_drawdown = finite(flow.get("pull_up_max_drawdown"))
     pre_seal_growth = finite(flow.get("pre_seal_amount_growth"))
     pullup_available = pull_up_minutes is not None
 
-    # 2.1 拉升用时 (2.6分)：一波流最强，墨迹拉升减分
+    # 2.1 拉升用时 (内部 10.4 分)：一波流最强，墨迹拉升减分
     if not pullup_available:
         pullup_time = 0.0
     elif pull_up_minutes <= 15:
-        pullup_time = 2.6
+        pullup_time = 10.4
     elif pull_up_minutes <= 30:
-        pullup_time = 1.9
+        pullup_time = 7.6
     elif pull_up_minutes <= 60:
-        pullup_time = 1.3
+        pullup_time = 5.2
     elif pull_up_minutes <= 120:
-        pullup_time = 0.6
+        pullup_time = 2.4
     else:
-        pullup_time = 0.3
+        pullup_time = 1.2
 
-    # 2.2 拉升流畅度 (1.9分)：拉升段最大回撤越小越强
+    # 2.2 拉升流畅度 (内部 7.6 分)：拉升段最大回撤越小越强
     pullup_smooth_available = pullup_available and pull_up_max_drawdown is not None
     pullup_smooth = (
-        1.9 - _linear(pull_up_max_drawdown, 0.01, 0.05, 1.9)
+        7.6 - _linear(pull_up_max_drawdown, 0.01, 0.05, 7.6)
         if pullup_smooth_available and pull_up_max_drawdown is not None
         else 0.0
     )
 
-    # 2.3 封板前量能 (2.6分)：放量上攻最强
+    # 2.3 封板前量能 (内部 10.4 分)：放量上攻最强
     pre_seal_available = pullup_available and pre_seal_growth is not None
     if not pre_seal_available or pre_seal_growth is None:
         pullup_volume = 0.0
     elif pre_seal_growth > 0.50:
-        pullup_volume = 2.6  # 放量突破
+        pullup_volume = 10.4  # 放量突破
     elif pre_seal_growth > 0.0:
-        pullup_volume = _linear(pre_seal_growth, 0.0, 0.50, 1.0) + 1.6  # 温和放量
+        pullup_volume = _linear(pre_seal_growth, 0.0, 0.50, 4.0) + 6.4  # 温和放量
     elif pre_seal_growth > -0.20:
-        pullup_volume = _linear(pre_seal_growth, -0.20, 0.0, 1.0) + 0.6  # 缩量上涨
+        pullup_volume = _linear(pre_seal_growth, -0.20, 0.0, 4.0) + 2.4  # 缩量上涨
     else:
         pullup_volume = 0.0  # 无量空拉
 
     pullup_score = pullup_time + pullup_smooth + pullup_volume
     pullup_max = (
-        (2.6 if pullup_available else 0.0)
-        + (1.9 if pullup_smooth_available else 0.0)
-        + (2.6 if pre_seal_available else 0.0)
+        (10.4 if pullup_available else 0.0)
+        + (7.6 if pullup_smooth_available else 0.0)
+        + (10.4 if pre_seal_available else 0.0)
     )
 
-    # 3. 资金强度 (6.4分)：封板/贴板后主动成交只剩卖单，净流入指标失真，
+    # 3. 资金强度 (内部 25.6 分)：封板/贴板后主动成交只剩卖单，净流入指标失真，
     #    此时显式标记数据不足，不再报「主力资金流出」假警。
     sealed_now = bool(flow.get("sealed_now"))
     net_flow_ratio = finite(flow.get("net_flow_ratio"))
@@ -1175,22 +1186,22 @@ def comprehensive_score(
     elif net_flow_ratio is not None:
         # 基于净流入比例打分
         if net_flow_ratio >= 0.40:
-            capital_flow = 6.4
+            capital_flow = 25.6
         elif net_flow_ratio >= 0.20:
-            capital_flow = _linear(net_flow_ratio, 0.20, 0.40, 1.9) + 4.5
+            capital_flow = _linear(net_flow_ratio, 0.20, 0.40, 7.6) + 18.0
         elif net_flow_ratio >= 0.0:
-            capital_flow = _linear(net_flow_ratio, 0.0, 0.20, 1.9) + 2.6
+            capital_flow = _linear(net_flow_ratio, 0.0, 0.20, 7.6) + 10.4
         elif net_flow_ratio >= -0.20:
-            capital_flow = _linear(net_flow_ratio, -0.20, 0.0, 1.9) + 0.6
+            capital_flow = _linear(net_flow_ratio, -0.20, 0.0, 7.6) + 2.4
         else:
             capital_flow = 0.0
     elif capital_max > 0:
         # 备选：使用 capital_score 转换
-        capital_flow = ((capital_score_raw or 0.0) / capital_max) * 6.4
+        capital_flow = ((capital_score_raw or 0.0) / capital_max) * 25.6
     else:
         capital_flow = 0.0
 
-    # 4. 均线形态 (1.9分)：与前端「均线形态」展示口径一致，五线严格递减。
+    # 4. 均线形态 (内部 7.6 分)：与前端「均线形态」展示口径一致，五线严格递减。
     price = finite(tech.get("price"))
     ma5 = finite(tech.get("ma5"))
     ma10 = finite(tech.get("ma10"))
@@ -1202,21 +1213,21 @@ def comprehensive_score(
     if not ma_available or price is None or ma5 is None or ma10 is None or ma20 is None or ma60 is None:
         ma_alignment = 0.0
     elif price > ma5 > ma10 > ma20 > ma60:
-        ma_alignment = 1.9
+        ma_alignment = 7.6
     elif price > ma5 > ma10 > ma20:
-        ma_alignment = 1.6
+        ma_alignment = 6.4
     elif price > ma5 > ma10:
-        ma_alignment = 1.3
+        ma_alignment = 5.2
     elif price > ma5:
-        ma_alignment = 0.6
+        ma_alignment = 2.4
     else:
         ma_alignment = 0.0
 
-    health = _dimension_result("拉升健康度", 25.0, [
-        ("sector_position", sector_position, 9.6, position_available),
+    health = _dimension_result("拉升健康度", 20.0, [
+        ("sector_position", sector_position, 38.4, position_available),
         ("pullup_form", pullup_score, pullup_max, pullup_available),
-        ("capital_flow", capital_flow, 6.4, capital_available),
-        ("ma_alignment", ma_alignment, 1.9, ma_available),
+        ("capital_flow", capital_flow, 25.6, capital_available),
+        ("ma_alignment", ma_alignment, 7.6, ma_available),
     ])
 
     # ========================================
@@ -1264,16 +1275,14 @@ def comprehensive_score(
     # ========================================
     warnings: list[str] = []
     strengths: list[str] = []
-    history_components = history["components"]
-
     # 历史基因
-    if "next_day_red" in history_components:
-        if history_components["next_day_red"] < 12.0:  # <60% (满分 20)
+    if next_day_red_rate is not None:
+        if next_day_red_rate < 0.60:
             warnings.append("次日收红率偏低")
-        elif history_components["next_day_red"] >= 16.0:  # ≥80% (满分 20)
+        elif next_day_red_rate >= 0.80:
             strengths.append("次日收红率高")
 
-    if "consecutive_ability" in history_components and history_components["consecutive_ability"] >= 7.0:  # ≥70% (满分 10)
+    if consecutive_rate is not None and consecutive_rate >= 0.70:
         strengths.append("连板能力强")
 
     # 板块强度：机构式横截面分数替代离散状态标签。
@@ -1306,19 +1315,19 @@ def comprehensive_score(
             warnings.append("板块连续上涨多日，过热")
 
     # 拉升健康度
-    # 阈值跟随板块地位/资金强度的满分缩放（原 15/9/3 与 7/4 各 ×0.64）
+    # 阈值使用内部 100 分制，避免随外层卡片权重变化而改变业务含义。
     if position_available:
-        if sector_position >= 9.6:
+        if sector_position >= 38.4:
             strengths.append("板块绝对龙头")
-        elif sector_position >= 5.8:
+        elif sector_position >= 23.2:
             strengths.append("板块前排")
-        elif sector_position < 1.9:
+        elif sector_position < 7.6:
             warnings.append("非板块龙头")
 
     if capital_available:
-        if capital_flow >= 4.5:
+        if capital_flow >= 18.0:
             strengths.append("主力大幅流入")
-        elif capital_flow < 2.6:
+        elif capital_flow < 10.4:
             warnings.append("主力资金流出")
 
     if pullup_available:
@@ -1335,6 +1344,7 @@ def comprehensive_score(
 
     return {
         "comprehensive_score": total_score,
+        "score_model_version": SCORE_MODEL_VERSION,
         "max_score": 100.0,
         "data_completeness": data_completeness,
         "grade": grade,

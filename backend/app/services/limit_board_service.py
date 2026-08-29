@@ -17,6 +17,7 @@ from app.market_time import CN_TZ, cn_now, cn_today
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.services import premium_gene, rps_rotation
 from app.services.limit_board_scoring import (
+    SCORE_MODEL_VERSION,
     comprehensive_score,
     intraday_flow_detail,
     premium_gene_detail,
@@ -103,6 +104,20 @@ def _quote_time(value: object) -> datetime | None:
             return None
         return parsed.astimezone(CN_TZ) if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
     return None
+
+
+def _is_current_score_snapshot(value: dict[str, Any] | None) -> bool:
+    if not isinstance(value, dict):
+        return False
+    detail = value.get("candidate_score_detail") or {}
+    comprehensive = detail.get("comprehensive") if isinstance(detail, dict) else None
+    # Older candidate-score snapshots predate the comprehensive projection and
+    # remain valid for the independent candidate ranking score.
+    if comprehensive is None:
+        return True
+    return isinstance(comprehensive, dict) and (
+        comprehensive.get("score_model_version") == SCORE_MODEL_VERSION
+    )
 
 
 def _is_trading_time(value: datetime) -> bool:
@@ -3732,6 +3747,7 @@ class LimitBoardService:
                     symbol not in valid_snapshots
                     and value.get("candidate_score") is not None
                     and _quote_time(value.get("candidate_score_as_of")) is not None
+                    and _is_current_score_snapshot(value)
                 ):
                     valid_snapshots[symbol] = dict(value)
             non_trading_cache = (
@@ -3936,6 +3952,7 @@ class LimitBoardService:
                 )
                 if (
                     snapshot.get("candidate_score") is not None
+                    and _is_current_score_snapshot(snapshot)
                     and cache_age is not None
                     and cache_age >= 0
                     and (non_trading_cache or cache_age <= _SCORE_DISPLAY_CACHE_SECONDS)
