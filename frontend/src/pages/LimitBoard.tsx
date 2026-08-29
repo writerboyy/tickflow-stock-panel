@@ -1411,6 +1411,41 @@ function manualActionRow(
   }
 }
 
+/** 均线形态判定：与后端日K位置的口径一致，面板显式写出是否多头排列。 */
+function maAlignmentVerdict(
+  technical: NonNullable<LimitBoardRow['candidate_score_detail']>['technical'],
+): string | null {
+  if (!technical) return null
+  const { price, ma5, ma10, ma20, ma60 } = technical
+  const values = [price, ma5, ma10, ma20, ma60]
+  if (values.some(value => value == null || value <= 0)) return null
+  if (price! > ma5! && ma5! > ma10! && ma10! > ma20! && ma20! > ma60!) return '完美多头'
+  if (price! > ma5! && ma5! > ma10! && ma10! > ma20!) return '强多头'
+  if (price! > ma5! && ma5! > ma10!) return '中多头'
+  if (price! > ma5!) return '弱多头'
+  return '非多头排列'
+}
+
+/** 板块轮动不只是一个标签：把 5 日涨幅/斜率/榜变/持续天数一起写出。 */
+function rotationDetailText(
+  sector: NonNullable<LimitBoardRow['candidate_score_detail']>['sector'],
+): string {
+  const parts: string[] = [sector?.rotation_label || '数据不足']
+  if (sector?.five_day_change_pct != null) {
+    parts.push(`5日 ${scoreDetailSignedPercent(sector.five_day_change_pct, 1)}`)
+  }
+  if (sector?.trend_slope != null) {
+    parts.push(`斜率 ${scoreDetailSignedPercent(sector.trend_slope, 2)}/天`)
+  }
+  if (sector?.rank_change != null) {
+    parts.push(`榜变 ${scoreDetailSignedPercent(sector.rank_change, 0)}`)
+  }
+  if (sector?.top_20_days != null) {
+    parts.push(`Top20 ${sector.top_20_days}天`)
+  }
+  return parts.join(' · ')
+}
+
 function scoreDetailRows(
   detail: NonNullable<LimitBoardRow['candidate_score_detail']>,
 ): ComprehensiveScoreDetails {
@@ -1418,13 +1453,13 @@ function scoreDetailRows(
   const sector = detail.sector
   const flow = detail.intraday_flow
   const technical = detail.technical
+  const maVerdict = maAlignmentVerdict(technical)
   return {
     history: gene ? [
       { label: `近${gene.window_days ?? '--'}日涨停`, value: gene.limit_up_count == null ? '--' : `${gene.limit_up_count} 次` },
-      { label: '次日收红率', value: ratioPct(gene.next_day_red_rate, 1) },
+      { label: '次日收红率', value: ratioPct(gene.next_day_red_rate, 1), tone: 'text-warning' },
       { label: '首板尝试数', value: gene.first_board_attempt_count == null ? '--' : `${gene.first_board_attempt_count} 次` },
-      { label: '首板封板率', value: ratioPct(gene.first_board_seal_rate, 1) },
-      { label: '首板破板率', value: ratioPct(gene.first_board_broken_rate, 1) },
+      { label: '首板封板率', value: ratioPct(gene.first_board_seal_rate, 1), tone: 'text-warning' },
       { label: '连板率', value: ratioPct(gene.consecutive_rate, 1) },
       { label: '5%溢价率', value: ratioPct(gene.premium_5_rate, 1) },
       { label: '样本数', value: gene.next_day_observation_count == null ? '--' : `${gene.next_day_observation_count} 次` },
@@ -1436,11 +1471,13 @@ function scoreDetailRows(
       { label: '板块涨幅', value: scoreDetailSignedPercent(sector.realtime_change_pct ?? sector.change_pct, 2) },
       { label: '板块强度排名', value: sector.realtime_rank != null && sector.realtime_rank_count ? `${sector.realtime_rank}/${sector.realtime_rank_count}` : '--' },
       { label: '上涨占比', value: ratioPct(sector.up_ratio, 1) },
-      { label: '板块轮动', value: sector.rotation_label || '数据不足' },
-      { label: '个股板块排名', value: sector.stock_rank != null && sector.member_count ? `${sector.stock_rank}/${sector.member_count}` : '--' },
-      { label: '与龙头差距', value: scoreDetailSignedPercent(sector.leader_gap_pct, 2) },
+      { label: '板块轮动', value: rotationDetailText(sector) },
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
-    health: flow || technical ? [
+    health: flow || technical || sector ? [
+      ...(sector ? [
+        { label: sector.close_frozen ? '板块排名·收盘' : '板块排名·日内', value: sector.stock_rank != null && sector.member_count ? `${sector.stock_rank}/${sector.member_count}` : '--' },
+        { label: '排名口径', value: '涨幅÷涨停幅度归一（主板10%·创业科创20%·北交30%）' },
+      ] : []),
       ...(flow ? [
         { label: '触板状态', value: flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
         { label: '拉升用时', value: flow.pull_up_minutes == null ? '--' : `${flow.pull_up_minutes} 分钟` },
@@ -1453,7 +1490,7 @@ function scoreDetailRows(
         { label: '分时样本', value: flow.bars == null ? '--' : `${flow.bars} 根` },
       ] : []),
       ...(technical ? [
-        { label: '均线排列', value: `${scoreDetailNumber(technical.price, 2)} / ${scoreDetailNumber(technical.ma5, 2)} / ${scoreDetailNumber(technical.ma20, 2)}` },
+        { label: '均线形态', value: `${maVerdict ? `${maVerdict} · ` : ''}${scoreDetailNumber(technical.price, 2)} / ${scoreDetailNumber(technical.ma5, 2)} / ${scoreDetailNumber(technical.ma20, 2)}`, tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
         { label: '5日动量', value: scoreDetailSignedPercent(technical.momentum_5d, 2) },
         { label: '5日量比', value: scoreDetailNumber(technical.vol_ratio_5d, 2) },
         { label: 'RSI(14)', value: scoreDetailNumber(technical.rsi_14, 1) },

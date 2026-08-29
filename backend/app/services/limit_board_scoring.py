@@ -5,6 +5,8 @@ from datetime import date
 from math import prod
 from typing import Any
 
+from app.price_limits import is_risk_warning_name, price_limit_pct
+
 
 def finite(value: object) -> float | None:
     try:
@@ -524,13 +526,24 @@ def sector_detail(
         change = finite((member or {}).get("change_pct"))
         if member is None or change is None:
             continue
+        # 排名按「涨停进度」归一：日内涨幅 ÷ 该票涨停幅度。
+        # 主板 10%、创业板/科创板 20%、北交所 30%、主板 ST 按规则调整——
+        # 否则 20cm 票 +15% 会排在主板涨停票前面，龙头判定失真。
+        limit_pct = price_limit_pct(
+            member_symbol,
+            today,
+            is_risk_warning=is_risk_warning_name(str(member.get("name") or "")),
+        )
+        progress = change / limit_pct if limit_pct and limit_pct > 0 else change
         ranked.append({
             "symbol": member_symbol,
             "name": member.get("name") or member_symbol,
             "change_pct": change,
+            "limit_pct": limit_pct,
+            "progress_pct": progress,
             "amount": max(0.0, finite(member.get("amount")) or 0.0),
         })
-    ranked.sort(key=lambda row: (-row["change_pct"], -row["amount"], row["symbol"]))
+    ranked.sort(key=lambda row: (-row["progress_pct"], -row["amount"], row["symbol"]))
     member_count = int(effective_snapshot.get("total_count") or len(member_symbols))
     if member_count < 5 or not ranked:
         return None
@@ -540,11 +553,12 @@ def sector_detail(
     )
     if candidate_index is None:
         return None
-    top_change = float(ranked[0]["change_pct"])
+    top_progress = float(ranked[0]["progress_pct"])
+    candidate_progress = float(ranked[candidate_index]["progress_pct"])
     co_leaders = [
         row for row in ranked
-        if float(row["change_pct"]) > 0
-        and top_change - float(row["change_pct"]) <= 0.001
+        if float(row["progress_pct"]) > 0
+        and top_progress - float(row["progress_pct"]) <= 0.01
     ]
     leader = (
         min(
@@ -553,9 +567,9 @@ def sector_detail(
         )
         if co_leaders else ranked[0]
     )
-    leader_gap = top_change - candidate_change
-    is_leader = candidate_change > 0 and leader_gap <= 0.001
-    is_front = not is_leader and (candidate_index < 3 or leader_gap <= 0.01)
+    leader_gap = top_progress - candidate_progress
+    is_leader = candidate_progress > 0 and leader_gap <= 0.01
+    is_front = not is_leader and (candidate_index < 3 or leader_gap <= 0.10)
     leadership = "leader" if is_leader else "front" if is_front else "follower"
     up_count = int(effective_snapshot.get("up_count") or 0)
     valid_count = int(effective_snapshot.get("valid_count") or len(ranked))
@@ -590,7 +604,9 @@ def sector_detail(
         "leader": leader,
         "stock_rank": candidate_index + 1,
         "stock_change_pct": candidate_change,
+        "stock_progress_pct": candidate_progress,
         "leader_gap_pct": leader_gap,
+        "rank_method": "intraday_progress_normalized",
         "leadership": leadership,
         "is_sector_leader": is_leader,
         "rotation_available": rotation_available,
@@ -868,14 +884,14 @@ def comprehensive_score(
 
     if not position_available:
         sector_position = 0.0
-    elif is_leader and leader_gap_pct >= 0.01:
-        # 绝对龙头：排名第1且领先第2名≥1%
+    elif is_leader and leader_gap_pct >= 0.10:
+        # 绝对龙头：排名第1且领先≥10%涨停进度（主板≈1%、20cm≈2%）
         sector_position = 15.0
     elif is_leader:
-        # 并列龙头：排名第1但领先不足1%
+        # 并列龙头：排名第1但领先不足10%涨停进度
         sector_position = 12.0
-    elif leadership == "front" and (stock_rank is None or stock_rank <= 3 or leader_gap_pct <= 0.01):
-        # 前排强势：排名2-3或与龙头差距≤1%
+    elif leadership == "front" and (stock_rank is None or stock_rank <= 3 or leader_gap_pct <= 0.10):
+        # 前排强势：排名2-3或与龙头差距≤10%涨停进度
         sector_position = 9.0
     elif leadership == "front":
         # 前排跟随：排名4-5

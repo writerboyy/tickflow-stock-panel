@@ -378,6 +378,59 @@ def test_sector_score_handles_an_all_declining_sector():
     assert detail["current_components"]["leader_change"] == 0.0
 
 
+def test_sector_rank_normalizes_growth_board_progress():
+    """主板涨停（进度 1.0）必须排在创业板 +15%（进度 0.75）前面。"""
+    stock_rows = {
+        "600000.SH": {"symbol": "600000.SH", "name": "主板票", "change_pct": 0.10, "amount": 100},
+        "300001.SZ": {"symbol": "300001.SZ", "name": "创业票", "change_pct": 0.15, "amount": 200},
+        "600002.SH": {"symbol": "600002.SH", "change_pct": 0.05, "amount": 100},
+        "600003.SH": {"symbol": "600003.SH", "change_pct": 0.02, "amount": 100},
+        "600004.SH": {"symbol": "600004.SH", "change_pct": -0.01, "amount": 100},
+    }
+    snapshot = {
+        "valid": True,
+        "change_pct": 0.02,
+        "coverage_ratio": 1.0,
+        "up_count": 4,
+        "down_count": 1,
+        "valid_count": 5,
+        "total_count": 5,
+    }
+    main_board = sector_detail(
+        symbol="600000.SH",
+        target={"kind": "concept", "name": "人工智能"},
+        snapshot=snapshot,
+        rotation=_rotation(),
+        stock_rows=stock_rows,
+        member_symbols=set(stock_rows),
+        today=date(2026, 8, 17),
+    )
+
+    assert main_board is not None
+    assert main_board["stock_rank"] == 1
+    assert main_board["leader"]["symbol"] == "600000.SH"
+    assert main_board["leadership"] == "leader"
+    assert main_board["stock_progress_pct"] == pytest.approx(1.0)
+    assert main_board["rank_method"] == "intraday_progress_normalized"
+
+    growth = sector_detail(
+        symbol="300001.SZ",
+        target={"kind": "concept", "name": "人工智能"},
+        snapshot=snapshot,
+        rotation=_rotation(),
+        stock_rows=stock_rows,
+        member_symbols=set(stock_rows),
+        today=date(2026, 8, 17),
+    )
+
+    assert growth is not None
+    assert growth["stock_rank"] == 2
+    assert growth["stock_progress_pct"] == pytest.approx(0.75)
+    assert growth["leadership"] == "front"
+    # 与龙头的进度差：1.0 - 0.75 = 0.25
+    assert growth["leader_gap_pct"] == pytest.approx(0.25)
+
+
 def _sealed_pullup_intraday() -> dict:
     """昨收 10.0，启动后 4 分钟放量一波拉到涨停 11.0 并封死。"""
     closes = [10.05, 10.10, 10.32, 10.55, 10.80, 11.00]
@@ -505,7 +558,8 @@ def test_comprehensive_score_sector_overheat_uses_real_data_only():
         "up_ratio": 0.9,
         "leadership": "leader",
         "is_sector_leader": True,
-        "leader_gap_pct": 0.02,
+        # 归一化后的涨停进度差距：0.12 = 领先第二名 12% 涨停进度
+        "leader_gap_pct": 0.12,
         "stock_rank": 1,
     }
     result = comprehensive_score({"sector": sector})
