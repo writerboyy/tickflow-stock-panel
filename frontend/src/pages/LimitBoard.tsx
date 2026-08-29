@@ -947,9 +947,7 @@ function LimitBoardAllocationDialog({
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
   const comprehensive = row.candidate_score_detail?.comprehensive
   const scoreDetails = comprehensive ? scoreDetailRows(row.candidate_score_detail ?? {}) : undefined
-  const scoreUnavailableReason = row.candidate_score_state === 'unavailable'
-    ? '评分所需的实时板块、分时或资金数据暂未就绪。'
-    : '该标的来自板块强度手动入口，后端尚未生成 v5 评分快照。'
+  const scoreUnavailableReason = '后端尚未生成 v5 评分快照，等待板块强度、分时或资金数据返回后自动刷新。'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
     { value: 'available', label: poolAllocationLabel('available') },
     { value: 'sixth', label: poolAllocationLabel('sixth') },
@@ -1012,9 +1010,14 @@ function LimitBoardAllocationDialog({
               <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {['历史涨停基因', '板块强度', '拉升健康度'].map(label => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
+              {[
+                { label: '历史涨停基因', hint: '暂无历史涨停样本' },
+                { label: '板块强度', hint: '暂无板块实时数据' },
+                { label: '拉升健康度', hint: '暂无分时/资金数据' },
+              ].map(({ label, hint }) => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
                 <div className="text-[10px] text-muted">{label}</div>
                 <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
+                <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">{hint}</div>
               </div>)}
             </div>
           </div>}
