@@ -1385,15 +1385,29 @@ class LimitBoardService:
             "rows": normalized,
         }
 
-    def _sector_strength_snapshot(self, today: date) -> dict[str, dict[str, Any]]:
-        view = self._sector_strength_view(today)
+    def _sector_strength_snapshot(
+        self, today: date,
+    ) -> tuple[dict[str, dict[str, Any]], date | None]:
+        """板块强度行（按名称索引）+ 数据锚定日期。
+
+        fallback_previous=True：周末/盘前（_should_display_previous_sector）
+        回退到最近一个交易日的快照——盘后/非交易日查看时，实时类指标
+        按收盘冻结值计算。
+        """
+        view = self._sector_strength_view(today, fallback_previous=True)
         if not view or view.get("state") != "live":
-            return {}
-        return {
+            return {}, None
+        rows = {
             str(row.get("plate_name") or "").strip(): row
             for row in view.get("rows") or []
             if str(row.get("plate_name") or "").strip()
         }
+        as_of: date | None = None
+        try:
+            as_of = date.fromisoformat(str(view.get("as_of") or ""))
+        except ValueError:
+            as_of = None
+        return rows, as_of
 
     def _kaipanla_sector_score_inputs(
         self,
@@ -1450,6 +1464,82 @@ class LimitBoardService:
             "up_count": sum(value > 0 for value in changes),
             "down_count": sum(value < 0 for value in changes),
             "data_source": "kaipanla_socket",
+        }
+
+    def _close_frozen_sector_inputs(
+        self,
+        realtime: dict[str, Any],
+        stock_rows: dict[str, dict[str, Any]],
+        anchor_date: date | None,
+    ) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, Any]] | None:
+        """用最近交易日的收盘快照构建板块评分输入（实时行情不可用时）。
+
+        盘后/周末查看时，实时类指标按「收盘冻结值」计算：成员涨跌幅/
+        成交额取自 enriched 日线快照；成分关系优先用内存中的实时表，
+        服务重启后回退到持久化的已完成日成分表。
+        """
+        plate_id = str(realtime.get("plate_id") or "").strip()
+        if not plate_id:
+            return None
+        with self._lock:
+            memberships = self._sector_memberships.clone()
+        missing = (
+            memberships.is_empty()
+            or "plate_id" not in memberships.columns
+            or "symbol" not in memberships.columns
+            or memberships.filter(pl.col("plate_id") == plate_id).is_empty()
+        )
+        if missing:
+            collector = getattr(self.app_state, "kaipanla_collector", None)
+            getter = getattr(collector, "sector_constituent_memberships", None)
+            if anchor_date is None or not callable(getter):
+                return None
+            try:
+                memberships = getter(anchor_date)
+            except Exception:  # noqa: BLE001
+                logger.debug("读取持久化板块成分表失败", exc_info=True)
+                return None
+        if (
+            memberships is None
+            or memberships.is_empty()
+            or "plate_id" not in memberships.columns
+            or "symbol" not in memberships.columns
+        ):
+            return None
+        member_symbols = {
+            str(symbol).strip().upper()
+            for symbol in memberships.filter(pl.col("plate_id") == plate_id)
+            .get_column("symbol")
+            .to_list()
+            if str(symbol).strip()
+        }
+        if not member_symbols:
+            return None
+        rows = {
+            symbol: row
+            for symbol in member_symbols
+            if (row := stock_rows.get(symbol))
+        }
+        valid_rows = {
+            symbol: row
+            for symbol, row in rows.items()
+            if _finite(row.get("change_pct")) is not None
+        }
+        total_count = len(member_symbols)
+        valid_count = len(valid_rows)
+        changes = [float(row["change_pct"]) for row in valid_rows.values()]
+        sector_change = _finite(realtime.get("change_pct"))
+        if sector_change is None and changes:
+            sector_change = sum(changes) / len(changes)
+        return rows, member_symbols, {
+            "valid": total_count >= 5 and valid_count / total_count >= 0.8,
+            "change_pct": sector_change,
+            "coverage_ratio": valid_count / total_count if total_count else 0.0,
+            "valid_count": valid_count,
+            "total_count": total_count,
+            "up_count": sum(value > 0 for value in changes),
+            "down_count": sum(value < 0 for value in changes),
+            "data_source": "daily_close",
         }
 
     def _set_sector_candidate_unavailable(self, reason: str) -> set[str]:
@@ -3532,7 +3622,7 @@ class LimitBoardService:
                 "concept": self._rotation("concept", None, now.date()),
                 "industry": self._rotation("industry", 2, now.date()),
             } if sector_service is not None else {}
-            realtime_sectors = self._sector_strength_snapshot(now.date())
+            realtime_sectors, realtime_anchor = self._sector_strength_snapshot(now.date())
 
             valid_snapshots = dict(runtime.get("candidate_score_snapshots") or {})
             for symbol, value in previous_cache.items():
@@ -3596,6 +3686,12 @@ class LimitBoardService:
                             continue
                         sector_inputs = self._kaipanla_sector_score_inputs(realtime)
                         if sector_inputs is None:
+                            # 实时成员行情不可用（盘后/周末/重启）时，
+                            # 用收盘快照的冻结值计算实时类组件。
+                            sector_inputs = self._close_frozen_sector_inputs(
+                                realtime, stock_rows, realtime_anchor,
+                            )
+                        if sector_inputs is None:
                             continue
                         sector_stock_rows, sector_members, sector_snapshot = sector_inputs
                         value = sector_detail(
@@ -3611,7 +3707,8 @@ class LimitBoardService:
                         )
                         if value is not None:
                             value["as_of"] = now.isoformat()
-                            value["data_source"] = "kaipanla_socket"
+                            value["data_source"] = sector_snapshot.get("data_source") or "kaipanla_socket"
+                            value["close_frozen"] = sector_snapshot.get("data_source") == "daily_close"
                             available.append(value)
                     if available:
                         sector = max(

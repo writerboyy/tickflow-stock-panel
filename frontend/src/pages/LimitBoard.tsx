@@ -1431,6 +1431,7 @@ function scoreDetailRows(
     ] : [{ label: '历史细则', value: '暂无数据', tone: 'text-warning' }],
     sentiment: sector ? [
       { label: '板块名称', value: sector.name || '--' },
+      ...(sector.close_frozen ? [{ label: '数据口径', value: '收盘冻结值', tone: 'text-warning' }] : []),
       { label: '板块强度', value: scoreDetailNumber(sector.realtime_strength, 1) },
       { label: '板块涨幅', value: scoreDetailSignedPercent(sector.realtime_change_pct ?? sector.change_pct, 2) },
       { label: '板块强度排名', value: sector.realtime_rank != null && sector.realtime_rank_count ? `${sector.realtime_rank}/${sector.realtime_rank_count}` : '--' },

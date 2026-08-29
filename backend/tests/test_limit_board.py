@@ -2045,6 +2045,99 @@ def test_rotation_only_fallback_when_realtime_sector_unavailable(tmp_path, monke
     assert "主线板块" in comprehensive["strengths"]
 
 
+def test_close_frozen_sector_inputs_score_realtime_components_after_hours(
+    tmp_path, monkeypatch,
+):
+    """盘后/周末：实时成员行情缺失时，用收盘快照冻结值给实时类组件出分。"""
+    class SectorService:
+        @staticmethod
+        def targets_for_symbol(_symbol, *, kind=None, industry_level=None):
+            if kind == "concept":
+                return [{"key": "c1", "kind": "concept", "name": "人工智能"}]
+            return []
+
+    friday = date(2026, 8, 28)
+    now = datetime(2026, 8, 29, 18, 0, tzinfo=CN_TZ)  # 周六
+    members = {
+        "600000.SH": (0.10, 300.0),
+        "600001.SH": (0.06, 200.0),
+        "600002.SH": (0.04, 100.0),
+        "600003.SH": (0.01, 100.0),
+        "600004.SH": (-0.01, 100.0),
+        "600005.SH": (-0.02, 100.0),
+    }
+    service, quotes, _config = make_service(tmp_path)
+    service.app_state.sector_monitor_service = SectorService()
+    # 模拟周末重启：内存成分表/实时行情为空， collector 只有持久化数据
+    service.app_state.kaipanla_collector = SimpleNamespace(
+        sector_strength_snapshot=lambda: None,
+        latest_completed_trading_date=lambda _today: friday,
+        sector_strength_snapshot_at=lambda trade_date, _captured: {
+            "state": "live",
+            "as_of": trade_date.isoformat(),
+            "rows": [{
+                "plate_id": "P-0",
+                "plate_name": "人工智能",
+                "change_pct_pct": 3.0,
+                "strength": 88.0,
+                "rank": 1,
+                "rank_count": 10,
+            }],
+        },
+        sector_constituent_memberships=lambda _date: pl.DataFrame({
+            "plate_id": ["P-0"] * len(members),
+            "symbol": list(members),
+        }),
+    )
+    dates = ["2026-08-28", "2026-08-27", "2026-08-26", "2026-08-25", "2026-08-24"]
+    rotation_payload = {
+        "dates": dates,
+        "columns": {
+            day: [["人工智能", change]] + [[f"板块{index}", 0.0] for index in range(1, 10)]
+            for day, change in zip(dates, [0.03, 0.02, 0.01, 0.0, -0.01], strict=True)
+        },
+        "concept_count": 10,
+    }
+    monkeypatch.setattr(
+        "app.services.limit_board_service.rps_rotation.build_rps_rotation",
+        lambda _repo, _days, kind, level=None: (
+            rotation_payload if kind == "concept" else {"dates": [], "columns": {}}
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.intraday_flow_detail",
+        lambda *_args, **_kwargs: None,
+    )
+    quotes.enriched_date = friday
+    quotes.enriched = pl.DataFrame({
+        "symbol": list(members),
+        "change_pct": [value[0] for value in members.values()],
+        "amount": [value[1] for value in members.values()],
+    })
+    runtime = {"candidate_scores": {}}
+    candidates = [{"symbol": "600000.SH", "source_modes": ["selected"], "change_pct": 0.10}]
+
+    service._refresh_candidate_scores(runtime, candidates, now)
+
+    detail = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]
+    sector = detail["sector"]
+    assert sector["data_source"] == "daily_close"
+    assert sector["close_frozen"] is True
+    assert sector["realtime_available"] is True
+    assert sector["change_pct"] == pytest.approx(0.03)
+    assert sector["up_ratio"] == pytest.approx(4 / 6)
+    assert sector["leadership"] == "leader"
+    assert sector["stock_rank"] == 1
+    assert sector["realtime_rank"] == 1
+    comprehensive = detail["comprehensive"]
+    sentiment = comprehensive["dimensions"]["sentiment"]
+    # 当日表现（板块 +3%、上涨占比 4/6）与过热排名（1/10 顶部）按收盘值出分
+    assert sentiment["components"]["sector_current"] == pytest.approx(3.8, abs=0.05)
+    assert sentiment["components"]["overheat_risk"] < 10.0
+    health = comprehensive["dimensions"]["health"]
+    assert health["components"]["sector_position"] >= 9.0
+
+
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     service.store.update(0, lambda value: value["selected"].append({"symbol": "600000.SH", "name": "浦发银行"}))
