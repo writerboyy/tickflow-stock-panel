@@ -85,9 +85,9 @@ _REFERENCE_PAGE_SIZE = 1000
 _SECTOR_STRENGTH_PAGE_SIZE = 60
 _SECTOR_STRENGTH_MAX_PAGES = 10
 # 短线成分行情预加载板块数上限：全榜单 300+ 个板块每个 5s 周期都抓成分会
-# 把刷新循环拖到分钟级，反而拖死头部板块的数据新鲜度。前 60 名覆盖候选池
+# 把刷新循环拖到分钟级，反而拖死头部板块的数据新鲜度。前 30 名覆盖候选池
 # 与板块地位评分的实际需求；榜单外的板块仍可按需单抓（shortline_constituents_for_plate）。
-_SHORTLINE_PRELOAD_PLATE_LIMIT = 60
+_SHORTLINE_PRELOAD_PLATE_LIMIT = 30
 
 
 def _in_sector_strength_window(value: clock_time) -> bool:
