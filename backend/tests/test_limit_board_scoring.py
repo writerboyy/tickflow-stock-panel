@@ -7,6 +7,7 @@ from app.services.limit_board_scoring import (
     intraday_flow_detail,
     premium_gene_detail,
     rotation_detail,
+    rotation_only_detail,
     sector_detail,
     technical_detail,
 )
@@ -557,3 +558,42 @@ def test_comprehensive_score_flags_choppy_pullup():
     assert flow["pull_up_max_drawdown"] == pytest.approx(0.0566, abs=0.001)
     assert health["components"]["pullup_form"] < 11.0
     assert "拉升反复，分歧大" in result["warnings"]
+
+
+def test_rotation_only_detail_scores_daily_rotation_and_gates_realtime_parts():
+    detail = rotation_only_detail(
+        {"kind": "concept", "name": "人工智能"}, _rotation(), date(2026, 8, 17),
+    )
+
+    assert detail is not None
+    assert detail["rotation_available"] is True
+    assert detail["realtime_available"] is False
+    assert detail["rotation_score"] == pytest.approx(16.22)
+    assert detail["max_score"] == pytest.approx(50.0)
+    assert detail["days"]
+    assert detail["five_day_change_pct"] is not None
+    # 实时类组件全部为 None，交给综合评分的数据门控
+    assert detail["change_pct"] is None
+    assert detail["up_ratio"] is None
+    assert detail["leadership"] is None
+    assert detail["stock_rank"] is None
+
+    result = comprehensive_score({"sector": detail})
+    sentiment = result["dimensions"]["sentiment"]
+    # 日频组件正常计分：板块形态 + 过热（5日涨幅 + 连涨天数，排名缺）
+    assert sentiment["components"]["sector_pattern"] == pytest.approx(12.2, abs=0.05)
+    assert sentiment["components"]["overheat_risk"] == pytest.approx(6.0)
+    assert "sector_current" in sentiment["unavailable_components"]
+    health = result["dimensions"]["health"]
+    assert "sector_position" in health["unavailable_components"]
+    assert "板块快速走强" in result["strengths"]
+
+
+def test_rotation_only_detail_returns_none_without_five_completed_days():
+    detail = rotation_only_detail(
+        {"kind": "concept", "name": "人工智能"},
+        {"dates": [], "columns": {}},
+        date(2026, 8, 17),
+    )
+
+    assert detail is None

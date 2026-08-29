@@ -1955,6 +1955,96 @@ def test_candidate_sector_selection_prefers_best_concept_then_falls_back_to_indu
     assert sector["score"] == pytest.approx(49.0)
 
 
+def test_weekend_scoring_anchors_to_last_completed_trading_day(tmp_path, monkeypatch):
+    service, quotes, _config = make_service(tmp_path)
+    friday = date(2026, 8, 28)
+    now = datetime(2026, 8, 29, 18, 0, tzinfo=CN_TZ)  # 周六傍晚
+
+    # 日线快照是周五的（非当日）——周末应被接受为「最近已完成交易日」
+    quotes.enriched_date = friday
+    quotes.enriched = pl.DataFrame({
+        "symbol": ["600000.SH"], "close": [11.0], "last_price": [11.0],
+        "prev_close": [10.0], "change_pct": [0.10], "amount": [100.0],
+        "ma5": [10.5], "ma10": [10.2], "ma20": [10.0], "ma60": [9.5],
+        "momentum_5d": [0.08], "momentum_20d": [0.2], "vol_ratio_5d": [2.0],
+        "macd_dif": [0.3], "macd_dea": [0.2], "macd_hist": [0.1], "rsi_14": [70.0],
+    })
+
+    stock_df, stock_rows = service._candidate_stock_snapshot(now)
+    assert not stock_df.is_empty()
+    assert stock_rows["600000.SH"]["ma5"] == pytest.approx(10.5)
+
+    # 交易时段内仍只接受当日实时快照（周五盘中拿到周四快照 → 拒绝）
+    quotes.enriched_date = date(2026, 8, 27)
+    intraday = datetime(2026, 8, 28, 10, 0, tzinfo=CN_TZ)
+    stale_df, stale_rows = service._candidate_stock_snapshot(intraday)
+    assert stale_df.is_empty()
+    assert stale_rows == {}
+
+    # 周末分钟数据 freshness 覆盖整个周末（回看周五分钟K）
+    quotes.enriched_date = friday
+    captured: dict = {}
+    def fake_features(symbols, **kwargs):
+        captured.update(kwargs)
+        return {}
+    monkeypatch.setattr(quotes, "get_intraday_features", fake_features, raising=False)
+    service._candidate_intraday_features({"600000.SH"}, now)
+    assert captured["freshness_seconds"] == 7 * 24 * 60 * 60
+
+
+def test_rotation_only_fallback_when_realtime_sector_unavailable(tmp_path, monkeypatch):
+    class SectorService:
+        @staticmethod
+        def targets_for_symbol(_symbol, *, kind=None, industry_level=None):
+            if kind == "concept":
+                return [{"key": "c1", "kind": "concept", "name": "人工智能"}]
+            return []
+
+    service, quotes, _config = make_service(tmp_path)
+    now = datetime(2026, 8, 29, 18, 0, tzinfo=CN_TZ)  # 周六
+    service.app_state.sector_monitor_service = SectorService()
+    # 无 kaipanla_collector / 实时板块行情 → 走日频轮动降级路径
+    dates = ["2026-08-28", "2026-08-27", "2026-08-26", "2026-08-25", "2026-08-24"]
+    changes = [0.03, 0.02, 0.01, 0.0, -0.01]
+    rotation_payload = {
+        "dates": dates,
+        "columns": {
+            day: [["人工智能", change]] + [[f"板块{index}", 0.0] for index in range(1, 10)]
+            for day, change in zip(dates, changes, strict=True)
+        },
+        "concept_count": 10,
+    }
+    monkeypatch.setattr(
+        "app.services.limit_board_service.rps_rotation.build_rps_rotation",
+        lambda _repo, _days, kind, level=None: (
+            rotation_payload if kind == "concept" else {"dates": [], "columns": {}}
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.limit_board_service.intraday_flow_detail",
+        lambda *_args, **_kwargs: None,
+    )
+    quotes.enriched_date = date(2026, 8, 28)
+    quotes.enriched = pl.DataFrame({"symbol": ["600000.SH"]})
+    runtime = {"candidate_scores": {}}
+    candidates = [{"symbol": "600000.SH", "source_modes": ["selected"], "change_pct": 0.10}]
+
+    service._refresh_candidate_scores(runtime, candidates, now)
+
+    detail = runtime["candidate_scores"]["600000.SH"]["candidate_score_detail"]
+    sector = detail["sector"]
+    assert sector["data_source"] == "rps_rotation"
+    assert sector["realtime_available"] is False
+    assert sector["rotation_available"] is True
+    assert sector["rotation_label"] == "主线"
+    comprehensive = detail["comprehensive"]
+    sentiment = comprehensive["dimensions"]["sentiment"]
+    assert sentiment["components"]["sector_pattern"] > 0
+    assert "sector_current" in sentiment["unavailable_components"]
+    assert "sector_position" in comprehensive["dimensions"]["health"]["unavailable_components"]
+    assert "主线板块" in comprehensive["strengths"]
+
+
 def test_candidate_pool_marks_legacy_selected_rows_as_manual(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     service.store.update(0, lambda value: value["selected"].append({"symbol": "600000.SH", "name": "浦发银行"}))

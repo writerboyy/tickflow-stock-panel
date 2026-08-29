@@ -20,6 +20,7 @@ from app.services.limit_board_scoring import (
     comprehensive_score,
     intraday_flow_detail,
     premium_gene_detail,
+    rotation_only_detail,
     sector_detail,
     technical_detail,
 )
@@ -3182,7 +3183,18 @@ class LimitBoardService:
         if not callable(getter):
             return pl.DataFrame(), {}
         stock_df, stock_date = getter()
-        if stock_date != now.date() or stock_df is None or stock_df.is_empty():
+        if stock_date != now.date():
+            # 日线锚定「最近已完成交易日」：交易时段内只接受当日实时快照；
+            # 盘前/盘后/周末接受最近一个交易日的快照（如周六回看周五）。
+            # 快照超过 7 天视为 pipeline 异常，保持 fail-closed。
+            relaxed = now.weekday() >= 5 or not _is_trading_time(now)
+            if not (
+                relaxed
+                and stock_date is not None
+                and 0 <= (now.date() - stock_date).days <= 7
+            ):
+                return pl.DataFrame(), {}
+        if stock_df is None or stock_df.is_empty():
             return pl.DataFrame(), {}
         columns = [column for column in stock_df.columns if column in _SCORE_STOCK_COLUMNS]
         if "symbol" not in columns:
@@ -3206,7 +3218,13 @@ class LimitBoardService:
         if not callable(getter) or not symbols:
             return {}
         try:
-            freshness_seconds = 180 if _is_trading_time(now) else 24 * 60 * 60
+            if _is_trading_time(now) and now.weekday() < 5:
+                freshness_seconds = 180
+            elif now.weekday() >= 5:
+                # 周末按最近一个交易日计算：周五的分钟数据在整个周末有效
+                freshness_seconds = 7 * 24 * 60 * 60
+            else:
+                freshness_seconds = 24 * 60 * 60
             value = getter(
                 symbols,
                 asset_type="stock",
@@ -3607,6 +3625,21 @@ class LimitBoardService:
                             ),
                         )
                         break
+                if sector is None:
+                    # 实时板块行情不可用（周末/盘后/socket 断开）时，用日频
+                    # 轮动数据降级出板块形态/过热；实时类组件返回 None，
+                    # 由综合评分的数据门控显式标记为数据不足。
+                    for kind in ("concept", "industry"):
+                        targets = symbol_targets.get(kind) or []
+                        if not targets:
+                            continue
+                        sector = rotation_only_detail(
+                            targets[0], rotations.get(kind) or {}, now.date(),
+                        )
+                        if sector is not None:
+                            sector["as_of"] = now.isoformat()
+                            sector["data_source"] = "rps_rotation"
+                            break
                 sector = self._scale_score_detail(sector, _SCORE_WEIGHTS["sector"], 50.0)
                 gene = self._scale_score_detail(
                     premium_gene_detail(self._premium_stats.get(symbol) or {}),

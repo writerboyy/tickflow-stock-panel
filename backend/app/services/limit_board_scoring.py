@@ -615,6 +615,45 @@ def _rotation_name(target: dict[str, Any]) -> str:
     return name.split(" / ")[-1].strip()
 
 
+def rotation_only_detail(
+    target: dict[str, Any],
+    rotation: dict[str, Any],
+    today: date,
+) -> dict[str, Any] | None:
+    """仅依赖日频轮动数据的板块评分（实时板块行情不可用时的降级路径）。
+
+    板块K线形态/过热风险是日频数据，周末、盘后或实时 socket 断开时仍然
+    有效；实时类组件（当日表现、板块地位、宽度）输出 None 字段，由综合
+    评分的数据门控显式标记为数据不足，不参与打分。
+    """
+    history = rotation_detail(rotation, _rotation_name(target), today)
+    if history is None:
+        return None
+    rotation_fields = {
+        key: value for key, value in history.items()
+        if key not in {"score", "max_score", "components"}
+    }
+    return {
+        "score": history["score"],
+        "max_score": 50.0,
+        "current_score": 0.0,
+        "rotation_score": history["score"],
+        "current_components": {},
+        "kind": target.get("kind"),
+        "name": target.get("name") or _rotation_name(target),
+        "change_pct": None,
+        "up_ratio": None,
+        "coverage_ratio": None,
+        "leadership": None,
+        "stock_rank": None,
+        "is_sector_leader": False,
+        "rotation_available": True,
+        "realtime_available": False,
+        "rotation_components": history["components"],
+        **rotation_fields,
+    }
+
+
 _GRADE_ORDER = ("D", "C", "B", "B+", "A", "A+", "S")
 _GRADE_LABELS = {
     "S": "完美",
