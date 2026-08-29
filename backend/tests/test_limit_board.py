@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 import json
 from types import SimpleNamespace
+from typing import Any
 
 import polars as pl
 import pytest
@@ -1706,6 +1707,69 @@ def test_candidate_ranking_prioritizes_live_sector_before_total_score():
         [{"symbol": "600000.SH"}, {"symbol": "600001.SH"}], scores,
     )
     assert [row["symbol"] for row in ranked] == ["600000.SH", "600001.SH"]
+
+
+def test_rank_candidates_backfills_premium_gene_for_manual_entry_only_when_provider_given():
+    """Manual-entry 标的（score_cache 没快照）应当通过 provider 注入历史涨停基因；自动源已存在的 premium_gene 不被覆盖；不传 provider 不注入。"""
+    raw_gene: dict[str, Any] = {
+        "limit_up_count": 6,
+        "next_day_red_rate": 0.85,
+        "first_board_broken_rate": 0.10,
+        "first_board_attempt_count": 5,
+        "first_board_sealed_count": 4,
+        "first_board_seal_rate": 0.8,
+        "consecutive_rate": 0.4,
+        "premium_5_count": 3,
+        "next_day_observation_count": 6,
+        "window_days": 200,
+        "as_of": "2026-08-29",
+    }
+
+    def provider(symbol: str) -> dict[str, Any]:
+        return raw_gene if symbol.upper() == "600127.SH" else {}
+
+    # case A: manual entry（detail={}）传入 provider → 注入 premium_gene
+    scores_empty: dict[str, dict[str, Any]] = {}
+    ranked = LimitBoardService._rank_candidates(
+        [{"symbol": "600127.SH", "source_modes": ["selected"]}],
+        scores_empty,
+        premium_stats_provider=provider,
+    )
+    gene = ranked[0]["candidate_score_detail"]["premium_gene"]
+    assert gene["max_score"] == 10.0
+    assert gene["score"] > 0
+    assert gene["limit_up_count"] == 6
+    assert gene["passed"] is True
+    assert any("涨停基因" in reason for reason in ranked[0]["candidate_reasons"])
+
+    # case B: 自动源已有 premium_gene → provider 注入逻辑跳过，保留原值（幂等）
+    existing_gene = {"score": 7.5, "max_score": 10.0, "marker": "auto"}
+    ranked2 = LimitBoardService._rank_candidates(
+        [{"symbol": "600127.SH", "source_modes": ["first_board"]}],
+        {"600127.SH": {"candidate_score": 80.0, "candidate_score_state": "live",
+                       "candidate_score_detail": {"premium_gene": existing_gene},
+                       "candidate_reasons": []}},
+        premium_stats_provider=provider,
+    )
+    assert ranked2[0]["candidate_score_detail"]["premium_gene"] is existing_gene
+
+    # case C: 不传 provider → 历史涨停基因不会被注入，detail 维持空 dict
+    ranked3 = LimitBoardService._rank_candidates(
+        [{"symbol": "600127.SH", "source_modes": ["selected"]}],
+        scores_empty,
+    )
+    assert ranked3[0]["candidate_score_detail"] == {}
+
+
+def test_rank_candidates_skips_premium_gene_backfill_when_raw_stats_incomplete():
+    """Provider 返回的 raw stats 缺必需字段（limit_up_count / next_day_red_rate / first_board_broken_rate）时，不注入 premium_gene。"""
+    incomplete: dict[str, Any] = {"limit_up_count": 3, "next_day_red_rate": 0.9}
+    ranked = LimitBoardService._rank_candidates(
+        [{"symbol": "600127.SH", "source_modes": ["selected"]}],
+        {},
+        premium_stats_provider=lambda _symbol: incomplete,
+    )
+    assert ranked[0]["candidate_score_detail"] == {}
 
 
 def test_entry_metrics_requires_open_space_fresh_quote_and_rising_score(tmp_path):

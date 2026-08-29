@@ -1010,8 +1010,53 @@ function LimitBoardAllocationDialog({
               <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {(() => {
+                const premiumGene = row.candidate_score_detail?.premium_gene
+                if (!premiumGene) {
+                  return (
+                    <div className="rounded-btn border border-border bg-surface p-2.5">
+                      <div className="text-[10px] text-muted">历史涨停基因</div>
+                      <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
+                      <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">暂无历史涨停样本</div>
+                    </div>
+                  )
+                }
+                const geneScore = Number(premiumGene.score ?? 0)
+                const geneMax = Number(premiumGene.max_score ?? 10)
+                const genePct = geneMax > 0 ? Math.min(100, Math.max(0, (geneScore / geneMax) * 100)) : 0
+                const geneColor = genePct >= 80 ? 'bg-bull' : genePct >= 60 ? 'bg-accent' : 'bg-warning'
+                return (
+                  <div className="rounded border border-border bg-surface p-2.5">
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="min-w-0 truncate text-[10px] font-medium text-secondary">历史涨停基因</span>
+                      <span className="shrink-0 font-mono text-xs text-foreground">
+                        {geneScore.toFixed(1)}/{geneMax.toFixed(0)}
+                      </span>
+                    </div>
+                    <div className="relative h-1.5 overflow-hidden rounded-full bg-elevated">
+                      <div className={`h-full transition-all duration-300 ${geneColor}`} style={{ width: `${genePct}%` }} />
+                    </div>
+                    <div className="mt-2 space-y-1 border-t border-border/70 pt-2">
+                      {[
+                        { label: `近${premiumGene.window_days ?? '--'}日涨停`, value: premiumGene.limit_up_count == null ? '--' : `${premiumGene.limit_up_count} 次` },
+                        { label: '次日收红率', value: ratioPct(premiumGene.next_day_red_rate, 1) },
+                        { label: '首板尝试数', value: premiumGene.first_board_attempt_count == null ? '--' : `${premiumGene.first_board_attempt_count} 次` },
+                        { label: '首板封板率', value: ratioPct(premiumGene.first_board_seal_rate, 1) },
+                        { label: '首板破板率', value: ratioPct(premiumGene.first_board_broken_rate, 1) },
+                        { label: '连板率', value: ratioPct(premiumGene.consecutive_rate, 1) },
+                        { label: '5%溢价率', value: ratioPct(premiumGene.premium_5_rate, 1) },
+                        { label: '样本数', value: premiumGene.next_day_observation_count == null ? '--' : `${premiumGene.next_day_observation_count} 次` },
+                      ].map(detail => (
+                        <div key={detail.label} className="flex items-center justify-between gap-2 text-[9px]">
+                          <span className="min-w-0 truncate text-muted">{detail.label}</span>
+                          <span className="shrink-0 text-right font-mono text-secondary">{detail.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })()}
               {[
-                { label: '历史涨停基因', hint: '暂无历史涨停样本' },
                 { label: '板块强度', hint: '暂无板块实时数据' },
                 { label: '拉升健康度', hint: '暂无分时/资金数据' },
               ].map(({ label, hint }) => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">

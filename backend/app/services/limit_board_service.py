@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as clock_time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 
@@ -2869,7 +2869,10 @@ class LimitBoardService:
 
     @staticmethod
     def _rank_candidates(
-        candidates: list[dict[str, Any]], score_cache: dict[str, dict[str, Any]],
+        candidates: list[dict[str, Any]],
+        score_cache: dict[str, dict[str, Any]],
+        *,
+        premium_stats_provider: Callable[[str], dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         result = []
         for candidate in candidates:
@@ -2882,6 +2885,21 @@ class LimitBoardService:
                 "candidate_score_detail": {},
                 "candidate_reasons": LimitBoardService._score_reasons(candidate, {}),
             }
+            # 历史涨停基因可离线得到；即使综合评分 unavailable / manual entry
+            # 标的，也单独把这一维度补上，前端能单卡渲染。
+            if premium_stats_provider is not None and symbol:
+                detail = score.get("candidate_score_detail") or {}
+                if not detail.get("premium_gene"):
+                    gene = premium_gene_detail(premium_stats_provider(symbol) or {})
+                    if gene:
+                        detail = {**detail, "premium_gene": gene}
+                        score = {
+                            **score,
+                            "candidate_score_detail": detail,
+                            "candidate_reasons": LimitBoardService._score_reasons(
+                                candidate, detail,
+                            ),
+                        }
             result.append({**candidate, **score})
         def sort_key(row: dict[str, Any]) -> tuple:
             detail = row.get("candidate_score_detail") or {}
@@ -3670,16 +3688,21 @@ class LimitBoardService:
         # Keep both API projections on the same per-symbol score snapshot. The
         # candidate queue only re-displays scores computed for strong-stock rows.
         score_cache = runtime.get("candidate_scores") or {}
+        premium_stats_provider = (
+            lambda symbol: self._premium_stats.get(str(symbol).strip().upper()) or {}
+        )
         candidate_pool = self._rank_candidates(
-            candidates, score_cache,
+            candidates, score_cache, premium_stats_provider=premium_stats_provider,
         )
         first_board = self._rank_candidates(
             self._strong_rows(rows),
             score_cache,
+            premium_stats_provider=premium_stats_provider,
         )
         rebound_board = self._rank_candidates(
             [item for item in self._strong_rows(rows) if "rebound_board" in item.get("source_modes", [])],
             score_cache,
+            premium_stats_provider=premium_stats_provider,
         )
         opportunity_pool = self._rank_opportunities(
             self._strong_rows(rows),
