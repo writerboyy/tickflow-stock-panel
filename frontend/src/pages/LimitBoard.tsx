@@ -1458,7 +1458,7 @@ function scoreDetailRows(
     sentiment: sector ? [
       { label: '板块名称', value: sector.name || '--' },
       { label: '板块排名', value: sectorRankText(sector) },
-      { label: '板块涨幅', value: scoreDetailSignedPercent(sector.realtime_change_pct ?? sector.change_pct ?? sector.one_day_change_pct, 2) },
+      { label: '板块涨幅', value: scoreDetailSignedPercent(sector.one_day_change_pct ?? sector.change_pct, 2) },
       { label: '上涨占比', value: ratioPct(sector.up_ratio, 1) },
       ...(sector.institutional_score != null && sector.institutional_max_score != null ? [
         { label: '机构评分', value: `${sector.institutional_score.toFixed(1)}/${sector.institutional_max_score.toFixed(0)}` },
