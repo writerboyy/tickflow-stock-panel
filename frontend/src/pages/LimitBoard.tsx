@@ -1569,7 +1569,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
   const [mainBoardOnly, setMainBoardOnly] = useState(false)
   const [progressClock, setProgressClock] = useState(() => Date.now())
   const [cycleStartedAt, setCycleStartedAt] = useState(() => Date.now())
+  const sectorRowRefs = useRef(new Map<string, HTMLTableRowElement>())
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
+  const lastScrolledSector = useRef<string | null>(null)
   const lastScrolledConstituent = useRef<string | null>(null)
   const constituentOrder = useRef<{ key: string; symbols: string[] }>({ key: '', symbols: [] })
   const timeline = snapshot?.timeline ?? []
@@ -1662,6 +1664,16 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
     setSelectedPlateId(rows[0]?.plate_id ?? null)
     setSelectedStockSymbol(null)
   }, [rows, selectedPlateId])
+  useEffect(() => {
+    if (!selectedStockSymbol || !selectedPlateId || !rows.some(row => row.plate_id === selectedPlateId)) return
+    const scrollKey = `${selectedPlateId}:${selectedStockSymbol}`
+    if (lastScrolledSector.current === scrollKey) return
+    const frame = window.requestAnimationFrame(() => {
+      sectorRowRefs.current.get(selectedPlateId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      lastScrolledSector.current = scrollKey
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [rows, selectedPlateId, selectedStockSymbol])
   const activeCapturedAt = isLive
     ? activeSnapshot?.refreshed_at ?? cursorAt
     : cursorAt ?? sectorTradingCapturedAt(
@@ -1738,6 +1750,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
     const heatLinks = hotSectorLinks[normalized] ?? []
     const heatItem = hotRows.find(item => item.thscode.toUpperCase() === normalized)
     setSelectedStockSymbol(normalized)
+    lastScrolledSector.current = null
     lastScrolledConstituent.current = null
     const ids = new Set([
       ...heatLinks.map(link => link.plate_id),
@@ -1808,7 +1821,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
     </div>
     <div className="h-0.5 bg-elevated" aria-label={`板块三栏统一刷新进度 ${Math.round(refreshProgress)}%`}><div className="h-full bg-accent transition-[width] duration-200 ease-linear" style={{ width: `${refreshProgress}%` }} /></div>
     <div className="overflow-x-auto overscroll-x-contain">
-    <div className={`grid min-w-0 lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_16%_38%_24%]' : 'lg:grid-cols-[25%_24%_51%]'}`}>
+    <div className={`grid min-w-0 lg:h-[calc(62vh+5rem)] lg:min-w-[1020px] ${rankingOpen ? 'lg:grid-cols-[22%_16%_38%_24%]' : 'lg:grid-cols-[25%_24%_51%]'}`}>
       <div className="min-w-0 border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex min-h-12 flex-wrap items-center justify-between gap-1 border-b border-border px-2 py-1.5">
           <div className="min-w-0"><div className="inline-flex items-center gap-1 text-[11px] font-medium"><Flame className="h-3.5 w-3.5 shrink-0 text-accent" /><span className="truncate">即将涨停</span></div><div className="mt-0.5 truncate pl-[18px] text-[8px] text-muted">行情{refreshIntervalSeconds}秒 · {hotIntradayAvailable ? (hotIntradayVisible ? (hotIntradayAutoRefresh ? `分时${hotIntradayRefreshInterval}秒` : '分时手动') : '分时已关闭') : '分时不可用'}</div></div>
@@ -1873,8 +1886,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
           </div>
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
       </div>
-      <div className="min-w-0 self-start overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
-        <div className="max-w-full overflow-y-auto overscroll-contain lg:max-h-[62vh]">
+      <div className="min-h-0 min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
+        <div className="max-h-[62vh] min-h-0 max-w-full overflow-y-auto overscroll-contain scroll-py-[50%] lg:h-full lg:max-h-none">
+          {selectedStockSymbol ? <div aria-hidden="true" className="h-[31vh]" /> : null}
           <table className="w-full min-w-0 table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[35%] px-1.5 py-1.5">板块</th><th className="w-[23%] px-1.5 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[42%] px-1.5 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
             <tbody>{rows.length ? rows.map(row => {
@@ -1882,6 +1896,10 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
             const linked = linkedPlateIds.has(row.plate_id)
             return <tr
               key={row.plate_id}
+              ref={element => {
+                if (element) sectorRowRefs.current.set(row.plate_id, element)
+                else sectorRowRefs.current.delete(row.plate_id)
+              }}
               role="button"
               tabIndex={0}
               aria-selected={selected}
@@ -1900,6 +1918,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
             </tr>
             }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
           </table>
+          {selectedStockSymbol ? <div aria-hidden="true" className="h-[31vh]" /> : null}
         </div>
       </div>
       <div className="min-w-0">
