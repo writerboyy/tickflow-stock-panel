@@ -136,10 +136,6 @@ function scoreTime(value: string | null | undefined): string {
   return Number.isNaN(parsed.getTime()) ? '--' : parsed.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-function scoreDetailNumber(value: number | null | undefined, digits = 1): string {
-  return value == null || !Number.isFinite(value) ? '--' : value.toFixed(digits)
-}
-
 function scoreDetailSignedPercent(value: number | null | undefined, digits = 1): string {
   return value == null || !Number.isFinite(value) ? '--' : `${value >= 0 ? '+' : ''}${(value * 100).toFixed(digits)}%`
 }
@@ -1448,10 +1444,7 @@ function scoreDetailRows(
       ...(sector.twenty_day_change_pct != null ? [{ label: '20日收益', value: scoreDetailSignedPercent(sector.twenty_day_change_pct, 1) }] : []),
       ...(sector.top_20_days != null ? [{ label: '前20%天数', value: `${sector.top_20_days}/${sector.days?.length ?? 20}` }] : []),
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
-    health: flow || technical || sector ? [
-      ...(sector ? [
-        { label: sector.close_frozen ? '板块内涨幅排名·收盘' : '板块内涨幅排名·日内', value: sector.stock_rank != null && sector.member_count ? `${sector.stock_rank}/${sector.member_count}` : '--' },
-      ] : []),
+    health: flow || technical ? [
       ...(flow ? [
         { label: '触板状态', value: flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
         { label: '拉升用时', value: flow.pull_up_minutes == null ? '--' : `${flow.pull_up_minutes} 分钟` },
@@ -1465,8 +1458,6 @@ function scoreDetailRows(
       ] : []),
       ...(technical ? [
         { label: '均线形态', value: maVerdict || '--', tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
-        { label: 'MACD', value: `DIF ${scoreDetailNumber(technical.macd_dif, 2)} / DEA ${scoreDetailNumber(technical.macd_dea, 2)}` },
-        { label: 'KDJ', value: `K ${scoreDetailNumber(technical.kdj_k, 1)} / D ${scoreDetailNumber(technical.kdj_d, 1)} / J ${scoreDetailNumber(technical.kdj_j, 1)}` },
       ] : []),
     ] : [{ label: '拉升细则', value: '暂无数据', tone: 'text-warning' }],
   }
