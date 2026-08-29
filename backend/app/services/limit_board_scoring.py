@@ -1190,79 +1190,10 @@ def comprehensive_score(
     else:
         capital_flow = 0.0
 
-    # 4. 日K位置 (5分)：均线排列 + 当日K线实体/影线（分时 bar 聚合）
-    price = finite(tech.get("price"))
-    ma5 = finite(tech.get("ma5"))
-    ma10 = finite(tech.get("ma10"))
-    ma20 = finite(tech.get("ma20"))
-    ma60 = finite(tech.get("ma60"))
-
-    # 4.1 均线排列 (3分)
-    ma_available = all(
-        value is not None and value > 0 for value in (price, ma5, ma10, ma20, ma60)
-    )
-    if not ma_available or price is None or ma5 is None or ma10 is None or ma20 is None or ma60 is None:
-        ma_align = 0.0
-    elif price > ma5 > ma10 > ma20 > ma60:
-        ma_align = 3.0  # 完美多头
-    elif price > ma5 > ma10 > ma20:
-        ma_align = 2.5  # 强多头
-    elif price > ma5 > ma10:
-        ma_align = 2.0  # 中多头
-    elif price > ma5:
-        ma_align = 1.0  # 弱多头
-    else:
-        ma_align = 0.0  # 均线纠缠或空头
-
-    # 4.2 当日K线实体 (1.5分) + 影线 (0.5分)
-    day_open = finite(flow.get("day_open"))
-    day_high = finite(flow.get("day_high"))
-    day_low = finite(flow.get("day_low"))
-    day_close = finite(flow.get("last_price"))
-    kline_available = all(
-        value is not None for value in (day_open, day_high, day_low, day_close)
-    )
-    body_score = 0.0
-    shadow_score = 0.0
-    if kline_available:
-        span = (day_high or 0.0) - (day_low or 0.0)
-        open_price = day_open or 0.0
-        close_price = day_close or 0.0
-        body = abs(close_price - open_price)
-        body_ratio = (
-            body / span if span > 0 else (1.0 if close_price >= open_price else 0.0)
-        )
-        if body_ratio >= 0.70:
-            body_score = 1.5  # 大阳线
-        elif body_ratio >= 0.50:
-            body_score = 1.0  # 中阳线
-        elif body_ratio >= 0.30:
-            body_score = 0.5  # 小阳线
-        else:
-            body_score = 0.0  # 十字星/阴线
-        if span <= 0:
-            # 一字板：没有上影线压力
-            shadow_score = 0.5 if close_price >= open_price else 0.0
-        else:
-            upper_shadow = (day_high or 0.0) - max(open_price, close_price)
-            lower_shadow = min(open_price, close_price) - (day_low or 0.0)
-            ref = max(body, span * 0.05)
-            if upper_shadow > 2.0 * ref:
-                shadow_score = 0.0  # 上方压力大
-            elif lower_shadow > 2.0 * ref and upper_shadow <= ref:
-                shadow_score = 0.5  # 强支撑
-            else:
-                shadow_score = 0.3  # 正常
-
-    daily_k_available = ma_available or kline_available
-    daily_k_score = ma_align + body_score + shadow_score
-    daily_k_max = (3.0 if ma_available else 0.0) + (2.0 if kline_available else 0.0)
-
-    health = _dimension_result("拉升健康度", 40.0, [
+    health = _dimension_result("拉升健康度", 35.0, [
         ("sector_position", sector_position, 15.0, position_available),
         ("pullup_form", pullup_score, pullup_max, pullup_available),
         ("capital_flow", capital_flow, 10.0, capital_available),
-        ("daily_k_pattern", daily_k_score, daily_k_max, daily_k_available),
     ])
 
     # ========================================
@@ -1271,7 +1202,12 @@ def comprehensive_score(
     dimensions = {"history": history, "sentiment": sentiment, "health": health}
     available_total_max = sum(item["max_score"] for item in dimensions.values())
     raw_total = sum(item["score"] for item in dimensions.values())
-    data_completeness = round(available_total_max / 100.0, 2)
+    # 分母取各维度 full_max_score 之和，维度权重调整时无需同步改这里的常数，
+    # 否则 data_completeness 永远到不了 1.0，评级会被静默封顶 B。
+    full_total_max = sum(item["full_max_score"] for item in dimensions.values())
+    data_completeness = (
+        round(available_total_max / full_total_max, 2) if full_total_max > 0 else 0.0
+    )
     total_score = (
         round(raw_total / available_total_max * 100.0, 1)
         if available_total_max > 0
@@ -1360,12 +1296,6 @@ def comprehensive_score(
             strengths.append("主力大幅流入")
         elif capital_flow < 4.0:
             warnings.append("主力资金流出")
-
-    if ma_available:
-        if ma_align >= 3.0:
-            strengths.append("完美多头排列")
-        elif ma_align < 1.0:
-            warnings.append("均线压制")
 
     if pullup_available:
         one_wave = (

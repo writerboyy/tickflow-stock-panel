@@ -1407,7 +1407,7 @@ function manualActionRow(
   }
 }
 
-/** 均线形态判定：与后端日K位置的口径一致，面板显式写出是否多头排列。 */
+/** 均线形态判定：纯展示用，不参与综合评分（日K位置维度已移除）。 */
 function maAlignmentVerdict(
   technical: NonNullable<LimitBoardRow['candidate_score_detail']>['technical'],
 ): string | null {

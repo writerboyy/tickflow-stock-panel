@@ -573,10 +573,12 @@ def test_comprehensive_score_gene_only_scales_and_caps_grade():
     assert history["max_score"] == pytest.approx(24.0)
     assert history["full_max_score"] == pytest.approx(30.0)
     assert history["unavailable_components"] == ["consecutive_ability"]
-    # 18/24 = 75 → A 档，但数据完整度 0.24 → 封顶 B
+    # 18/24 = 75 → A 档，但数据完整度不足 → 封顶 B
     assert result["comprehensive_score"] == pytest.approx(75.0)
     assert result["grade"] == "B"
-    assert result["data_completeness"] == pytest.approx(0.24)
+    # 满分基数 = 30 + 30 + 35（日K位置移除后拉升健康度满分由 40 降为 35）
+    # 24/95 = 0.2526… → round 到 0.25
+    assert result["data_completeness"] == pytest.approx(0.25)
     # 真实数据驱动的警示保留；缺项的假信号全部消失
     assert "次日收红率偏低" in result["warnings"]
     assert "板块涨幅不大，安全" not in result["strengths"]
@@ -629,11 +631,39 @@ def test_comprehensive_score_sealed_stock_scores_pullup_not_capital():
     assert health["components"]["pullup_form"] == pytest.approx(11.0)
     # 封板后资金流向失真 → 数据不足，不再拿「主力流出」扣分
     assert "capital_flow" in health["unavailable_components"]
-    # 日K：实体 1.5 + 影线 0.3（无均线数据 → max 2）
-    assert health["components"]["daily_k_pattern"] == pytest.approx(1.8)
-    assert health["max_score"] == pytest.approx(13.0)
+    # 日K位置已移除，拉升健康度满分为 板块地位 15 + 拉升形态 11 + 资金强度 10
+    assert "daily_k_pattern" not in health["components"]
+    assert health["max_score"] == pytest.approx(11.0)
+    assert health["full_max_score"] == pytest.approx(35.0)
     assert "一波流拉升" in result["strengths"]
     assert "主力资金流出" not in result["warnings"]
+
+
+def test_health_dimension_drops_daily_k_and_rescales_full_total():
+    """日K位置移除后：拉升健康度满分上限 40→35，总分基数 100→95。
+
+    基数必须跟着降，否则 data_completeness 永远到不了 1.0，
+    「数据不完整封顶 B」这条规则会把所有评级静默压死。
+    """
+    result = comprehensive_score({})
+    dimensions = result["dimensions"]
+
+    assert dimensions["health"]["full_max_score"] == pytest.approx(35.0)
+    assert "daily_k_pattern" not in dimensions["health"]["components"]
+    assert sum(item["full_max_score"] for item in dimensions.values()) == pytest.approx(95.0)
+
+
+def test_strengths_and_warnings_drop_ma_signals_with_daily_k():
+    """均线相关的优势/警示由日K位置驱动，随该维度一并移除。"""
+    flow = intraday_flow_detail(
+        _sealed_pullup_intraday(), previous_close=10.0, limit_up=11.0,
+        external_flow={"buy_ratio": 0.70, "sell_ratio": 0.30},
+    )
+    result = comprehensive_score({"intraday_flow": flow})
+
+    assert "perfect_ma" not in result["strengths"]
+    assert "完美多头排列" not in result["strengths"]
+    assert "均线压制" not in result["warnings"]
 
 
 def test_comprehensive_score_flags_choppy_pullup():
