@@ -63,11 +63,15 @@ def _symbols(data_dir: Path) -> list[str]:
 
 
 def _focus_symbols(data_dir: Path) -> list[str]:
-    """09:24:57 最后 3 秒窗口的重点标的池（instruments/auction_focus.parquet）。
+    """09:24:57 最后 3 秒窗口的重点标的池（pools/auction_focus.parquet）。
 
     文件不存在或读取失败时返回空列表，由 collect() 判定为跳过，不报错。
+
+    位置固定在 data/pools/ 而不是 data/instruments/：后者会被
+    data/instruments/**/*.parquet 整体当作维表扫描，一个只有 symbol 列的文件
+    会顶掉真正的 instruments.parquet 的 schema，让整个 instruments 缓存加载失败。
     """
-    path = Path(data_dir) / "instruments" / "auction_focus.parquet"
+    path = Path(data_dir) / "pools" / "auction_focus.parquet"
     if not path.exists():
         return []
     try:

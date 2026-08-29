@@ -13,7 +13,12 @@
     ./backend/.venv/bin/python backend/scripts/build_auction_focus.py --max 500
     ./backend/.venv/bin/python backend/scripts/build_auction_focus.py --extra data/pools/my_pool.parquet
 
-输出: data/instruments/auction_focus.parquet（仅 symbol 列）
+输出: data/pools/auction_focus.parquet（仅 symbol 列）
+
+注意: 不能写到 data/instruments/ —— 那目录会被
+data/instruments/**/*.parquet 当作维表分区整体扫描, 一个只有 symbol 列的文件
+会让 Polars 以它为基准 schema, 导致真正的 instruments.parquet 因 "extra
+column: name" 加载失败, 连锁拖垮整个 instruments 缓存。
 """
 from __future__ import annotations
 
@@ -98,7 +103,7 @@ def main() -> None:
     if not symbols:
         sys.exit("重点池为空，不生成文件")
 
-    out = DATA_DIR / "instruments" / "auction_focus.parquet"
+    out = DATA_DIR / "pools" / "auction_focus.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     pl.DataFrame({"symbol": symbols}).write_parquet(out)
     batches = (len(symbols) + 99) // 100

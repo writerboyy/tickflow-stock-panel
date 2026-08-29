@@ -256,8 +256,8 @@ def test_clear_api_key_removes_local_secret_and_refreshes_collector(monkeypatch)
     assert stopped == [True]
 
 
-def _write_symbols(tmp_path, filename: str, symbols: list[str]) -> None:
-    inst = tmp_path / "instruments"
+def _write_symbols(tmp_path, filename: str, symbols: list[str], subdir: str = "instruments") -> None:
+    inst = tmp_path / subdir
     inst.mkdir(exist_ok=True)
     pl.DataFrame({"symbol": symbols}).write_parquet(inst / filename)
 
@@ -267,7 +267,7 @@ async def test_collect_092457_uses_focus_pool_instead_of_full_universe(tmp_path,
     """最后 3 秒窗口拉不完全市场，092457 必须只采 auction_focus 重点池。"""
     _write_symbols(tmp_path, "instruments.parquet", [f"{600000 + i:06d}.SH" for i in range(300)])
     focus = ["600519.SH", "000001.SZ"]
-    _write_symbols(tmp_path, "auction_focus.parquet", focus)
+    _write_symbols(tmp_path, "auction_focus.parquet", focus, "pools")
 
     fake = _FakeClient({"timestamp": 123, "auction_phase": "open", "data_status": "ready", "item": [_row()]})
     monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
@@ -281,6 +281,22 @@ async def test_collect_092457_uses_focus_pool_instead_of_full_universe(tmp_path,
     assert fake.calls[0][1] == "live"
     frame = pl.read_parquet(partition_path(tmp_path, date(2026, 8, 27)))
     assert set(frame["checkpoint"].to_list()) == {"092457"}
+
+
+def test_focus_pool_is_read_from_pools_dir_only(tmp_path):
+    """重点池只认 data/pools/。
+
+    放在 data/instruments/ 会被 data/instruments/**/*.parquet 当作维表分区一起
+    扫描, 只有 symbol 列的文件会顶掉 instruments.parquet 的 schema, 导致
+    "extra column: name" 让整张维表加载失败。
+    """
+    _write_symbols(tmp_path, "auction_focus.parquet", ["600519.SH"], "instruments")
+
+    assert collector_module._focus_symbols(tmp_path) == []
+
+    _write_symbols(tmp_path, "auction_focus.parquet", ["600519.SH"], "pools")
+
+    assert collector_module._focus_symbols(tmp_path) == ["600519.SH"]
 
 
 @pytest.mark.asyncio
