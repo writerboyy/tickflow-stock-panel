@@ -165,6 +165,10 @@ def technical_detail(values: dict[str, Any], *, as_of: str | None = None) -> dic
         "components": {key: round(value, 2) for key, value in components.items()},
         "as_of": as_of,
         **raw,
+        # KDJ 只做明细展示，不进 raw 门控：缺失时不能把整个技术面明细打没。
+        "kdj_k": finite(values.get("kdj_k")),
+        "kdj_d": finite(values.get("kdj_d")),
+        "kdj_j": finite(values.get("kdj_j")),
     }
 
 

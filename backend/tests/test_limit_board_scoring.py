@@ -108,6 +108,43 @@ def test_technical_score_combines_all_configured_indicators():
     }
 
 
+def _technical_values() -> dict:
+    return {
+        "close": 12.0,
+        "ma5": 11.0,
+        "ma10": 10.0,
+        "ma20": 9.0,
+        "ma60": 8.0,
+        "momentum_5d": 0.10,
+        "momentum_20d": 0.30,
+        "vol_ratio_5d": 2.5,
+        "macd_dif": 0.3,
+        "macd_dea": 0.2,
+        "macd_hist": 0.1,
+        "rsi_14": 70.0,
+    }
+
+
+def test_technical_detail_exposes_kdj_when_present():
+    detail = technical_detail({**_technical_values(), "kdj_k": 82.3, "kdj_d": 75.1, "kdj_j": 96.7})
+
+    assert detail is not None
+    assert detail["kdj_k"] == pytest.approx(82.3)
+    assert detail["kdj_d"] == pytest.approx(75.1)
+    assert detail["kdj_j"] == pytest.approx(96.7)
+
+
+def test_technical_detail_survives_missing_kdj():
+    """KDJ 是纯展示字段，缺失不能让整个技术面明细消失。"""
+    detail = technical_detail(_technical_values())
+
+    assert detail is not None
+    assert detail["score"] == pytest.approx(20.0)
+    assert detail["kdj_k"] is None
+    assert detail["kdj_d"] is None
+    assert detail["kdj_j"] is None
+
+
 def test_intraday_flow_score_makes_persistent_underwater_outflow_lowest_weighted_signal():
     rising = intraday_flow_detail({
         "available": True,

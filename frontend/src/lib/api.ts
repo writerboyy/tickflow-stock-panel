@@ -1623,6 +1623,10 @@ export interface LimitBoardRow {
       macd_hist?: number
       rsi_14?: number
       as_of?: string
+      // 仅明细展示，不参与技术面打分
+      kdj_k?: number
+      kdj_d?: number
+      kdj_j?: number
     }
     comprehensive?: {
       comprehensive_score: number

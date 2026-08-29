@@ -1465,7 +1465,8 @@ function scoreDetailRows(
       ] : []),
       ...(technical ? [
         { label: '均线形态', value: maVerdict || '--', tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
-        { label: 'RSI(14)', value: scoreDetailNumber(technical.rsi_14, 1) },
+        { label: 'MACD', value: `DIF ${scoreDetailNumber(technical.macd_dif, 2)} / DEA ${scoreDetailNumber(technical.macd_dea, 2)}` },
+        { label: 'KDJ', value: `K ${scoreDetailNumber(technical.kdj_k, 1)} / D ${scoreDetailNumber(technical.kdj_d, 1)} / J ${scoreDetailNumber(technical.kdj_j, 1)}` },
       ] : []),
     ] : [{ label: '拉升细则', value: '暂无数据', tone: 'text-warning' }],
   }

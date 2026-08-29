@@ -71,6 +71,8 @@ _SCORE_STOCK_COLUMNS = {
     "symbol", "name", "close", "last_price", "prev_close", "change_pct", "amount",
     "ma5", "ma10", "ma20", "ma60", "momentum_5d", "momentum_20d",
     "vol_ratio_5d", "macd_dif", "macd_dea", "macd_hist", "rsi_14",
+    # KDJ 仅用于明细展示，不参与技术面打分（见 technical_detail）
+    "kdj_k", "kdj_d", "kdj_j",
 }
 _SCORE_WEIGHTS = {
     "sector": 50.0,
