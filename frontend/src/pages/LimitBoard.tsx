@@ -1449,10 +1449,6 @@ function scoreDetailRows(
       ...(sector.top_20_days != null ? [{ label: '前20%天数', value: `${sector.top_20_days}/${sector.days?.length ?? 20}` }] : []),
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
     health: flow || technical || sector ? [
-      ...(sector ? [
-        { label: sector.close_frozen ? '板块排名·收盘' : '板块排名·日内', value: sector.stock_rank != null && sector.member_count ? `${sector.stock_rank}/${sector.member_count}` : '--' },
-        { label: '排名口径', value: '涨幅÷涨停幅度归一（主板10%·创业科创20%·北交30%）' },
-      ] : []),
       ...(flow ? [
         { label: '触板状态', value: flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
         { label: '拉升用时', value: flow.pull_up_minutes == null ? '--' : `${flow.pull_up_minutes} 分钟` },
@@ -1466,8 +1462,6 @@ function scoreDetailRows(
       ] : []),
       ...(technical ? [
         { label: '均线形态', value: `${maVerdict ? `${maVerdict} · ` : ''}${scoreDetailNumber(technical.price, 2)} / ${scoreDetailNumber(technical.ma5, 2)} / ${scoreDetailNumber(technical.ma20, 2)}`, tone: maVerdict === '非多头排列' ? 'text-warning' : maVerdict ? 'text-bull' : undefined },
-        { label: '5日动量', value: scoreDetailSignedPercent(technical.momentum_5d, 2) },
-        { label: '5日量比', value: scoreDetailNumber(technical.vol_ratio_5d, 2) },
         { label: 'RSI(14)', value: scoreDetailNumber(technical.rsi_14, 1) },
       ] : []),
     ] : [{ label: '拉升细则', value: '暂无数据', tone: 'text-warning' }],
