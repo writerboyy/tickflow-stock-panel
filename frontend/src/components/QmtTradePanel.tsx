@@ -192,6 +192,7 @@ export function QmtTradePanel({
     retry: false,
     placeholderData: previous => previous,
     staleTime: 500,
+    refetchInterval: query => query.state.data?.preview?.credit_opvolume?.status === 'pending' ? 400 : false,
   })
   const basePreview = preview.data?.preview
   const serverPreview = useMemo(() => {
@@ -311,7 +312,9 @@ export function QmtTradePanel({
     ? preview.error instanceof Error ? preview.error.message : '委托金额暂时无法计算'
     : !qmtReady
       ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
-      : serverPreview?.reason
+      : serverPreview?.credit_opvolume?.status === 'pending'
+        ? '正在读取该股票最大融资可买…'
+        : serverPreview?.reason
         || serverPreview?.credit_buy_mode_reason
         || (serverPreview?.capped
         ? '目标金额已按账户可用资金或持仓，以及 100 股整手向下调整。'

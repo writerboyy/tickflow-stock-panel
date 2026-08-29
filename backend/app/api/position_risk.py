@@ -54,6 +54,16 @@ class QmtOrderPreviewPayload(BaseModel):
     credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
+class QmtCreditOpvolumeWarmItem(BaseModel):
+    symbol: str
+    price: float = Field(gt=0)
+
+
+class QmtCreditOpvolumeWarmPayload(BaseModel):
+    items: list[QmtCreditOpvolumeWarmItem] = Field(default_factory=list, max_length=12)
+    credit_buy_mode: str = Field(default="financing", pattern="^(collateral|financing)$")
+
+
 class QmtTradeTogglePayload(BaseModel):
     enabled: bool
 
@@ -379,6 +389,18 @@ def qmt_preview_order(payload: QmtOrderPreviewPayload, request: Request):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, str(exc)) from exc
     return {"ok": True, "preview": preview}
+
+
+@router.post("/qmt/credit-opvolume/warm")
+def qmt_warm_credit_opvolume(payload: QmtCreditOpvolumeWarmPayload, request: Request):
+    try:
+        scheduled = _qmt(request).warm_credit_opvolume(
+            [item.model_dump() for item in payload.items],
+            payload.credit_buy_mode,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, str(exc)) from exc
+    return {"ok": True, "scheduled": scheduled}
 
 
 @router.post("/qmt/orders")

@@ -3518,6 +3518,12 @@ export const api = {
   qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
   qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode }, quiet = false) =>
     request<{ ok: boolean; preview: QmtOrderPreview }>('/api/position-risk/qmt/orders/preview', { method: 'POST', body: JSON.stringify(payload), quiet }),
+  qmtWarmCreditOpvolume: (items: { symbol: string; price: number }[], creditBuyMode: QmtCreditBuyMode = 'financing') =>
+    request<{ ok: boolean; scheduled: number }>('/api/position-risk/qmt/credit-opvolume/warm', {
+      method: 'POST',
+      body: JSON.stringify({ items: items.slice(0, 12), credit_buy_mode: creditBuyMode }),
+      quiet: true,
+    }),
   qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume?: number | null; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode?: string | null; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode; idempotency_key: string }) =>
     request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
   qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number; credit_buy_mode?: QmtCreditBuyMode }) =>

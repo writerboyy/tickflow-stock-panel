@@ -2054,6 +2054,32 @@ export function LimitBoard() {
     1,
     view.data?.runtime.refresh_cycle.interval_seconds ?? 5,
   ) * 1000
+  const qmt = useQuery({
+    queryKey: QK.positionRiskQmt,
+    queryFn: api.qmtStatus,
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+    placeholderData: previous => previous,
+  })
+  const warmItems = useMemo(() => {
+    if (qmt.data?.configured !== true || qmt.data.state !== 'ready') return []
+    if (String(qmt.data?.account_type || '').toUpperCase() !== 'CREDIT') return []
+    const source = tab === 'buy_pool' ? view.data?.buy_pool : tab === 'pool' ? view.data?.board_pool : []
+    const items: { symbol: string; price: number }[] = []
+    for (const row of source ?? []) {
+      const price = row.last_price ?? row.order_price
+      if (row.symbol && typeof price === 'number' && price > 0) items.push({ symbol: row.symbol, price })
+      if (items.length >= 12) break
+    }
+    return items
+  }, [qmt.data, tab, view.data?.board_pool, view.data?.buy_pool])
+  const warmedKeyRef = useRef('')
+  useEffect(() => {
+    const key = warmItems.map(item => `${item.symbol}@${item.price}`).join(',')
+    if (!key || key === warmedKeyRef.current) return
+    warmedKeyRef.current = key
+    api.qmtWarmCreditOpvolume(warmItems).catch(() => undefined)
+  }, [warmItems])
   const approachingLimitUp = useQuery({
     queryKey: QK.limitBoardApproachingLimitUp,
     queryFn: () => api.limitBoardApproachingLimitUp(true),

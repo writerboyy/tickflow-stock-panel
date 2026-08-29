@@ -671,6 +671,107 @@ def test_qmt_zmq_client_schedules_credit_opvolume_without_blocking_preview():
         client.close()
 
 
+def test_qmt_background_credit_rpc_keeps_the_interactive_socket_free():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    observed = []
+
+    def fake_roundtrip(dealer, request, timeout_seconds):
+        observed.append((request["method"], timeout_seconds, client._lock.locked()))
+        return {"ok": True, "request_id": request["request_id"], "data": {"status": "ready"}}
+
+    client._roundtrip = fake_roundtrip
+    try:
+        payload = {"stock_code": "600000.SH"}
+        assert client.call_background("get_credit_opvolume", payload, 1.5) == {"status": "ready"}
+        assert observed[0] == ("get_credit_opvolume", 1.5, False)
+        assert client._background_dealer is not client._dealer
+    finally:
+        client.close()
+
+
+def test_qmt_credit_opvolume_warm_only_schedules_new_symbols():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    fetched = []
+
+    def fake_fetch(key, symbol, price, mode, _timeout):
+        fetched.append((symbol, mode))
+        return {
+            "status": "ready",
+            "stock_code": symbol,
+            "max_volume": 100,
+            "max_amount": round(price * 100, 2),
+        }
+
+    client._fetch_credit_opvolume = fake_fetch
+    items = [{"symbol": "600000.SH", "price": 10.0}, {"symbol": "600519.SH", "price": 1500.0}]
+    try:
+        assert client.warm_credit_opvolume(items) == 2
+        assert client.warm_credit_opvolume(items) == 0
+        deadline = time.monotonic() + 2
+        while len(fetched) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert sorted(fetched) == [("600000.SH", "financing"), ("600519.SH", "financing")]
+        assert client.warm_credit_opvolume(items) == 0
+    finally:
+        client.close()
+
+
+def test_qmt_credit_opvolume_error_expires_instead_of_poisoning_the_symbol():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    attempts = []
+    results = [
+        {"status": "error", "stock_code": "600000.SH", "reason": "QMT RPC 超时"},
+        {"status": "ready", "stock_code": "600000.SH", "max_volume": 500, "max_amount": 5_000.0},
+    ]
+
+    def fake_fetch(key, symbol, price, mode, _timeout):
+        attempts.append(symbol)
+        return results[min(len(attempts) - 1, len(results) - 1)]
+
+    client._fetch_credit_opvolume = fake_fetch
+    items = [{"symbol": "600000.SH", "price": 10.0}]
+    try:
+        def settle(expected: str) -> str:
+            deadline = time.monotonic() + 2
+            status = "pending"
+            while time.monotonic() < deadline:
+                status = str(client.get_credit_opvolume("600000.SH", 10.0, "financing", background=True)["status"])
+                if status != "pending":
+                    break
+                time.sleep(0.01)
+            assert status == expected
+            return status
+
+        assert client.warm_credit_opvolume(items) == 1
+        settle("error")
+        assert client.warm_credit_opvolume(items) == 0
+        client._credit_opvolume_error_until.clear()
+        assert client.warm_credit_opvolume(items) == 1
+        settle("ready")
+        assert client.get_credit_opvolume("600000.SH", 10.0, "financing")["max_volume"] == 500
+    finally:
+        client.close()
+
+
+def test_qmt_credit_opvolume_warm_caps_the_batch_and_skips_stock_accounts():
+    credit = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    credit._fetch_credit_opvolume = lambda key, symbol, price, mode, _t: {
+        "status": "ready",
+        "stock_code": symbol,
+        "max_volume": 100,
+        "max_amount": round(price * 100, 2),
+    }
+    items = [{"symbol": f"6000{index:02d}.SH", "price": 10.0} for index in range(30)]
+    try:
+        assert credit.warm_credit_opvolume(items) == 12
+    finally:
+        credit.close()
+
+    stock = QmtZmqRpcClient(_qmt_settings(qmt_account_type="STOCK"))
+    stock._fetch_credit_opvolume = lambda *_args: pytest.fail("stock accounts have no credit limit")
+    assert stock.warm_credit_opvolume(items) == 0
+
+
 def test_qmt_client_matches_financing_subject_by_exchange_and_status():
     client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
     calls = []

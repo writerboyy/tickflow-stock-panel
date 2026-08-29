@@ -118,6 +118,15 @@ _CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
 _CREDIT_SUBJECT_CACHE_SECONDS = 180.0
 _CREDIT_OPVOLUME_BACKGROUND_TIMEOUT_SECONDS = 8.0
 _CREDIT_SUBJECT_ERROR_CACHE_SECONDS = 5.0
+# Budget for one background poll. The broker's own kick-off query is slower
+# than this, so only the cheap status polls use it.
+_CREDIT_BACKGROUND_RPC_TIMEOUT_SECONDS = 3.0
+# A failed query is retried after this long instead of poisoning the symbol
+# for the rest of the session.
+_CREDIT_OPVOLUME_ERROR_CACHE_SECONDS = 30.0
+# Symbols warmed per request. The broker query is asynchronous and serialized
+# on the background socket, so a larger batch only delays the tail.
+_CREDIT_OPVOLUME_WARM_LIMIT = 12
 
 _CREDIT_RAW_FIELD_TARGETS = {
     "m_dFinEnbuyBalance": ("fin_enbuy_balance",),
@@ -293,11 +302,17 @@ class QmtZmqRpcClient:
         self.timeout = max(1.0, float(getattr(settings, "qmt_rpc_timeout_seconds", 6.0)))
         self._context = None
         self._dealer = None
+        self._background_dealer = None
         self._lock = threading.Lock()
+        # Background credit queries use their own socket and lock. Sharing the
+        # interactive one made a slow broker reply hold ``self._lock`` for the
+        # whole round trip, which stalled order previews by 5-13 seconds.
+        self._background_lock = threading.Lock()
         self._credit_state_lock = threading.Lock()
         self._retired = False
         self._credit_opvolume_cache: dict[tuple[str, float, str], dict[str, Any]] = {}
         self._credit_opvolume_futures: dict[tuple[str, float, str], Any] = {}
+        self._credit_opvolume_error_until: dict[tuple[str, float, str], float] = {}
         self._credit_executor: ThreadPoolExecutor | None = None
         self._credit_subjects_cache: list[dict[str, Any]] | None = None
         self._credit_subjects_cache_at = 0.0
@@ -355,8 +370,16 @@ class QmtZmqRpcClient:
             return self._ensure_dealer_locked()
 
     def _ensure_dealer_locked(self):
-        if self._dealer is not None:
-            return self._dealer
+        if self._dealer is None:
+            self._dealer = self._create_dealer()
+        return self._dealer
+
+    def _ensure_background_dealer_locked(self):
+        if self._background_dealer is None:
+            self._background_dealer = self._create_dealer()
+        return self._background_dealer
+
+    def _create_dealer(self):
         if zmq is None:  # pragma: no cover - guarded by configured
             raise QmtRpcError("后端未安装 pyzmq 客户端")
         if self._context is None:
@@ -365,16 +388,21 @@ class QmtZmqRpcClient:
         dealer.setsockopt(zmq.IDENTITY, uuid.uuid4().hex[:16].encode("ascii"))
         dealer.setsockopt(zmq.LINGER, 0)
         dealer.connect(self.connect_address)
-        self._dealer = dealer
         return dealer
 
     def _close_dealer_locked(self) -> None:
-        if self._dealer is None:
-            return
         try:
-            self._dealer.close(linger=0)
+            if self._dealer is not None:
+                self._dealer.close(linger=0)
         finally:
             self._dealer = None
+
+    def _close_background_dealer_locked(self) -> None:
+        try:
+            if self._background_dealer is not None:
+                self._background_dealer.close(linger=0)
+        finally:
+            self._background_dealer = None
 
     def _credit_executor_locked(self) -> ThreadPoolExecutor:
         if self._credit_executor is None:
@@ -385,39 +413,11 @@ class QmtZmqRpcClient:
         return self._credit_executor
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        if not self.configured:
-            raise QmtRpcError(self.configuration_reason)
-        request_id = uuid.uuid4().hex
-        request = {
-            "schema_version": 1,
-            "request_id": request_id,
-            "account_id": self.account_id,
-            "method": method,
-            "params": params or {},
-            "ttl_seconds": max(60, int(self.timeout) + 30),
-        }
+        request = self._build_request(method, params)
         with self._lock:
             dealer = self._ensure_dealer_locked()
             try:
-                dealer.send(_encode_zmq_payload(request))
-                poller = zmq.Poller()
-                poller.register(dealer, zmq.POLLIN)
-                deadline = time.monotonic() + self.timeout
-                response = None
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    events = dict(poller.poll(timeout=max(1, math.ceil(remaining * 1000))))
-                    if dealer not in events:
-                        continue
-                    candidate = _decode_zmq_payload(dealer.recv())
-                    if not isinstance(candidate, dict):
-                        continue
-                    if str(candidate.get("request_id") or "") != request_id:
-                        continue
-                    response = candidate
-                    break
+                response = self._roundtrip(dealer, request, self.timeout)
             except QmtRpcError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -426,6 +426,80 @@ class QmtZmqRpcClient:
             if response is None:
                 self._close_dealer_locked()
                 raise QmtRpcError(f"QMT RPC 超时: {method}")
+        return self._unwrap_response(method, response)
+
+    def call_background(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> Any:
+        """Send an RPC over the dedicated background socket.
+
+        Credit contract and max-volume queries are slow and chatty. Keeping
+        them off the interactive socket stops a hung broker reply from holding
+        ``self._lock`` while an order preview waits for its turn.
+        """
+        # A replaced ``call`` is a test double or an older bridge adapter; keep
+        # routing through it so existing behaviour is unchanged.
+        if getattr(self.call, "__func__", None) is not QmtZmqRpcClient.call:
+            return self.call(method, params)
+        request = self._build_request(method, params)
+        with self._background_lock:
+            dealer = self._ensure_background_dealer_locked()
+            try:
+                response = self._roundtrip(
+                    dealer, request, timeout_seconds or min(self.timeout, 8.0),
+                )
+            except QmtRpcError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._close_background_dealer_locked()
+                raise QmtRpcError(f"QMT ZMQ RPC 连接失败: {exc.__class__.__name__}") from exc
+            if response is None:
+                self._close_background_dealer_locked()
+                raise QmtRpcError(f"QMT RPC 超时: {method}")
+        return self._unwrap_response(method, response)
+
+    def _build_request(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        if not self.configured:
+            raise QmtRpcError(self.configuration_reason)
+        return {
+            "schema_version": 1,
+            "request_id": uuid.uuid4().hex,
+            "account_id": self.account_id,
+            "method": method,
+            "params": params or {},
+            "ttl_seconds": max(60, int(self.timeout) + 30),
+        }
+
+    def _roundtrip(
+        self,
+        dealer: Any,
+        request: dict[str, Any],
+        timeout_seconds: float,
+    ) -> dict[str, Any] | None:
+        """Send one request and return its reply, or ``None`` on timeout."""
+        request_id = str(request["request_id"])
+        dealer.send(_encode_zmq_payload(request))
+        poller = zmq.Poller()
+        poller.register(dealer, zmq.POLLIN)
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            events = dict(poller.poll(timeout=max(1, math.ceil(remaining * 1000))))
+            if dealer not in events:
+                continue
+            candidate = _decode_zmq_payload(dealer.recv())
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("request_id") or "") != request_id:
+                continue
+            return candidate
+
+    def _unwrap_response(self, method: str, response: dict[str, Any]) -> Any:
         if not response.get("ok"):
             error = response.get("error") or f"QMT RPC {method} 失败"
             raise QmtRpcError(str(error))
@@ -439,6 +513,8 @@ class QmtZmqRpcClient:
         with self._lock:
             self._retired = True
             self._close_dealer_locked()
+        with self._background_lock:
+            self._close_background_dealer_locked()
         with self._credit_state_lock:
             executor = self._credit_executor
             self._credit_executor = None
@@ -496,48 +572,68 @@ class QmtZmqRpcClient:
         timeout_seconds: float | None,
     ) -> dict[str, Any]:
         op_type = 27 if mode == "financing" else 33
-        query = self.call(
-            "query_credit_opvolume",
-            {
-                "account_id": self.account_id,
-                "stock_code": symbol,
-                "op_type": op_type,
-                "price_type": 11,
-                "price": float(price),
-            },
-        )
+        query_payload = {
+            "account_id": self.account_id,
+            "stock_code": symbol,
+            "op_type": op_type,
+            "price_type": 11,
+            "price": float(price),
+        }
+        # The broker answers this query only after it has kicked off the
+        # calculation, which measured 1.5-2.0s. Give it the full background
+        # budget instead of the shorter poll timeout.
+        query = self.call_background("query_credit_opvolume", query_payload)
         if not isinstance(query, dict):
             result = {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
             with self._credit_state_lock:
-                self._credit_opvolume_cache[key] = dict(result)
+                self._cache_credit_opvolume_locked(key, result)
             return result
-        if isinstance(query, dict) and query.get("status") == "error":
+        if query.get("status") in {"error", "unavailable"}:
             with self._credit_state_lock:
-                self._credit_opvolume_cache[key] = dict(query)
-            return query
-        if query.get("status") == "unavailable":
-            with self._credit_state_lock:
-                self._credit_opvolume_cache[key] = dict(query)
+                self._cache_credit_opvolume_locked(key, query)
             return query
         deadline = time.monotonic() + max(0.5, float(timeout_seconds or min(self.timeout, 4.0)))
         latest = {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
         while time.monotonic() < deadline:
-            latest = self.call(
+            latest = self.call_background(
                 "get_credit_opvolume",
-                {
-                    "account_id": self.account_id,
-                    "stock_code": symbol,
-                    "op_type": op_type,
-                    "price_type": 11,
-                    "price": float(price),
-                },
+                query_payload,
+                _CREDIT_BACKGROUND_RPC_TIMEOUT_SECONDS,
             )
             if isinstance(latest, dict) and latest.get("status") in {"ready", "error", "unavailable"}:
                 with self._credit_state_lock:
-                    self._credit_opvolume_cache[key] = dict(latest)
+                    self._cache_credit_opvolume_locked(key, latest)
                 return latest
             time.sleep(0.2)
         return latest if isinstance(latest, dict) else {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
+
+    def _cache_credit_opvolume_locked(
+        self,
+        key: tuple[str, float, str],
+        result: dict[str, Any],
+    ) -> None:
+        """Store a result and let a transient error expire on its own."""
+        self._credit_opvolume_cache[key] = dict(result)
+        if result.get("status") == "error":
+            self._credit_opvolume_error_until[key] = (
+                time.monotonic() + _CREDIT_OPVOLUME_ERROR_CACHE_SECONDS
+            )
+        else:
+            self._credit_opvolume_error_until.pop(key, None)
+
+    def _cached_credit_opvolume_locked(
+        self,
+        key: tuple[str, float, str],
+    ) -> dict[str, Any] | None:
+        """Return a cached result, dropping an expired error entry."""
+        cached = self._credit_opvolume_cache.get(key)
+        if cached is None:
+            return None
+        if cached.get("status") == "error" and time.monotonic() >= self._credit_opvolume_error_until.get(key, 0.0):
+            self._credit_opvolume_cache.pop(key, None)
+            self._credit_opvolume_error_until.pop(key, None)
+            return None
+        return cached
 
     def _resolve_credit_opvolume_background(
         self,
@@ -563,8 +659,65 @@ class QmtZmqRpcClient:
                 "reason": str(exc),
             }
         with self._credit_state_lock:
-            self._credit_opvolume_cache[key] = dict(result)
+            self._cache_credit_opvolume_locked(key, result)
             self._credit_opvolume_futures.pop(key, None)
+
+    def _schedule_credit_opvolume_locked(
+        self,
+        key: tuple[str, float, str],
+        symbol: str,
+        price: float,
+        mode: str,
+    ) -> None:
+        """Start one background broker query. Caller holds the state lock."""
+        self._credit_opvolume_cache[key] = {
+            "status": "pending",
+            "stock_code": symbol,
+            "max_volume": None,
+            "max_amount": None,
+        }
+        self._credit_opvolume_futures[key] = self._credit_executor_locked().submit(
+            self._resolve_credit_opvolume_background,
+            key,
+            symbol,
+            float(price),
+            mode,
+        )
+
+    def warm_credit_opvolume(
+        self,
+        items: list[dict[str, Any]],
+        credit_buy_mode: str = "financing",
+    ) -> int:
+        """Pre-ask the broker for max volumes so a later dialog hits the cache.
+
+        The broker's per-symbol query takes a couple of seconds to resolve, so
+        the only way to show it inside one second is to start it before the
+        dialog opens. Returns how many queries were newly scheduled.
+        """
+        if self.account_type != "CREDIT":
+            return 0
+        mode = str(credit_buy_mode or "financing").strip().lower()
+        if mode not in _CREDIT_BUY_MODES:
+            return 0
+        scheduled = 0
+        for item in items[:_CREDIT_OPVOLUME_WARM_LIMIT]:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "").strip().upper()
+            price = _float(item.get("price")) or 0.0
+            if not symbol or price <= 0:
+                continue
+            key = (symbol, round(float(price), 6), mode)
+            with self._credit_state_lock:
+                cached = self._cached_credit_opvolume_locked(key)
+                if cached is not None and cached.get("status") in {"ready", "error", "unavailable"}:
+                    continue
+                if self._credit_opvolume_futures.get(key) is not None:
+                    continue
+                self._schedule_credit_opvolume_locked(key, symbol, price, mode)
+            scheduled += 1
+        return scheduled
 
     def get_credit_opvolume(
         self,
@@ -592,25 +745,13 @@ class QmtZmqRpcClient:
         if background and getattr(self.call, "__func__", None) is not QmtZmqRpcClient.call:
             background = False
         with self._credit_state_lock:
-            cached = self._credit_opvolume_cache.get(key)
+            cached = self._cached_credit_opvolume_locked(key)
             future = self._credit_opvolume_futures.get(key)
             if cached is not None and cached.get("status") in {"ready", "error", "unavailable"}:
                 return dict(cached)
             if background:
                 if future is None:
-                    self._credit_opvolume_cache[key] = {
-                        "status": "pending",
-                        "stock_code": symbol,
-                        "max_volume": None,
-                        "max_amount": None,
-                    }
-                    self._credit_opvolume_futures[key] = self._credit_executor_locked().submit(
-                        self._resolve_credit_opvolume_background,
-                        key,
-                        symbol,
-                        float(price),
-                        mode,
-                    )
+                    self._schedule_credit_opvolume_locked(key, symbol, price, mode)
                 return dict(self._credit_opvolume_cache[key])
         if future is not None:
             try:
@@ -623,7 +764,7 @@ class QmtZmqRpcClient:
         return self._fetch_credit_opvolume(key, symbol, float(price), mode, timeout_seconds)
 
     def _fetch_credit_subjects(self) -> list[dict[str, Any]]:
-        rows = self.call("query_credit_subjects", {"account_id": self.account_id})
+        rows = self.call_background("query_credit_subjects", {"account_id": self.account_id})
         if not isinstance(rows, list) or not rows:
             raise QmtRpcError("QMT 融资标的列表为空")
         subjects = [dict(row) for row in rows if isinstance(row, dict)]
@@ -1579,6 +1720,12 @@ class QmtTradingService:
             "capped": candidate["capped"],
             "reason": candidate["reason"],
         }
+
+    def warm_credit_opvolume(self, items: list[dict[str, Any]], credit_buy_mode: str = "financing") -> int:
+        """Pre-ask the broker for per-symbol max volumes before a dialog opens."""
+        if not self.client.configured:
+            return 0
+        return self.client.warm_credit_opvolume(items, credit_buy_mode)
 
     def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "").upper()
