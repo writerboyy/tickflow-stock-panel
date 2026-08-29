@@ -12,7 +12,6 @@ export type QmtTradeAllocationMode =
   | 'third'
   | 'half'
   | 'fixed'
-  | 'lot'
   | 'volume'
 
 export type QmtTradeAllocationAction = 'BUY' | 'SELL'
@@ -33,7 +32,6 @@ const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximum
 
 export function qmtAllocationLabel(action: QmtTradeAllocationAction, mode: QmtTradeAllocationMode): string {
   if (mode === 'fixed') return '固定金额'
-  if (mode === 'lot') return '一手（100 股）'
   if (mode === 'volume') return '固定数量'
   const option = QMT_ALLOCATION_OPTIONS.find(item => item.value === mode)
   if (!option) return mode

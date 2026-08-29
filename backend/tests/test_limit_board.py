@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import json
 from types import SimpleNamespace
 
 import polars as pl
@@ -674,6 +675,8 @@ def test_auto_trade_blocks_quote_above_limit_price(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {}
 
@@ -2054,6 +2057,8 @@ def test_started_service_blocks_auto_trade_without_pool_websocket(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {}
 
@@ -2122,7 +2127,32 @@ def test_board_pool_updates_per_stock_fixed_volume(tmp_path):
     assert member["allocation_value"] == 300
 
 
-def test_buy_pool_submits_current_price_one_lot_and_persists_order(tmp_path, monkeypatch):
+def test_board_pool_defaults_to_fixed_amount(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+
+    saved = service.add_pool("600000.SH", "first_board", 0)
+
+    member = saved["board_pool"][0]
+    assert member["allocation_mode"] == "fixed"
+    assert member["allocation_value"] == 20_000
+
+
+def test_board_pool_rejects_legacy_allocation_mode(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service.add_pool("600000.SH", "first_board", 0)
+
+    with pytest.raises(ValueError, match="跟随全局"):
+        service.add_pool("600001.SH", "first_board", 1, "global")
+
+    with pytest.raises(ValueError, match="一手"):
+        service.update_pool("600000.SH", True, "queue", 1, "lot")
+
+    saved = service.store.load_config()["board_pool"]
+    assert [item["symbol"] for item in saved] == ["600000.SH"]
+    assert saved[0]["allocation_mode"] == "fixed"
+
+
+def test_buy_pool_submits_current_price_with_default_fixed_amount(tmp_path, monkeypatch):
     qmt = FakeQmt()
     service, quotes, _config = make_service(tmp_path, qmt)
     now = datetime(2026, 8, 13, 10, 0, tzinfo=CN_TZ)
@@ -2136,12 +2166,14 @@ def test_buy_pool_submits_current_price_one_lot_and_persists_order(tmp_path, mon
     result = service.add_buy_pool("600000.SH", "first_board", 0)
 
     assert result["order"]["status"] == "accepted_pending"
-    assert qmt.orders[0]["allocation_mode"] == "lot"
+    assert qmt.orders[0]["allocation_mode"] == "fixed"
+    assert qmt.orders[0]["allocation_value"] == 20_000
     assert qmt.orders[0]["price"] == 10.5
-    assert qmt.orders[0]["volume"] == 100
+    # 20000 / 10.5 = 1904 股, 向下取整到百股 = 1900 股
+    assert qmt.orders[0]["volume"] == 1_900
     saved = service.store.load_config()
     assert saved["buy_pool"][0]["order_price"] == 10.5
-    assert saved["buy_pool"][0]["order_volume"] == 100
+    assert saved["buy_pool"][0]["order_volume"] == 1_900
     assert service._runtime_for_today()["buy_orders"]["600000.SH"]["order_status"] == "accepted_pending"
 
 
@@ -2172,7 +2204,7 @@ def test_buy_pool_persists_and_submits_credit_buy_mode(tmp_path, monkeypatch):
     service, quotes, _config = make_service(tmp_path, qmt)
     quotes.latest_quotes = [{**quote(price=10.5, limit=11.0), "timestamp": now.isoformat()}]
 
-    service.add_buy_pool("600000.SH", "manual", 0, "lot", None, "financing")
+    service.add_buy_pool("600000.SH", "manual", 0, "fixed", 1_050, "financing")
 
     assert qmt.orders[0]["credit_buy_mode"] == "financing"
     assert service.store.load_config()["buy_pool"][0]["credit_buy_mode"] == "financing"
@@ -2187,7 +2219,7 @@ def test_buy_pool_after_hours_uses_custom_order_price_without_market_quote(tmp_p
     service._pool_quote = lambda _symbol: (_ for _ in ()).throw(AssertionError("盘后不应读取行情"))
 
     result = service.add_buy_pool(
-        "600000.SH", "manual", 0, "lot", None, "collateral", 9.876,
+        "600000.SH", "manual", 0, "fixed", 1_050, "collateral", 9.876,
     )
 
     assert result["order"]["status"] == "accepted_pending"
@@ -2211,8 +2243,8 @@ def test_default_config_preserves_current_sweep_and_queue_triggers():
     assert settings["sweep_price_levels"] == 5
     assert settings["queue_wait_seconds"] == 0
     assert settings["queue_confirm_snapshots"] == 0
-    assert settings["order_allocation_mode"] == "fixed"
-    assert settings["order_amount_per_board"] == 0.0
+    assert "order_allocation_mode" not in settings
+    assert "order_amount_per_board" not in settings
     assert settings["max_auto_board_count"] == 0
     assert settings["main_board_only"] is False
 
@@ -2286,6 +2318,8 @@ def test_limit_touch_triggers_sweep_order_without_depth(tmp_path, monkeypatch):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "sweep",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     runtime = service._runtime_for_today()
 
@@ -2505,6 +2539,8 @@ def test_queue_waits_from_first_touch_before_submitting(tmp_path, monkeypatch):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     current = [datetime(2026, 8, 13, 10, 0, 4, tzinfo=CN_TZ)]
     monkeypatch.setattr(
@@ -2546,6 +2582,8 @@ def test_queue_submits_after_configured_sealed_snapshots(tmp_path, monkeypatch):
             "symbol": "600000.SH",
             "auto_trade": True,
             "order_mode": "queue",
+            "allocation_mode": "fixed",
+            "allocation_value": 20_000,
         })
 
     service.store.update(0, configure)
@@ -2579,16 +2617,17 @@ def test_queue_submits_after_configured_sealed_snapshots(tmp_path, monkeypatch):
     assert service._runtime_for_today()["symbols"]["600000.SH"]["auto_order_mode"] == "queue"
 
 
-def test_board_pool_auto_trade_uses_configured_amount_per_board(tmp_path):
+def test_board_pool_auto_trade_uses_member_fixed_amount(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
     service._order_executor.shutdown(wait=False, cancel_futures=True)
     service._order_executor = ImmediateExecutor()
-    config["settings"]["order_amount_per_board"] = 10_000
     config["board_pool"] = [{
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 10_000,
     }]
     state = {}
 
@@ -2603,25 +2642,81 @@ def test_board_pool_auto_trade_uses_configured_amount_per_board(tmp_path):
     assert result["estimated_amount"] == 9900.0
 
 
-def test_board_pool_auto_trade_defaults_to_one_lot(tmp_path):
+def test_board_pool_auto_trade_ignores_legacy_global_settings(tmp_path):
+    """全局资金方式已废弃, 即使旧配置仍留有该字段也不参与计算。"""
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
     service._order_executor.shutdown(wait=False, cancel_futures=True)
     service._order_executor = ImmediateExecutor()
+    config["settings"]["order_allocation_mode"] = "fixed"
+    config["settings"]["order_amount_per_board"] = 10_000
     config["board_pool"] = [{
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 5_000,
     }]
 
     service._maybe_auto_trade("600000.SH", quote(), {}, config)
 
     assert len(qmt.orders) == 1
-    assert qmt.orders[0]["allocation_mode"] == "lot"
-    assert qmt.orders[0]["volume"] == 100
-    result = service._order_results.get_nowait()
-    assert result["allocation_mode"] == "lot"
-    assert result["volume"] == 100
+    assert qmt.orders[0]["allocation_value"] == 5_000
+
+
+def test_board_pool_auto_trade_blocks_legacy_one_lot_mode(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+        "allocation_mode": "lot",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "一手" in state["auto_order_error"]
+    assert "已废弃" in state["auto_order_error"]
+
+
+def test_board_pool_auto_trade_blocks_legacy_global_mode(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+        "allocation_mode": "global",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert "跟随全局" in state["auto_order_error"]
+    assert "已废弃" in state["auto_order_error"]
+
+
+def test_board_pool_auto_trade_blocks_missing_allocation_mode(tmp_path):
+    qmt = FakeQmt()
+    service, _quotes, config = make_service(tmp_path, qmt)
+    config["board_pool"] = [{
+        "symbol": "600000.SH",
+        "auto_trade": True,
+        "order_mode": "queue",
+    }]
+    state = {}
+
+    service._maybe_auto_trade("600000.SH", quote(), state, config)
+
+    assert qmt.orders == []
+    assert state["auto_order_status"] == "blocked"
+    assert state["auto_order_error"] == "单板资金分配方式无效"
 
 
 def test_board_pool_auto_trade_marks_qmt_preflight_failure_blocked(tmp_path):
@@ -2635,6 +2730,8 @@ def test_board_pool_auto_trade_marks_qmt_preflight_failure_blocked(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
 
     assert service._order_slots.acquire(blocking=False)
@@ -2652,11 +2749,12 @@ def test_board_pool_auto_trade_marks_qmt_preflight_failure_blocked(tmp_path):
 def test_board_pool_auto_trade_blocks_amount_below_one_lot(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
-    config["settings"]["order_amount_per_board"] = 500
     config["board_pool"] = [{
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 500,
     }]
     state = {}
 
@@ -2672,12 +2770,11 @@ def test_board_pool_auto_trade_passes_ratio_allocation_to_qmt(tmp_path):
     service, _quotes, config = make_service(tmp_path, qmt)
     service._order_executor.shutdown(wait=False, cancel_futures=True)
     service._order_executor = ImmediateExecutor()
-    config["settings"]["order_allocation_mode"] = "quarter"
-    config["settings"]["order_amount_per_board"] = 0
     config["board_pool"] = [{
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "quarter",
     }]
 
     service._maybe_auto_trade("600000.SH", quote(), {}, config)
@@ -2699,6 +2796,8 @@ def test_board_pool_auto_trade_respects_daily_board_limit(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     runtime = service._runtime_for_today()
     runtime["symbols"]["600001.SH"] = {"auto_order_key": "limit-board-existing"}
@@ -2790,7 +2889,7 @@ def test_fourth_break_adds_symbol_to_daily_blacklist(tmp_path):
     assert quotes.events == []
 
 
-def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
+def test_board_pool_auto_trade_submits_once_per_day(tmp_path):
     qmt = FakeQmt()
     service, _quotes, config = make_service(tmp_path, qmt)
     service._order_executor.shutdown(wait=False, cancel_futures=True)
@@ -2801,6 +2900,8 @@ def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
         "source": "first_board",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     runtime = service._runtime_for_today()
     state = runtime["symbols"].setdefault("600000.SH", {})
@@ -2814,7 +2915,8 @@ def test_board_pool_auto_trade_submits_one_lot_once_per_day(tmp_path):
 
     assert len(qmt.orders) == 1
     assert qmt.orders[0]["strategy_name"] == "limit_board"
-    assert qmt.orders[0]["volume"] == 100
+    # 20000 / 11.0 = 1818 股, 向下取整到百股 = 1800 股
+    assert qmt.orders[0]["volume"] == 1_800
     assert qmt.orders[0]["price"] == 11.0
     assert qmt.orders[0]["price_type"] == "LIMIT"
     assert state["auto_order_status"] == "accepted_pending"
@@ -2827,6 +2929,8 @@ def test_board_pool_auto_trade_blocks_when_qmt_is_not_ready(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {}
 
@@ -2852,6 +2956,8 @@ def test_board_pool_auto_trade_stops_when_live_market_broken_rate_is_high(tmp_pa
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
 
     state = {}
@@ -2879,6 +2985,8 @@ def test_board_pool_auto_trade_allows_stale_market_snapshot(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
 
     state = {}
@@ -2904,6 +3012,8 @@ def test_board_pool_auto_trade_allows_live_market_snapshot_below_threshold(tmp_p
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
 
     service._maybe_auto_trade("600000.SH", quote(), {}, config)
@@ -3546,6 +3656,8 @@ def test_board_pool_auto_trade_blocks_legacy_st_member(tmp_path):
         "symbol": "600002.SH",
         "auto_trade": True,
         "order_mode": "queue",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {}
 
@@ -3575,6 +3687,8 @@ def test_sweep_submits_on_limit_touch_without_queue_delay(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "sweep",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {
         "touched": True,
@@ -3598,6 +3712,8 @@ def test_sweep_ignores_queue_only_depth_trigger(tmp_path):
         "symbol": "600000.SH",
         "auto_trade": True,
         "order_mode": "sweep",
+        "allocation_mode": "fixed",
+        "allocation_value": 20_000,
     }]
     state = {}
 
@@ -3769,7 +3885,8 @@ def test_limit_board_buy_pool_api_submits_and_removes_order(tmp_path, monkeypatc
             "symbol": "600000.SH",
             "source": "first_board",
             "revision": 0,
-            "allocation_mode": "lot",
+            "allocation_mode": "fixed",
+            "allocation_value": 1_050,
         },
     )
 
@@ -3870,7 +3987,8 @@ def test_limit_board_buy_pool_api_accepts_after_hours_order_price(tmp_path, monk
             "symbol": "600000.SH",
             "source": "manual",
             "revision": 0,
-            "allocation_mode": "lot",
+            "allocation_mode": "fixed",
+            "allocation_value": 1_050,
             "order_price": 9.876,
         },
     )
@@ -3903,6 +4021,20 @@ def test_limit_board_api_rejects_legacy_notification_settings(tmp_path):
     assert "notifications" not in service.store.load_config()["settings"]
 
 
+def test_limit_board_config_drops_legacy_global_allocation_settings(tmp_path):
+    """旧配置里的全局资金方式字段在读取时清理，避免继续落盘。"""
+    service, _quotes, _config = make_service(tmp_path)
+    raw = default_config()
+    raw["settings"]["order_allocation_mode"] = "quarter"
+    raw["settings"]["order_amount_per_board"] = 10_000
+    service.store.config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    settings = service.store.load_config()["settings"]
+
+    assert "order_allocation_mode" not in settings
+    assert "order_amount_per_board" not in settings
+
+
 def test_limit_board_quote_api_limits_batch_size(tmp_path):
     service, _quotes, _config = make_service(tmp_path)
     app = FastAPI()
@@ -3928,8 +4060,6 @@ def test_limit_board_api_updates_advanced_settings(tmp_path):
         "sweep_price_levels": 10,
         "queue_wait_seconds": 8,
         "queue_confirm_snapshots": 4,
-        "order_allocation_mode": "third",
-        "order_amount_per_board": 20_000,
         "max_auto_board_count": 3,
         "max_market_broken_rate_pct": 35.5,
         "main_board_only": True,
@@ -3964,7 +4094,6 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
         "sweep_price_levels": 5,
         "queue_wait_seconds": 0,
         "queue_confirm_snapshots": 0,
-        "order_amount_per_board": 0,
         "max_auto_board_count": 0,
         "max_market_broken_rate_pct": 40,
         "main_board_only": False,

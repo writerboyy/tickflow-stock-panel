@@ -1436,7 +1436,7 @@ export interface LimitBoardRow {
   source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
   auto_trade?: boolean
   order_mode?: 'sweep' | 'queue'
-  allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
+  allocation_mode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
   allocation_value?: number | null
   credit_buy_mode?: QmtCreditBuyMode
   order_price?: number | null
@@ -1454,7 +1454,7 @@ export interface LimitBoardRow {
   auto_order_error?: string | null
   auto_order_at?: string
   auto_order_updated_at?: string
-  auto_order_allocation_mode?: 'sixth' | 'fifth' | 'quarter' | 'third' | 'half' | 'available' | 'fixed' | 'lot' | 'volume'
+  auto_order_allocation_mode?: 'sixth' | 'fifth' | 'quarter' | 'third' | 'half' | 'available' | 'fixed' | 'volume'
   auto_order_allocation_value?: number | null
   auto_order_volume?: number | null
   auto_order_amount?: number | null
@@ -1853,8 +1853,6 @@ export interface LimitBoardView {
     sweep_price_levels: number
     queue_wait_seconds: number
     queue_confirm_snapshots: number
-    order_allocation_mode: 'quarter' | 'third' | 'half' | 'available' | 'fixed'
-    order_amount_per_board: number
     max_auto_board_count: number
     max_market_broken_rate_pct: number
     main_board_only: boolean
@@ -1944,7 +1942,7 @@ export interface LimitBoardConfig {
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
     auto_trade: boolean
     order_mode?: 'sweep' | 'queue'
-    allocation_mode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
+    allocation_mode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
     allocation_value?: number
     credit_buy_mode?: QmtCreditBuyMode
     added_at?: string
@@ -1953,7 +1951,7 @@ export interface LimitBoardConfig {
     symbol: string
     name?: string
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
-    allocation_mode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
+    allocation_mode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
     allocation_value?: number
     credit_buy_mode?: QmtCreditBuyMode
     order_price?: number
@@ -3557,11 +3555,11 @@ export const api = {
       `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
       { method: 'DELETE' },
     ),
-  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'global', allocationValue?: number | null, creditBuyMode: QmtCreditBuyMode = 'collateral') =>
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume' = 'fixed', allocationValue?: number | null, creditBuyMode: QmtCreditBuyMode = 'collateral') =>
     request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
       method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode }),
     }),
-  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume', allocationValue?: number | null, creditBuyMode?: QmtCreditBuyMode) =>
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume', allocationValue?: number | null, creditBuyMode?: QmtCreditBuyMode) =>
     request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
       method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode ?? null }),
     }),
@@ -3578,7 +3576,7 @@ export const api = {
     symbol: string,
     source: 'first_board' | 'rebound_board' | 'selected' | 'manual',
     revision: number,
-    allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume' = 'lot',
+    allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume' = 'fixed',
     allocationValue?: number | null,
     creditBuyMode: QmtCreditBuyMode = 'collateral',
     orderPrice?: number | null,

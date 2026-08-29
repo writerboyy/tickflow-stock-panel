@@ -22,14 +22,14 @@ class PoolBatchDelete(BaseModel):
 
 class PoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
-    allocation_mode: str = Field(default="global", pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
+    allocation_mode: str = Field(default="fixed", pattern="^(available|sixth|fifth|quarter|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
     credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
 
 
 class BuyPoolWrite(SelectedWrite):
     source: str = Field(default="manual", pattern="^(first_board|rebound_board|selected|manual)$")
-    allocation_mode: str = Field(default="lot", pattern="^(available|sixth|fifth|quarter|lot|fixed|volume)$")
+    allocation_mode: str = Field(default="fixed", pattern="^(available|sixth|fifth|quarter|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
     credit_buy_mode: str = Field(default="collateral", pattern="^(collateral|financing)$")
     order_price: float | None = Field(default=None, gt=0)
@@ -39,7 +39,7 @@ class PoolUpdate(BaseModel):
     revision: int = Field(ge=0)
     auto_trade: bool
     order_mode: str = Field(default="sweep", pattern="^(sweep|queue)$")
-    allocation_mode: str | None = Field(default=None, pattern="^(global|available|sixth|fifth|quarter|lot|fixed|volume)$")
+    allocation_mode: str | None = Field(default=None, pattern="^(available|sixth|fifth|quarter|fixed|volume)$")
     allocation_value: float | None = Field(default=None, gt=0)
     credit_buy_mode: str | None = Field(default=None, pattern="^(collateral|financing)$")
 
@@ -48,8 +48,6 @@ class AdvancedSettings(BaseModel):
     sweep_price_levels: int = Field(ge=1, le=10)
     queue_wait_seconds: int = Field(default=0, ge=0, le=300)
     queue_confirm_snapshots: int = Field(default=0, ge=0, le=10)
-    order_allocation_mode: str = Field(default="fixed", pattern="^(quarter|third|half|available|fixed)$")
-    order_amount_per_board: float = Field(default=0, ge=0, le=10_000_000)
     max_auto_board_count: int = Field(default=0, ge=0, le=100)
     max_market_broken_rate_pct: float = Field(default=40.0, ge=0, le=100)
     main_board_only: bool = False

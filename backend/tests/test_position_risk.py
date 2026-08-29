@@ -840,16 +840,27 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     assert fifth["volume"] == 600
     assert fifth["actual_amount"] == 21_000
 
-    one_lot = service.preview_order({
+    # 一手模式 (lot) 已废弃, 固定金额刚好买一手的边界仍要保留。
+    one_lot_amount = service.preview_order({
         "action": "BUY",
         "symbol": "600036.SH",
         "price": 35,
         "price_type": "LIMIT",
-        "allocation_mode": "lot",
+        "allocation_mode": "fixed",
+        "allocation_value": 3_500,
     })
-    assert one_lot["target_amount"] == 3_500
-    assert one_lot["volume"] == 100
-    assert one_lot["actual_amount"] == 3_500
+    assert one_lot_amount["target_amount"] == 3_500
+    assert one_lot_amount["volume"] == 100
+    assert one_lot_amount["actual_amount"] == 3_500
+
+    with pytest.raises(ValueError):
+        service.preview_order({
+            "action": "BUY",
+            "symbol": "600036.SH",
+            "price": 35,
+            "price_type": "LIMIT",
+            "allocation_mode": "lot",
+        })
 
     sell = service.preview_order({
         "action": "SELL",

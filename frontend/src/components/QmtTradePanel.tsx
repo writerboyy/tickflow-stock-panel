@@ -25,7 +25,7 @@ type QmtTradePriceType = 'LIMIT' | 'LATEST' | 'LIMIT_UP' | 'LIMIT_DOWN'
 
 /** 旧调用方可继续使用的持仓风控资金方式类型。 */
 export type QmtAllocationMode = Extract<QmtTradeAllocationMode, 'available' | 'quarter' | 'third' | 'half' | 'fixed'>
-type QmtPanelAllocationMode = Exclude<QmtTradeAllocationMode, 'lot' | 'volume'>
+type QmtPanelAllocationMode = Exclude<QmtTradeAllocationMode, 'volume'>
 
 export { QMT_ALLOCATION_OPTIONS, QmtTradeAllocationControls }
 
@@ -343,7 +343,7 @@ export function QmtTradePanel({
             action={tradeAction}
             mode={allocationMode}
             value={allocationValue}
-            onModeChange={next => { if (next !== 'lot' && next !== 'volume') setAllocationMode(next) }}
+            onModeChange={next => { if (next !== 'volume') setAllocationMode(next) }}
             onValueChange={setAllocationValue}
             disabled={tradeMutation.isPending}
             basisLabel={serverPreview?.basis_label ?? cachedBasisLabel}

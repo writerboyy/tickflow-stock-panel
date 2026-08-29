@@ -56,7 +56,13 @@ _ENTRY_MIN_LIMIT_GAP_PCT = 0.005
 _ENTRY_MAX_LIMIT_GAP_PCT = 0.03
 _ENTRY_QUOTE_FRESH_SECONDS = 10.0
 _ENTRY_SCORE_RISING_DELTA = 0.05
-_POOL_ALLOCATION_MODES = frozenset({"global", "available", "sixth", "fifth", "quarter", "lot", "fixed", "volume"})
+# 「跟随全局」(global) 和「一手」(lot) 已废弃: 全局资金方式配置被移除,
+# 一手模式也不再提供。旧配置中残留的这两个值在读取时会被显式拒绝。
+_POOL_ALLOCATION_MODES = frozenset({"available", "sixth", "fifth", "quarter", "fixed", "volume"})
+_LEGACY_POOL_ALLOCATION_MODES = frozenset({"global", "lot"})
+# 「固定金额」未填写时的兜底金额(元)。前端新增时默认就填这个值,
+# 这里再兜一层, 避免 API 直接调用时因缺金额而报错。
+_DEFAULT_FIXED_ALLOCATION_VALUE = 20_000.0
 _CLOSE_AUCTION_START = clock_time(14, 57)
 _CLOSE_AUCTION_END = clock_time(15, 0)
 _SCORE_STOCK_COLUMNS = {
@@ -2430,7 +2436,7 @@ class LimitBoardService:
             state["auto_order_error"] = "自动委托队列已满"
             return
         allocation_mode, allocation_value, allocation_error = self._auto_order_allocation(
-            float(quote["limit_up"]), config, member,
+            float(quote["limit_up"]), member,
         )
         if allocation_error:
             self._order_slots.release()
@@ -2473,33 +2479,30 @@ class LimitBoardService:
     @staticmethod
     def _auto_order_allocation(
         limit_up: float,
-        config: dict[str, Any],
         member: dict[str, Any] | None = None,
     ) -> tuple[str, float | None, str | None]:
-        member_mode = str((member or {}).get("allocation_mode") or "global").strip().lower()
-        if member_mode not in {"", "global"}:
-            mode = member_mode
-            amount = _finite((member or {}).get("allocation_value"))
-        else:
-            mode = str(config["settings"].get("order_allocation_mode") or "fixed").strip().lower()
-            amount = _finite(config["settings"].get("order_amount_per_board", 0))
-        if mode not in {"sixth", "fifth", "quarter", "third", "half", "fixed", "available", "lot", "volume"}:
+        """Resolve the per-member allocation for an automatic board order.
+
+        全局资金方式 (order_allocation_mode / order_amount_per_board) 已废弃,
+        资金方式只取自打板池成员自身。旧配置残留的 global / lot 会被显式拒绝,
+        避免静默改变真实下单金额。
+        """
+        mode = str((member or {}).get("allocation_mode") or "").strip().lower()
+        amount = _finite((member or {}).get("allocation_value"))
+        if mode in _LEGACY_POOL_ALLOCATION_MODES:
+            legacy = "跟随全局" if mode == "global" else "一手"
+            return "fixed", None, f"该股票仍使用已废弃的「{legacy}」资金方式，请重新设置打板交易金额"
+        if mode not in _POOL_ALLOCATION_MODES:
             return "fixed", None, "单板资金分配方式无效"
-        if mode == "lot":
-            return mode, None, None
         if mode == "volume":
             volume = int(amount or 0)
             if volume < 100 or volume % 100:
                 return mode, amount, "固定数量必须是 100 股的整数倍"
             return mode, float(volume), None
-        if amount is None or amount < 0:
-            return mode, None, "单板下单资金配置无效"
         if mode != "fixed":
             return mode, None, None
-        if amount == 0:
-            # Preserve the historical zero-value setting while routing the
-            # actual calculation through QmtTradingService.
-            return "lot", None, None
+        if amount is None or amount <= 0:
+            return mode, None, "单板固定金额必须大于 0"
         if limit_up <= 0 or limit_up != limit_up:
             return mode, None, "涨停价无效，已阻止自动委托"
         if amount < limit_up * 100:
@@ -3809,8 +3812,6 @@ class LimitBoardService:
             "sweep_price_levels": int(settings["sweep_price_levels"]),
             "queue_wait_seconds": int(settings["queue_wait_seconds"]),
             "queue_confirm_snapshots": int(settings["queue_confirm_snapshots"]),
-            "order_allocation_mode": str(settings.get("order_allocation_mode") or "fixed"),
-            "order_amount_per_board": float(settings["order_amount_per_board"]),
             "max_auto_board_count": int(settings["max_auto_board_count"]),
             "max_market_broken_rate_pct": float(
                 settings.get("max_market_broken_rate_pct", 40.0),
@@ -3913,12 +3914,17 @@ class LimitBoardService:
         default: str,
     ) -> tuple[str, float | None]:
         cleaned_mode = str(mode or default).strip().lower()
+        if cleaned_mode in _LEGACY_POOL_ALLOCATION_MODES:
+            legacy = "跟随全局" if cleaned_mode == "global" else "一手"
+            raise ValueError(f"「{legacy}」资金方式已废弃，请选择其他方式")
         if cleaned_mode not in _POOL_ALLOCATION_MODES:
             raise ValueError("交易数量/金额方式无效")
-        if cleaned_mode in {"global", "available", "sixth", "fifth", "quarter", "lot"}:
+        if cleaned_mode in {"available", "sixth", "fifth", "quarter"}:
             if value is not None:
                 raise ValueError("当前金额或比例配置不应填写固定金额")
             return cleaned_mode, None
+        if cleaned_mode == "fixed" and value is None:
+            value = _DEFAULT_FIXED_ALLOCATION_VALUE
         if value is None or not float(value) > 0:
             raise ValueError("固定金额或固定数量必须大于 0")
         if cleaned_mode == "volume":
@@ -4007,13 +4013,6 @@ class LimitBoardService:
             }
         preview_getter = getattr(qmt, "preview_order", None)
         if not callable(preview_getter):
-            if allocation_mode == "lot":
-                return {
-                    "volume": 100,
-                    "actual_amount": round(price * 100, 2),
-                    "target_amount": round(price * 100, 2),
-                    "capped": False,
-                }
             raise RuntimeError("QMT 不支持金额预览，无法确认买入金额")
         preview = preview_getter({
             "action": "BUY",
@@ -4044,7 +4043,7 @@ class LimitBoardService:
         symbol: str,
         source: str,
         revision: int,
-        allocation_mode: str = "global",
+        allocation_mode: str = "fixed",
         allocation_value: float | None = None,
         credit_buy_mode: str = "collateral",
     ) -> dict[str, Any]:
@@ -4052,7 +4051,7 @@ class LimitBoardService:
         allocation_mode, allocation_value = self._pool_allocation(
             allocation_mode,
             allocation_value,
-            default="global",
+            default="fixed",
         )
         if credit_buy_mode not in {"collateral", "financing"}:
             raise ValueError("信用账户买入方式无效")
@@ -4115,7 +4114,7 @@ class LimitBoardService:
                 mode, normalized_value = self._pool_allocation(
                     allocation_mode,
                     allocation_value,
-                    default="global",
+                    default="fixed",
                 )
                 member["allocation_mode"] = mode
                 if normalized_value is None:
@@ -4136,7 +4135,7 @@ class LimitBoardService:
         symbol: str,
         source: str,
         revision: int,
-        allocation_mode: str = "lot",
+        allocation_mode: str = "fixed",
         allocation_value: float | None = None,
         credit_buy_mode: str = "collateral",
         order_price: float | None = None,
@@ -4145,7 +4144,7 @@ class LimitBoardService:
         allocation_mode, allocation_value = self._pool_allocation(
             allocation_mode,
             allocation_value,
-            default="lot",
+            default="fixed",
         )
         if credit_buy_mode not in {"collateral", "financing"}:
             raise ValueError("信用账户买入方式无效")

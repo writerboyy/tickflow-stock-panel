@@ -20,8 +20,6 @@ def default_config() -> dict[str, Any]:
             "sweep_price_levels": 5,
             "queue_wait_seconds": 0,
             "queue_confirm_snapshots": 0,
-            "order_allocation_mode": "fixed",
-            "order_amount_per_board": 0.0,
             "max_auto_board_count": 0,
             "max_market_broken_rate_pct": 40.0,
             "main_board_only": False,
@@ -65,6 +63,9 @@ class LimitBoardStore:
             result["settings"].update(raw.get("settings") or {})
             # 旧版的打板通知开关已废弃，公共提醒统一由监控规则控制。
             result["settings"].pop("notifications", None)
+            # 全局资金方式已废弃，资金方式只取自打板池/买入池成员自身。
+            result["settings"].pop("order_allocation_mode", None)
+            result["settings"].pop("order_amount_per_board", None)
             result["selected"] = [
                 item for item in (raw.get("selected") or [])
                 if isinstance(item, dict) and item.get("symbol")

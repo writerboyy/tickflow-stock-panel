@@ -191,9 +191,8 @@ _ALLOCATION_RATIOS = {
     "half": 0.5,
     "available": 1.0,
 }
-# ``lot`` is an internal compatibility mode for the old automatic board
-# order setting where zero amount meant one 100-share lot.
-_ALLOCATION_MODES = frozenset((*_ALLOCATION_RATIOS, "fixed", "lot"))
+# 一手模式 (lot) 已废弃: 打板池不再提供该选项, 零金额也不再代表一手。
+_ALLOCATION_MODES = frozenset((*_ALLOCATION_RATIOS, "fixed"))
 
 
 def _parse_broker_time(value: Any, anchor: str | None) -> str | None:
@@ -1284,7 +1283,7 @@ class QmtTradingService:
             raise ValueError("金额下单需要有效的参考价格")
         mode = str(request.get("allocation_mode") or "").strip().lower()
         if mode not in _ALLOCATION_MODES:
-            raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一、固定金额或一手模式")
+            raise ValueError("金额分配方式必须是当前可用金额、可用金额六分之一、五分之一、四分之一、三分之一、二分之一或固定金额")
 
         financing_available = None
         credit_opvolume = None
@@ -1336,9 +1335,7 @@ class QmtTradingService:
             raise ValueError("固定金额必须大于 0")
 
         def build_candidate(candidate_mode: str, candidate_basis: float, candidate_label: str) -> dict[str, Any]:
-            if mode == "lot":
-                candidate_requested_amount = price * 100
-            elif mode == "fixed":
+            if mode == "fixed":
                 candidate_requested_amount = fixed_amount or 0.0
             else:
                 candidate_requested_amount = candidate_basis * _ALLOCATION_RATIOS[mode]

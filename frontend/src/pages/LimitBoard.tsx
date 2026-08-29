@@ -35,7 +35,6 @@ import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
-import { type QmtAllocationMode } from '@/components/QmtTradePanel'
 import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -77,7 +76,11 @@ const AUCTION_COLUMNS = [
   'open_price', 'last_price', 'float_market_cap',
 ]
 type AdvancedSettings = LimitBoardView['settings']
-type PoolAllocationMode = 'global' | 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'
+// 「跟随全局」(global) 与「一手」(lot) 已废弃, 后端会拒绝这两种值。
+type PoolAllocationMode = 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
+/** 新增打板池/买入池时的默认资金方式 */
+const DEFAULT_POOL_ALLOCATION_MODE: PoolAllocationMode = 'fixed'
+const DEFAULT_POOL_ALLOCATION_VALUE = 20_000
 type AllocationDialogState = {
   row: LimitBoardRow
   kind: 'buy' | 'board' | 'edit'
@@ -85,14 +88,6 @@ type AllocationDialogState = {
   initialValue?: number | null
   initialCreditBuyMode?: QmtCreditBuyMode
 }
-
-const ADVANCED_QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtAllocationMode; label: string }> = [
-  { value: 'available', label: '当前可用金额' },
-  { value: 'quarter', label: '可用金额 1/4' },
-  { value: 'third', label: '可用金额 1/3' },
-  { value: 'half', label: '可用金额 1/2' },
-  { value: 'fixed', label: '固定金额' },
-]
 
 const STATUS: Record<string, { label: string; tone: string }> = {
   watching: { label: '观察中', tone: 'text-muted' },
@@ -668,13 +663,18 @@ function queueCell(row: LimitBoardRow): JSX.Element {
   </div>
 }
 
+/** 旧配置可能残留 global / lot, 展示时统一降级为固定金额。 */
+function normalizePoolAllocationMode(mode: string | null | undefined): PoolAllocationMode {
+  return mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter' || mode === 'volume'
+    ? mode
+    : DEFAULT_POOL_ALLOCATION_MODE
+}
+
 function poolAllocationLabel(mode: PoolAllocationMode): string {
-  if (mode === 'global') return '旧配置'
   if (mode === 'available') return '当前可用金额'
   if (mode === 'sixth') return '可用金额 1/6'
   if (mode === 'fifth') return '可用金额 1/5'
   if (mode === 'quarter') return '可用金额 1/4'
-  if (mode === 'lot') return '一手（100 股）'
   if (mode === 'fixed') return '固定金额'
   return '固定数量'
 }
@@ -698,8 +698,12 @@ function LimitBoardAllocationDialog({
   onClose: () => void
   onConfirm: (mode: PoolAllocationMode, value: number | undefined, creditBuyMode: QmtCreditBuyMode, orderPrice?: number) => void
 }) {
-  const [mode, setMode] = useState<PoolAllocationMode>(kind === 'edit' ? (initialMode === 'global' ? 'lot' : initialMode) : 'lot')
-  const [value, setValue] = useState<number>(initialValue ?? 0)
+  const [mode, setMode] = useState<PoolAllocationMode>(
+    kind === 'edit' ? normalizePoolAllocationMode(initialMode) : DEFAULT_POOL_ALLOCATION_MODE,
+  )
+  const [value, setValue] = useState<number>(
+    initialValue ?? (kind === 'edit' ? 0 : DEFAULT_POOL_ALLOCATION_VALUE),
+  )
   const [creditBuyMode, setCreditBuyMode] = useState<QmtCreditBuyMode>(
     kind === 'edit' ? (initialCreditBuyMode ?? row.credit_buy_mode ?? 'financing') : (initialCreditBuyMode ?? 'financing'),
   )
@@ -727,7 +731,7 @@ function LimitBoardAllocationDialog({
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
   // Fetch one authoritative account basis and derive the other lot/ratio modes
   // locally. Switching the selector should not issue another QMT RPC request.
-  const previewMode: Exclude<QmtTradeAllocationMode, 'volume' | 'global'> = mode === 'fixed' ? 'fixed' : 'quarter'
+  const previewMode: Exclude<QmtTradeAllocationMode, 'volume'> = mode === 'fixed' ? 'fixed' : 'quarter'
   const previewValue = mode === 'fixed' ? value : null
   const allocationPreview = useQuery({
     queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue, creditBuyMode),
@@ -759,7 +763,7 @@ function LimitBoardAllocationDialog({
             ? 0.25
             : 0
     const basisAmount = Number(basePreview.basis_amount) || 0
-    const requestedVolume = mode === 'lot' ? 100 : mode === 'volume' ? Math.max(0, value) : null
+    const requestedVolume = mode === 'volume' ? Math.max(0, value) : null
     const requestedAmount = requestedVolume != null
       ? requestedVolume * (basePreview.price || 0)
       : basisAmount * ratio
@@ -790,10 +794,10 @@ function LimitBoardAllocationDialog({
   const estimatedVolume = price != null && price > 0
     ? previewOrder?.volume ?? 0
     : 0
-  const estimatedAmount = mode !== 'volume' && mode !== 'global'
+  const estimatedAmount = mode !== 'volume'
     ? previewOrder?.actual_amount ?? null
     : price != null && estimatedVolume > 0 ? price * estimatedVolume : null
-  const validValue = ratioMode || mode === 'lot' || (Number.isFinite(value) && value > 0)
+  const validValue = ratioMode || (Number.isFinite(value) && value > 0)
   const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
   const previewRequired = requiresPreview
   const previewReady = !previewRequired || (qmtReady && !allocationPreview.isFetching && previewOrder != null)
@@ -837,7 +841,6 @@ function LimitBoardAllocationDialog({
     { value: 'sixth', label: poolAllocationLabel('sixth') },
     { value: 'fifth', label: poolAllocationLabel('fifth') },
     { value: 'quarter', label: poolAllocationLabel('quarter') },
-    { value: 'lot', label: poolAllocationLabel('lot') },
     { value: 'fixed', label: poolAllocationLabel('fixed') },
     { value: 'volume', label: poolAllocationLabel('volume') },
   ]
@@ -1797,10 +1800,6 @@ function AdvancedSettingsDialog({
     && Number.isInteger(draft.queue_confirm_snapshots)
     && draft.queue_confirm_snapshots >= 0
     && draft.queue_confirm_snapshots <= 10
-    && ADVANCED_QMT_ALLOCATION_OPTIONS.some(option => option.value === draft.order_allocation_mode)
-    && Number.isFinite(draft.order_amount_per_board)
-    && draft.order_amount_per_board >= 0
-    && draft.order_amount_per_board <= 10000000
     && Number.isInteger(draft.max_auto_board_count)
     && draft.max_auto_board_count >= 0
     && draft.max_auto_board_count <= 100
@@ -1891,8 +1890,6 @@ function advancedSettings(value: LimitBoardView['settings']): AdvancedSettings {
     sweep_price_levels: value.sweep_price_levels,
     queue_wait_seconds: value.queue_wait_seconds,
     queue_confirm_snapshots: value.queue_confirm_snapshots,
-    order_allocation_mode: value.order_allocation_mode ?? 'fixed',
-    order_amount_per_board: value.order_amount_per_board,
     max_auto_board_count: value.max_auto_board_count,
     max_market_broken_rate_pct: value.max_market_broken_rate_pct,
     main_board_only: value.main_board_only,
@@ -2074,7 +2071,7 @@ export function LimitBoard() {
     onSuccess: () => { setAllocationDialog(null); void refresh() },
   })
   const addBuyPool = useMutation({
-    mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode, orderPrice }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume'; allocationValue?: number; creditBuyMode: QmtCreditBuyMode; orderPrice?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode, orderPrice),
+    mutationFn: ({ row, source, allocationMode, allocationValue, creditBuyMode, orderPrice }: { row: LimitBoardRow; source: 'first_board' | 'rebound_board' | 'manual'; allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'; allocationValue?: number; creditBuyMode: QmtCreditBuyMode; orderPrice?: number }) => api.limitBoardBuyPoolAdd(row.symbol, source, view.data?.revision ?? 0, allocationMode, allocationValue, creditBuyMode, orderPrice),
     onSuccess: () => { setAllocationDialog(null); void refresh() },
   })
   const updatePool = useMutation({
@@ -2250,8 +2247,8 @@ export function LimitBoard() {
           onAddToPool={(stock: LimitLadderStock) => setAllocationDialog({
             row: withCandidateScore(manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null)),
             kind: 'board',
-            initialMode: 'lot',
-            initialValue: null,
+            initialMode: DEFAULT_POOL_ALLOCATION_MODE,
+            initialValue: DEFAULT_POOL_ALLOCATION_VALUE,
           })}
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
@@ -2268,7 +2265,7 @@ export function LimitBoard() {
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'board', initialMode: row.allocation_mode ?? 'global', initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'buy', initialMode: row.allocation_mode === 'available' || row.allocation_mode === 'sixth' || row.allocation_mode === 'fifth' || row.allocation_mode === 'quarter' || row.allocation_mode === 'fixed' || row.allocation_mode === 'volume' ? row.allocation_mode : 'lot', initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'board', initialMode: normalizePoolAllocationMode(row.allocation_mode), initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'buy', initialMode: normalizePoolAllocationMode(row.allocation_mode), initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
@@ -2294,7 +2291,7 @@ export function LimitBoard() {
               onEditAllocation={row => setAllocationDialog({
                 row,
                 kind: 'edit',
-                initialMode: row.allocation_mode ?? 'global',
+                initialMode: normalizePoolAllocationMode(row.allocation_mode),
                 initialValue: row.allocation_value,
               })}
               onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
@@ -2349,11 +2346,10 @@ export function LimitBoard() {
             ? 'manual'
             : row.source === 'rebound_board' ? 'rebound_board' : 'first_board'
           if (allocationDialog.kind === 'buy') {
-            if (allocationMode === 'global') return
             addBuyPool.mutate({
               row,
               source,
-              allocationMode: allocationMode as 'available' | 'sixth' | 'fifth' | 'quarter' | 'lot' | 'fixed' | 'volume',
+              allocationMode,
               allocationValue,
               creditBuyMode,
               orderPrice,
