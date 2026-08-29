@@ -722,8 +722,6 @@ function LimitBoardAllocationDialog({
   const cachedBasisLabel = creditBuy
     ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
     : '可用资金'
-  const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
-    ?? null
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
@@ -914,7 +912,7 @@ function LimitBoardAllocationDialog({
             basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
             cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
-            financingBuyingPowerAmount={previewOrder?.buying_power_amount ?? cachedFinancingBuyingPower}
+            financingBuyingPowerAmount={previewOrder?.financing_buying_power_amount ?? null}
             financingBuyingPowerLabel={
               previewOrder?.credit_opvolume?.status === 'ready'
                 ? '该股票最大可买'
@@ -1818,57 +1816,72 @@ function AdvancedSettingsDialog({
 
   return <Modal labelledBy="limit-board-advanced-title" onClose={onClose} closeOnBackdrop={!pending} panelClassName="max-h-[92vh] w-[94vw] max-w-xl overflow-y-auto rounded-card border border-border bg-surface shadow-xl">
     <div className="border-b border-border px-4 py-3"><h2 id="limit-board-advanced-title" className="text-sm font-semibold">高级设置</h2></div>
-    <div className="grid grid-cols-1 divide-y divide-border px-4 sm:grid-cols-2 sm:gap-x-6 sm:divide-y-0">
-      <label className="flex items-center justify-between gap-3 border-b border-border py-3 text-xs sm:col-span-2">
-        <span><span className="block font-medium">扫板触发档位</span><span className="mt-0.5 block text-[10px] text-muted">卖一距涨停价的最大价格档位</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={1} max={10} step={1} value={draft.sweep_price_levels} disabled={pending} onChange={event => update('sweep_price_levels', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">档</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span>排板等待时间</span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={300} step={1} value={draft.queue_wait_seconds} disabled={pending} onChange={event => update('queue_wait_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">排板确认快照</span><span className="mt-0.5 block text-[10px] text-muted">0 为涨停即排</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={10} step={1} value={draft.queue_confirm_snapshots} disabled={pending} onChange={event => update('queue_confirm_snapshots', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">自动下单资金方式</span><span className="mt-0.5 block text-[10px] text-muted">按 QMT 提交时的最新可用资金计算</span></span>
-        <select value={draft.order_allocation_mode} disabled={pending} onChange={event => update('order_allocation_mode', event.target.value as QmtAllocationMode)} className="h-8 w-36 rounded-btn border border-border bg-base px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
-          {ADVANCED_QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
-      </label>
-      {draft.order_allocation_mode === 'fixed' ? <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">单板固定金额</span><span className="mt-0.5 block text-[10px] text-muted">0 保留旧配置的一手模式</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={10000000} step={100} value={draft.order_amount_per_board} disabled={pending} onChange={event => update('order_amount_per_board', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">元</span></span>
-      </label> : null}
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">每日自动打板上限</span><span className="mt-0.5 block text-[10px] text-muted">0 为不限制</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={1} value={draft.max_auto_board_count} disabled={pending} onChange={event => update('max_auto_board_count', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">只</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span><span className="block">今日破板率停手阈值</span><span className="mt-0.5 block text-[10px] text-muted">达到后停止自动打板，默认 40%</span></span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={0.1} value={draft.max_market_broken_rate_pct} disabled={pending} onChange={event => update('max_market_broken_rate_pct', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">%</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span>临板 WS 阈值</span>
-        <span className="flex items-center gap-2"><input type="number" min={0.1} max={10} step={0.1} value={Number((draft.near_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('near_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span>扫描退出阈值</span>
-        <span className="flex items-center gap-2"><input type="number" min={0.1} max={20} step={0.1} value={Number((draft.exit_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('exit_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 border-t border-border py-3 text-xs sm:border-t-0 sm:border-b sm:border-border">
-        <span>退出持续时间</span>
-        <span className="flex items-center gap-2"><input type="number" min={1} max={300} step={1} value={draft.exit_sustain_seconds} disabled={pending} onChange={event => update('exit_sustain_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 py-3 text-xs sm:border-b sm:border-border">
-        <span>首板回看</span>
-        <span className="flex items-center gap-2"><input type="number" min={1} max={60} step={1} value={draft.first_board_lookback_days} disabled={pending} onChange={event => update('first_board_lookback_days', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">日</span></span>
-      </label>
-      <label className="flex items-center justify-between gap-3 border-t border-border py-3 text-xs sm:col-span-2 sm:border-t-0">
-        <span>炸板黑名单阈值</span>
-        <span className="flex items-center gap-2"><input type="number" min={0} max={20} step={1} value={draft.blacklist_after_breaks} disabled={pending} onChange={event => update('blacklist_after_breaks', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
-      </label>
+    <div className="px-4">
+      <section className="border-b border-border py-3">
+        <h3 className="mb-2 text-xs font-semibold text-secondary">扫板</h3>
+        <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+          <label className="flex items-center justify-between gap-3 py-3 text-xs sm:col-span-2">
+            <span><span className="block font-medium">扫板触发档位</span><span className="mt-0.5 block text-[10px] text-muted">卖一距涨停价的最大价格档位</span></span>
+            <span className="flex items-center gap-2"><input type="number" min={1} max={10} step={1} value={draft.sweep_price_levels} disabled={pending} onChange={event => update('sweep_price_levels', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">档</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span>临板 WS 阈值</span>
+            <span className="flex items-center gap-2"><input type="number" min={0.1} max={10} step={0.1} value={Number((draft.near_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('near_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span>首板回看</span>
+            <span className="flex items-center gap-2"><input type="number" min={1} max={60} step={1} value={draft.first_board_lookback_days} disabled={pending} onChange={event => update('first_board_lookback_days', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">日</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span><span className="block">自动下单资金方式</span><span className="mt-0.5 block text-[10px] text-muted">按 QMT 提交时的最新可用资金计算</span></span>
+            <select value={draft.order_allocation_mode} disabled={pending} onChange={event => update('order_allocation_mode', event.target.value as QmtAllocationMode)} className="h-8 w-36 rounded-btn border border-border bg-base px-2 text-xs outline-none focus:border-accent disabled:opacity-50">
+              {ADVANCED_QMT_ALLOCATION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+          {draft.order_allocation_mode === 'fixed' ? <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span><span className="block">单板固定金额</span><span className="mt-0.5 block text-[10px] text-muted">0 保留旧配置的一手模式</span></span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={10000000} step={100} value={draft.order_amount_per_board} disabled={pending} onChange={event => update('order_amount_per_board', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">元</span></span>
+          </label> : null}
+        </div>
+      </section>
+      <section className="border-b border-border py-3">
+        <h3 className="mb-2 text-xs font-semibold text-secondary">排板</h3>
+        <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span>排板等待时间</span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={300} step={1} value={draft.queue_wait_seconds} disabled={pending} onChange={event => update('queue_wait_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span><span className="block">排板确认快照</span><span className="mt-0.5 block text-[10px] text-muted">0 为涨停即排</span></span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={10} step={1} value={draft.queue_confirm_snapshots} disabled={pending} onChange={event => update('queue_confirm_snapshots', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
+          </label>
+        </div>
+      </section>
+      <section className="py-3">
+        <h3 className="mb-2 text-xs font-semibold text-secondary">风险控制</h3>
+        <div className="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span><span className="block">每日自动打板上限</span><span className="mt-0.5 block text-[10px] text-muted">0 为不限制</span></span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={1} value={draft.max_auto_board_count} disabled={pending} onChange={event => update('max_auto_board_count', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">只</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span><span className="block">今日破板率停手阈值</span><span className="mt-0.5 block text-[10px] text-muted">达到后停止自动打板，默认 40%</span></span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={100} step={0.1} value={draft.max_market_broken_rate_pct} disabled={pending} onChange={event => update('max_market_broken_rate_pct', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span>扫描退出阈值</span>
+            <span className="flex items-center gap-2"><input type="number" min={0.1} max={20} step={0.1} value={Number((draft.exit_limit_pct * 100).toFixed(3))} disabled={pending} onChange={event => update('exit_limit_pct', Number(event.target.value) / 100)} className={inputClass} /><span className="w-7 text-muted">%</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs">
+            <span>退出持续时间</span>
+            <span className="flex items-center gap-2"><input type="number" min={1} max={300} step={1} value={draft.exit_sustain_seconds} disabled={pending} onChange={event => update('exit_sustain_seconds', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">秒</span></span>
+          </label>
+          <label className="flex items-center justify-between gap-3 py-3 text-xs sm:col-span-2">
+            <span>炸板黑名单阈值</span>
+            <span className="flex items-center gap-2"><input type="number" min={0} max={20} step={1} value={draft.blacklist_after_breaks} disabled={pending} onChange={event => update('blacklist_after_breaks', Number(event.target.value))} className={inputClass} /><span className="w-7 text-muted">次</span></span>
+          </label>
+        </div>
+      </section>
     </div>
     {!valid ? <div className="border-t border-border px-4 py-2 text-[11px] text-danger">请检查参数范围，且扫描退出阈值不能小于临板 WS 阈值。</div> : null}
     <div className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" onClick={onClose} disabled={pending} className="h-8 rounded-btn border border-border px-3 text-xs text-muted disabled:opacity-50">取消</button><button type="button" onClick={() => onSave(draft)} disabled={pending || !valid} className="inline-flex h-8 items-center gap-1.5 rounded-btn bg-accent px-3 text-xs text-white disabled:opacity-50"><Check className="h-3.5 w-3.5" />{pending ? '保存中…' : '保存'}</button></div>
