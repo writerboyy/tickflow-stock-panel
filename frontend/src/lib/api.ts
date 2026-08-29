@@ -1515,6 +1515,18 @@ export interface LimitBoardRow {
       capital_available?: boolean
       amount_growth?: number | null
       bars?: number
+      last_price?: number
+      limit_up?: number | null
+      touch_index?: number | null
+      sealed_now?: boolean
+      pull_up_start_index?: number | null
+      pull_up_minutes?: number | null
+      pull_up_max_drawdown?: number | null
+      pull_up_gain?: number | null
+      pre_seal_amount_growth?: number | null
+      day_open?: number
+      day_high?: number
+      day_low?: number
       as_of?: string
     }
     sector?: {
@@ -1603,41 +1615,52 @@ export interface LimitBoardRow {
     comprehensive?: {
       comprehensive_score: number
       max_score: number
+      data_completeness?: number
       grade: string
       grade_label: string
       dimensions: {
         history: {
           score: number
           max_score: number
+          full_max_score?: number
           percentage: number
           components: {
             next_day_red?: number
             seal_success?: number
             consecutive_ability?: number
           }
+          unavailable_components?: string[]
+          data_complete?: boolean
           label: string
         }
         sentiment: {
           score: number
           max_score: number
+          full_max_score?: number
           percentage: number
           components: {
             sector_pattern?: number
             overheat_risk?: number
             sector_current?: number
           }
+          unavailable_components?: string[]
+          data_complete?: boolean
           label: string
         }
         health: {
           score: number
           max_score: number
+          full_max_score?: number
           percentage: number
           components: {
             sector_position?: number
+            pullup_form?: number
             intraday_volume_price?: number
             capital_flow?: number
             daily_k_pattern?: number
           }
+          unavailable_components?: string[]
+          data_complete?: boolean
           label: string
         }
       }

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual'
 import * as echarts from 'echarts'
@@ -1030,19 +1030,26 @@ function LimitBoardAllocationDialog({
             maxScore={comprehensive.max_score}
             grade={comprehensive.grade}
             gradeLabel={comprehensive.grade_label}
+            dataCompleteness={comprehensive.data_completeness}
             dimensions={{
               history: {
                 ...comprehensive.dimensions.history,
                 maxScore: comprehensive.dimensions.history.max_score,
+                fullMaxScore: comprehensive.dimensions.history.full_max_score,
+                unavailableComponents: comprehensive.dimensions.history.unavailable_components,
               },
               sentiment: {
                 ...comprehensive.dimensions.sentiment,
                 maxScore: comprehensive.dimensions.sentiment.max_score,
+                fullMaxScore: comprehensive.dimensions.sentiment.full_max_score,
+                unavailableComponents: comprehensive.dimensions.sentiment.unavailable_components,
                 label: '板块强度',
               },
               health: {
                 ...comprehensive.dimensions.health,
                 maxScore: comprehensive.dimensions.health.max_score,
+                fullMaxScore: comprehensive.dimensions.health.full_max_score,
+                unavailableComponents: comprehensive.dimensions.health.unavailable_components,
               },
             }}
             warnings={comprehensive.warnings}
@@ -1312,7 +1319,7 @@ interface TableProps {
   onToggleAll: (checked: boolean) => void
 }
 
-function Table(props: TableProps) {
+const Table = memo(function Table(props: TableProps) {
   const { rows, mode } = props
   if (!rows.length) return <div className="px-4 py-12 text-center text-xs text-muted">当前没有符合条件的标的</div>
   return (
@@ -1351,7 +1358,7 @@ function Table(props: TableProps) {
       </table>
     </div>
   )
-}
+})
 
 type SectorSortKey = 'strength' | 'main_net'
 const SECTOR_TIMELINE_START = 9 * 3600 + 25 * 60
@@ -1434,10 +1441,13 @@ function scoreDetailRows(
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
     health: flow || technical ? [
       ...(flow ? [
+        { label: '触板状态', value: flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
+        { label: '拉升用时', value: flow.pull_up_minutes == null ? '--' : `${flow.pull_up_minutes} 分钟` },
+        { label: '拉升回撤', value: ratioPct(flow.pull_up_max_drawdown, 1) },
+        { label: '封板前量能', value: scoreDetailSignedPercent(flow.pre_seal_amount_growth, 1) },
         { label: '分时涨幅', value: scoreDetailSignedPercent(flow.trend_pct, 2) },
         { label: '水下比例', value: ratioPct(flow.underwater_ratio, 1) },
-        { label: '量能变化', value: scoreDetailSignedPercent(flow.amount_growth, 1) },
-        { label: '净流向比例', value: scoreDetailSignedPercent(flow.net_flow_ratio, 1) },
+        { label: '净流向比例', value: flow.sealed_now ? '封板后失真' : scoreDetailSignedPercent(flow.net_flow_ratio, 1), tone: flow.sealed_now ? 'text-warning' : undefined },
         { label: '资金状态', value: flow.flow_state || '不可用' },
         { label: '分时样本', value: flow.bars == null ? '--' : `${flow.bars} 根` },
       ] : []),
@@ -1460,7 +1470,7 @@ function sectorNameKey(value: string | null | undefined): string {
   return String(value ?? '').replace(/\s+/g, '').trim()
 }
 
-function SectorStrengthTable({
+const SectorStrengthTable = memo(function SectorStrengthTable({
   snapshot,
   hotRows = [],
   hotQuotes = {},
@@ -1976,7 +1986,7 @@ function SectorStrengthTable({
     </div>
     </section>
   </div>
-}
+})
 
 function queueTriggerDescription(waitSeconds: number, confirmSnapshots: number): string {
   const trigger = confirmSnapshots > 0
@@ -2186,13 +2196,13 @@ export function LimitBoard() {
     placeholderData: previous => previous,
     refetchInterval: hotIntradayAutoRefresh ? hotIntradayRefreshInterval * 1000 : false,
   })
-  const toggleHotIntraday = () => {
+  const toggleHotIntraday = useCallback(() => {
     setHotIntradayVisible(value => {
       const next = !value
       storage.limitBoardIntraday.set(next)
       return next
     })
-  }
+  }, [])
   const fuyaoAuctionStatus = useQuery({
     queryKey: QK.fuyaoAuctionStatus,
     queryFn: api.fuyaoAuctionStatus,
@@ -2327,7 +2337,7 @@ export function LimitBoard() {
     }
     return result
   }, [data?.candidate_pool, data?.first_board, data?.rebound_board])
-  const withCandidateScore = (row: LimitBoardRow): LimitBoardRow => {
+  const withCandidateScore = useCallback((row: LimitBoardRow): LimitBoardRow => {
     const scored = scoredRowsBySymbol.get(String(row.symbol || '').trim().toUpperCase())
     if (!scored) return row
     return {
@@ -2338,7 +2348,84 @@ export function LimitBoard() {
       candidate_score_as_of: scored.candidate_score_as_of,
       candidate_score_detail: scored.candidate_score_detail,
     }
-  }
+  }, [scoredRowsBySymbol])
+  // 弹框/表格回调全部稳定化：点开打板池弹框时只渲染弹框子树，
+  // 不再触发整页（板块表、迷你分时、池表格）的同步重渲染。
+  const handleOpenStockPreview = useCallback((symbol: string, name?: string) => {
+    setPreview({ symbol, name })
+  }, [])
+  const handleAddPoolFromRow = useCallback((row: LimitBoardRow) => {
+    setAllocationDialog({
+      row: withCandidateScore(row),
+      kind: 'board',
+      initialMode: normalizePoolAllocationMode(row.allocation_mode),
+      initialValue: row.allocation_value,
+    })
+  }, [withCandidateScore])
+  const handleAddBuyPoolFromRow = useCallback((row: LimitBoardRow) => {
+    setAllocationDialog({
+      row: withCandidateScore(row),
+      kind: 'buy',
+      initialMode: normalizePoolAllocationMode(row.allocation_mode),
+      initialValue: row.allocation_value,
+    })
+  }, [withCandidateScore])
+  const handleAddPoolFromLadder = useCallback((stock: LimitLadderStock) => {
+    setAllocationDialog({
+      row: withCandidateScore(manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null)),
+      kind: 'board',
+      initialMode: DEFAULT_POOL_ALLOCATION_MODE,
+      initialValue: DEFAULT_POOL_ALLOCATION_VALUE,
+    })
+  }, [withCandidateScore])
+  const handleRefreshHotIntraday = useCallback(() => {
+    void heatMinuteBatch.refetch()
+    // refetch 的身份由 React Query 保证稳定
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heatMinuteBatch.refetch])
+  const updatePoolMutate = updatePool.mutate
+  const removePoolMutate = removePool.mutate
+  const removeBuyPoolMutate = removeBuyPool.mutate
+  const tableMode: TableMode = tab === 'pool' ? 'pool' : 'buy_pool'
+  const poolTableRows = tab === 'buy_pool' ? data?.buy_pool : data?.board_pool
+  const rows = useMemo(() => poolTableRows ?? [], [poolTableRows])
+  const handleEditAllocation = useCallback((row: LimitBoardRow) => {
+    setAllocationDialog({
+      row,
+      kind: 'edit',
+      initialMode: normalizePoolAllocationMode(row.allocation_mode),
+      initialValue: row.allocation_value,
+    })
+  }, [])
+  const handleToggleAuto = useCallback((row: LimitBoardRow, enabled: boolean) => {
+    updatePoolMutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })
+  }, [updatePoolMutate])
+  const handleChangeOrderMode = useCallback((row: LimitBoardRow, orderMode: 'sweep' | 'queue') => {
+    updatePoolMutate({ row, enabled: row.auto_trade === true, orderMode })
+  }, [updatePoolMutate])
+  const handleRemovePoolRow = useCallback((row: LimitBoardRow) => {
+    const setSelected = tableMode === 'buy_pool' ? setSelectedBuyPoolSymbols : setSelectedPoolSymbols
+    setSelected(previous => {
+      const next = new Set(previous)
+      next.delete(row.symbol)
+      return next
+    })
+    if (tableMode === 'buy_pool') removeBuyPoolMutate(row)
+    else removePoolMutate(row)
+  }, [tableMode, removeBuyPoolMutate, removePoolMutate])
+  const handleToggleSelect = useCallback((symbol: string, checked: boolean) => {
+    const setSelected = tableMode === 'buy_pool' ? setSelectedBuyPoolSymbols : setSelectedPoolSymbols
+    setSelected(previous => {
+      const next = new Set(previous)
+      if (checked) next.add(symbol)
+      else next.delete(symbol)
+      return next
+    })
+  }, [tableMode])
+  const handleToggleAll = useCallback((checked: boolean) => {
+    const setSelected = tableMode === 'buy_pool' ? setSelectedBuyPoolSymbols : setSelectedPoolSymbols
+    setSelected(checked ? new Set(rows.map(row => row.symbol)) : new Set())
+  }, [tableMode, rows])
   const hotBreakCounts = useMemo(() => {
     const counts: Record<string, number> = {}
     for (const event of data?.events ?? []) {
@@ -2363,67 +2450,70 @@ export function LimitBoard() {
           pullback_count: data.market_sentiment.emotion_pullback_count,
         },
   ), [data?.market_sentiment])
+  // sentimentPanel 作为 EmbeddedLimitLadder 的 headerContent prop 传入，
+  // 必须 memo，否则弹框/任意 state 变化都会让天梯整树跟着重渲染。
+  const sentimentPanel = useMemo(() => {
+    const marketSentiment = data?.market_sentiment
+    const sentimentGuard = data?.runtime?.sentiment_guard
+    return <>
+      <section className="border-b border-border px-4 py-3 sm:px-5">
+        <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(220px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
+        {[
+          ['今日破板率', marketSentiment ? plainPercentValue(marketSentiment.market_broken_rate_pct) : '--', sentimentGuard?.blocked ? 'text-danger' : 'text-secondary'],
+          ['昨日涨停今表现', marketSentiment ? percentValue(marketSentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
+          ['昨日连板今表现', marketSentiment ? percentValue(marketSentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
+          ['昨日破板今表现', marketSentiment ? percentValue(marketSentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
+        ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
+        <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+          <span className="min-w-0 truncate text-accent">情绪分数 {marketSentiment?.emotion_strength ?? '--'} / {marketSentiment?.max_consecutive ?? '--'}板</span>
+          <button
+            type="button"
+            onClick={() => setSentimentChartOpen(true)}
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-accent"
+            aria-label="查看情绪历史图表"
+            title="查看情绪历史图表"
+          >
+            <LineChart className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
+        {marketSentiment ? <span>{marketSentiment.state === 'live' ? '开盘啦实时情绪数据' : marketSentiment.state === 'stale' ? `${marketSentiment.as_of ?? '--'} 开盘啦收盘数据` : '开盘啦实时情绪数据暂不可用'}</span> : <span>开盘啦实时情绪数据暂不可用</span>}
+        {marketSentiment ? <span>刷新 {scoreTime(marketSentiment.refreshed_at)}</span> : null}
+        <span className={sentimentGuard?.blocked ? 'text-danger' : 'text-secondary'}>{sentimentGuard?.reason}</span>
+      </div>
+      {sentimentGuard?.blocked ? <div className="mt-2 flex items-center gap-2 rounded-btn border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"><ShieldAlert className="h-3.5 w-3.5" />自动打板已停止</div> : null}
+      </section>
+      {sentimentChartOpen ? <Modal labelledBy="limit-board-sentiment-title" onClose={() => setSentimentChartOpen(false)} panelClassName="flex max-h-[90vh] w-[94vw] max-w-4xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div>
+            <h2 id="limit-board-sentiment-title" className="text-sm font-semibold">市场情绪历史</h2>
+            <p className="mt-0.5 text-[10px] text-muted">情绪强度与涨停家数</p>
+          </div>
+          <button type="button" onClick={() => setSentimentChartOpen(false)} className="grid h-7 w-7 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭情绪历史图表"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4">
+          <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted">
+            <span className="font-mono text-accent">情绪分数 {marketSentiment?.emotion_strength ?? '--'} / {marketSentiment?.max_consecutive ?? '--'}板</span>
+            <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-orange-500" aria-hidden="true" />情绪强度</span>
+            <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-green-500/70" aria-hidden="true" />涨停家数</span>
+          </div>
+          <SentimentHistoryChart points={sentimentHistory} className="h-[min(74vh,620px)] min-h-[320px]" />
+        </div>
+      </Modal> : null}
+    </>
+  }, [data?.market_sentiment, data?.runtime?.sentiment_guard, sentimentChartOpen, sentimentHistory])
   if (!data && view.isLoading) {
     return <EmptyState icon={Loader2} title="短线猎手加载中" hint="正在等待后端服务响应" />
   }
   if (!data) return <EmptyState icon={ShieldAlert} title="短线猎手加载失败" hint="请检查后端服务后重试" />
   const runtime = data.runtime
-  const rows = tab === 'buy_pool' ? data.buy_pool : tab === 'pool' ? data.board_pool : []
-  const tableMode: TableMode = tab === 'pool' ? 'pool' : 'buy_pool'
   const tableTitle = tab === 'buy_pool' ? '买入池' : '实盘打板池'
   const selectedSymbols = tableMode === 'buy_pool' ? selectedBuyPoolSymbols : selectedPoolSymbols
-  const setSelectedSymbols = tableMode === 'buy_pool' ? setSelectedBuyPoolSymbols : setSelectedPoolSymbols
   const removeBatch = tableMode === 'buy_pool' ? removeBuyPoolBatch : removePoolBatch
   const tableHint = tab === 'pool'
     ? `扫板：卖一距涨停不超过 ${data.settings.sweep_price_levels} 个价位时提交；排板：${queueTriggerDescription(data.settings.queue_wait_seconds, data.settings.queue_confirm_snapshots)}`
     : '加入后立即按当前 TickFlow 价格发送限价买入委托；移出买入池不会自动撤销已发委托'
-  const sentimentPanel = <>
-    <section className="border-b border-border px-4 py-3 sm:px-5">
-      <div className="grid min-w-[960px] grid-cols-[repeat(4,minmax(130px,1fr))_minmax(220px,1.8fr)] divide-x divide-border overflow-x-auto rounded-btn border border-border bg-surface">
-      {[
-        ['今日破板率', data.market_sentiment ? plainPercentValue(data.market_sentiment.market_broken_rate_pct) : '--', runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'],
-        ['昨日涨停今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_limitup_change_pct) : '--', 'text-secondary'],
-        ['昨日连板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_consecutive_change_pct) : '--', 'text-secondary'],
-        ['昨日破板今表现', data.market_sentiment ? percentValue(data.market_sentiment.yesterday_broken_change_pct) : '--', 'text-secondary'],
-      ].map(([label, value, tone]) => <div key={label} className="min-w-0 px-3 py-2.5"><div className="truncate text-[10px] text-muted">{label}</div><div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div></div>)}
-      <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
-        <span className="min-w-0 truncate text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
-        <button
-          type="button"
-          onClick={() => setSentimentChartOpen(true)}
-          className="grid h-7 w-7 shrink-0 place-items-center rounded-btn border border-border text-muted hover:bg-elevated hover:text-accent"
-          aria-label="查看情绪历史图表"
-          title="查看情绪历史图表"
-        >
-          <LineChart className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    </div>
-    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted">
-      {data.market_sentiment ? <span>{data.market_sentiment.state === 'live' ? '开盘啦实时情绪数据' : data.market_sentiment.state === 'stale' ? `${data.market_sentiment.as_of ?? '--'} 开盘啦收盘数据` : '开盘啦实时情绪数据暂不可用'}</span> : <span>开盘啦实时情绪数据暂不可用</span>}
-      {data.market_sentiment ? <span>刷新 {scoreTime(data.market_sentiment.refreshed_at)}</span> : null}
-      <span className={runtime.sentiment_guard.blocked ? 'text-danger' : 'text-secondary'}>{runtime.sentiment_guard.reason}</span>
-    </div>
-    {runtime.sentiment_guard.blocked ? <div className="mt-2 flex items-center gap-2 rounded-btn border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger"><ShieldAlert className="h-3.5 w-3.5" />自动打板已停止</div> : null}
-    </section>
-    {sentimentChartOpen ? <Modal labelledBy="limit-board-sentiment-title" onClose={() => setSentimentChartOpen(false)} panelClassName="flex max-h-[90vh] w-[94vw] max-w-4xl flex-col overflow-hidden rounded-card border border-border bg-surface shadow-xl">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <div>
-          <h2 id="limit-board-sentiment-title" className="text-sm font-semibold">市场情绪历史</h2>
-          <p className="mt-0.5 text-[10px] text-muted">情绪强度与涨停家数</p>
-        </div>
-        <button type="button" onClick={() => setSentimentChartOpen(false)} className="grid h-7 w-7 place-items-center rounded-btn text-muted hover:bg-elevated hover:text-foreground" aria-label="关闭情绪历史图表"><X className="h-4 w-4" /></button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4 sm:py-4">
-        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted">
-          <span className="font-mono text-accent">情绪分数 {data.market_sentiment?.emotion_strength ?? '--'} / {data.market_sentiment?.max_consecutive ?? '--'}板</span>
-          <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-orange-500" aria-hidden="true" />情绪强度</span>
-          <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-green-500/70" aria-hidden="true" />涨停家数</span>
-        </div>
-        <SentimentHistoryChart points={sentimentHistory} className="h-[min(74vh,620px)] min-h-[320px]" />
-      </div>
-    </Modal> : null}
-  </>
   return (
     <div className="flex h-full min-h-0 flex-col">
       <PageHeader
@@ -2455,12 +2545,7 @@ export function LimitBoard() {
       <div className={`min-h-0 flex-1 ${tab === 'ladder' ? 'overflow-hidden' : 'overflow-x-hidden overflow-y-auto px-2 py-3 sm:px-5'}`}>
         {tab === 'ladder' ? <Suspense fallback={<div className="grid h-full place-items-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>}><EmbeddedLimitLadder
           headerContent={sentimentPanel}
-          onAddToPool={(stock: LimitLadderStock) => setAllocationDialog({
-            row: withCandidateScore(manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null)),
-            kind: 'board',
-            initialMode: DEFAULT_POOL_ALLOCATION_MODE,
-            initialValue: DEFAULT_POOL_ALLOCATION_VALUE,
-          })}
+          onAddToPool={handleAddPoolFromLadder}
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
           comparisonRows={auctionComparisonRows}
@@ -2476,7 +2561,7 @@ export function LimitBoard() {
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={() => { void heatMinuteBatch.refetch() }} onOpenStock={(symbol, name) => setPreview({ symbol, name })} onAddPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'board', initialMode: normalizePoolAllocationMode(row.allocation_mode), initialValue: row.allocation_value })} onAddBuyPool={row => setAllocationDialog({ row: withCandidateScore(row), kind: 'buy', initialMode: normalizePoolAllocationMode(row.allocation_mode), initialValue: row.allocation_value })} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotMinuteData={heatMinuteBatch.data?.data} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} hotIntradayAvailable={hasMinuteBatch} hotIntradayVisible={hotIntradayVisible} hotIntradayAutoRefresh={hotIntradayAutoRefresh} hotIntradayRefreshing={heatMinuteBatch.isFetching} hotIntradayRefreshInterval={hotIntradayRefreshInterval} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onToggleHotIntraday={toggleHotIntraday} onRefreshHotIntraday={handleRefreshHotIntraday} onOpenStock={handleOpenStockPreview} onAddPool={handleAddPoolFromRow} onAddBuyPool={handleAddBuyPoolFromRow} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
@@ -2499,30 +2584,12 @@ export function LimitBoard() {
               queueConfirmSnapshots={data.settings.queue_confirm_snapshots}
               selectedSymbols={selectedSymbols}
               onOpen={setPreview}
-              onEditAllocation={row => setAllocationDialog({
-                row,
-                kind: 'edit',
-                initialMode: normalizePoolAllocationMode(row.allocation_mode),
-                initialValue: row.allocation_value,
-              })}
-              onToggleAuto={(row, enabled) => updatePool.mutate({ row, enabled, orderMode: row.order_mode === 'queue' ? 'queue' : 'sweep' })}
-              onChangeOrderMode={(row, orderMode) => updatePool.mutate({ row, enabled: row.auto_trade === true, orderMode })}
-              onRemovePool={row => {
-                setSelectedSymbols(previous => {
-                  const next = new Set(previous)
-                  next.delete(row.symbol)
-                  return next
-                })
-                if (tableMode === 'buy_pool') removeBuyPool.mutate(row)
-                else removePool.mutate(row)
-              }}
-              onToggleSelect={(symbol, checked) => setSelectedSymbols(previous => {
-                const next = new Set(previous)
-                if (checked) next.add(symbol)
-                else next.delete(symbol)
-                return next
-              })}
-              onToggleAll={checked => setSelectedSymbols(checked ? new Set(rows.map(row => row.symbol)) : new Set())}
+              onEditAllocation={handleEditAllocation}
+              onToggleAuto={handleToggleAuto}
+              onChangeOrderMode={handleChangeOrderMode}
+              onRemovePool={handleRemovePoolRow}
+              onToggleSelect={handleToggleSelect}
+              onToggleAll={handleToggleAll}
             />
           </section>
         ) : (

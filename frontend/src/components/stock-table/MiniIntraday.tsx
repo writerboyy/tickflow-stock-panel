@@ -8,10 +8,10 @@
 - 价格线下方渐变填充: 顶部半透明实色 → 底部全透明(与个股对话框 EChartsIntraday 一致)
 空数据返回等尺寸占位 SVG，保证加载前后尺寸一致（同 MiniCandlestick 模式）。
 */
-import { useId } from 'react'
+import { memo, useId } from 'react'
 import type { MinuteKlineRow } from '@/lib/api'
 
-export function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56, className = 'block' }: {
+export const MiniIntraday = memo(function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56, className = 'block' }: {
   rows: MinuteKlineRow[]
   /** 昨收价 (前收), 用于基准线。无则用 close/changePct 反算 */
   prevClose?: number | null
@@ -129,4 +129,4 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
       />
     </svg>
   )
-}
+})
