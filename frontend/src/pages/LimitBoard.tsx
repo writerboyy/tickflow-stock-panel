@@ -1669,7 +1669,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
     const scrollKey = `${selectedPlateId}:${selectedStockSymbol}`
     if (lastScrolledSector.current === scrollKey) return
     const frame = window.requestAnimationFrame(() => {
-      sectorRowRefs.current.get(selectedPlateId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      sectorRowRefs.current.get(selectedPlateId)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
       lastScrolledSector.current = scrollKey
     })
     return () => window.cancelAnimationFrame(frame)
@@ -1887,8 +1887,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
       </div>
       <div className="min-h-0 min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
-        <div className="max-h-[62vh] min-h-0 max-w-full overflow-y-auto overscroll-contain scroll-py-[50%] lg:h-full lg:max-h-none">
-          {selectedStockSymbol ? <div aria-hidden="true" className="h-[31vh]" /> : null}
+        <div className="max-h-[62vh] min-h-0 max-w-full overflow-y-auto overscroll-contain lg:h-full lg:max-h-none">
           <table className="w-full min-w-0 table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[35%] px-1.5 py-1.5">板块</th><th className="w-[23%] px-1.5 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[42%] px-1.5 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
             <tbody>{rows.length ? rows.map(row => {
@@ -1918,7 +1917,6 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
             </tr>
             }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
           </table>
-          {selectedStockSymbol ? <div aria-hidden="true" className="h-[31vh]" /> : null}
         </div>
       </div>
       <div className="min-w-0">
