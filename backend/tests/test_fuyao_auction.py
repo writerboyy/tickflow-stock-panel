@@ -326,3 +326,19 @@ def test_start_registers_092457_at_second_57(tmp_path):
     assert "second='57'" in str(job["trigger"])
     legacy = next(j for j in jobs if j["id"] == "fuyao_auction_0925")
     assert "second='5'" in str(legacy["trigger"])
+
+
+def test_start_uses_tight_misfire_grace_for_every_checkpoint(tmp_path):
+    """竞价是时点快照：任何时点延迟补跑都会拿到别的口径，必须统一收紧。"""
+    jobs: list[dict] = []
+
+    class _FakeScheduler:
+        def add_job(self, func, args=None, trigger=None, id=None, **kwargs):  # noqa: ARG002
+            jobs.append({"id": id, "misfire": kwargs.get("misfire_grace_time")})
+
+    FuyaoAuctionCollector(tmp_path).start(_FakeScheduler(), bootstrap=False)
+
+    assert {j["id"] for j in jobs} == {
+        f"fuyao_auction_{cp}" for cp in ("0915", "0920", "092457", "0925", "1457", "1500")
+    }
+    assert {j["misfire"] for j in jobs} == {3}

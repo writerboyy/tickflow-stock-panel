@@ -39,6 +39,8 @@ _CHECKPOINTS = {
 }
 # 扶摇接口约束: 单次 thscodes 不得超过 100 个。
 _BATCH_SIZE = 100
+# 竞价是时点快照，错过即作废：延迟补跑会拿到别的口径（原因见 start() 内注释）。
+_MISFIRE_GRACE_SECONDS = 3
 
 
 def _symbols(data_dir: Path) -> list[str]:
@@ -136,7 +138,10 @@ class FuyaoAuctionCollector:
                     timezone="Asia/Shanghai",
                 ),
                 id=f"fuyao_auction_{checkpoint}",
-                misfire_grace_time=120,
+                # 竞价是时点快照，延迟补跑会拿到别的口径：live 时点补跑会取到
+                # 后续时点甚至 final 的数据，final 时点补跑则可能已切到盘中模式。
+                # 丢弃优于存错，故统一收紧到 3 秒。
+                misfire_grace_time=_MISFIRE_GRACE_SECONDS,
                 replace_existing=True,
             )
         if bootstrap:
