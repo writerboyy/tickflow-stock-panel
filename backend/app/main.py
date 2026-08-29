@@ -212,7 +212,9 @@ async def _application_lifespan(app: FastAPI):
             store.data_dir,
             realtime_interval_seconds=max(5.0, float(qs.get_min_interval())),
         )
-        kaipanla_collector.start(app.state.scheduler, bootstrap=collector_bootstrap)
+        # 即将涨停雷达只保存在采集器内存中，必须在启动时首刷；维护开关
+        # 仍可跳过其它数据源的首拉，但不能让该面板永远保持 unavailable。
+        kaipanla_collector.start(app.state.scheduler)
         app.state.kaipanla_collector = kaipanla_collector
     except Exception as e:  # noqa: BLE001
         logger.warning("kaipanla collector not started: %s", e)
