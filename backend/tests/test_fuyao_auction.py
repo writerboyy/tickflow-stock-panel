@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import polars as pl
@@ -10,6 +10,7 @@ from app.plugins.fuyao import client as fuyao_client
 from app.plugins.fuyao_auction import collector as collector_module
 from app.plugins.fuyao_auction.collector import FuyaoAuctionCollector
 from app.plugins.fuyao_auction.storage import TABLE_ID, partition_path, publish, read_status
+from app.services.ingestion_manifest import load_ingestion_manifest
 import app.plugins.fuyao_auction.router as router_module
 
 
@@ -253,3 +254,75 @@ def test_clear_api_key_removes_local_secret_and_refreshes_collector(monkeypatch)
     assert result["ok"] is True
     assert cleared == ["fuyao_api_key"]
     assert stopped == [True]
+
+
+def _write_symbols(tmp_path, filename: str, symbols: list[str]) -> None:
+    inst = tmp_path / "instruments"
+    inst.mkdir(exist_ok=True)
+    pl.DataFrame({"symbol": symbols}).write_parquet(inst / filename)
+
+
+@pytest.mark.asyncio
+async def test_collect_092457_uses_focus_pool_instead_of_full_universe(tmp_path, monkeypatch):
+    """最后 3 秒窗口拉不完全市场，092457 必须只采 auction_focus 重点池。"""
+    _write_symbols(tmp_path, "instruments.parquet", [f"{600000 + i:06d}.SH" for i in range(300)])
+    focus = ["600519.SH", "000001.SZ"]
+    _write_symbols(tmp_path, "auction_focus.parquet", focus)
+
+    fake = _FakeClient({"timestamp": 123, "auction_phase": "open", "data_status": "ready", "item": [_row()]})
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    collector = FuyaoAuctionCollector(tmp_path)
+    collector._client = fake
+
+    rows = await collector.collect("092457", date(2026, 8, 27))
+
+    assert rows == 2
+    assert fake.calls[0][0] == sorted(focus)  # 重点池按 symbol 排序后分批
+    assert fake.calls[0][1] == "live"
+    frame = pl.read_parquet(partition_path(tmp_path, date(2026, 8, 27)))
+    assert set(frame["checkpoint"].to_list()) == {"092457"}
+
+
+@pytest.mark.asyncio
+async def test_collect_092457_skips_when_focus_pool_missing(tmp_path, monkeypatch):
+    """无重点池时不得回退全市场：54 批跨越 09:25:00 会造成 live/final 数据混杂。"""
+    _write_symbols(tmp_path, "instruments.parquet", [f"{600000 + i:06d}.SH" for i in range(10)])
+
+    fake = _FakeClient({"timestamp": 123, "auction_phase": "open", "data_status": "ready", "item": [_row()]})
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    collector = FuyaoAuctionCollector(tmp_path)
+    collector._client = fake
+
+    rows = await collector.collect("092457", date(2026, 8, 27))
+
+    assert rows == 0
+    assert fake.calls == []
+    assert not partition_path(tmp_path, date(2026, 8, 27)).exists()
+    manifest = load_ingestion_manifest(tmp_path, "fuyao", TABLE_ID, "2026-08-27")
+    assert manifest["status"] == "missing_instruments"
+
+
+def test_default_checkpoint_is_092457_within_last_three_seconds(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector_module, "cn_now", lambda: datetime(2026, 8, 28, 9, 24, 58))
+    assert FuyaoAuctionCollector(tmp_path).default_checkpoint() == "092457"
+
+
+def test_default_checkpoint_advances_to_0925_after_auction_closes(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector_module, "cn_now", lambda: datetime(2026, 8, 28, 9, 25, 30))
+    assert FuyaoAuctionCollector(tmp_path).default_checkpoint() == "0925"
+
+
+def test_start_registers_092457_at_second_57(tmp_path):
+    jobs: list[dict] = []
+
+    class _FakeScheduler:
+        def add_job(self, func, args=None, trigger=None, id=None, **kwargs):  # noqa: ARG002
+            jobs.append({"id": id, "args": args, "trigger": trigger})
+
+    FuyaoAuctionCollector(tmp_path).start(_FakeScheduler(), bootstrap=False)
+
+    job = next(j for j in jobs if j["id"] == "fuyao_auction_092457")
+    assert job["args"] == ["092457"]
+    assert "second='57'" in str(job["trigger"])
+    legacy = next(j for j in jobs if j["id"] == "fuyao_auction_0925")
+    assert "second='5'" in str(legacy["trigger"])

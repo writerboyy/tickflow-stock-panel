@@ -50,7 +50,7 @@ def config() -> ExtConfig:
         label="扶摇集合竞价",
         mode="timeseries",
         fields=_FIELDS,
-        description="扶摇/同花顺集合竞价批量快照（09:15/09:20/09:25及收盘竞价）",
+        description="扶摇/同花顺集合竞价批量快照（09:15/09:20/09:24:57/09:25 及收盘竞价）",
         symbol_map={"type": "mapped", "col": "symbol"},
         code_map={"type": "mapped", "col": "code"},
         primary_key=["symbol", "checkpoint"],

@@ -25,12 +25,17 @@ from app.services.ingestion_manifest import load_ingestion_manifest, update_inge
 
 logger = logging.getLogger(__name__)
 
+# (stage, hour, minute, second)。字典顺序即当日时序，default_checkpoint 依赖它。
 _CHECKPOINTS = {
-    "0915": ("live", 9, 15),
-    "0920": ("live", 9, 20),
-    "0925": ("final", 9, 25),
-    "1457": ("live", 14, 57),
-    "1500": ("final", 15, 0),
+    "0915": ("live", 9, 15, 5),
+    "0920": ("live", 9, 20, 5),
+    # 09:24:57 是竞价结束前最后 3 秒，用于量化「最后时刻资金突袭」强度。
+    # 全市场约 5400 只 / 每批 100 = 54 个请求，无法在 3 秒内完成，
+    # 因此该时点只采集 _focus_symbols() 返回的重点池。
+    "092457": ("live", 9, 24, 57),
+    "0925": ("final", 9, 25, 5),
+    "1457": ("live", 14, 57, 5),
+    "1500": ("final", 15, 0, 5),
 }
 # 扶摇接口约束: 单次 thscodes 不得超过 100 个。
 _BATCH_SIZE = 100
@@ -50,6 +55,24 @@ def _symbols(data_dir: Path) -> list[str]:
         frame = frame.filter(pl.col("status").cast(pl.String).str.to_lowercase() == "active")
     if "asset_type" in frame.columns:
         frame = frame.filter(pl.col("asset_type").cast(pl.String).str.to_lowercase() == "stock")
+    if "symbol" not in frame.columns:
+        return []
+    return sorted({str(value).strip().upper() for value in frame["symbol"].drop_nulls().to_list() if "." in str(value)})
+
+
+def _focus_symbols(data_dir: Path) -> list[str]:
+    """09:24:57 最后 3 秒窗口的重点标的池（instruments/auction_focus.parquet）。
+
+    文件不存在或读取失败时返回空列表，由 collect() 判定为跳过，不报错。
+    """
+    path = Path(data_dir) / "instruments" / "auction_focus.parquet"
+    if not path.exists():
+        return []
+    try:
+        frame = pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取竞价重点池失败: %s", exc)
+        return []
     if "symbol" not in frame.columns:
         return []
     return sorted({str(value).strip().upper() for value in frame["symbol"].drop_nulls().to_list() if "." in str(value)})
@@ -101,7 +124,7 @@ class FuyaoAuctionCollector:
         ensure_config(self.data_dir)
         if scheduler is None:
             return
-        for checkpoint, (_stage, hour, minute) in _CHECKPOINTS.items():
+        for checkpoint, (_stage, hour, minute, second) in _CHECKPOINTS.items():
             scheduler.add_job(
                 self._scheduled_collect,
                 args=[checkpoint],
@@ -109,7 +132,7 @@ class FuyaoAuctionCollector:
                     day_of_week="mon-fri",
                     hour=hour,
                     minute=minute,
-                    second=5,
+                    second=second,
                     timezone="Asia/Shanghai",
                 ),
                 id=f"fuyao_auction_{checkpoint}",
@@ -118,7 +141,11 @@ class FuyaoAuctionCollector:
             )
         if bootstrap:
             now = cn_now().time()
-            due = [key for key, (_stage, hour, minute) in _CHECKPOINTS.items() if (hour, minute) <= (now.hour, now.minute)]
+            due = [
+                key
+                for key, (_stage, hour, minute, second) in _CHECKPOINTS.items()
+                if (hour, minute, second) <= (now.hour, now.minute, now.second)
+            ]
             if due:
                 asyncio.create_task(self._scheduled_collect(due[-1]), name="fuyao-auction-bootstrap")
         logger.info("扶摇集合竞价采集器已启动")
@@ -185,9 +212,15 @@ class FuyaoAuctionCollector:
                     "error_code": None,
                 }
                 return 0
-            symbols = _symbols(self.data_dir)
+            # 09:24:57 只有 3 秒窗口，全市场 54 批拉不完，只采重点池。
+            if checkpoint == "092457":
+                symbols = _focus_symbols(self.data_dir)
+                empty_msg = "auction_focus 重点池为空，跳过最后 3 秒采集"
+            else:
+                symbols = _symbols(self.data_dir)
+                empty_msg = "instruments 维表为空"
             if not symbols:
-                return self._fail(day, checkpoint, stage, "instruments 维表为空", None, "missing_instruments")
+                return self._fail(day, checkpoint, stage, empty_msg, None, "missing_instruments")
             started = cn_now().isoformat(timespec="seconds")
             self._status = {
                 "state": "running", "checkpoint": checkpoint, "stage": stage,
@@ -264,7 +297,11 @@ class FuyaoAuctionCollector:
 
     def default_checkpoint(self) -> str:
         now = cn_now().time()
-        due = [key for key, (_stage, hour, minute) in _CHECKPOINTS.items() if (hour, minute) <= (now.hour, now.minute)]
+        due = [
+            key
+            for key, (_stage, hour, minute, second) in _CHECKPOINTS.items()
+            if (hour, minute, second) <= (now.hour, now.minute, now.second)
+        ]
         return due[-1] if due else "0915"
 
     def status(self) -> dict:
