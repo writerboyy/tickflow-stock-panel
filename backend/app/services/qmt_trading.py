@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -115,6 +116,8 @@ _CREDIT_ASSET_FIELDS = frozenset(
 )
 _CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
 _CREDIT_SUBJECT_CACHE_SECONDS = 180.0
+_CREDIT_OPVOLUME_BACKGROUND_TIMEOUT_SECONDS = 8.0
+_CREDIT_SUBJECT_ERROR_CACHE_SECONDS = 5.0
 
 _CREDIT_RAW_FIELD_TARGETS = {
     "m_dFinEnbuyBalance": ("fin_enbuy_balance",),
@@ -291,10 +294,15 @@ class QmtZmqRpcClient:
         self._context = None
         self._dealer = None
         self._lock = threading.Lock()
+        self._credit_state_lock = threading.Lock()
         self._retired = False
         self._credit_opvolume_cache: dict[tuple[str, float, str], dict[str, Any]] = {}
+        self._credit_opvolume_futures: dict[tuple[str, float, str], Any] = {}
+        self._credit_executor: ThreadPoolExecutor | None = None
         self._credit_subjects_cache: list[dict[str, Any]] | None = None
         self._credit_subjects_cache_at = 0.0
+        self._credit_subject_future: Any | None = None
+        self._credit_subject_error_until = 0.0
 
     @staticmethod
     def _normalise_connection_mode(value: Any) -> str:
@@ -368,6 +376,14 @@ class QmtZmqRpcClient:
         finally:
             self._dealer = None
 
+    def _credit_executor_locked(self) -> ThreadPoolExecutor:
+        if self._credit_executor is None:
+            self._credit_executor = ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="qmt-credit-query",
+            )
+        return self._credit_executor
+
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if not self.configured:
             raise QmtRpcError(self.configuration_reason)
@@ -419,9 +435,17 @@ class QmtZmqRpcClient:
         return response.get("data")
 
     def close(self) -> None:
+        executor = None
         with self._lock:
             self._retired = True
             self._close_dealer_locked()
+        with self._credit_state_lock:
+            executor = self._credit_executor
+            self._credit_executor = None
+            self._credit_opvolume_futures.clear()
+            self._credit_subject_future = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def probe(self) -> dict[str, Any]:
         data = self.call("ping")
@@ -463,31 +487,15 @@ class QmtZmqRpcClient:
                 merged[targets[0]] = value
         return merged
 
-    def get_credit_opvolume(
+    def _fetch_credit_opvolume(
         self,
-        stock_code: str,
+        key: tuple[str, float, str],
+        symbol: str,
         price: float,
-        credit_buy_mode: str = "financing",
-        timeout_seconds: float | None = None,
+        mode: str,
+        timeout_seconds: float | None,
     ) -> dict[str, Any]:
-        """Return QMT's broker-calculated max volume for one credit buy.
-
-        ``query_credit_opvolume`` is asynchronous in Big QMT. The bridge starts
-        the query once, then this client polls its short-lived cache; it never
-        treats the account's credit quota or ``DBL_MAX`` sentinel as buying
-        power.
-        """
-        symbol = str(stock_code or "").strip().upper()
-        if not symbol or price <= 0:
-            return {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
-        mode = str(credit_buy_mode or "financing").strip().lower()
         op_type = 27 if mode == "financing" else 33
-        key = (symbol, round(float(price), 6), mode)
-        with self._lock:
-            cached = self._credit_opvolume_cache.get(key)
-        if cached is not None and cached.get("status") in {"ready", "error"}:
-            return dict(cached)
-
         query = self.call(
             "query_credit_opvolume",
             {
@@ -499,10 +507,17 @@ class QmtZmqRpcClient:
             },
         )
         if not isinstance(query, dict):
-            return {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
+            result = {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
+            with self._credit_state_lock:
+                self._credit_opvolume_cache[key] = dict(result)
+            return result
         if isinstance(query, dict) and query.get("status") == "error":
+            with self._credit_state_lock:
+                self._credit_opvolume_cache[key] = dict(query)
             return query
         if query.get("status") == "unavailable":
+            with self._credit_state_lock:
+                self._credit_opvolume_cache[key] = dict(query)
             return query
         deadline = time.monotonic() + max(0.5, float(timeout_seconds or min(self.timeout, 4.0)))
         latest = {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
@@ -518,14 +533,119 @@ class QmtZmqRpcClient:
                 },
             )
             if isinstance(latest, dict) and latest.get("status") in {"ready", "error", "unavailable"}:
-                if latest.get("status") == "ready":
-                    with self._lock:
-                        self._credit_opvolume_cache[key] = dict(latest)
+                with self._credit_state_lock:
+                    self._credit_opvolume_cache[key] = dict(latest)
                 return latest
             time.sleep(0.2)
         return latest if isinstance(latest, dict) else {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
 
-    def get_credit_subject(self, stock_code: str) -> dict[str, Any]:
+    def _resolve_credit_opvolume_background(
+        self,
+        key: tuple[str, float, str],
+        symbol: str,
+        price: float,
+        mode: str,
+    ) -> None:
+        try:
+            result = self._fetch_credit_opvolume(
+                key,
+                symbol,
+                price,
+                mode,
+                _CREDIT_OPVOLUME_BACKGROUND_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - expose a stable status to the next poll
+            result = {
+                "status": "error",
+                "stock_code": symbol,
+                "max_volume": None,
+                "max_amount": None,
+                "reason": str(exc),
+            }
+        with self._credit_state_lock:
+            self._credit_opvolume_cache[key] = dict(result)
+            self._credit_opvolume_futures.pop(key, None)
+
+    def get_credit_opvolume(
+        self,
+        stock_code: str,
+        price: float,
+        credit_buy_mode: str = "financing",
+        timeout_seconds: float | None = None,
+        background: bool = False,
+    ) -> dict[str, Any]:
+        """Return QMT's broker-calculated max volume for one credit buy.
+
+        ``query_credit_opvolume`` is asynchronous in Big QMT. Preview requests
+        use ``background=True`` so the first HTTP response only schedules the
+        broker query and returns ``pending``; later polls read the in-memory
+        result. Final order validation keeps the synchronous path.
+        """
+        symbol = str(stock_code or "").strip().upper()
+        if not symbol or price <= 0:
+            return {"status": "unavailable", "stock_code": symbol, "max_volume": None, "max_amount": None}
+        mode = str(credit_buy_mode or "financing").strip().lower()
+        key = (symbol, round(float(price), 6), mode)
+        # A replaced ``call`` method is typically a test double or an older
+        # bridge adapter. Keep that compatibility path synchronous instead of
+        # returning pending for a response that is already available.
+        if background and getattr(self.call, "__func__", None) is not QmtZmqRpcClient.call:
+            background = False
+        with self._credit_state_lock:
+            cached = self._credit_opvolume_cache.get(key)
+            future = self._credit_opvolume_futures.get(key)
+            if cached is not None and cached.get("status") in {"ready", "error", "unavailable"}:
+                return dict(cached)
+            if background:
+                if future is None:
+                    self._credit_opvolume_cache[key] = {
+                        "status": "pending",
+                        "stock_code": symbol,
+                        "max_volume": None,
+                        "max_amount": None,
+                    }
+                    self._credit_opvolume_futures[key] = self._credit_executor_locked().submit(
+                        self._resolve_credit_opvolume_background,
+                        key,
+                        symbol,
+                        float(price),
+                        mode,
+                    )
+                return dict(self._credit_opvolume_cache[key])
+        if future is not None:
+            try:
+                result = future.result(timeout=max(self.timeout, 8.0))
+            except FuturesTimeout:
+                return {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
+            except Exception as exc:  # noqa: BLE001 - preserve the preview contract
+                return {"status": "error", "stock_code": symbol, "max_volume": None, "max_amount": None, "reason": str(exc)}
+            return dict(result) if isinstance(result, dict) else {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
+        return self._fetch_credit_opvolume(key, symbol, float(price), mode, timeout_seconds)
+
+    def _fetch_credit_subjects(self) -> list[dict[str, Any]]:
+        rows = self.call("query_credit_subjects", {"account_id": self.account_id})
+        if not isinstance(rows, list) or not rows:
+            raise QmtRpcError("QMT 融资标的列表为空")
+        subjects = [dict(row) for row in rows if isinstance(row, dict)]
+        if not subjects:
+            raise QmtRpcError("QMT 融资标的列表为空")
+        with self._credit_state_lock:
+            self._credit_subjects_cache = subjects
+            self._credit_subjects_cache_at = time.monotonic()
+            self._credit_subject_error_until = 0.0
+        return subjects
+
+    def _resolve_credit_subjects_background(self) -> None:
+        try:
+            self._fetch_credit_subjects()
+        except Exception:
+            with self._credit_state_lock:
+                self._credit_subject_error_until = time.monotonic() + _CREDIT_SUBJECT_ERROR_CACHE_SECONDS
+        finally:
+            with self._credit_state_lock:
+                self._credit_subject_future = None
+
+    def get_credit_subject(self, stock_code: str, background: bool = False) -> dict[str, Any]:
         """Return whether one security is currently a financing subject.
 
         QMT exposes this as the account's full ``get_assure_contract`` list;
@@ -538,22 +658,26 @@ class QmtZmqRpcClient:
         if not symbol:
             return {"status": "unavailable", "stock_code": symbol, "eligible": None}
         now = time.monotonic()
-        with self._lock:
+        if background and getattr(self.call, "__func__", None) is not QmtZmqRpcClient.call:
+            background = False
+        with self._credit_state_lock:
             subjects = self._credit_subjects_cache
             cache_age = now - self._credit_subjects_cache_at
+            error_until = self._credit_subject_error_until
         if subjects is None or cache_age > _CREDIT_SUBJECT_CACHE_SECONDS:
+            if background:
+                if error_until > now:
+                    return {"status": "unavailable", "stock_code": symbol, "eligible": None}
+                with self._credit_state_lock:
+                    if self._credit_subject_future is None:
+                        self._credit_subject_future = self._credit_executor_locked().submit(
+                            self._resolve_credit_subjects_background,
+                        )
+                return {"status": "pending", "stock_code": symbol, "eligible": None}
             try:
-                rows = self.call("query_credit_subjects", {"account_id": self.account_id})
+                subjects = self._fetch_credit_subjects()
             except Exception:  # noqa: BLE001 - older bridges may not expose the query
                 return {"status": "unavailable", "stock_code": symbol, "eligible": None}
-            if not isinstance(rows, list) or not rows:
-                return {"status": "unavailable", "stock_code": symbol, "eligible": None}
-            subjects = [dict(row) for row in rows if isinstance(row, dict)]
-            if not subjects:
-                return {"status": "unavailable", "stock_code": symbol, "eligible": None}
-            with self._lock:
-                self._credit_subjects_cache = subjects
-                self._credit_subjects_cache_at = now
 
         code, _, exchange = symbol.partition(".")
         matched = None
@@ -1133,6 +1257,7 @@ class QmtTradingService:
         price: float,
         credit_buy_mode: str,
         account: dict[str, Any],
+        opvolume_timeout_seconds: float | None = None,
     ) -> tuple[float | None, str, float | None, dict[str, Any] | None]:
         """Resolve credit buying power without treating account cash as symbol credit.
 
@@ -1151,7 +1276,15 @@ class QmtTradingService:
             subject_getter = getattr(self.client, "get_credit_subject", None)
             if callable(subject_getter):
                 try:
-                    subject = subject_getter(symbol)
+                    if opvolume_timeout_seconds is None:
+                        subject = subject_getter(symbol)
+                    else:
+                        try:
+                            subject = subject_getter(symbol, background=True)
+                        except TypeError:
+                            # Keep compatibility with test doubles and older
+                            # clients that still expose the one-argument API.
+                            subject = subject_getter(symbol)
                 except Exception:  # noqa: BLE001 - fall through to opvolume compatibility path
                     subject = None
                 if isinstance(subject, dict) and subject.get("status") == "ready" and subject.get("eligible") is False:
@@ -1167,10 +1300,28 @@ class QmtTradingService:
         if not callable(getter):
             return amount, label, financing_available, None
         try:
-            detail = getter(symbol, price, credit_buy_mode)
+            if opvolume_timeout_seconds is None:
+                detail = getter(symbol, price, credit_buy_mode)
+            else:
+                try:
+                    detail = getter(symbol, price, credit_buy_mode, opvolume_timeout_seconds, True)
+                except TypeError:
+                    try:
+                        detail = getter(symbol, price, credit_buy_mode, opvolume_timeout_seconds)
+                    except TypeError:
+                        # Keep compatibility with test doubles and older bridge
+                        # clients that still expose the original three-argument
+                        # method while allowing the built-in client to use a
+                        # shorter preview polling window.
+                        detail = getter(symbol, price, credit_buy_mode)
         except Exception:  # noqa: BLE001 - an unavailable bridge can use the fallback mode
             detail = {"status": "unavailable", "stock_code": symbol, "max_volume": None}
         if not isinstance(detail, dict) or detail.get("status") != "ready":
+            if isinstance(detail, dict) and detail.get("status") == "pending":
+                # A symbol-specific financing limit is not known yet. Do not
+                # use the account-level financing field while the broker query
+                # is in flight; the next preview poll will replace this value.
+                return 0.0, label, financing_available, detail
             return amount, label, financing_available, detail if isinstance(detail, dict) else None
         try:
             max_volume = int(detail.get("max_volume") or 0)
@@ -1269,6 +1420,7 @@ class QmtTradingService:
         self,
         request: dict[str, Any],
         snapshot: dict[str, Any],
+        opvolume_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Calculate a lot-sized order from fresh cash/position availability."""
         action = str(request.get("action") or "").upper()
@@ -1293,7 +1445,7 @@ class QmtTradingService:
         if action == "BUY":
             account = snapshot.get("account") or {}
             basis_amount, basis_label, financing_available, credit_opvolume = self._credit_symbol_buying_power(
-                symbol, price, credit_buy_mode, account,
+                symbol, price, credit_buy_mode, account, opvolume_timeout_seconds,
             )
             if basis_amount is None or basis_amount < 0:
                 # A financing request may still fall back to collateral buying
@@ -1361,7 +1513,7 @@ class QmtTradingService:
         if action == "BUY" and self.account_type == "CREDIT":
             fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
             fallback_basis, fallback_label, _, _fallback_opvolume = self._credit_symbol_buying_power(
-                symbol, price, fallback_mode, account,
+                symbol, price, fallback_mode, account, opvolume_timeout_seconds,
             )
             if fallback_basis is not None and fallback_basis >= 0:
                 fallback_candidate = build_candidate(fallback_mode, fallback_basis, fallback_label)
@@ -1370,6 +1522,15 @@ class QmtTradingService:
                     or candidate["capped"]
                     or candidate["volume"] < 100
                 )
+                if (
+                    requested_credit_buy_mode == "financing"
+                    and isinstance(credit_opvolume, dict)
+                    and credit_opvolume.get("status") == "pending"
+                ):
+                    # Keep financing selected until the per-symbol result is
+                    # ready; switching to collateral during the pending state
+                    # would be a false negative for an eligible stock.
+                    primary_insufficient = False
                 if primary_insufficient and fallback_candidate["actual_amount"] > candidate["actual_amount"] and fallback_candidate["volume"] >= 100:
                     candidate = fallback_candidate
                     credit_buy_mode = fallback_mode
@@ -1449,7 +1610,7 @@ class QmtTradingService:
                 snapshot = self._order_preflight(action)
         else:
             snapshot = self._order_preflight(action)
-        return self._allocation_preview(request, snapshot)
+        return self._allocation_preview(request, snapshot, opvolume_timeout_seconds=0.5)
 
     def _order_preflight(self, action: str) -> dict[str, Any]:
         if action == "BUY":

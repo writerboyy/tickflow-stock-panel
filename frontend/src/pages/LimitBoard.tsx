@@ -44,6 +44,7 @@ import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-li
 import {
   api,
   type QmtCreditBuyMode,
+  type QmtOrderPreview,
   type LimitBoardEvent,
   type LimitBoardApproachingLimitUpItem,
   type LimitBoardQuoteSnapshot,
@@ -732,10 +733,13 @@ function LimitBoardAllocationDialog({
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
-  // Fetch one authoritative account basis and derive the other lot/ratio modes
-  // locally. Switching the selector should not issue another QMT RPC request.
-  const previewMode: Exclude<QmtTradeAllocationMode, 'volume'> = mode === 'fixed' ? 'fixed' : 'quarter'
-  const previewValue = mode === 'fixed' ? value : null
+  // Fetch one authoritative account basis and derive the other lot/ratio/fixed
+  // modes locally. The query key is intentionally independent of the user's
+  // selected mode and value so switching / typing does not issue another QMT
+  // RPC request. Local preview fills the gap while the single basis call is in
+  // flight.
+  const previewMode: Exclude<QmtTradeAllocationMode, 'volume'> = 'quarter'
+  const previewValue = null
   const allocationPreview = useQuery({
     queryKey: QK.positionRiskQmtPreview(row.symbol, 'BUY', 'LIMIT', validPrice ? price : null, previewMode, previewValue, creditBuyMode),
     queryFn: () => api.qmtPreviewOrder({
@@ -751,11 +755,29 @@ function LimitBoardAllocationDialog({
     enabled: Boolean(qmtReady && validPrice),
     retry: false,
     placeholderData: previous => previous,
-    staleTime: 500,
+    staleTime: 5_000,
+    refetchOnWindowFocus: false,
+    refetchInterval: query => query.state.data?.preview?.credit_opvolume?.status === 'pending' ? 400 : false,
   })
   const basePreview = allocationPreview.data?.preview
   const previewOrder = useMemo(() => {
-    if (!basePreview || mode === 'fixed') return basePreview
+    if (!basePreview) return undefined
+    if (mode === 'volume') {
+      const requestedVolume = Math.max(0, value)
+      const lotVolume = Math.floor(requestedVolume / 100) * 100
+      const volume = Math.min(requestedVolume, lotVolume)
+      const actualAmount = Math.round(volume * basePreview.price * 100) / 100
+      return {
+        ...basePreview,
+        allocation_mode: mode,
+        allocation_value: value,
+        target_amount: actualAmount,
+        actual_amount: actualAmount,
+        volume,
+        capped: false,
+        reason: volume < 100 ? '金额不足一手' : null,
+      }
+    }
     const ratio = mode === 'available'
       ? 1
       : mode === 'sixth'
@@ -766,18 +788,17 @@ function LimitBoardAllocationDialog({
             ? 0.25
             : 0
     const basisAmount = Number(basePreview.basis_amount) || 0
-    const requestedVolume = mode === 'volume' ? Math.max(0, value) : null
-    const requestedAmount = requestedVolume != null
-      ? requestedVolume * (basePreview.price || 0)
+    const requestedAmount = mode === 'fixed'
+      ? value
       : basisAmount * ratio
     const targetAmount = Math.min(requestedAmount, basisAmount)
     const lotVolume = Math.floor(targetAmount / basePreview.price / 100) * 100
-    const volume = requestedVolume != null ? Math.min(requestedVolume, lotVolume) : lotVolume
+    const volume = lotVolume
     const actualAmount = Math.round(volume * basePreview.price * 100) / 100
     return {
       ...basePreview,
       allocation_mode: mode,
-      allocation_value: mode === 'volume' ? value : null,
+      allocation_value: mode === 'fixed' ? value : null,
       target_amount: Math.round(targetAmount * 100) / 100,
       actual_amount: actualAmount,
       volume,
@@ -785,47 +806,137 @@ function LimitBoardAllocationDialog({
       reason: volume < 100 ? '金额不足一手' : null,
     }
   }, [basePreview, mode, value])
+  // Local optimistic preview: compute amount immediately from cached account
+  // basis and the current price. It intentionally skips the slow per-symbol
+  // QMT opvolume call; the authoritative preview replaces it once it lands.
+  const localPreviewOrder: QmtOrderPreview | null = useMemo(() => {
+    if (!validPrice || price == null) return null
+    const priceValue = price
+    const shared = {
+      action: 'BUY' as const,
+      symbol: row.symbol,
+      price: priceValue,
+      price_type: 'LIMIT' as const,
+      credit_buy_mode: creditBuyMode,
+      requested_credit_buy_mode: creditBuyMode,
+      credit_buy_mode_switched: false,
+      credit_buy_mode_reason: null,
+      cash_amount: cachedAccount?.cash ?? null,
+      financing_available_amount: null,
+      credit_opvolume: null,
+      financing_buying_power_amount: null,
+    }
+    if (mode === 'volume') {
+      if (!Number.isInteger(value) || value < 100 || value % 100 !== 0) return null
+      const actualAmount = Math.round(value * priceValue * 100) / 100
+      return {
+        ...shared,
+        allocation_mode: mode,
+        allocation_value: value,
+        basis_label: cachedBasisLabel,
+        basis_amount: cachedBuyingPower ?? 0,
+        buying_power_amount: cachedBuyingPower ?? null,
+        target_amount: actualAmount,
+        actual_amount: actualAmount,
+        volume: value,
+        available_volume: null,
+        capped: false,
+        reason: null,
+      } as QmtOrderPreview
+    }
+    const ratio = mode === 'available'
+      ? 1
+      : mode === 'sixth'
+        ? 1 / 6
+        : mode === 'fifth'
+          ? 0.2
+          : mode === 'quarter'
+            ? 0.25
+            : 0
+    if (mode === 'fixed' && (!Number.isFinite(value) || value <= 0)) return null
+    const hasCachedBasis = cachedBuyingPower != null && Number.isFinite(cachedBuyingPower)
+    // A fixed amount can be displayed immediately even when the per-symbol
+    // financing limit is still loading. The server preview remains the
+    // authority and will cap it once QMT responds.
+    const requestedAmount = mode === 'fixed' ? value : (cachedBuyingPower ?? 0) * ratio
+    const basisAmount = hasCachedBasis ? cachedBuyingPower : mode === 'fixed' ? requestedAmount : 0
+    if (!hasCachedBasis && mode !== 'fixed') return null
+    const targetAmount = Math.min(requestedAmount, basisAmount)
+    const volume = Math.floor(targetAmount / priceValue / 100) * 100
+    const actualAmount = Math.round(volume * priceValue * 100) / 100
+    return {
+      ...shared,
+      allocation_mode: mode,
+      allocation_value: mode === 'fixed' ? value : null,
+      basis_label: cachedBasisLabel,
+      basis_amount: basisAmount,
+      buying_power_amount: basisAmount,
+      target_amount: Math.round(targetAmount * 100) / 100,
+      actual_amount: actualAmount,
+      volume,
+      available_volume: null,
+      capped: targetAmount < requestedAmount || actualAmount < requestedAmount,
+      reason: volume < 100 ? '金额不足一手' : null,
+    } as QmtOrderPreview
+  }, [mode, value, price, creditBuyMode, creditBuy, cachedBuyingPower, cachedBasisLabel, cachedAccount, validPrice, ratioMode, row.symbol])
+  const creditOpvolumePending = previewOrder?.credit_opvolume?.status === 'pending'
+  // A pending symbol limit must not hide the instant local amount preview.
+  // Once QMT returns ready, its result becomes authoritative again.
+  const effectivePreviewOrder = creditOpvolumePending
+    ? localPreviewOrder ?? previewOrder
+    : previewOrder ?? localPreviewOrder
   const effectiveCreditBuyMode = previewOrder?.credit_buy_mode ?? creditBuyMode
   useEffect(() => {
-    if (!creditBuy || allocationPreview.isFetching || !previewOrder) return
+    // Only trust the backend's mode switch when the preview was computed for
+    // the same mode we are showing. The fixed preview is derived locally, so
+    // switching based on a quarter basis preview would be misleading.
+    if (!creditBuy || allocationPreview.isFetching || !previewOrder || creditOpvolumePending || mode === 'fixed') return
     const requestedMode = previewOrder.requested_credit_buy_mode ?? creditBuyMode
     const effectiveMode = previewOrder.credit_buy_mode
     if (requestedMode === creditBuyMode && effectiveMode && effectiveMode !== creditBuyMode) {
       setCreditBuyMode(effectiveMode)
     }
-  }, [allocationPreview.isFetching, creditBuy, creditBuyMode, previewOrder])
+  }, [allocationPreview.isFetching, creditBuy, creditBuyMode, previewOrder, creditOpvolumePending, mode])
   const estimatedVolume = price != null && price > 0
-    ? previewOrder?.volume ?? 0
+    ? effectivePreviewOrder?.volume ?? 0
     : 0
   const estimatedAmount = mode !== 'volume'
-    ? previewOrder?.actual_amount ?? null
+    ? effectivePreviewOrder?.actual_amount ?? null
     : price != null && estimatedVolume > 0 ? price * estimatedVolume : null
   const validValue = ratioMode || (Number.isFinite(value) && value > 0)
-  const validVolume = mode !== 'volume' || Number.isInteger(value) && value >= 100 && value % 100 === 0
+  const validVolume = mode !== 'volume' || (Number.isInteger(value) && value >= 100 && value % 100 === 0)
   const previewRequired = requiresPreview
-  const previewReady = !previewRequired || (qmtReady && !allocationPreview.isFetching && previewOrder != null)
+  const canConfirmWithLocalPreview = mode === 'fixed' || mode === 'volume'
+  const authoritativePreview = previewOrder && !creditOpvolumePending ? previewOrder : null
+  const previewReady = !previewRequired || (qmtReady && (authoritativePreview != null || (canConfirmWithLocalPreview && localPreviewOrder != null)))
   const allocationPreviewState = !requiresPreview
     ? 'idle'
-    : allocationPreview.isFetching
-    ? 'loading'
     : allocationPreview.isError
       ? 'error'
-      : previewOrder?.reason
-        ? 'error'
-      : previewOrder
-        ? 'ready'
-        : qmtReady
-          ? 'idle'
-          : 'unavailable'
+        : !qmtReady
+          ? 'unavailable'
+        : creditOpvolumePending
+          ? 'loading'
+          : previewOrder?.reason
+            ? 'error'
+            : previewOrder
+            ? 'ready'
+            : canConfirmWithLocalPreview && localPreviewOrder
+              ? 'ready'
+              : allocationPreview.isFetching
+                ? 'loading'
+                : 'idle'
   const allocationPreviewMessage = !requiresPreview
     ? null
     : allocationPreview.isError
-    ? allocationPreview.error instanceof Error ? allocationPreview.error.message : '当前可用金额暂时无法读取'
-    : !qmtReady
-      ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
-      : previewOrder?.reason
-        || previewOrder?.credit_buy_mode_reason
-        || (previewOrder?.capped ? '目标金额已按账户可用资金和 100 股整手向下调整。' : null)
+      ? allocationPreview.error instanceof Error ? allocationPreview.error.message : '当前可用金额暂时无法读取'
+      : !qmtReady
+        ? qmt.data?.reason || 'QMT 未就绪，无法读取账户可用金额'
+        : previewOrder?.reason
+          || previewOrder?.credit_buy_mode_reason
+          || (creditOpvolumePending ? '正在读取该股票最大融资可买…' : null)
+          || (previewOrder?.capped ? '目标金额已按账户可用资金和 100 股整手向下调整。' : null)
+          || (canConfirmWithLocalPreview && localPreviewOrder && allocationPreview.isFetching ? '正在读取账户可用资金并校验…' : null)
   const canConfirm = Boolean(
     validValue
     && validVolume
@@ -922,11 +1033,11 @@ function LimitBoardAllocationDialog({
             disabled={pending}
             options={allocationOptions}
             disabledModes={{ available: !qmtReady }}
-            basisLabel={previewOrder?.basis_label ?? cachedBasisLabel}
-            basisAmount={previewOrder?.basis_amount ?? cachedBuyingPower}
+            basisLabel={effectivePreviewOrder?.basis_label ?? cachedBasisLabel}
+            basisAmount={effectivePreviewOrder?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
-            cashAmount={previewOrder?.cash_amount ?? cachedAccount?.cash}
-            financingBuyingPowerAmount={previewOrder?.financing_buying_power_amount ?? null}
+            cashAmount={effectivePreviewOrder?.cash_amount ?? cachedAccount?.cash}
+            financingBuyingPowerAmount={effectivePreviewOrder?.financing_buying_power_amount ?? null}
             financingBuyingPowerLabel={
               previewOrder?.credit_opvolume?.status === 'ready'
                 ? '该股票最大融资可买'

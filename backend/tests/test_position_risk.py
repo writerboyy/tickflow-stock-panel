@@ -631,6 +631,46 @@ def test_qmt_zmq_client_reads_credit_opvolume_from_async_bridge():
     assert calls[1][0] == "get_credit_opvolume"
 
 
+def test_qmt_zmq_client_schedules_credit_opvolume_without_blocking_preview():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    started = Event()
+    release = Event()
+
+    def fake_fetch(key, symbol, price, mode, _timeout):
+        started.set()
+        assert release.wait(1)
+        return {
+            "status": "ready",
+            "stock_code": symbol,
+            "max_volume": 1_200,
+            "max_amount": round(price * 1_200, 2),
+        }
+
+    client._fetch_credit_opvolume = fake_fetch
+    started_at = time.monotonic()
+    try:
+        pending = client.get_credit_opvolume(
+            "600000.SH",
+            10.0,
+            "financing",
+            timeout_seconds=0.5,
+            background=True,
+        )
+        assert time.monotonic() - started_at < 0.5
+        assert pending["status"] == "pending"
+        assert started.wait(1)
+        release.set()
+        deadline = time.monotonic() + 1
+        result = pending
+        while result["status"] == "pending" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = client.get_credit_opvolume("600000.SH", 10.0, "financing", background=True)
+        assert result["status"] == "ready"
+        assert result["max_volume"] == 1_200
+    finally:
+        client.close()
+
+
 def test_qmt_client_matches_financing_subject_by_exchange_and_status():
     client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
     calls = []
