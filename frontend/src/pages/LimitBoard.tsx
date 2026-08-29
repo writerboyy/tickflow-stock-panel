@@ -1047,7 +1047,6 @@ function LimitBoardAllocationDialog({
                 ),
                 unavailableComponents: comprehensive.dimensions.sentiment.unavailable_components?.filter(key => key !== 'leadership'),
                 label: '板块强度',
-                displayValue: mergedDetail.sector ? sectorRankText(mergedDetail.sector) : undefined,
               },
               health: {
                 ...comprehensive.dimensions.health,
@@ -1430,16 +1429,6 @@ function maAlignmentVerdict(
   return '非多头排列'
 }
 
-/** 板块强度使用榜单排名，不展示供应商的原始强度数值。 */
-function sectorRankText(
-  sector: NonNullable<LimitBoardRow['candidate_score_detail']>['sector'],
-): string {
-  const latestDay = sector?.days?.[sector.days.length - 1]
-  const rank = latestDay?.rank
-  const count = latestDay?.rank_count
-  return rank != null && count != null ? `${Math.round(rank)}/${Math.round(count)}` : '--'
-}
-
 function scoreDetailRows(
   detail: NonNullable<LimitBoardRow['candidate_score_detail']>,
 ): ComprehensiveScoreDetails {
@@ -1460,12 +1449,7 @@ function scoreDetailRows(
     ] : [{ label: '历史细则', value: '暂无数据', tone: 'text-warning' }],
     sentiment: sector ? [
       { label: '板块名称', value: sector.name || '--' },
-      { label: '板块排名', value: sectorRankText(sector) },
-      { label: '板块涨幅', value: scoreDetailSignedPercent(sector.one_day_change_pct ?? sector.change_pct, 2) },
       { label: '上涨占比', value: ratioPct(sector.up_ratio, 1) },
-      ...(sector.institutional_score != null && sector.institutional_max_score != null ? [
-        { label: '机构评分', value: `${sector.institutional_score.toFixed(1)}/${sector.institutional_max_score.toFixed(0)}` },
-      ] : []),
       ...(sector.one_day_change_pct != null ? [{ label: '1日收益', value: scoreDetailSignedPercent(sector.one_day_change_pct, 1) }] : []),
       ...(sector.five_day_change_pct != null ? [{ label: '5日收益', value: scoreDetailSignedPercent(sector.five_day_change_pct, 1) }] : []),
       ...(sector.twenty_day_change_pct != null ? [{ label: '20日收益', value: scoreDetailSignedPercent(sector.twenty_day_change_pct, 1) }] : []),

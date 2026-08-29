@@ -2165,9 +2165,9 @@ def test_close_frozen_sector_inputs_score_realtime_components_after_hours(
     assert sector["realtime_rank"] == 1
     comprehensive = detail["comprehensive"]
     sentiment = comprehensive["dimensions"]["sentiment"]
-    # 机构分项使用冻结的横截面数据：广度 4/6 -> 4 分，龙头 10 -> 3 分。
-    assert sentiment["components"]["breadth"] == pytest.approx(4.0, abs=0.05)
-    assert sentiment["components"]["leadership"] == pytest.approx(3.0, abs=0.05)
+    # 机构分项使用冻结的横截面数据：广度 4/6 -> 4.4/6 分。
+    assert sentiment["components"]["breadth"] == pytest.approx(4.4, abs=0.05)
+    assert "leadership" not in sentiment["components"]
     assert "sector_current" not in sentiment["components"]
     health = comprehensive["dimensions"]["health"]
     assert health["components"]["sector_position"] >= 9.0

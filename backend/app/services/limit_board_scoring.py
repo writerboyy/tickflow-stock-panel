@@ -700,7 +700,7 @@ def sector_detail(
         "leadership": 10.0 if is_leader else 5.0 if is_front else 0.0,
     }
     current_score = sum(current_components.values())
-    # 机构式当日确认：广度、资金、龙头和流动性各自独立计分，缺失时
+    # 机构式当日确认：广度、资金和流动性各自独立计分，缺失时
     # 只减少可得满分，不把缺失数据当成中性分数。
     institutional_components = dict(history.get("institutional_components") or {})
     institutional_component_max = dict(history.get("institutional_component_max") or {})
@@ -720,12 +720,6 @@ def sector_detail(
         institutional_component_max["money_flow"] = 15.0
         institutional_score += institutional_components["money_flow"]
         institutional_max += 15.0
-    if position_available:
-        leadership_score = 10.0 if is_leader else 7.0 if is_front else 3.0 if candidate_index < 10 else 0.0
-        institutional_components["leadership"] = leadership_score
-        institutional_component_max["leadership"] = 10.0
-        institutional_score += leadership_score
-        institutional_max += 10.0
     volume_ratio = finite((realtime or {}).get("volume_ratio"))
     if volume_ratio is not None:
         institutional_components["liquidity"] = _linear(volume_ratio, 0.8, 2.0, 5.0)
@@ -944,7 +938,6 @@ def comprehensive_score(
         "stability": 10.0,
         "breadth": 20.0,
         "money_flow": 15.0,
-        "leadership": 10.0,
         "liquidity": 5.0,
     }
     institutional_keys = tuple(institutional_component_defaults)
@@ -962,9 +955,10 @@ def comprehensive_score(
                 # 兼容机构分项已存在、但尚未持久化 component_max 的旧快照。
                 raw_max = institutional_component_defaults[key]
             available = raw_score is not None and raw_max is not None and raw_max > 0
-            scaled_max = raw_max * 0.3 if available and raw_max is not None else 0.0
+            # 剩余 7 项原始满分为 90，等比例缩放到板块强度 30 分。
+            scaled_max = raw_max / 3.0 if available and raw_max is not None else 0.0
             scaled_score = (
-                min(max(raw_score, 0.0), raw_max) * 0.3
+                min(max(raw_score, 0.0), raw_max) / 3.0
                 if available and raw_score is not None and raw_max is not None
                 else 0.0
             )

@@ -37,7 +37,6 @@ interface DimensionScore {
   components: Record<string, number>
   unavailableComponents?: string[]
   label: string
-  displayValue?: string
 }
 
 const GRADE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -102,8 +101,8 @@ function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: Dim
           ? <span className="shrink-0 text-[10px] text-warning">数据不足</span>
           : (
             <span className="shrink-0 font-mono text-xs text-foreground">
-              {dimension.displayValue ?? `${dimension.score.toFixed(1)}/${dimension.maxScore.toFixed(0)}`}
-              {!dimension.displayValue && dimension.fullMaxScore != null && dimension.fullMaxScore > dimension.maxScore
+              {dimension.score.toFixed(1)}/{dimension.maxScore.toFixed(0)}
+              {dimension.fullMaxScore != null && dimension.fullMaxScore > dimension.maxScore
                 ? <span className="ml-0.5 text-[9px] text-muted">/{dimension.fullMaxScore.toFixed(0)}</span>
                 : null}
             </span>
