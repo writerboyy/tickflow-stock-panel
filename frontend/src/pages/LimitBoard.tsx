@@ -1873,10 +1873,11 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
           </div>
         </div> : <div className={`px-3 py-10 text-center text-xs ${hotError ? 'text-warning' : 'text-muted'}`}>{hotLoading ? '正在读取即将涨停' : hotError ? '即将涨停暂不可用' : '暂无即将涨停数据'}</div>}
       </div>
-      <div className="min-w-0 overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
-        <table className="w-full min-w-0 table-fixed border-collapse">
-          <thead className="text-left text-[9px] text-muted"><tr><th className="w-[35%] px-1.5 py-1.5">板块</th><th className="w-[23%] px-1.5 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[42%] px-1.5 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
-          <tbody>{rows.length ? rows.map(row => {
+      <div className="min-w-0 self-start overflow-x-auto overscroll-x-contain border-b border-border lg:border-b-0 lg:border-r">
+        <div className="max-w-full overflow-y-auto overscroll-contain lg:max-h-[62vh]">
+          <table className="w-full min-w-0 table-fixed border-collapse">
+            <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[35%] px-1.5 py-1.5">板块</th><th className="w-[23%] px-1.5 py-1.5 text-right text-foreground">{header('strength', '强度')}</th><th className="w-[42%] px-1.5 py-1.5 text-right">{header('main_net', '主力净额')}</th></tr></thead>
+            <tbody>{rows.length ? rows.map(row => {
             const selected = row.plate_id === selectedPlate?.plate_id
             const linked = linkedPlateIds.has(row.plate_id)
             return <tr
@@ -1897,8 +1898,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
               <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-xs font-semibold tabular-nums text-secondary">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.main_net)}</td>
             </tr>
-          }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
-        </table>
+            }) : <tr><td colSpan={3} className="px-3 py-10 text-center text-xs text-muted">实时板块数据暂不可用</td></tr>}</tbody>
+          </table>
+        </div>
       </div>
       <div className="min-w-0">
         <div className="flex min-h-12 items-center justify-between gap-1.5 border-b border-border px-2 py-1.5">
