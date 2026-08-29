@@ -2102,32 +2102,6 @@ export function LimitBoard() {
     1,
     view.data?.runtime.refresh_cycle.interval_seconds ?? 5,
   ) * 1000
-  const qmt = useQuery({
-    queryKey: QK.positionRiskQmt,
-    queryFn: api.qmtStatus,
-    refetchInterval: 30_000,
-    staleTime: 10_000,
-    placeholderData: previous => previous,
-  })
-  const warmItems = useMemo(() => {
-    if (qmt.data?.configured !== true || qmt.data.state !== 'ready') return []
-    if (String(qmt.data?.account_type || '').toUpperCase() !== 'CREDIT') return []
-    const source = tab === 'buy_pool' ? view.data?.buy_pool : tab === 'pool' ? view.data?.board_pool : []
-    const items: { symbol: string; price: number }[] = []
-    for (const row of source ?? []) {
-      const price = row.last_price ?? row.order_price
-      if (row.symbol && typeof price === 'number' && price > 0) items.push({ symbol: row.symbol, price })
-      if (items.length >= 12) break
-    }
-    return items
-  }, [qmt.data, tab, view.data?.board_pool, view.data?.buy_pool])
-  const warmedKeyRef = useRef('')
-  useEffect(() => {
-    const key = warmItems.map(item => `${item.symbol}@${item.price}`).join(',')
-    if (!key || key === warmedKeyRef.current) return
-    warmedKeyRef.current = key
-    api.qmtWarmCreditOpvolume(warmItems).catch(() => undefined)
-  }, [warmItems])
   const approachingLimitUp = useQuery({
     queryKey: QK.limitBoardApproachingLimitUp,
     queryFn: () => api.limitBoardApproachingLimitUp(true),
@@ -2300,7 +2274,10 @@ export function LimitBoard() {
     const result = new Map<string, LimitBoardRow>()
     for (const row of [...(data?.first_board ?? []), ...(data?.rebound_board ?? []), ...(data?.candidate_pool ?? [])]) {
       const symbol = String(row.symbol || '').trim().toUpperCase()
-      if (symbol && row.candidate_score_detail?.comprehensive) result.set(symbol, row)
+      const detail = row.candidate_score_detail
+      // 优先把 candidate_pool 里已经带 premium_gene 的 row 覆盖到 source row，
+      // 这样 manual entry 标的从 sector_strength 表点加入时也能拿到历史维度。
+      if (symbol && (detail?.comprehensive || detail?.premium_gene)) result.set(symbol, row)
     }
     return result
   }, [data?.candidate_pool, data?.first_board, data?.rebound_board])
