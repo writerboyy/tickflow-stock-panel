@@ -849,6 +849,87 @@ def test_credit_limit_renewal_refreshes_the_oldest_active_row(tmp_path: Path):
     assert renewed == ["600000.SH"]
 
 
+def _store_probe(service: QmtTradingService, amount: float, price: float = 1.19) -> None:
+    service._write_credit_limit(
+        "PROBE.SZ", "financing",
+        _ready_limit("PROBE.SZ", price, int(amount / price / 100) * 100),
+        price, eligible=True, is_probe=True,
+    )
+
+
+def test_probe_balance_gives_an_unwarmed_symbol_a_number_at_once(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    _store_probe(service, 338_317.0)
+    service.client.get_credit_opvolume = lambda *_a, **_k: {
+        "status": "pending",
+        "stock_code": "600000.SH",
+        "max_volume": None,
+        "max_amount": None,
+    }
+
+    amount, label, _available, detail = service._credit_symbol_buying_power(
+        "600000.SH", 10.0, "financing", {"fin_enbuy_balance": 500_000},
+    )
+
+    assert label == "该股票最大融资可买"
+    # 338,317 at 10 yuan is 33,800 shares = 338,000.
+    assert amount == 338_000
+    assert detail["from_probe"] is True
+    assert detail["stale"] is True
+
+
+def test_unwarmed_symbol_uses_the_smaller_of_probe_and_broker_value(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    _store_probe(service, 338_317.0)
+    # 600519 carries a single-name cap well below the account balance.
+    service.client.get_credit_opvolume = lambda *_a, **_k: {
+        "status": "ready",
+        "stock_code": "600519.SH",
+        "max_volume": 200,
+        "max_amount": 300_000.0,
+    }
+
+    amount, _label, _available, _detail = service._credit_symbol_buying_power(
+        "600519.SH", 1500.0, "financing", {"fin_enbuy_balance": 500_000},
+    )
+
+    assert amount == 300_000
+
+
+def test_unavailable_opvolume_does_not_brand_a_symbol_ineligible(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._write_credit_limit("600000.SH", "financing", _ready_limit("600000.SH", 10.0), 10.0, eligible=True)
+    service.client.get_credit_opvolume = lambda *_a, **_k: {
+        "status": "unavailable",
+        "stock_code": "600000.SH",
+        "max_volume": None,
+    }
+
+    service._credit_symbol_buying_power(
+        "600000.SH", 10.0, "financing", {"fin_enbuy_balance": 500_000},
+    )
+
+    assert service._read_credit_limit("600000.SH", "financing")["eligible"] is True
+
+
+def test_probe_symbol_is_the_cheapest_lot_among_financing_subjects(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.fetch_credit_subjects = lambda: [
+        {"m_strInstrumentID": "600519", "m_strExchangeID": "SH", "m_eFinStatus": 48},
+        {"m_strInstrumentID": "002146", "m_strExchangeID": "SZ", "m_eFinStatus": 48},
+        {"m_strInstrumentID": "600704", "m_strExchangeID": "SH", "m_eFinStatus": 48},
+        {"m_strInstrumentID": "603159", "m_strExchangeID": "SH", "m_eFinStatus": 47},
+    ]
+    service._sync_credit_subject_list()
+    service._latest_closes = lambda: {
+        "600519.SH": 1500.0,
+        "002146.SZ": 1.19,
+        "600704.SH": 4.99,
+    }
+
+    assert service._select_credit_probe_symbol() == ("002146.SZ", 1.19)
+
+
 def test_qmt_client_matches_financing_subject_by_exchange_and_status():
     client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
     calls = []

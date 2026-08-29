@@ -197,6 +197,7 @@ export interface PremiumGene {
   }
   limit_up_count?: number
   premium_5_count?: number
+  premium_5_rate?: number
   next_day_observation_count?: number
   next_day_red_count?: number
   next_day_red_rate?: number
@@ -1572,6 +1573,7 @@ export interface LimitBoardRow {
       as_of?: string | null
       window_days?: number
       limit_up_count?: number
+      premium_5_count?: number
       premium_5_rate?: number
       next_day_observation_count?: number
       next_day_red_rate?: number

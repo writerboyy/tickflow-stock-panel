@@ -55,6 +55,7 @@ import {
   type LimitBoardView,
   type LimitLadderStock,
   type MinuteKlineRow,
+  type PremiumGene,
   type FuyaoAuctionStatus,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -732,6 +733,32 @@ function LimitBoardAllocationDialog({
     : '可用资金'
   const validPrice = price != null && Number.isFinite(price) && price > 0
   const requiresPreview = kind === 'buy'
+  const geneDetail = row.candidate_score_detail?.premium_gene
+  const localGeneReady = Boolean(
+    geneDetail
+    && geneDetail.limit_up_count != null
+    && geneDetail.premium_5_count != null
+    && geneDetail.next_day_observation_count != null
+    && geneDetail.next_day_red_rate != null
+    && geneDetail.first_board_attempt_count != null
+    && geneDetail.first_board_seal_rate != null
+    && geneDetail.first_board_broken_rate != null
+    && geneDetail.consecutive_rate != null,
+  )
+  const premiumGeneQuery = useQuery({
+    queryKey: QK.stockPremiumGene(row.symbol),
+    queryFn: () => api.stockAnalysisPremiumGene(row.symbol),
+    // Manual entries from the sector/radar panels do not enter the score cache.
+    // Read the same authoritative endpoint as the stock-analysis page so the
+    // dialog can still show the offline snapshot (or the live provider result).
+    enabled: kind === 'board' && Boolean(row.symbol) && !localGeneReady,
+    staleTime: 5 * 60_000,
+    gcTime: 15 * 60_000,
+    retry: false,
+  })
+  const geneData: PremiumGene | undefined = premiumGeneQuery.data?.available
+    ? premiumGeneQuery.data
+    : undefined
   const ratioMode = mode === 'available' || mode === 'sixth' || mode === 'fifth' || mode === 'quarter'
   // Fetch one authoritative account basis and derive the other lot/ratio/fixed
   // modes locally. The query key is intentionally independent of the user's
@@ -1011,13 +1038,15 @@ function LimitBoardAllocationDialog({
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
               {(() => {
-                const premiumGene = row.candidate_score_detail?.premium_gene
+                const premiumGene = geneDetail ?? geneData
                 if (!premiumGene) {
                   return (
                     <div className="rounded-btn border border-border bg-surface p-2.5">
                       <div className="text-[10px] text-muted">历史涨停基因</div>
-                      <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
-                      <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">暂无历史涨停样本</div>
+                      <div className="mt-2 font-mono text-sm text-secondary">{premiumGeneQuery.isLoading ? '读取中' : '暂无数据'}</div>
+                      <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">
+                        {premiumGeneQuery.isLoading ? '正在读取涨停基因快照' : '当前标的没有可用历史涨停样本'}
+                      </div>
                     </div>
                   )
                 }
@@ -1044,7 +1073,7 @@ function LimitBoardAllocationDialog({
                         { label: '首板封板率', value: ratioPct(premiumGene.first_board_seal_rate, 1) },
                         { label: '首板破板率', value: ratioPct(premiumGene.first_board_broken_rate, 1) },
                         { label: '连板率', value: ratioPct(premiumGene.consecutive_rate, 1) },
-                        { label: '5%溢价率', value: ratioPct(premiumGene.premium_5_rate, 1) },
+                        { label: '5%溢价', value: premiumGene.premium_5_count == null ? ratioPct(premiumGene.premium_5_rate, 1) : `${premiumGene.premium_5_count} 次` },
                         { label: '样本数', value: premiumGene.next_day_observation_count == null ? '--' : `${premiumGene.next_day_observation_count} 次` },
                       ].map(detail => (
                         <div key={detail.label} className="flex items-center justify-between gap-2 text-[9px]">

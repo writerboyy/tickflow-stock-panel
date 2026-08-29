@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import polars as pl
 try:
     import zmq
 except ImportError:  # pragma: no cover - dependency is installed with the backend
@@ -56,6 +57,12 @@ _QMT_TERMINAL_ORDER_STATUS_LABELS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _smallest(*values: float | None) -> float | None:
+    """The smallest of the given amounts, ignoring the unknown ones."""
+    known = [value for value in values if value is not None]
+    return min(known) if known else None
 
 
 def _utc_iso(seconds_ago: float = 0.0) -> str:
@@ -991,6 +998,7 @@ class QmtTradingService:
         self._last_account: dict[str, Any] | None = None
         self._last_account_monotonic = 0.0
         self._orders: dict[str, dict[str, Any]] = {}
+        self._data_dir = data_dir
         self._db_path = data_dir / "user_data" / "position_risk" / "runtime.sqlite3"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self._db_path) as conn:
@@ -1013,9 +1021,16 @@ class QmtTradingService:
                     updated_at TEXT NOT NULL,
                     last_accessed_at TEXT NOT NULL,
                     eligible_updated_at TEXT,
+                    is_probe INTEGER,
                     PRIMARY KEY (symbol, credit_mode)
                 )""",
             )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(qmt_credit_symbol_limit)")
+            }
+            if "is_probe" not in columns:
+                conn.execute("ALTER TABLE qmt_credit_symbol_limit ADD COLUMN is_probe INTEGER")
 
     def _connect(self) -> sqlite3.Connection:
         # Background threads write to the same file; give SQLite room to wait
@@ -1058,6 +1073,7 @@ class QmtTradingService:
         result: dict[str, Any],
         price: float,
         eligible: bool | None = None,
+        is_probe: bool | None = None,
     ) -> None:
         status = str(result.get("status") or "unknown")
         max_volume = result.get("max_volume")
@@ -1067,15 +1083,16 @@ class QmtTradingService:
             conn.execute(
                 """INSERT INTO qmt_credit_symbol_limit (
                        symbol, credit_mode, eligible, price, max_volume, max_amount,
-                       status, updated_at, last_accessed_at, eligible_updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       status, updated_at, last_accessed_at, eligible_updated_at, is_probe
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(symbol, credit_mode) DO UPDATE SET
                        eligible = COALESCE(excluded.eligible, eligible),
                        price = excluded.price,
                        max_volume = excluded.max_volume,
                        max_amount = excluded.max_amount,
                        status = excluded.status,
-                       updated_at = excluded.updated_at""",
+                       updated_at = excluded.updated_at,
+                       is_probe = COALESCE(excluded.is_probe, is_probe)""",
                 (
                     symbol,
                     mode,
@@ -1087,8 +1104,25 @@ class QmtTradingService:
                     now,
                     now,
                     now if eligible is not None else None,
+                    None if is_probe is None else int(is_probe),
                 ),
             )
+
+    def _read_credit_probe(self) -> dict[str, Any] | None:
+        """The stored account-level financing balance measured by the probe."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT symbol, price, max_amount, updated_at
+                   FROM qmt_credit_symbol_limit WHERE is_probe = 1""",
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "symbol": row[0],
+            "price": row[1],
+            "max_amount": row[2],
+            "updated_at": row[3],
+        }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -1522,7 +1556,89 @@ class QmtTradingService:
             return
         if _age_seconds(self._credit_subject_list_synced_at()) > _CREDIT_SUBJECT_LIST_SYNC_SECONDS:
             self._sync_credit_subject_list()
+        # The probe is the number every unwarmed symbol falls back to, so it is
+        # refreshed before any per-symbol entry.
+        probe = self._read_credit_probe()
+        if probe is None or _age_seconds(probe.get("updated_at")) >= (
+            _CREDIT_SYMBOL_LIMIT_TTL_SECONDS - _CREDIT_SYMBOL_RENEW_LEAD_SECONDS
+        ):
+            if self._refresh_credit_probe():
+                return
         self._renew_one_credit_limit()
+
+    def _select_credit_probe_symbol(self) -> tuple[str, float] | None:
+        """Pick the financing subject with the smallest one-lot amount.
+
+        The broker rounds a max-volume answer down to whole lots, so the
+        cheaper the lot the tighter the measured account balance: a 119 yuan
+        lot pins it to within one lot. Returns ``(symbol, price)``.
+        """
+        with self._connect() as conn:
+            eligible = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT symbol FROM qmt_credit_symbol_limit WHERE eligible = 1",
+                )
+            }
+        if not eligible:
+            return None
+        closes = self._latest_closes()
+        candidates = [
+            (price, symbol)
+            for symbol, price in closes.items()
+            if symbol in eligible and price > 0
+        ]
+        if not candidates:
+            return None
+        price, symbol = min(candidates)
+        return symbol, price
+
+    def _latest_closes(self) -> dict[str, float]:
+        """Last close per symbol from the daily kline store, or ``{}``."""
+        root = self._data_dir / "kline_daily"
+        try:
+            partitions = sorted(path.name for path in root.iterdir() if path.is_dir())
+        except OSError:
+            return {}
+        if not partitions:
+            return {}
+        try:
+            frame = pl.scan_parquet(root / partitions[-1] / "**/*.parquet").select(
+                ["symbol", "close"],
+            ).collect()
+        except Exception:  # noqa: BLE001 - a missing store only disables the probe
+            return {}
+        if "symbol" not in frame.columns or "close" not in frame.columns:
+            return {}
+        return {
+            symbol: close
+            for symbol, close in frame.iter_rows()
+            if symbol and close is not None
+        }
+
+    def _refresh_credit_probe(self) -> bool:
+        """Re-measure the account balance through the probe symbol."""
+        probe = self._read_credit_probe()
+        if probe is None:
+            selected = self._select_credit_probe_symbol()
+            if selected is None:
+                return False
+            symbol, price = selected
+        else:
+            symbol, price = probe["symbol"], probe["price"] or 0.0
+        if not symbol or not price or price <= 0:
+            return False
+        detail = self.client.get_credit_opvolume(
+            symbol, price, "financing", timeout_seconds=_CREDIT_OPVOLUME_BACKGROUND_TIMEOUT_SECONDS,
+        )
+        if str(detail.get("status") or "") != "ready":
+            return False
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE qmt_credit_symbol_limit SET is_probe = 0 WHERE is_probe = 1",
+            )
+        self._write_credit_limit(symbol, "financing", detail, price, is_probe=True)
+        return True
 
     def _credit_subject_list_synced_at(self) -> str | None:
         with self._connect() as conn:
@@ -1709,31 +1825,50 @@ class QmtTradingService:
         except Exception:  # noqa: BLE001 - an unavailable bridge can use the fallback mode
             detail = {"status": "unavailable", "stock_code": symbol, "max_volume": None}
         if isinstance(detail, dict) and detail.get("status") in {"ready", "unavailable", "error"}:
-            # ``unavailable`` is how the bridge reports a non-financing subject.
-            self._write_credit_limit(
-                symbol, credit_buy_mode, detail, price,
-                eligible=False if detail.get("status") == "unavailable" else None,
-            )
+            # Eligibility is decided by the broker's subject list, never by an
+            # ``unavailable`` here: the bridge also returns it when its async
+            # query is throttled, which must not brand a good stock for good.
+            self._write_credit_limit(symbol, credit_buy_mode, detail, price)
+        probe_amount = self._probe_derived_amount(price)
         if not isinstance(detail, dict) or detail.get("status") != "ready":
             if isinstance(detail, dict) and detail.get("status") == "pending":
-                # A symbol-specific financing limit is not known yet. Show the
-                # stored one while the broker answers instead of falling back to
-                # the account-level financing field, which is a different number.
-                if stored is not None and stored.get("max_amount") is not None:
+                # The broker has not answered for this symbol yet. Fall back to
+                # the tightest number we already have rather than the account
+                # level financing field, which is a different, larger quantity.
+                served = _smallest(
+                    probe_amount,
+                    float(stored["max_amount"]) if stored is not None and stored.get("max_amount") is not None else None,
+                )
+                if served is not None:
                     return (
-                        round(float(stored["max_amount"]), 2),
+                        round(served, 2),
                         "该股票最大融资可买",
                         financing_available,
                         {
                             "status": "ready",
                             "stock_code": symbol,
-                            "max_volume": stored.get("max_volume"),
-                            "max_amount": stored.get("max_amount"),
+                            "max_volume": int(served / price / 100) * 100 if price > 0 else None,
+                            "max_amount": served,
                             "cached": True,
                             "stale": True,
+                            "from_probe": probe_amount is not None and served == probe_amount,
                         },
                     )
                 return 0.0, label, financing_available, detail
+            if probe_amount is not None:
+                return (
+                    probe_amount,
+                    "该股票最大融资可买",
+                    financing_available,
+                    {
+                        "status": "ready",
+                        "stock_code": symbol,
+                        "max_volume": int(probe_amount / price / 100) * 100,
+                        "max_amount": probe_amount,
+                        "cached": True,
+                        "from_probe": True,
+                    },
+                )
             return amount, label, financing_available, detail if isinstance(detail, dict) else None
         try:
             max_volume = int(detail.get("max_volume") or 0)
@@ -1742,12 +1877,35 @@ class QmtTradingService:
         if max_volume < 0:
             return amount, label, financing_available, detail
         max_amount = _float(detail.get("max_amount"))
+        served = _smallest(
+            max_amount if max_amount is not None else max_volume * price,
+            probe_amount,
+        )
         return (
-            round(max_amount if max_amount is not None else max_volume * price, 2),
+            round(served, 2),
             "该股票最大融资可买",
             financing_available,
             detail,
         )
+
+    def _probe_derived_amount(self, price: float) -> float | None:
+        """Account financing balance from the probe, rounded down to lots.
+
+        The broker answers in whole lots, so the cheapest lot measures the
+        account balance most tightly. Any symbol is then bounded by that
+        balance at its own price.
+        """
+        if price <= 0:
+            return None
+        probe = self._read_credit_probe()
+        if probe is None or probe.get("max_amount") is None:
+            return None
+        if _age_seconds(probe.get("updated_at")) > _CREDIT_SYMBOL_LIMIT_TTL_SECONDS:
+            return None
+        lots = int(float(probe["max_amount"]) / price / 100)
+        if lots <= 0:
+            return None
+        return round(lots * 100 * price, 2)
 
     @staticmethod
     def _credit_limit_is_fresh(stored: dict[str, Any], price: float) -> bool:

@@ -387,6 +387,22 @@ async def get_for_symbol_async(repo, symbol: str, *, window_days: int = WINDOW_D
             return dict(cached[1])
         try:
             live = await _fetch_kaipanla(normalized)
+            # /76 only exposes six live fields. Preserve the additional
+            # historical counts from the local snapshot when available, while
+            # keeping the provider's live rates authoritative.
+            local = get_for_symbol(
+                repo,
+                normalized,
+                window_days=window_days,
+                refresh_if_stale=False,
+            )
+            if local.get("available") is True:
+                for key in SNAPSHOT_COLUMNS:
+                    if key in {"symbol", "as_of", "window_days"} or key in live:
+                        continue
+                    value = local.get(key)
+                    if value is not None:
+                        live[key] = value
             result = {
                 "available": True,
                 "symbol": normalized,

@@ -215,3 +215,51 @@ async def test_get_for_symbol_async_prefers_kaipanla_gene_result(tmp_path, monke
     assert result["consecutive_rate"] == 0.125
     assert result["max_score"] == 10.0
     assert result["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_for_symbol_async_fills_live_result_with_snapshot_counts(tmp_path, monkeypatch):
+    class _Repo:
+        class store:
+            data_dir = tmp_path
+
+        @staticmethod
+        def latest_enriched_date(_asset_type):
+            return date(2026, 8, 14)
+
+    snapshot = premium_gene.calculate(
+        _history().with_columns(pl.lit("001331.SZ").alias("symbol")),
+    )
+    premium_gene.persist_snapshot(tmp_path, snapshot)
+
+    class _Credentials:
+        pass
+
+    class _Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def request(self, endpoint, params):
+            assert endpoint == 76
+            assert params == {"StockID": "001331"}
+            return {"List": [9, 3, 100, 88.8889, 11.1111, 12.5], "errcode": "0"}
+
+    monkeypatch.setattr(premium_gene, "load_credentials", lambda: _Credentials())
+    monkeypatch.setattr(premium_gene, "KaipanlaClient", _Client)
+    premium_gene._live_cache.clear()
+
+    result = await premium_gene.get_for_symbol_async(_Repo(), "001331.SZ")
+
+    # Provider values remain authoritative, while fields absent from /76 are
+    # filled from the local snapshot for a complete UI card.
+    assert result["next_day_red_rate"] == 1.0
+    assert result["first_board_seal_rate"] == pytest.approx(0.888889)
+    assert result["first_board_attempt_count"] == 3
+    assert result["first_board_broken_count"] == 1
+    assert result["next_day_observation_count"] == 2
