@@ -403,12 +403,14 @@ function auctionFiniteNumber(value: unknown): number | null {
   return Number.isFinite(number) ? number : null
 }
 
-function auctionRushPct(row: Record<string, any>): number | null {
+function auctionRushPct(row: Record<string, any>, priorSnapshot?: Record<string, any>): number | null {
   // 通达信 DYNAINFO(104) 只对应开盘竞价；15:00 是收盘竞价，不能套用这个口径。
   if (String(row.checkpoint || '') !== '0925') return null
   const sourceValue = auctionFiniteNumber(row.opening_rush_pct ?? row.opening_rush)
   if (sourceValue != null) return sourceValue
-  const matchedPrice = auctionFiniteNumber(row.auction_price)
+  // 基准必须是 09:24:57 的虚拟匹配价：09:25 自身 auction_price 就是 open_price，
+  // 拿它当基准恒等于 0。缺失时返回 null 显示 '--'，而不是给出一个假的 0。
+  const matchedPrice = auctionFiniteNumber(priorSnapshot?.auction_price)
   const openPrice = auctionFiniteNumber(row.open_price)
   if (matchedPrice == null || matchedPrice === 0 || openPrice == null) return null
   return (openPrice - matchedPrice) / matchedPrice * 100
@@ -491,10 +493,10 @@ function AuctionTable({
       .slice()
       .sort((left, right) => {
         const leftValue = sortKey === 'opening_rush_pct'
-          ? auctionRushPct(left.snapshots['0925'] ?? {})
+          ? auctionRushPct(left.snapshots['0925'] ?? {}, left.snapshots['092457'])
           : auctionFiniteNumber(left.snapshots['0925']?.[sortKey])
         const rightValue = sortKey === 'opening_rush_pct'
-          ? auctionRushPct(right.snapshots['0925'] ?? {})
+          ? auctionRushPct(right.snapshots['0925'] ?? {}, right.snapshots['092457'])
           : auctionFiniteNumber(right.snapshots['0925']?.[sortKey])
         const leftMissing = leftValue == null || !Number.isFinite(leftValue)
         const rightMissing = rightValue == null || !Number.isFinite(rightValue)
@@ -507,6 +509,7 @@ function AuctionTable({
   const checkpointOptions = [
     ['0915', '09:15'],
     ['0920', '09:20'],
+    ['092457', '09:24:57'],
     ['0925', '09:25'],
     ['1457', '14:57'],
     ['1500', '15:00'],
@@ -540,7 +543,7 @@ function AuctionTable({
     >
       <td className="px-3 py-2"><button type="button" onClick={() => onOpen(String(row.symbol || ''), row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.code || row.symbol || '--'}</div></button></td>
       <td className="max-w-[180px] px-2 py-2 text-left text-secondary"><div className="truncate" title={conceptBySymbol.get(String(row.symbol || '').toUpperCase())}>{conceptBySymbol.get(String(row.symbol || '').toUpperCase()) || '--'}</div></td>
-      <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
+      <td className="px-2 py-2 text-right font-mono text-secondary">{String(row.checkpoint || '--').replace(/^(\d{2})(\d{2})(\d{2})$/, '$1:$2:$3').replace(/^(\d{2})(\d{2})$/, '$1:$2')}</td>
       <td className="px-2 py-2 text-right font-mono text-foreground">{auctionPrice(row.auction_price)}</td>
       <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(row.auction_pct)}`}>{auctionPercent(row.auction_pct)}</td>
       <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.auction_volume)}</td>
@@ -548,7 +551,7 @@ function AuctionTable({
       <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_turnover_pct)}`}>{auctionPercent(row.auction_turnover_pct)}</td>
       <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.auction_unmatched)}`}>{auctionNumber(row.auction_unmatched)}</td>
       <td className="px-2 py-2 text-right font-mono font-medium text-secondary" title="扶摇接口原始竞价量比">{auctionFiniteNumber(row.auction_volume_ratio)?.toFixed(2) ?? '--'}</td>
-      <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(auctionRushPct(row))}`} title="(开盘价 - 09:25 最后一次集合竞价匹配价) / 最后一次集合竞价匹配价 × 100">{auctionPercent(auctionRushPct(row))}</td>
+      <td className={`px-2 py-2 text-right font-mono font-medium ${auctionTone(auctionRushPct(row))}`} title="DYNAINFO(104)：(开盘价 - 09:24:57 最后 3 秒虚拟匹配价) / 09:24:57 虚拟匹配价 × 100。单时点视图缺 09:24:57 快照时显示 --">{auctionPercent(auctionRushPct(row))}</td>
       <td className="px-2 py-2 text-right font-mono text-secondary">{auctionMarketCap(row.float_market_cap)}</td>
       <td className="px-2 py-2 text-right font-mono text-secondary">{auctionPrice(row.pre_close_price)}</td>
       <td className="px-3 py-2 text-right font-mono text-secondary">{auctionPrice(row.open_price)}</td>
