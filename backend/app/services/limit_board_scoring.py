@@ -400,76 +400,187 @@ def intraday_flow_detail(
 def rotation_detail(
     rotation: dict[str, Any], sector_name: str, today: date,
 ) -> dict[str, Any] | None:
-    days: list[dict[str, Any]] = []
-    trading_dates = []
+    """Build an institutional-style cross-sectional sector signal.
+
+    The matrix contains sector returns ranked within each day.  We use the
+    latest 1/3/5/20 completed sessions, convert each window return to a
+    cross-sectional percentile, and keep the component scores unnormalised
+    when a window is missing.  This avoids treating a short history as a
+    fully observed signal.
+    """
+    trading_dates: list[date] = []
     for raw_date in rotation.get("dates") or []:
         try:
             trading_date = date.fromisoformat(str(raw_date))
         except ValueError:
             continue
-        if trading_date >= today:
-            continue
-        trading_dates.append(trading_date)
-    for trading_date in sorted(set(trading_dates), reverse=True):
-        raw_date = trading_date.isoformat()
-        rows = rotation.get("columns", {}).get(str(raw_date)) or []
-        match_index = next(
-            (index for index, item in enumerate(rows) if str(item[0]) == sector_name),
-            None,
-        )
-        if match_index is None:
-            continue
-        change = finite(rows[match_index][1])
+        if trading_date < today:
+            trading_dates.append(trading_date)
+    unique_dates = sorted(set(trading_dates))
+    columns = rotation.get("columns") or {}
+    daily_maps: dict[str, dict[str, float]] = {}
+    daily_rank_info: dict[str, tuple[int, int]] = {}
+    for trading_date in unique_dates:
+        rows = columns.get(trading_date.isoformat()) or []
+        values: dict[str, float] = {}
+        for index, item in enumerate(rows):
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            value = finite(item[1])
+            if value is not None:
+                name = str(item[0])
+                values[name] = value
+                if name == sector_name:
+                    daily_rank_info[trading_date.isoformat()] = (index, len(rows))
+        if values:
+            daily_maps[trading_date.isoformat()] = values
+
+    target_days: list[dict[str, Any]] = []
+    for trading_date in unique_dates:
+        values = daily_maps.get(trading_date.isoformat()) or {}
+        change = values.get(sector_name)
         if change is None:
             continue
-        count = len(rows)
-        percentile = 1.0 if count <= 1 else 1.0 - match_index / (count - 1)
-        days.append({
+        rank_index, count = daily_rank_info.get(
+            trading_date.isoformat(), (0, len(values)),
+        )
+        percentile = 1.0 if count <= 1 else 1.0 - rank_index / (count - 1)
+        target_days.append({
             "date": trading_date.isoformat(),
             "change_pct": change,
-            "rank": match_index + 1,
+            "rank": rank_index + 1,
             "rank_count": count,
             "rank_percentile": percentile,
         })
-        if len(days) == 5:
-            break
-    if len(days) < 5:
+    if len(target_days) < 3:
         return None
-    days.reverse()
-    returns = [float(item["change_pct"]) for item in days]
-    percentiles = [float(item["rank_percentile"]) for item in days]
-    compound = prod(1.0 + value for value in returns) - 1.0
-    mean = sum(returns) / 5.0
-    slope = sum((index - 2.0) * (value - mean) for index, value in enumerate(returns)) / 10.0
+
+    def compound(values: list[float]) -> float:
+        return prod(1.0 + value for value in values) - 1.0
+
+    def percentile(values: list[float], target: float) -> float:
+        if len(values) <= 1:
+            return 1.0
+        below = sum(value < target for value in values)
+        equal = sum(value == target for value in values)
+        rank = below + max(equal - 1, 0) / 2.0
+        return _clamp(rank / (len(values) - 1))
+
+    def window_percentile(window: int) -> tuple[float, float] | None:
+        if len(target_days) < window:
+            return None
+        window_days = target_days[-window:]
+        date_keys = [str(item["date"]) for item in window_days]
+        common_names = set(daily_maps.get(date_keys[0], {}))
+        for date_key in date_keys[1:]:
+            common_names.intersection_update(daily_maps.get(date_key, {}))
+        returns: list[float] = []
+        target_return: float | None = None
+        for name in common_names:
+            values = [daily_maps[date_key][name] for date_key in date_keys]
+            value = compound(values)
+            returns.append(value)
+            if name == sector_name:
+                target_return = value
+        if target_return is None or not returns:
+            return None
+        return target_return, percentile(returns, target_return)
+
+    windows = {window: window_percentile(window) for window in (1, 3, 5, 20)}
+    window_weights = {1: 0.15, 3: 0.20, 5: 0.30, 20: 0.35}
+    momentum_score = sum(
+        result[1] * 20.0 * window_weights[window]
+        for window, result in windows.items()
+        if result is not None
+    )
+    momentum_max = sum(
+        20.0 * window_weights[window]
+        for window, result in windows.items()
+        if result is not None
+    )
+
+    returns = [float(item["change_pct"]) for item in target_days]
+    percentiles = [float(item["rank_percentile"]) for item in target_days]
+    latest_returns = returns[-5:]
+    center = (len(latest_returns) - 1) / 2.0
+    mean = sum(latest_returns) / len(latest_returns)
+    denominator = sum((index - center) ** 2 for index in range(len(latest_returns)))
+    return_slope = (
+        sum((index - center) * (value - mean) for index, value in enumerate(latest_returns)) / denominator
+        if denominator > 0 else None
+    )
     rank_change = percentiles[-1] - percentiles[0]
+    trend_score = (
+        (_clamp((return_slope + 0.002) / 0.004) * 0.5
+         + _clamp((rank_change + 0.30) / 0.60) * 0.5) * 10.0
+        if return_slope is not None else 0.0
+    )
+    trend_max = 10.0 if return_slope is not None else 0.0
     top_days = sum(value >= 0.8 for value in percentiles)
-    yesterday = returns[-1]
-    components = {
-        "compound": _linear(compound, -0.05, 0.10, 6.0),
-        "slope": _linear(slope, -0.01, 0.01, 4.0),
+    persistence_max = 10.0 if len(percentiles) >= 5 else 0.0
+    persistence_score = top_days / len(percentiles) * persistence_max if persistence_max else 0.0
+    positive_ratio = sum(value > 0 for value in returns) / len(returns)
+    volatility = (
+        sum((value - mean) ** 2 for value in latest_returns) / len(latest_returns)
+    ) ** 0.5
+    stability = _clamp(positive_ratio * 0.7 + (1.0 - _clamp(volatility / 0.03)) * 0.3)
+    stability_max = 10.0 if len(latest_returns) >= 3 else 0.0
+    stability_score = stability * stability_max if stability_max else 0.0
+    institutional_score = momentum_score + trend_score + persistence_score + stability_score
+    institutional_max = momentum_max + trend_max + persistence_max + stability_max
+    five_day = windows.get(5)
+    one_day = windows.get(1)
+    three_day = windows.get(3)
+    twenty_day = windows.get(20)
+    five_day_return = five_day[0] if five_day else None
+    legacy_components = {
+        "compound": _linear(five_day_return, -0.05, 0.10, 6.0)
+        if five_day_return is not None else 0.0,
+        "slope": _linear(return_slope, -0.01, 0.01, 4.0)
+        if return_slope is not None else 0.0,
         "rank_change": _linear(rank_change, -0.30, 0.30, 4.0),
-        "persistence": top_days / 5.0 * 3.0,
-        "yesterday": _linear(yesterday, -0.02, 0.03, 3.0),
+        "persistence": top_days / min(len(percentiles), 5) * 3.0,
+        "yesterday": _linear(returns[-1], -0.02, 0.03, 3.0),
     }
-    if top_days >= 3 and percentiles[-1] >= 0.8 and compound > 0:
-        label = "主线"
-    elif rank_change >= 0.15 and slope > 0:
-        label = "上升"
-    elif rank_change <= -0.15 and slope < 0:
-        label = "退潮"
+    if top_days >= 3 and percentiles[-1] >= 0.8 and (five_day_return or 0.0) > 0:
+        legacy_label = "主线"
+    elif rank_change >= 0.15 and (return_slope or 0.0) > 0:
+        legacy_label = "上升"
+    elif rank_change <= -0.15 and (return_slope or 0.0) < 0:
+        legacy_label = "退潮"
     else:
-        label = "震荡"
+        legacy_label = "震荡"
     return {
-        "score": round(sum(components.values()), 2),
+        # Keep the legacy 20-point field for existing candidate consumers. The
+        # institutional score is exposed separately and drives board scoring.
+        "score": round(sum(legacy_components.values()), 2),
         "max_score": 20.0,
-        "components": {key: round(value, 2) for key, value in components.items()},
-        "days": days,
-        "five_day_change_pct": compound,
-        "trend_slope": slope,
+        "components": {key: round(value, 2) for key, value in legacy_components.items()},
+        "institutional_score": round(institutional_score, 2),
+        "institutional_max_score": round(institutional_max, 2),
+        "institutional_components": {
+            "relative_momentum": round(momentum_score, 2),
+            "trend": round(trend_score, 2),
+            "persistence": round(persistence_score, 2),
+            "stability": round(stability_score, 2),
+        },
+        "days": target_days[-20:],
+        "one_day_change_pct": one_day[0] if one_day else None,
+        "three_day_change_pct": three_day[0] if three_day else None,
+        "five_day_change_pct": five_day[0] if five_day else None,
+        "twenty_day_change_pct": twenty_day[0] if twenty_day else None,
+        "momentum_1d_percentile": one_day[1] if one_day else None,
+        "momentum_3d_percentile": three_day[1] if three_day else None,
+        "momentum_5d_percentile": five_day[1] if five_day else None,
+        "momentum_20d_percentile": twenty_day[1] if twenty_day else None,
+        "trend_slope": return_slope,
         "rank_change": rank_change,
         "top_20_days": top_days,
-        "yesterday_change_pct": yesterday,
-        "rotation_label": label,
+        "positive_days": sum(value > 0 for value in returns),
+        "volatility": volatility,
+        "yesterday_change_pct": returns[-1],
+        # Deprecated compatibility field; new scoring/UI do not use it.
+        "rotation_label": legacy_label,
     }
 
 
@@ -571,6 +682,7 @@ def sector_detail(
     is_leader = candidate_progress > 0 and leader_gap <= 0.01
     is_front = not is_leader and (candidate_index < 3 or leader_gap <= 0.10)
     leadership = "leader" if is_leader else "front" if is_front else "follower"
+    position_available = bool(ranked)
     up_count = int(effective_snapshot.get("up_count") or 0)
     valid_count = int(effective_snapshot.get("valid_count") or len(ranked))
     up_ratio = up_count / valid_count if valid_count else 0.0
@@ -582,6 +694,33 @@ def sector_detail(
         "leadership": 10.0 if is_leader else 5.0 if is_front else 0.0,
     }
     current_score = sum(current_components.values())
+    # 机构式当日确认：广度、资金、龙头和流动性各自独立计分，缺失时
+    # 只减少可得满分，不把缺失数据当成中性分数。
+    institutional_components = dict(history.get("institutional_components") or {})
+    institutional_score = float(history.get("institutional_score") or 0.0)
+    institutional_max = float(history.get("institutional_max_score") or 0.0)
+    breadth_available = up_ratio is not None
+    if breadth_available:
+        institutional_components["breadth"] = _clamp(up_ratio) * 20.0
+        institutional_score += institutional_components["breadth"]
+        institutional_max += 20.0
+    flow_amount = finite((realtime or {}).get("amount"))
+    flow_net = finite((realtime or {}).get("main_net"))
+    flow_ratio = flow_net / flow_amount if flow_net is not None and flow_amount and flow_amount > 0 else None
+    if flow_ratio is not None:
+        institutional_components["money_flow"] = _linear(flow_ratio, -0.20, 0.40, 15.0)
+        institutional_score += institutional_components["money_flow"]
+        institutional_max += 15.0
+    if position_available:
+        leadership_score = 10.0 if is_leader else 7.0 if is_front else 3.0 if candidate_index < 10 else 0.0
+        institutional_components["leadership"] = leadership_score
+        institutional_score += leadership_score
+        institutional_max += 10.0
+    volume_ratio = finite((realtime or {}).get("volume_ratio"))
+    if volume_ratio is not None:
+        institutional_components["liquidity"] = _linear(volume_ratio, 0.8, 2.0, 5.0)
+        institutional_score += institutional_components["liquidity"]
+        institutional_max += 5.0
     rotation_fields = {
         key: value for key, value in history.items()
         if key not in {"score", "max_score", "components"}
@@ -623,6 +762,11 @@ def sector_detail(
         "realtime_volume_ratio": finite((realtime or {}).get("volume_ratio")),
         "rotation_components": history["components"],
         **rotation_fields,
+        "institutional_score": round(institutional_score, 2),
+        "institutional_max_score": round(institutional_max, 2),
+        "institutional_components": {
+            key: round(float(value), 2) for key, value in institutional_components.items()
+        },
     }
 
 
@@ -759,14 +903,22 @@ def comprehensive_score(
     # ========================================
     rotation_available = bool(sector.get("rotation_available", False))
     rotation_score = finite(sector.get("rotation_score"))
+    institutional_score = finite(sector.get("institutional_score"))
     five_day_change = finite(sector.get("five_day_change_pct"))
     days = [day for day in (sector.get("days") or []) if isinstance(day, dict)]
     realtime_rank = finite(sector.get("realtime_rank"))
     realtime_rank_count = finite(sector.get("realtime_rank_count"))
 
     # 1. 板块K线形态 (15分)：依赖真实轮动数据，缺失即数据不足
-    sector_pattern_available = rotation_available and rotation_score is not None
-    sector_pattern = (rotation_score / 20.0) * 15.0 if sector_pattern_available else 0.0
+    sector_pattern_available = rotation_available and (
+        institutional_score is not None or rotation_score is not None
+    )
+    sector_pattern = (
+        _clamp(institutional_score / 100.0) * 15.0
+        if institutional_score is not None
+        else (rotation_score / 20.0) * 15.0
+        if rotation_score is not None else 0.0
+    )
 
     # 2. 板块过热风险 (10分)：三个子项各自门控，缺哪项哪项不计分
     overheat_gain_available = five_day_change is not None
@@ -1109,14 +1261,24 @@ def comprehensive_score(
     if "consecutive_ability" in history_components and history_components["consecutive_ability"] >= 4.2:  # ≥70%
         strengths.append("连板能力强")
 
-    # 板块强度
-    rotation_label = sector.get("rotation_label")
-    if rotation_available and rotation_label == "主线":
-        strengths.append("主线板块")
-    elif rotation_available and rotation_label == "上升":
-        strengths.append("板块快速走强")
-    elif rotation_available and rotation_label == "退潮":
-        warnings.append("板块退潮中")
+    # 板块强度：机构式横截面分数替代离散状态标签。
+    institutional_score = finite(sector.get("institutional_score"))
+    institutional_max = finite(sector.get("institutional_max_score"))
+    if institutional_score is not None and institutional_max and institutional_max > 0:
+        institutional_pct = institutional_score / institutional_max
+        if institutional_pct >= 0.75:
+            strengths.append("板块相对强度高")
+        elif institutional_pct < 0.35:
+            warnings.append("板块相对强度偏弱")
+    else:
+        # 兼容历史缓存中尚未带机构分数的快照；新快照不会走这里。
+        rotation_label = sector.get("rotation_label")
+        if rotation_available and rotation_label == "主线":
+            strengths.append("主线板块")
+        elif rotation_available and rotation_label == "上升":
+            strengths.append("板块快速走强")
+        elif rotation_available and rotation_label == "退潮":
+            warnings.append("板块退潮中")
 
     if five_day_change is not None:
         if five_day_change > 0.15:

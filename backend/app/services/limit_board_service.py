@@ -3046,7 +3046,7 @@ class LimitBoardService:
                 not bool(sector.get("realtime_available")),
                 realtime_rank if realtime_rank is not None else float("inf"),
                 -float(_finite(sector.get("realtime_strength")) or 0.0),
-                -float(_finite(sector.get("score")) or 0.0),
+                -LimitBoardService._sector_candidate_score(sector),
                 -leadership_rank,
                 stock_rank if stock_rank is not None else float("inf"),
                 -float(row.get("candidate_score") or 0.0),
@@ -3258,7 +3258,8 @@ class LimitBoardService:
         if cached is not None:
             return cached
         try:
-            value = rps_rotation.build_rps_rotation(self.repo, 7, kind, level)
+            # 机构式板块评分需要覆盖 1/3/5/20 个交易日窗口。
+            value = rps_rotation.build_rps_rotation(self.repo, 30, kind, level)
         except Exception:  # noqa: BLE001
             logger.warning("打板备选池读取板块轮动失败: %s", kind, exc_info=True)
             return {}
@@ -3392,6 +3393,20 @@ class LimitBoardService:
         return result
 
     @staticmethod
+    def _sector_candidate_score(value: dict[str, Any]) -> float:
+        """Return the sector contribution used by candidate ranking.
+
+        New snapshots carry an institutional score whose available maximum
+        varies with data coverage. Normalize it to the sector's 50-point
+        weight; old snapshots without the field keep their legacy score.
+        """
+        institutional = _finite(value.get("institutional_score"))
+        institutional_max = _finite(value.get("institutional_max_score"))
+        if institutional is not None and institutional_max and institutional_max > 0:
+            return max(0.0, min(1.0, institutional / institutional_max)) * _SCORE_WEIGHTS["sector"]
+        return float(_finite(value.get("score")) or 0.0)
+
+    @staticmethod
     def _score_reasons(
         candidate: dict[str, Any], detail: dict[str, dict[str, Any]],
     ) -> list[str]:
@@ -3418,8 +3433,15 @@ class LimitBoardService:
             else:
                 reasons.append("分时强度已计算，实时资金数据待补")
         if sector:
+            institutional_score = _finite(sector.get("institutional_score"))
+            institutional_max = _finite(sector.get("institutional_max_score"))
+            relative_strength = (
+                f"机构强度 {institutional_score:.1f}/{institutional_max:.0f}"
+                if institutional_score is not None and institutional_max
+                else "机构强度待补"
+            )
             reasons.append(
-                f"{sector.get('name') or '板块'} {sector.get('rotation_label') or '数据不足'}"
+                f"{sector.get('name') or '板块'} {relative_strength}"
                 f" · {sector.get('leadership') or 'follower'}"
             )
         if gene:
@@ -3789,7 +3811,12 @@ class LimitBoardService:
                     and bool((detail.get("sector") or {}).get("rotation_available", True))
                 )
                 base_score = (
-                    sum(float(detail[key]["score"]) for key in _SCORE_WEIGHTS)
+                    sum(
+                        LimitBoardService._sector_candidate_score(detail[key])
+                        if key == "sector"
+                        else float(detail[key]["score"])
+                        for key in _SCORE_WEIGHTS
+                    )
                     if complete else None
                 )
                 score = round(base_score, 1) if base_score is not None else None

@@ -208,6 +208,9 @@ def test_rotation_uses_five_completed_trading_days_and_marks_rising():
     assert detail["trend_slope"] == pytest.approx(0.01)
     assert detail["rotation_label"] == "上升"
     assert detail["score"] == pytest.approx(16.22)
+    assert detail["institutional_score"] == pytest.approx(32.79, abs=0.01)
+    assert detail["institutional_max_score"] == pytest.approx(43.0)
+    assert detail["momentum_20d_percentile"] is None
 
 
 def test_rotation_sorts_dates_before_selecting_latest_five_completed_days():
@@ -635,12 +638,12 @@ def test_rotation_only_detail_scores_daily_rotation_and_gates_realtime_parts():
     result = comprehensive_score({"sector": detail})
     sentiment = result["dimensions"]["sentiment"]
     # 日频组件正常计分：板块形态 + 过热（5日涨幅 + 连涨天数，排名缺）
-    assert sentiment["components"]["sector_pattern"] == pytest.approx(12.2, abs=0.05)
+    assert sentiment["components"]["sector_pattern"] == pytest.approx(4.9, abs=0.05)
     assert sentiment["components"]["overheat_risk"] == pytest.approx(6.0)
     assert "sector_current" in sentiment["unavailable_components"]
     health = result["dimensions"]["health"]
     assert "sector_position" in health["unavailable_components"]
-    assert "板块快速走强" in result["strengths"]
+    assert "板块相对强度高" in result["strengths"]
 
 
 def test_rotation_only_detail_returns_none_without_five_completed_days():

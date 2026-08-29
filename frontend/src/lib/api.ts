@@ -1560,8 +1560,18 @@ export interface LimitBoardRow {
       realtime_main_buy?: number | null
       realtime_main_sell?: number | null
       realtime_volume_ratio?: number | null
+      institutional_score?: number
+      institutional_max_score?: number
+      institutional_components?: Record<string, number>
       days?: Array<{ date: string; change_pct: number; rank: number; rank_count: number; rank_percentile: number }>
+      one_day_change_pct?: number | null
+      three_day_change_pct?: number | null
       five_day_change_pct?: number
+      twenty_day_change_pct?: number | null
+      momentum_1d_percentile?: number | null
+      momentum_3d_percentile?: number | null
+      momentum_5d_percentile?: number | null
+      momentum_20d_percentile?: number | null
       trend_slope?: number
       rank_change?: number
       top_20_days?: number

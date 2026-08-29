@@ -170,6 +170,15 @@ class FakeQmt:
         }
 
 
+def test_sector_candidate_score_prefers_institutional_score():
+    assert LimitBoardService._sector_candidate_score({
+        "score": 12.0,
+        "institutional_score": 36.0,
+        "institutional_max_score": 45.0,
+    }) == pytest.approx(40.0)
+    assert LimitBoardService._sector_candidate_score({"score": 12.0}) == pytest.approx(12.0)
+
+
 class ImmediateExecutor:
     @staticmethod
     def submit(callback, *args):
@@ -2042,7 +2051,7 @@ def test_rotation_only_fallback_when_realtime_sector_unavailable(tmp_path, monke
     assert sentiment["components"]["sector_pattern"] > 0
     assert "sector_current" in sentiment["unavailable_components"]
     assert "sector_position" in comprehensive["dimensions"]["health"]["unavailable_components"]
-    assert "主线板块" in comprehensive["strengths"]
+    assert "板块相对强度高" in comprehensive["strengths"]
 
 
 def test_close_frozen_sector_inputs_score_realtime_components_after_hours(

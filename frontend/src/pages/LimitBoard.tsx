@@ -1426,24 +1426,27 @@ function maAlignmentVerdict(
   return '非多头排列'
 }
 
-/** 板块轮动不只是一个标签：把 5 日涨幅/斜率/榜变/持续天数一起写出。 */
+/** 展示机构式板块分数与多周期收益，避免再用离散状态标签判断强弱。 */
 function rotationDetailText(
   sector: NonNullable<LimitBoardRow['candidate_score_detail']>['sector'],
 ): string {
-  const parts: string[] = [sector?.rotation_label || '数据不足']
+  const parts: string[] = []
+  if (sector?.institutional_score != null && sector.institutional_max_score != null) {
+    parts.push(`机构 ${sector.institutional_score.toFixed(1)}/${sector.institutional_max_score.toFixed(0)}`)
+  }
+  if (sector?.one_day_change_pct != null) {
+    parts.push(`1日 ${scoreDetailSignedPercent(sector.one_day_change_pct, 1)}`)
+  }
   if (sector?.five_day_change_pct != null) {
     parts.push(`5日 ${scoreDetailSignedPercent(sector.five_day_change_pct, 1)}`)
   }
-  if (sector?.trend_slope != null) {
-    parts.push(`斜率 ${scoreDetailSignedPercent(sector.trend_slope, 2)}/天`)
-  }
-  if (sector?.rank_change != null) {
-    parts.push(`榜变 ${scoreDetailSignedPercent(sector.rank_change, 0)}`)
+  if (sector?.twenty_day_change_pct != null) {
+    parts.push(`20日 ${scoreDetailSignedPercent(sector.twenty_day_change_pct, 1)}`)
   }
   if (sector?.top_20_days != null) {
-    parts.push(`Top20 ${sector.top_20_days}天`)
+    parts.push(`前20% ${sector.top_20_days}/${sector.days?.length ?? 20}`)
   }
-  return parts.join(' · ')
+  return parts.join(' · ') || '数据不足'
 }
 
 function scoreDetailRows(
@@ -1469,7 +1472,7 @@ function scoreDetailRows(
       { label: '板块强度', value: scoreDetailNumber(sector.realtime_strength, 1) },
       { label: '板块涨幅', value: scoreDetailSignedPercent(sector.realtime_change_pct ?? sector.change_pct, 2) },
       { label: '上涨占比', value: ratioPct(sector.up_ratio, 1) },
-      { label: '板块轮动', value: rotationDetailText(sector) },
+      { label: '机构板块评分', value: rotationDetailText(sector) },
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
     health: flow || technical || sector ? [
       ...(sector ? [
