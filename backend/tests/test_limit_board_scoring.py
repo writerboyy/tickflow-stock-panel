@@ -3,6 +3,7 @@ from datetime import date
 import pytest
 
 from app.services.limit_board_scoring import (
+    comprehensive_score,
     intraday_flow_detail,
     premium_gene_detail,
     rotation_detail,
@@ -374,3 +375,185 @@ def test_sector_score_handles_an_all_declining_sector():
     assert detail["leader"]["symbol"] == "A"
     assert detail["is_sector_leader"] is False
     assert detail["current_components"]["leader_change"] == 0.0
+
+
+def _sealed_pullup_intraday() -> dict:
+    """昨收 10.0，启动后 4 分钟放量一波拉到涨停 11.0 并封死。"""
+    closes = [10.05, 10.10, 10.32, 10.55, 10.80, 11.00]
+    amounts = [1_000_000, 1_000_000, 2_000_000, 3_000_000, 4_000_000, 5_000_000]
+    return {
+        "available": True,
+        "session_bars": [
+            {"open": close, "high": close, "low": close, "close": close, "amount": amount}
+            for close, amount in zip(closes, amounts, strict=True)
+        ],
+    }
+
+
+def test_intraday_flow_reports_pullup_metrics_and_sealed_state():
+    detail = intraday_flow_detail(
+        _sealed_pullup_intraday(), previous_close=10.0, limit_up=11.0,
+    )
+
+    assert detail is not None
+    assert detail["limit_up"] == pytest.approx(11.0)
+    assert detail["touch_index"] == 5
+    assert detail["sealed_now"] is True
+    assert detail["pull_up_start_index"] == 2
+    assert detail["pull_up_minutes"] == 4
+    assert detail["pull_up_max_drawdown"] == pytest.approx(0.0)
+    assert detail["pull_up_gain"] == pytest.approx(11.0 / 10.32 - 1.0)
+    # 封板前量能：最近 3 根均值 4M，之前 3 根均值约 1.33M → +200%
+    assert detail["pre_seal_amount_growth"] == pytest.approx(2.0)
+    assert detail["day_open"] == pytest.approx(10.05)
+    assert detail["day_high"] == pytest.approx(11.0)
+    assert detail["day_low"] == pytest.approx(10.05)
+    assert detail["last_price"] == pytest.approx(11.0)
+
+
+def test_intraday_flow_pullup_drawdown_and_unsealed_volume_window():
+    intraday = {
+        "available": True,
+        "session_bars": [
+            {"open": close, "high": close, "low": close, "close": close, "amount": 1_000_000}
+            for close in (10.0, 10.3, 10.6, 10.4, 10.7)
+        ],
+    }
+    detail = intraday_flow_detail(intraday, previous_close=10.0, limit_up=11.0)
+
+    assert detail is not None
+    assert detail["touch_index"] is None
+    assert detail["sealed_now"] is False
+    assert detail["pull_up_minutes"] == 4
+    assert detail["pull_up_max_drawdown"] == pytest.approx((10.6 - 10.4) / 10.6)
+    # 未触板：量能窗口覆盖全部 bar，均额持平 → 0
+    assert detail["pre_seal_amount_growth"] == pytest.approx(0.0)
+
+
+def test_intraday_flow_without_limit_price_keeps_pullup_fields_empty():
+    detail = intraday_flow_detail(
+        {
+            "available": True,
+            "session_bars": [
+                {"open": 10.0, "close": 10.5, "amount": 1_000_000},
+                {"open": 10.5, "close": 10.8, "amount": 1_000_000},
+            ],
+        },
+        previous_close=10.0,
+    )
+
+    assert detail is not None
+    assert detail["limit_up"] is None
+    assert detail["touch_index"] is None
+    assert detail["sealed_now"] is False
+    # 启动点不依赖涨停价，仍然可算
+    assert detail["pull_up_minutes"] == 2
+
+
+def test_comprehensive_score_marks_all_missing_data_as_unavailable():
+    result = comprehensive_score({})
+
+    assert result["comprehensive_score"] == 0.0
+    assert result["grade"] == "D"
+    assert result["grade_label"] == "数据不足"
+    assert result["data_completeness"] == 0.0
+    for dimension in result["dimensions"].values():
+        assert dimension["max_score"] == 0.0
+        assert dimension["components"] == {}
+        assert dimension["unavailable_components"]
+    # 缺数据不允许产生任何警示/优势（旧版会报「板块涨幅不大，安全」等假信号）
+    assert result["warnings"] == []
+    assert result["strengths"] == []
+
+
+def test_comprehensive_score_gene_only_scales_and_caps_grade():
+    result = comprehensive_score({
+        "premium_gene": {
+            "next_day_red_rate": 0.5,
+            "first_board_seal_rate": 1.0,
+        },
+    })
+
+    history = result["dimensions"]["history"]
+    assert history["score"] == pytest.approx(18.0)
+    assert history["max_score"] == pytest.approx(24.0)
+    assert history["full_max_score"] == pytest.approx(30.0)
+    assert history["unavailable_components"] == ["consecutive_ability"]
+    # 18/24 = 75 → A 档，但数据完整度 0.24 → 封顶 B
+    assert result["comprehensive_score"] == pytest.approx(75.0)
+    assert result["grade"] == "B"
+    assert result["data_completeness"] == pytest.approx(0.24)
+    # 真实数据驱动的警示保留；缺项的假信号全部消失
+    assert "次日收红率偏低" in result["warnings"]
+    assert "板块涨幅不大，安全" not in result["strengths"]
+    assert "主力资金流出" not in result["warnings"]
+    assert "均线压制" not in result["warnings"]
+    assert "非板块龙头" not in result["warnings"]
+
+
+def test_comprehensive_score_sector_overheat_uses_real_data_only():
+    sector = {
+        "rotation_available": True,
+        "rotation_score": 16.22,
+        "rotation_label": "主线",
+        "five_day_change_pct": 0.18,
+        "days": [{"change_pct": 0.02} for _ in range(5)],
+        "realtime_rank": 1,
+        "realtime_rank_count": 50,
+        "change_pct": 0.05,
+        "up_ratio": 0.9,
+        "leadership": "leader",
+        "is_sector_leader": True,
+        "leader_gap_pct": 0.02,
+        "stock_rank": 1,
+    }
+    result = comprehensive_score({"sector": sector})
+
+    sentiment = result["dimensions"]["sentiment"]
+    assert sentiment["max_score"] == pytest.approx(30.0)
+    assert sentiment["components"]["sector_pattern"] == pytest.approx(12.2, abs=0.05)
+    # 过热：5日涨幅 18% → 1 分；连涨 5 天 → 1 分；排名 1/50 顶部 → 0 分
+    assert sentiment["components"]["overheat_risk"] == pytest.approx(2.0)
+    assert sentiment["components"]["sector_current"] == pytest.approx(5.0)
+    health = result["dimensions"]["health"]
+    assert health["components"]["sector_position"] == pytest.approx(15.0)
+    assert "板块绝对龙头" in result["strengths"]
+    assert "主线板块" in result["strengths"]
+    assert "板块涨幅过大，注意回调风险" in result["warnings"]
+
+
+def test_comprehensive_score_sealed_stock_scores_pullup_not_capital():
+    flow = intraday_flow_detail(
+        _sealed_pullup_intraday(), previous_close=10.0, limit_up=11.0,
+        external_flow={"buy_ratio": 0.0, "sell_ratio": 1.0},
+    )
+    result = comprehensive_score({"intraday_flow": flow})
+
+    health = result["dimensions"]["health"]
+    # 一波流放量拉升：用时 4 + 流畅 3 + 封板前量能 4 = 11/11
+    assert health["components"]["pullup_form"] == pytest.approx(11.0)
+    # 封板后资金流向失真 → 数据不足，不再拿「主力流出」扣分
+    assert "capital_flow" in health["unavailable_components"]
+    # 日K：实体 1.5 + 影线 0.3（无均线数据 → max 2）
+    assert health["components"]["daily_k_pattern"] == pytest.approx(1.8)
+    assert health["max_score"] == pytest.approx(13.0)
+    assert "一波流拉升" in result["strengths"]
+    assert "主力资金流出" not in result["warnings"]
+
+
+def test_comprehensive_score_flags_choppy_pullup():
+    intraday = {
+        "available": True,
+        "session_bars": [
+            {"open": close, "high": close, "low": close, "close": close, "amount": 1_000_000}
+            for close in (10.0, 10.3, 10.6, 10.0, 10.7)
+        ],
+    }
+    flow = intraday_flow_detail(intraday, previous_close=10.0, limit_up=11.0)
+    result = comprehensive_score({"intraday_flow": flow})
+
+    health = result["dimensions"]["health"]
+    # 最大回撤 (10.6-10.0)/10.6 ≈ 5.7% > 5% → 流畅度 0 分
+    assert flow["pull_up_max_drawdown"] == pytest.approx(0.0566, abs=0.001)
+    assert health["components"]["pullup_form"] < 11.0
+    assert "拉升反复，分歧大" in result["warnings"]

@@ -3538,13 +3538,26 @@ class LimitBoardService:
                     change_pct = _finite((stock_rows.get(symbol) or {}).get("change_pct"))
                 if change_pct is None:
                     change_pct = _finite(previous.get("change_pct"))
+                prev_close = (stock_rows.get(symbol) or {}).get("prev_close") or candidate_quotes.get(symbol, {}).get("prev_close")
+                # 涨停价优先取行情/候选行自带值；都没有时按板块规则从昨收推算，
+                # 保证封板检测、封板前量能窗口在手动入口标的上同样生效。
+                score_limit_up = (
+                    _finite(candidate.get("limit_up"))
+                    or _finite(candidate_quotes.get(symbol, {}).get("limit_up"))
+                    or self._limit_up(
+                        {"prev_close": prev_close},
+                        symbol,
+                        self._resolve_name(symbol, (stock_rows.get(symbol) or {}).get("name")),
+                        now.date(),
+                    )
+                )
                 intraday_flow = self._scale_score_detail(
                     intraday_flow_detail(
                         intraday_features.get(symbol),
-                        previous_close=(stock_rows.get(symbol) or {}).get("prev_close")
-                        or candidate_quotes.get(symbol, {}).get("prev_close"),
+                        previous_close=prev_close,
                         external_flow=flow_snapshots.get(symbol),
                         as_of=now.isoformat(),
+                        limit_up=score_limit_up,
                     ),
                     _SCORE_WEIGHTS["intraday_flow"],
                     50.0,
