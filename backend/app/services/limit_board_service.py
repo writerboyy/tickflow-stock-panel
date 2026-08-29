@@ -20,6 +20,7 @@ from app.services.limit_board_scoring import (
     comprehensive_score,
     intraday_flow_detail,
     premium_gene_detail,
+    rotation_detail,
     rotation_only_detail,
     sector_detail,
     technical_detail,
@@ -851,6 +852,12 @@ class LimitBoardService:
             plate_id = str(row.get("plate_id") or "")
             row.update(trend_5m_by_plate.get(plate_id, {}))
             row.update(trend_30m_by_plate.get(plate_id, {}))
+        rotation_payloads = [
+            self._rotation("concept", None, today),
+            self._rotation("industry", 2, today),
+        ]
+        for row in ordered:
+            row.update(self._institutional_sector_fields(row, rotation_payloads, today))
         return {
             "provider": "kaipanla",
             "state": "live",
@@ -862,6 +869,59 @@ class LimitBoardService:
             "trend_5m": trend_5m,
             "trend_30m": trend_30m,
             "rows": ordered,
+        }
+
+    @staticmethod
+    def _institutional_sector_fields(
+        row: dict[str, Any],
+        rotations: list[dict[str, Any]],
+        today: date,
+    ) -> dict[str, Any]:
+        """Attach explainable institutional fields to a sector-strength row."""
+        name = str(row.get("plate_name") or "").strip()
+        histories = [
+            detail
+            for rotation in rotations
+            if isinstance(rotation, dict)
+            for detail in [rotation_detail(rotation, name, today)]
+            if detail is not None
+        ]
+        if not histories:
+            return {}
+        history = max(
+            histories,
+            key=lambda value: (
+                float(value.get("institutional_score") or 0.0)
+                / max(float(value.get("institutional_max_score") or 1.0), 1.0),
+                float(value.get("institutional_score") or 0.0),
+            ),
+        )
+        score = float(history.get("institutional_score") or 0.0)
+        max_score = float(history.get("institutional_max_score") or 0.0)
+        components = dict(history.get("institutional_components") or {})
+        amount = _finite(row.get("amount"))
+        main_net = _finite(row.get("main_net"))
+        flow_ratio = main_net / amount if main_net is not None and amount and amount > 0 else None
+        if flow_ratio is not None:
+            components["money_flow"] = max(0.0, min(1.0, (flow_ratio + 0.20) / 0.60)) * 15.0
+            score += components["money_flow"]
+            max_score += 15.0
+        volume_ratio = _finite(row.get("volume_ratio"))
+        if volume_ratio is not None:
+            components["liquidity"] = max(0.0, min(1.0, (volume_ratio - 0.80) / 1.20)) * 5.0
+            score += components["liquidity"]
+            max_score += 5.0
+        return {
+            "institutional_score": round(score, 2),
+            "institutional_max_score": round(max_score, 2),
+            "institutional_components": {
+                key: round(float(value), 2) for key, value in components.items()
+            },
+            "one_day_change_pct": history.get("one_day_change_pct"),
+            "three_day_change_pct": history.get("three_day_change_pct"),
+            "five_day_change_pct": history.get("five_day_change_pct"),
+            "twenty_day_change_pct": history.get("twenty_day_change_pct"),
+            "top_20_days": history.get("top_20_days"),
         }
 
     @staticmethod

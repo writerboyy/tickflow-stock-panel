@@ -179,6 +179,30 @@ def test_sector_candidate_score_prefers_institutional_score():
     assert LimitBoardService._sector_candidate_score({"score": 12.0}) == pytest.approx(12.0)
 
 
+def test_institutional_sector_fields_expose_history_and_realtime_confirmation():
+    dates = [f"2026-08-{day:02d}" for day in range(10, 15)]
+    rotation = {
+        "dates": dates,
+        "columns": {
+            day: [["通信", 0.01], ["板块一", 0.0], ["板块二", -0.01]]
+            for day in dates
+        },
+    }
+    fields = LimitBoardService._institutional_sector_fields(
+        {"plate_name": "通信", "amount": 1_000_000.0, "main_net": 100_000.0, "volume_ratio": 1.4},
+        [rotation],
+        date(2026, 8, 17),
+    )
+
+    assert fields["institutional_score"] > 0
+    assert fields["institutional_max_score"] > 50
+    assert fields["one_day_change_pct"] == pytest.approx(0.01)
+    assert fields["five_day_change_pct"] is not None
+    assert fields["twenty_day_change_pct"] is None
+    assert "money_flow" in fields["institutional_components"]
+    assert "liquidity" in fields["institutional_components"]
+
+
 class ImmediateExecutor:
     @staticmethod
     def submit(callback, *args):

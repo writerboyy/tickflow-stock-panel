@@ -1779,6 +1779,14 @@ export interface LimitBoardSectorStrengthRow {
   main_sell?: number | null
   volume_ratio?: number | null
   institution_increase?: number | null
+  institutional_score?: number | null
+  institutional_max_score?: number | null
+  institutional_components?: Record<string, number>
+  one_day_change_pct?: number | null
+  three_day_change_pct?: number | null
+  five_day_change_pct?: number | null
+  twenty_day_change_pct?: number | null
+  top_20_days?: number | null
   strength_delta_5m?: number | null
   main_net_delta_5m?: number | null
   strength_speed_per_min_5m?: number | null
