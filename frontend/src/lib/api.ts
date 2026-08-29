@@ -2739,6 +2739,8 @@ export interface Preferences {
   minute_intraday_refresh: boolean
   minute_intraday_refresh_interval: number
   monitor_ext_fields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
+  /** QMT 交易面板「快捷金额」按钮的 4 个档位(元), 用户可编辑 */
+  qmt_quick_amount_presets?: number[]
   large_orders?: {
     enabled: boolean
     score_threshold: number
@@ -3738,6 +3740,12 @@ export const api = {
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
       method: 'PUT',
       body: JSON.stringify({ interval }),
+    }),
+  /** 保存 QMT 交易面板的快捷金额预设(4 个档位, 元) */
+  updateQmtQuickAmountPresets: (presets: number[]) =>
+    request<{ qmt_quick_amount_presets: number[] }>('/api/settings/preferences/qmt-quick-amount-presets', {
+      method: 'PUT',
+      body: JSON.stringify({ presets }),
     }),
   updateLimitLadderMonitor: (enabled: boolean) =>
     request<{ limit_ladder_monitor_enabled: boolean }>('/api/settings/preferences/limit-ladder-monitor', {

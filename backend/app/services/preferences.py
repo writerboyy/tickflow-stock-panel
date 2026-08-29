@@ -1142,3 +1142,40 @@ def set_financial_sync_time(table: str, iso_ts: str) -> None:
     times = get_financial_sync_times()
     times[table] = iso_ts
     save({"financial_sync_times": times})
+
+
+# ===== QMT 交易快捷金额预设 =====
+# 交易面板中快捷金额按钮的 4 个档位,用户可编辑,重启后仍保留。
+
+_QMT_QUICK_AMOUNT_PRESETS_DEFAULT = [10_000, 20_000, 30_000, 40_000]
+_QMT_QUICK_AMOUNT_MIN = 100
+_QMT_QUICK_AMOUNT_MAX = 10_000_000
+
+
+def _normalize_quick_amount(value, index: int) -> int:
+    """将单个快捷金额值规范化为合法整数。"""
+    try:
+        amount = int(value)
+    except (TypeError, ValueError):
+        return _QMT_QUICK_AMOUNT_PRESETS_DEFAULT[index]
+    return max(_QMT_QUICK_AMOUNT_MIN, min(_QMT_QUICK_AMOUNT_MAX, amount))
+
+
+def get_qmt_quick_amount_presets() -> list[int]:
+    """返回 QMT 交易快捷金额预设,长度固定为 4。"""
+    raw = load().get("qmt_quick_amount_presets")
+    if not isinstance(raw, list):
+        return list(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT)
+    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(raw[:4])]
+    while len(cleaned) < 4:
+        cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
+    return cleaned
+
+
+def set_qmt_quick_amount_presets(presets: list) -> list[int]:
+    """保存并返回规范后的 QMT 交易快捷金额预设。"""
+    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(presets[:4])]
+    while len(cleaned) < 4:
+        cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
+    save({"qmt_quick_amount_presets": cleaned})
+    return cleaned

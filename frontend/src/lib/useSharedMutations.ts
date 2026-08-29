@@ -2,7 +2,7 @@
  * 共享 mutation hooks — 消除多页面重复的 useMutation 调用。
  */
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from './api'
+import { api, type Preferences } from './api'
 import { QK } from './queryKeys'
 
 /** 切换实时行情 — Layout / Data 共用 */
@@ -25,6 +25,28 @@ export function useUpdateQuoteInterval() {
     onSuccess: (data) => {
       qc.setQueryData(QK.quoteInterval, data)
       qc.invalidateQueries({ queryKey: QK.quoteStatus })
+    },
+  })
+}
+
+/** 保存 QMT 交易面板的快捷金额预设 — QmtTradePanel / LimitBoard 共用 */
+export function useUpdateQmtQuickAmountPresets() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (presets: number[]) => api.updateQmtQuickAmountPresets(presets),
+    // 乐观更新: 点完成后立刻显示新档位, 不等请求返回 (否则会闪回旧值)
+    onMutate: async (presets) => {
+      await qc.cancelQueries({ queryKey: QK.preferences })
+      const previous = qc.getQueryData<Preferences>(QK.preferences)
+      qc.setQueryData<Preferences>(QK.preferences, old =>
+        old ? { ...old, qmt_quick_amount_presets: presets } : old)
+      return { previous }
+    },
+    onError: (_error, _presets, context) => {
+      if (context?.previous) qc.setQueryData(QK.preferences, context.previous)
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
     },
   })
 }

@@ -529,6 +529,7 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        "qmt_quick_amount_presets": preferences.get_qmt_quick_amount_presets(),
         **preferences.get_mining_schedule(),
     }
 
@@ -1245,6 +1246,23 @@ def update_webhook_default_channels(req: WebhookDefaultChannelsIn) -> dict:
 
     saved = preferences.set_webhook_default_channels(req.channels)
     return {"webhook_default_channels": saved}
+
+
+class QmtQuickAmountPresetsIn(BaseModel):
+    presets: list[int]  # 交易面板「快捷金额」按钮的 4 个档位(元)
+
+
+@router.put("/preferences/qmt-quick-amount-presets")
+def update_qmt_quick_amount_presets(req: QmtQuickAmountPresetsIn) -> dict:
+    """保存 QMT 交易面板的快捷金额预设。
+
+    用户在交易面板点击铅笔图标编辑 4 个快捷金额档位后调用,
+    持久化到 preferences, 重启交易面板后仍显示用户自定义值。
+    """
+    from app.services import preferences
+
+    saved = preferences.set_qmt_quick_amount_presets(req.presets)
+    return {"qmt_quick_amount_presets": saved}
 
 
 @router.put("/preferences/quote-interval")

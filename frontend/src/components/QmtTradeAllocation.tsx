@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { Check, Pencil } from 'lucide-react'
+import { Check, Loader2, Pencil } from 'lucide-react'
 import { cn } from '@/lib/cn'
+import { usePreferences } from '@/lib/useSharedQueries'
+import { useUpdateQmtQuickAmountPresets } from '@/lib/useSharedMutations'
 
 export type QmtTradeAllocationMode =
   | 'available'
@@ -82,8 +84,17 @@ export function QmtTradeAllocationControls({
   className?: string
 }) {
   const hasValueInput = mode === 'fixed' || mode === 'volume'
-  const [quickAmounts, setQuickAmounts] = useState<number[]>(() => [...QMT_QUICK_AMOUNT_PRESETS])
+  const { data: preferences } = usePreferences()
+  const saveQuickAmounts = useUpdateQmtQuickAmountPresets()
+  const savedQuickAmounts = preferences?.qmt_quick_amount_presets?.length
+    ? preferences.qmt_quick_amount_presets
+    : QMT_QUICK_AMOUNT_PRESETS
   const [editingQuickAmounts, setEditingQuickAmounts] = useState(false)
+  const [draftQuickAmounts, setDraftQuickAmounts] = useState<number[] | null>(null)
+  // 编辑中用草稿, 否则用后端保存值 — 让修改后的档位在重开面板、重启后仍然保留。
+  const quickAmounts = editingQuickAmounts && draftQuickAmounts
+    ? draftQuickAmounts
+    : savedQuickAmounts
   const inputLabel = mode === 'volume' ? '确认数量（股）' : '确认金额'
   const creditAccount = String(accountType || '').toUpperCase() === 'CREDIT'
   const displayedBasisLabel = basisLabel === '可用资金'
@@ -117,16 +128,24 @@ export function QmtTradeAllocationControls({
           <button
             type="button"
             aria-label={editingQuickAmounts ? '完成快捷金额编辑' : '编辑快捷金额'}
-            title={editingQuickAmounts ? '完成快捷金额编辑' : '编辑快捷金额'}
+            title={editingQuickAmounts ? '完成并保存快捷金额' : '编辑快捷金额'}
             disabled={disabled}
             onClick={() => {
               if (editingQuickAmounts) {
-                setQuickAmounts(current => current.map(amount => Number.isFinite(amount) && amount >= 100 ? amount : 100))
+                const next = quickAmounts.map(amount => Number.isFinite(amount) && amount >= 100 ? amount : 100)
+                setDraftQuickAmounts(null)
+                if (next.join(',') !== savedQuickAmounts.join(',')) {
+                  saveQuickAmounts.mutate(next)
+                }
+              } else {
+                setDraftQuickAmounts([...quickAmounts])
               }
               setEditingQuickAmounts(current => !current)
             }}
             className="grid h-5 w-5 place-items-center rounded text-muted hover:bg-elevated hover:text-accent disabled:opacity-40"
-          >{editingQuickAmounts ? <Check className="h-3 w-3" /> : <Pencil className="h-3 w-3" />}</button>
+          >{saveQuickAmounts.isPending
+            ? <Loader2 className="h-3 w-3 animate-spin" />
+            : editingQuickAmounts ? <Check className="h-3 w-3" /> : <Pencil className="h-3 w-3" />}</button>
         </div>
         {editingQuickAmounts ? quickAmounts.map((amount, index) => <input
           key={index}
@@ -138,9 +157,9 @@ export function QmtTradeAllocationControls({
           disabled={disabled}
           onChange={event => {
             const nextAmount = Number(event.target.value)
-            setQuickAmounts(current => current.map((value, itemIndex) => itemIndex === index ? nextAmount : value))
+            setDraftQuickAmounts(current => (current ?? savedQuickAmounts).map((value, itemIndex) => itemIndex === index ? nextAmount : value))
           }}
-          onBlur={() => setQuickAmounts(current => current.map((value, itemIndex) => itemIndex === index && (!Number.isFinite(value) || value < 100) ? 100 : value))}
+          onBlur={() => setDraftQuickAmounts(current => (current ?? savedQuickAmounts).map((value, itemIndex) => itemIndex === index && (!Number.isFinite(value) || value < 100) ? 100 : value))}
           className="h-7 w-full min-w-0 rounded border border-accent/50 bg-accent/5 px-2 text-right font-mono text-[10px] text-foreground outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 disabled:opacity-40"
         />) : quickAmounts.map((amount, index) => <button
           key={index}
