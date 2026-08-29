@@ -1902,6 +1902,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
             const institutionalTitle = row.institutional_components
               ? Object.entries(row.institutional_components).map(([key, value]) => `${key} ${value.toFixed(1)}`).join(' · ')
               : undefined
+            const institutionalScoreLabel = row.institutional_score != null && row.institutional_max_score != null
+              ? `机构 ${row.institutional_score.toFixed(1)}/${row.institutional_max_score.toFixed(0)}`
+              : null
             return <tr
               key={row.plate_id}
               ref={element => {
@@ -1920,7 +1923,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
               }}
               className={`cursor-pointer border-t border-border/70 outline-none hover:bg-elevated/50 focus-visible:bg-elevated ${selected && linked ? 'bg-warning/25 ring-1 ring-inset ring-warning/60' : linked ? 'bg-warning/10' : selected ? 'bg-accent/20' : ''}`}
             >
-              <td className="px-1.5 py-1.5"><div className={row.is_child ? 'relative ml-2 pl-3 before:absolute before:left-0 before:top-0 before:h-1/2 before:w-2 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1 text-[11px] font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="font-mono text-[8px] text-muted">{row.plate_id}</div>{row.institutional_score != null && row.institutional_max_score != null ? <div className="mt-0.5 font-mono text-[8px] text-accent" title={institutionalTitle}><div>机构 {row.institutional_score.toFixed(1)}/{row.institutional_max_score.toFixed(0)}</div>{institutionalPeriods ? <div className="whitespace-nowrap text-[7px] text-muted">{institutionalPeriods}</div> : null}</div> : null}</div></td>
+              <td className="px-1.5 py-1.5"><div className={row.is_child ? 'relative ml-2 pl-3 before:absolute before:left-0 before:top-0 before:w-2 before:border-b before:border-l before:border-border' : ''}><div className="flex items-center gap-1 text-[11px] font-medium">{linked ? <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-label="首板或反包关联板块" /> : null}<span className="truncate">{row.plate_name || '--'}</span></div><div className="flex items-center justify-between gap-2 font-mono text-[8px] text-muted"><span>{row.plate_id}</span>{institutionalScoreLabel ? <span className="shrink-0 text-accent" title={institutionalTitle}>{institutionalScoreLabel}</span> : null}</div>{institutionalPeriods ? <div className="whitespace-nowrap text-right font-mono text-[7px] text-muted">{institutionalPeriods}</div> : null}</div></td>
               <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-xs font-semibold tabular-nums text-secondary">{row.strength?.toFixed(0) ?? '--'}</td>
               <td className="whitespace-nowrap px-1.5 py-1.5 text-right font-mono text-[10px] font-medium tabular-nums text-secondary">{moneyYi(row.main_net)}</td>
             </tr>
