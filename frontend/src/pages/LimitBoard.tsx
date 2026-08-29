@@ -927,10 +927,10 @@ function LimitBoardAllocationDialog({
     : previewOrder ?? localPreviewOrder
   const effectiveCreditBuyMode = previewOrder?.credit_buy_mode ?? creditBuyMode
   useEffect(() => {
-    // Only trust the backend's mode switch when the preview was computed for
-    // the same mode we are showing. The fixed preview is derived locally, so
-    // switching based on a quarter basis preview would be misleading.
-    if (!creditBuy || allocationPreview.isFetching || !previewOrder || creditOpvolumePending || mode === 'fixed') return
+    // Trust the backend's effective mode whenever it differs from what the
+    // user selected. This keeps the dropdown in sync with the warning text
+    // ("已自动切换为...") even when the allocation mode is fixed.
+    if (!creditBuy || allocationPreview.isFetching || !previewOrder || creditOpvolumePending) return
     const requestedMode = previewOrder.requested_credit_buy_mode ?? creditBuyMode
     const effectiveMode = previewOrder.credit_buy_mode
     if (requestedMode === creditBuyMode && effectiveMode && effectiveMode !== creditBuyMode) {
