@@ -1,13 +1,17 @@
 """生成 09:24:57 最后 3 秒采集用的竞价重点池
 
-数据来源（可叠加）：
+数据来源：
   1. 最近交易日的涨停股（ext_kpl_limitup）—— 次日最可能出现竞价抢筹
-  2. data/pools 下的自定义池（若存在 symbol 列）
+  2. --extra 指定的自定义池（可选）
+
+注意：data/pools/CN_Equity_A.parquet 是全市场池（约 5555 只），
+不可作为重点池来源——那会让 092457 退化成 56 个批次，远超 3 秒窗口。
 
 用法:
     ./backend/.venv/bin/python backend/scripts/build_auction_focus.py
     ./backend/.venv/bin/python backend/scripts/build_auction_focus.py --date 2026-08-27
     ./backend/.venv/bin/python backend/scripts/build_auction_focus.py --max 500
+    ./backend/.venv/bin/python backend/scripts/build_auction_focus.py --extra data/pools/my_pool.parquet
 
 输出: data/instruments/auction_focus.parquet（仅 symbol 列）
 """
@@ -23,7 +27,6 @@ import polars as pl
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = PROJECT_ROOT / "data"
 LIMITUP_GLOB = "data/ext_data/ext_kpl_limitup/timeseries/date=*/part.parquet"
-POOLS_DIR = DATA_DIR / "pools"
 
 
 def latest_limitup() -> tuple[date, pl.DataFrame] | None:
@@ -35,25 +38,22 @@ def latest_limitup() -> tuple[date, pl.DataFrame] | None:
     return day, pl.read_parquet(path)
 
 
-def pool_symbols() -> list[str]:
-    """data/pools 下自定义池的 symbol。"""
-    out: list[str] = []
-    if not POOLS_DIR.exists():
-        return out
-    for path in sorted(POOLS_DIR.rglob("*.parquet")):
-        try:
-            frame = pl.read_parquet(path)
-        except Exception:  # noqa: BLE001
-            continue
-        if "symbol" in frame.columns:
-            out.extend(str(v).strip().upper() for v in frame["symbol"].drop_nulls().to_list())
-    return out
+def extra_symbols(path: Path) -> list[str]:
+    """读取 --extra 指定的自定义池（需含 symbol 列）。"""
+    frame = pl.read_parquet(path)
+    if "symbol" not in frame.columns:
+        sys.exit(f"自定义池缺少 symbol 列: {path}")
+    return [str(v).strip().upper() for v in frame["symbol"].drop_nulls().to_list()]
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="生成竞价重点池 auction_focus.parquet")
     ap.add_argument("--date", help="取该日涨停股，默认最新分区")
-    ap.add_argument("--max", type=int, default=2000, help="重点池上限（保持在采集窗口内）")
+    ap.add_argument(
+        "--max", type=int, default=300,
+        help="重点池上限（默认 300，约 3 个采集批次，可稳在 3 秒窗口内）",
+    )
+    ap.add_argument("--extra", help="追加的自定义池 parquet 路径（需含 symbol 列）")
     args = ap.parse_args()
 
     symbols: list[str] = []
@@ -74,10 +74,10 @@ def main() -> None:
         symbols.extend(str(v).strip().upper() for v in frame["symbol"].drop_nulls().to_list())
     print(f"涨停股({src_day}): {len(symbols)} 只")
 
-    custom = pool_symbols()
-    if custom:
-        print(f"自定义池: {len(custom)} 条（去重前）")
-        symbols.extend(custom)
+    if args.extra:
+        extra = extra_symbols(Path(args.extra))
+        print(f"自定义池({args.extra}): {len(extra)} 条（去重前）")
+        symbols.extend(extra)
 
     # 只保留 instruments 维表内的在市股票，避免扶摇拒绝未知标的
     inst_path = DATA_DIR / "instruments" / "instruments.parquet"
