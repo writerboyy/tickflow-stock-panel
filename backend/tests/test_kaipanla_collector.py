@@ -475,8 +475,9 @@ async def test_sector_strength_close_snapshot_persists_at_market_close(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_sector_strength_paginates_full_vendor_ranking(tmp_path, monkeypatch):
-    """厂商对超大 st 静默降级（st=1000 只回个位数行），必须按 60/页翻页拉全榜单。"""
+async def test_sector_strength_keeps_top_thirty_with_children(tmp_path, monkeypatch):
+    """厂商对超大 st 静默降级（st=1000 只回个位数行）→ 按 60/页翻页；
+    榜单入库只保留前 30 名，子板块跟随父板块去留。"""
     _configured(monkeypatch)
     now = datetime(2026, 5, 15, 10, 0, tzinfo=CN_TZ)
     monkeypatch.setattr(collector_module, "cn_now", lambda: now)
@@ -487,17 +488,19 @@ async def test_sector_strength_paginates_full_vendor_ranking(tmp_path, monkeypat
 
     def respond(params):
         index = int(params.get("Index") or 0)
-        if index >= 85:
+        if index >= 120:
             return {"Day": ["2026-05-15"], "list": []}
-        count = min(60, 85 - index)
         payload = {
             "Day": ["2026-05-15"],
             "Title": ["第二季度机构增仓"],
-            "list": [make_row(index + offset + 1) for offset in range(count)],
+            "list": [make_row(index + offset + 1) for offset in range(60)],
         }
-        if index == 60:
-            payload["list_soninfo"] = [["P901", "子板块", 10.0, 1.0, 0.1, 10, 2, 5, 3, 1.0, 50]]
-            payload["list_son"] = ["P085"]
+        if index == 0:
+            payload["list_soninfo"] = [
+                ["P901", "P030的子板块", 10.0, 1.0, 0.1, 10, 2, 5, 3, 1.0, 50],
+                ["P902", "P045的子板块", 9.0, 0.9, 0.1, 10, 2, 5, 3, 1.0, 50],
+            ]
+            payload["list_son"] = ["P030", "P045"]
         return payload
 
     calls = []
@@ -505,18 +508,21 @@ async def test_sector_strength_paginates_full_vendor_ranking(tmp_path, monkeypat
         tmp_path, lambda: FakeClient({"sector_strength": respond}, calls),
     )
 
-    assert await collector.refresh_sector_strength(now.date()) == 86
+    assert await collector.refresh_sector_strength(now.date()) == 31
     rows = collector.sector_strength_snapshot()["rows"]
-    assert len(rows) == 86
+    assert len(rows) == 31
     assert rows[0]["rank"] == 1
     assert rows[0]["plate_id"] == "P001"
-    assert rows[-1]["rank"] == 86
-    assert rows[-1]["rank_count"] == 86
+    assert rows[29]["plate_id"] == "P030"
     assert rows[-1]["is_child"] is True
-    assert rows[-1]["parent_plate_id"] == "P085"
+    assert rows[-1]["parent_plate_id"] == "P030"
+    assert rows[-1]["rank_count"] == 31
+    # P045 在 30 名以外，其子板块一并丢弃
+    assert all(row["plate_id"] != "P902" for row in rows)
     assert collector.sector_strength_snapshot()["institution_label"] == "第二季度机构增仓"
     requested = [params for endpoint, params in calls if endpoint == "sector_strength"]
-    assert {params["Index"] for params in requested} == {0, 60}
+    # 第一页 60 行已覆盖前 30，不再翻页
+    assert {params["Index"] for params in requested} == {0}
     assert all(params["st"] == 60 for params in requested)
 
 

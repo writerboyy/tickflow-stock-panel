@@ -45,8 +45,8 @@ def test_shortline_socket_snapshot_uses_current_top_boards(tmp_path, monkeypatch
     assert snapshot["rows"][0]["main_net"] == 100.0
 
 
-def test_shortline_preload_covers_top_thirty_boards(tmp_path, monkeypatch):
-    """成分行情预加载覆盖强度榜前 30 名（从最初的前 10 放宽）。"""
+def test_shortline_preload_covers_top_sixty_boards(tmp_path, monkeypatch):
+    """成分行情预加载覆盖强度榜前 60 名（从最初的前 10 放宽）。"""
     collector = KaipanlaCollector(tmp_path)
     today = date(2026, 8, 18)
     collector._sector_strength = {
@@ -66,10 +66,10 @@ def test_shortline_preload_covers_top_thirty_boards(tmp_path, monkeypatch):
         @staticmethod
         def fetch_blocks(plate_ids):
             plate_ids = list(plate_ids)
-            assert len(plate_ids) == 30
+            assert len(plate_ids) == 60
             assert "801010" in plate_ids
-            assert "801030" in plate_ids
-            assert "801031" not in plate_ids
+            assert "801060" in plate_ids
+            assert "801061" not in plate_ids
             return {
                 plate_id: [{
                     "plate_id": plate_id, "code": "600000", "symbol": "600000",
@@ -82,10 +82,10 @@ def test_shortline_preload_covers_top_thirty_boards(tmp_path, monkeypatch):
     monkeypatch.setattr("app.plugins.kaipanla.collector.load_socket_login_packet", lambda: b"packet")
     monkeypatch.setattr("app.plugins.kaipanla.collector.KaipanlaSocketClient", SocketClient)
 
-    assert asyncio.run(collector.refresh_shortline_constituents(today)) == 30
+    assert asyncio.run(collector.refresh_shortline_constituents(today)) == 60
     snapshot = collector.shortline_constituents_snapshot()
     assert snapshot["state"] == "live"
-    assert len(snapshot["plate_ids"]) == 30
+    assert len(snapshot["plate_ids"]) == 60
 
 
 @pytest.mark.asyncio

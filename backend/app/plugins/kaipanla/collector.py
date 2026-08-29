@@ -85,9 +85,11 @@ _REFERENCE_PAGE_SIZE = 1000
 _SECTOR_STRENGTH_PAGE_SIZE = 60
 _SECTOR_STRENGTH_MAX_PAGES = 10
 # 短线成分行情预加载板块数上限：全榜单 300+ 个板块每个 5s 周期都抓成分会
-# 把刷新循环拖到分钟级，反而拖死头部板块的数据新鲜度。前 30 名覆盖候选池
+# 把刷新循环拖到分钟级，反而拖死头部板块的数据新鲜度。前 60 名覆盖候选池
 # 与板块地位评分的实际需求；榜单外的板块仍可按需单抓（shortline_constituents_for_plate）。
-_SHORTLINE_PRELOAD_PLATE_LIMIT = 30
+_SHORTLINE_PRELOAD_PLATE_LIMIT = 60
+# 板块强度榜入库/展示只保留前 30 名（用户拍板）：9 行太少、300+ 全榜单是噪音。
+_SECTOR_STRENGTH_KEEP = 30
 
 
 def _in_sector_strength_window(value: clock_time) -> bool:
@@ -753,7 +755,16 @@ class KaipanlaCollector:
                     )
                     payloads.append(payload)
                     raw_list = payload.get("list") if isinstance(payload, dict) else None
-                    if not isinstance(raw_list, list) or len(raw_list) < _SECTOR_STRENGTH_PAGE_SIZE:
+                    accumulated = sum(
+                        len(item.get("list") or [])
+                        for item in payloads
+                        if isinstance(item, dict)
+                    )
+                    if (
+                        not isinstance(raw_list, list)
+                        or len(raw_list) < _SECTOR_STRENGTH_PAGE_SIZE
+                        or accumulated >= _SECTOR_STRENGTH_KEEP
+                    ):
                         break
             first = payloads[0] if payloads else {}
             reported = first.get("Day") if isinstance(first, dict) else None
@@ -781,10 +792,22 @@ class KaipanlaCollector:
                 ):
                     merged_soninfo.extend(son_info)
                     merged_son.extend(son)
+            # 只保留前 _SECTOR_STRENGTH_KEEP 名父板块；子板块跟随其父板块去留。
+            merged_list = merged_list[:_SECTOR_STRENGTH_KEEP]
+            kept_ids = {
+                str(row[0]).strip()
+                for row in merged_list
+                if isinstance(row, list) and row
+            }
+            child_pairs = [
+                (info, parent)
+                for info, parent in zip(merged_soninfo, merged_son, strict=False)
+                if str(parent).strip() in kept_ids
+            ]
             merged: dict = {"list": merged_list}
-            if merged_soninfo:
-                merged["list_soninfo"] = merged_soninfo
-                merged["list_son"] = merged_son
+            if child_pairs:
+                merged["list_soninfo"] = [info for info, _parent in child_pairs]
+                merged["list_son"] = [parent for _info, parent in child_pairs]
             rows = parse_sector_strength(merged)
             if isinstance(titles, list) and titles:
                 institution_label = str(titles[0] or "").strip() or None
