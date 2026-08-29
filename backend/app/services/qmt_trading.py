@@ -114,6 +114,7 @@ _CREDIT_ASSET_FIELDS = frozenset(
      *_CREDIT_FINANCING_QUOTA_FIELDS),
 )
 _CREDIT_BUY_MODES = frozenset({"collateral", "financing"})
+_CREDIT_SUBJECT_CACHE_SECONDS = 180.0
 
 _CREDIT_RAW_FIELD_TARGETS = {
     "m_dFinEnbuyBalance": ("fin_enbuy_balance",),
@@ -293,6 +294,8 @@ class QmtZmqRpcClient:
         self._lock = threading.Lock()
         self._retired = False
         self._credit_opvolume_cache: dict[tuple[str, float, str], dict[str, Any]] = {}
+        self._credit_subjects_cache: list[dict[str, Any]] | None = None
+        self._credit_subjects_cache_at = 0.0
 
     @staticmethod
     def _normalise_connection_mode(value: Any) -> str:
@@ -522,6 +525,71 @@ class QmtZmqRpcClient:
                 return latest
             time.sleep(0.2)
         return latest if isinstance(latest, dict) else {"status": "pending", "stock_code": symbol, "max_volume": None, "max_amount": None}
+
+    def get_credit_subject(self, stock_code: str) -> dict[str, Any]:
+        """Return whether one security is currently a financing subject.
+
+        QMT exposes this as the account's full ``get_assure_contract`` list;
+        cache it briefly because the list is large and changes much less often
+        than a preview dialog is opened.  An unavailable bridge is kept
+        distinct from an empty match so callers can retain their compatibility
+        fallback when the newer query is not supported.
+        """
+        symbol = str(stock_code or "").strip().upper()
+        if not symbol:
+            return {"status": "unavailable", "stock_code": symbol, "eligible": None}
+        now = time.monotonic()
+        with self._lock:
+            subjects = self._credit_subjects_cache
+            cache_age = now - self._credit_subjects_cache_at
+        if subjects is None or cache_age > _CREDIT_SUBJECT_CACHE_SECONDS:
+            try:
+                rows = self.call("query_credit_subjects", {"account_id": self.account_id})
+            except Exception:  # noqa: BLE001 - older bridges may not expose the query
+                return {"status": "unavailable", "stock_code": symbol, "eligible": None}
+            if not isinstance(rows, list) or not rows:
+                return {"status": "unavailable", "stock_code": symbol, "eligible": None}
+            subjects = [dict(row) for row in rows if isinstance(row, dict)]
+            if not subjects:
+                return {"status": "unavailable", "stock_code": symbol, "eligible": None}
+            with self._lock:
+                self._credit_subjects_cache = subjects
+                self._credit_subjects_cache_at = now
+
+        code, _, exchange = symbol.partition(".")
+        matched = None
+        for row in subjects:
+            instrument = str(
+                row.get("m_strInstrumentID")
+                or row.get("instrument_id")
+                or row.get("stock_code")
+                or row.get("symbol")
+                or ""
+            ).strip().upper()
+            row_exchange = str(
+                row.get("m_strExchangeID") or row.get("exchange_id") or ""
+            ).strip().upper()
+            if instrument == symbol or instrument == code and (not exchange or row_exchange == exchange):
+                matched = row
+                break
+        if matched is None:
+            return {
+                "status": "ready",
+                "stock_code": symbol,
+                "eligible": False,
+                "subject": None,
+            }
+        raw_status = matched.get("m_eFinStatus")
+        try:
+            eligible = int(raw_status) == 48
+        except (TypeError, ValueError):
+            eligible = str(raw_status or "").strip().upper() in {"48", "NORMAL", "OK"}
+        return {
+            "status": "ready",
+            "stock_code": symbol,
+            "eligible": eligible,
+            "subject": matched,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         """同一轮读取账户、持仓、委托和成交；任一步失败则整轮失败。"""
@@ -1067,10 +1135,35 @@ class QmtTradingService:
         credit_buy_mode: str,
         account: dict[str, Any],
     ) -> tuple[float | None, str, float | None, dict[str, Any] | None]:
-        """Prefer QMT's per-symbol limit when account-level fields are absent."""
+        """Resolve credit buying power without treating account cash as symbol credit.
+
+        Financing buying power is a property of both the account and the
+        security.  QMT's account row only contains the former, so always ask
+        for the per-symbol limit in financing mode.  A ready result, including
+        a zero-volume result, is authoritative; account-level fields are only
+        a compatibility fallback when the bridge cannot provide that query.
+        """
         amount, label, financing_available = self._buying_power(account, credit_buy_mode)
-        if self.account_type != "CREDIT" or amount not in (None, 0.0):
+        if self.account_type != "CREDIT" or (
+            credit_buy_mode != "financing" and amount not in (None, 0.0)
+        ):
             return amount, label, financing_available, None
+        if credit_buy_mode == "financing":
+            subject_getter = getattr(self.client, "get_credit_subject", None)
+            if callable(subject_getter):
+                try:
+                    subject = subject_getter(symbol)
+                except Exception:  # noqa: BLE001 - fall through to opvolume compatibility path
+                    subject = None
+                if isinstance(subject, dict) and subject.get("status") == "ready" and subject.get("eligible") is False:
+                    detail = {
+                        "status": "ready",
+                        "stock_code": symbol,
+                        "max_volume": 0,
+                        "max_amount": 0,
+                        "reason": "not_financing_subject",
+                    }
+                    return 0.0, "该股票不可融资买入", financing_available, detail
         getter = getattr(self.client, "get_credit_opvolume", None)
         if not callable(getter):
             return amount, label, financing_available, None
@@ -1080,10 +1173,16 @@ class QmtTradingService:
             detail = {"status": "unavailable", "stock_code": symbol, "max_volume": None}
         if not isinstance(detail, dict) or detail.get("status") != "ready":
             return amount, label, financing_available, detail if isinstance(detail, dict) else None
-        max_volume = int(detail.get("max_volume") or 0)
+        try:
+            max_volume = int(detail.get("max_volume") or 0)
+        except (TypeError, ValueError):
+            return amount, label, financing_available, detail
+        if max_volume < 0:
+            return amount, label, financing_available, detail
+        max_amount = _float(detail.get("max_amount"))
         return (
-            round(max_volume * price, 2),
-            "该股票最大可买金额",
+            round(max_amount if max_amount is not None else max_volume * price, 2),
+            "该股票最大融资可买",
             financing_available,
             detail,
         )
@@ -1111,6 +1210,7 @@ class QmtTradingService:
             raise ValueError("限价必须大于 0")
         requested_credit_buy_mode = str(request.get("requested_credit_buy_mode") or credit_buy_mode).strip().lower()
         switched_credit_buy_mode = requested_credit_buy_mode != credit_buy_mode
+        financing_symbol_unavailable = False
         if action == "SELL":
             positions = snapshot.get("positions") or []
             row = next((item for item in positions if item.get("symbol") == symbol), None)
@@ -1120,6 +1220,12 @@ class QmtTradingService:
             account = snapshot.get("account") or {}
             buying_power, _label, _financing_available, detail = self._credit_symbol_buying_power(
                 symbol, price, credit_buy_mode, account,
+            )
+            financing_symbol_unavailable = (
+                credit_buy_mode == "financing"
+                and isinstance(detail, dict)
+                and detail.get("status") == "ready"
+                and buying_power == 0
             )
             if self.account_type == "CREDIT":
                 fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
@@ -1151,7 +1257,13 @@ class QmtTradingService:
             "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
             "requested_credit_buy_mode": requested_credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
             "credit_buy_mode_switched": switched_credit_buy_mode,
-            "credit_buy_mode_reason": "首选买入额度不足，已自动切换" if switched_credit_buy_mode else None,
+            "credit_buy_mode_reason": (
+                "该股票不可融资买入，已自动切换为担保品买入"
+                if switched_credit_buy_mode and financing_symbol_unavailable
+                else "首选买入额度不足，已自动切换"
+                if switched_credit_buy_mode
+                else None
+            ),
         }
 
     def _allocation_preview(
@@ -1176,6 +1288,7 @@ class QmtTradingService:
 
         financing_available = None
         credit_opvolume = None
+        financing_buying_power_amount = None
         requested_credit_buy_mode = str(request.get("credit_buy_mode") or "collateral").strip().lower()
         credit_buy_mode = requested_credit_buy_mode
         if action == "BUY":
@@ -1196,6 +1309,15 @@ class QmtTradingService:
                     raise QmtRpcError("QMT 可用资金无效，无法计算委托金额")
             else:
                 primary_basis_amount = basis_amount
+            if requested_credit_buy_mode == "financing":
+                # Keep the requested financing result separate from the
+                # effective candidate.  A collateral fallback must not make a
+                # non-financing symbol look as though it had financing power.
+                financing_buying_power_amount = (
+                    basis_amount
+                    if credit_opvolume and credit_opvolume.get("status") == "ready"
+                    else None
+                )
             available_volume = None
         else:
             row = next(
@@ -1241,7 +1363,7 @@ class QmtTradingService:
         switched_credit_buy_mode = False
         if action == "BUY" and self.account_type == "CREDIT":
             fallback_mode = _fallback_credit_buy_mode(credit_buy_mode)
-            fallback_basis, fallback_label, _, fallback_opvolume = self._credit_symbol_buying_power(
+            fallback_basis, fallback_label, _, _fallback_opvolume = self._credit_symbol_buying_power(
                 symbol, price, fallback_mode, account,
             )
             if fallback_basis is not None and fallback_basis >= 0:
@@ -1254,7 +1376,6 @@ class QmtTradingService:
                 if primary_insufficient and fallback_candidate["actual_amount"] > candidate["actual_amount"] and fallback_candidate["volume"] >= 100:
                     candidate = fallback_candidate
                     credit_buy_mode = fallback_mode
-                    credit_opvolume = fallback_opvolume
                     switched_credit_buy_mode = True
 
         if (
@@ -1275,7 +1396,15 @@ class QmtTradingService:
             "credit_buy_mode": credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
             "requested_credit_buy_mode": requested_credit_buy_mode if self.account_type == "CREDIT" and action == "BUY" else None,
             "credit_buy_mode_switched": switched_credit_buy_mode,
-            "credit_buy_mode_reason": "首选买入额度不足，已自动切换为" + ("担保品买入" if credit_buy_mode == "collateral" else "融资买入") if switched_credit_buy_mode else None,
+            "credit_buy_mode_reason": (
+                "该股票不可融资买入，已自动切换为担保品买入"
+                if switched_credit_buy_mode
+                and requested_credit_buy_mode == "financing"
+                and financing_buying_power_amount == 0
+                else "首选买入额度不足，已自动切换为" + ("担保品买入" if credit_buy_mode == "collateral" else "融资买入")
+                if switched_credit_buy_mode
+                else None
+            ),
             "allocation_mode": mode,
             "allocation_value": requested_amount if mode == "fixed" else None,
             "basis_label": candidate["basis_label"],
@@ -1283,6 +1412,7 @@ class QmtTradingService:
             "cash_amount": _float((snapshot.get("account") or {}).get("cash")),
             "financing_available_amount": financing_available,
             "credit_opvolume": credit_opvolume,
+            "financing_buying_power_amount": financing_buying_power_amount,
             "buying_power_amount": candidate["basis_amount"],
             "target_amount": candidate["target_amount"],
             "actual_amount": candidate["actual_amount"],

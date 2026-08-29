@@ -1227,6 +1227,7 @@ export interface QmtOrderPreview {
   basis_amount: number
   cash_amount?: number | null
   financing_available_amount?: number | null
+  financing_buying_power_amount?: number | null
   credit_opvolume?: {
     status?: 'ready' | 'pending' | 'unavailable' | 'error' | string
     stock_code?: string | null

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, X } from 'lucide-react'
 import { api, type QmtCreditBuyMode } from '@/lib/api'
@@ -163,8 +163,6 @@ export function QmtTradePanel({
       ? creditBuyMode === 'financing' ? '可买融资标的资金' : '可买担保品资金'
       : '可用资金'
     : null
-  const cachedFinancingBuyingPower = cachedAccount?.fin_enbuy_balance
-    ?? null
   const validReferencePrice = Number.isFinite(referencePrice) && referencePrice > 0
   const validAllocation = allocationMode !== 'fixed' || (Number.isFinite(allocationValue) && allocationValue > 0)
   const previewRequestMode = allocationMode === 'fixed' ? 'fixed' : 'quarter'
@@ -216,6 +214,14 @@ export function QmtTradePanel({
     }
   }, [allocationMode, basePreview])
   const effectiveCreditBuyMode = serverPreview?.credit_buy_mode ?? creditBuyMode
+  useEffect(() => {
+    if (!creditBuy || preview.isFetching || !serverPreview) return
+    const requestedMode = serverPreview.requested_credit_buy_mode ?? creditBuyMode
+    const effectiveMode = serverPreview.credit_buy_mode
+    if (requestedMode === creditBuyMode && effectiveMode && effectiveMode !== creditBuyMode) {
+      setCreditBuyMode(effectiveMode)
+    }
+  }, [creditBuy, creditBuyMode, preview.isFetching, serverPreview])
   const tradeVolume = serverPreview?.volume ?? 0
   const actualAmount = serverPreview ? Math.round(tradeVolume * serverPreview.price * 100) / 100 : 0
   const actionLabel = tradeAction === 'BUY' ? '买入' : '卖出'
@@ -344,10 +350,10 @@ export function QmtTradePanel({
             basisAmount={serverPreview?.basis_amount ?? cachedBuyingPower}
             accountType={qmt.data?.account_type}
             cashAmount={serverPreview?.cash_amount ?? cachedAccount?.cash}
-            financingBuyingPowerAmount={serverPreview?.buying_power_amount ?? cachedFinancingBuyingPower}
+            financingBuyingPowerAmount={serverPreview?.financing_buying_power_amount ?? null}
             financingBuyingPowerLabel={
               serverPreview?.credit_opvolume?.status === 'ready'
-                ? '该股票最大可买'
+                ? '该股票最大融资可买'
                 : undefined
             }
             previewState={allocationPreviewState}
@@ -370,7 +376,7 @@ export function QmtTradePanel({
             {tradeMutation.isPending ? '提交中...' : `发送${tradeAction === 'BUY' ? '买入' : '卖出'}委托`}
           </button>
           <p className="mt-2 text-[10px] leading-4 text-muted">金额和股数由 QMT 最新可用资金或可用持仓计算，并向下取 100 股整手。成交结果以券商回报为准。</p>
-          {serverPreview?.credit_buy_mode_switched ? <p className="mt-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</p> : null}
+          {serverPreview?.credit_buy_mode_switched ? <p className="mt-2 text-[10px] leading-4 text-warning">{serverPreview.credit_buy_mode_reason || `首选买入额度不足，实际将自动切换为${effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。`}</p> : null}
         </section>
 
         {instrumentOrders.length ? <section className="border-b border-border py-3">

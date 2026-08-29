@@ -56,7 +56,7 @@ export function QmtTradeAllocationControls({
   accountType,
   cashAmount,
   financingBuyingPowerAmount,
-  financingBuyingPowerLabel = '融资可买',
+  financingBuyingPowerLabel = '该股票最大融资可买',
   previewState = 'idle',
   previewMessage,
   showQuickPresets = true,

@@ -779,6 +779,14 @@ function LimitBoardAllocationDialog({
     }
   }, [basePreview, mode, value])
   const effectiveCreditBuyMode = previewOrder?.credit_buy_mode ?? creditBuyMode
+  useEffect(() => {
+    if (!creditBuy || allocationPreview.isFetching || !previewOrder) return
+    const requestedMode = previewOrder.requested_credit_buy_mode ?? creditBuyMode
+    const effectiveMode = previewOrder.credit_buy_mode
+    if (requestedMode === creditBuyMode && effectiveMode && effectiveMode !== creditBuyMode) {
+      setCreditBuyMode(effectiveMode)
+    }
+  }, [allocationPreview.isFetching, creditBuy, creditBuyMode, previewOrder])
   const estimatedVolume = price != null && price > 0
     ? previewOrder?.volume ?? 0
     : 0
@@ -915,7 +923,7 @@ function LimitBoardAllocationDialog({
             financingBuyingPowerAmount={previewOrder?.financing_buying_power_amount ?? null}
             financingBuyingPowerLabel={
               previewOrder?.credit_opvolume?.status === 'ready'
-                ? '该股票最大可买'
+                ? '该股票最大融资可买'
                 : undefined
             }
             previewState={allocationPreviewState}
@@ -932,7 +940,7 @@ function LimitBoardAllocationDialog({
               <option value="financing">融资买入</option>
             </select>
           </label> : null}
-          {previewOrder?.credit_buy_mode_switched ? <div className="mt-3 border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">首选买入额度不足，实际委托将自动切换为{effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。</div> : null}
+          {previewOrder?.credit_buy_mode_switched ? <div className="mt-3 border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">{previewOrder.credit_buy_mode_reason || `首选买入额度不足，实际委托将自动切换为${effectiveCreditBuyMode === 'financing' ? '融资买入' : '担保品买入'}。`}</div> : null}
           {kind === 'buy' ? <div className="mt-3 border-y border-warning/25 bg-warning/5 px-3 py-2 text-[10px] leading-4 text-warning">确认后立即按当前 TickFlow 价格发送限价买入委托，委托结果以 QMT 与券商回报为准。</div> : null}
         </section>
       </div>

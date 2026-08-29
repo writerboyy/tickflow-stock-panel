@@ -631,6 +631,36 @@ def test_qmt_zmq_client_reads_credit_opvolume_from_async_bridge():
     assert calls[1][0] == "get_credit_opvolume"
 
 
+def test_qmt_client_matches_financing_subject_by_exchange_and_status():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    calls = []
+
+    def fake_call(method, params):
+        calls.append((method, params))
+        assert method == "query_credit_subjects"
+        return [
+            {"m_strInstrumentID": "603159", "m_strExchangeID": "SH", "m_eFinStatus": 47},
+            {"m_strInstrumentID": "600036", "m_strExchangeID": "SH", "m_eFinStatus": 48},
+        ]
+
+    client.call = fake_call
+    unavailable = client.get_credit_subject("603159.SH")
+    available = client.get_credit_subject("600036.SH")
+
+    assert unavailable == {
+        "status": "ready",
+        "stock_code": "603159.SH",
+        "eligible": False,
+        "subject": {
+            "m_strInstrumentID": "603159",
+            "m_strExchangeID": "SH",
+            "m_eFinStatus": 47,
+        },
+    }
+    assert available["eligible"] is True
+    assert len(calls) == 1
+
+
 def test_credit_order_preview_uses_symbol_max_when_account_fields_are_unavailable(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
     service._last_account = {
@@ -662,11 +692,76 @@ def test_credit_order_preview_uses_symbol_max_when_account_fields_are_unavailabl
         "credit_buy_mode": "financing",
     })
 
-    assert preview["basis_label"] == "该股票最大可买金额"
+    assert preview["basis_label"] == "该股票最大融资可买"
     assert preview["buying_power_amount"] == 280_000
     assert preview["volume"] == 28_000
     assert preview["credit_opvolume"]["status"] == "ready"
     assert seen == [("600000.SH", 10.0, "financing"), ("600000.SH", 10.0, "collateral")]
+
+
+def test_credit_order_preview_does_not_reuse_account_financing_power_for_zero_symbol_limit(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._last_account = {
+        "cash": 152_684.08,
+        "assure_enbuy_balance": 152_684.08,
+        "fin_enbuy_balance": 152_684.08,
+    }
+    service._last_account_monotonic = time.monotonic()
+
+    def fake_opvolume(symbol, price, mode):
+        assert mode == "financing"
+        return {
+            "status": "ready",
+            "stock_code": symbol,
+            "max_volume": 0,
+            "max_amount": 0,
+        }
+
+    service.client.get_credit_opvolume = fake_opvolume
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "603159.SH",
+        "price": 24.54,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["credit_buy_mode"] == "collateral"
+    assert preview["basis_label"] == "可买担保品资金"
+    assert preview["financing_buying_power_amount"] == 0
+    assert preview["credit_opvolume"]["max_volume"] == 0
+    assert preview["credit_buy_mode_reason"] == "该股票不可融资买入，已自动切换为担保品买入"
+
+
+def test_credit_order_preview_rejects_non_financing_subject_before_opvolume_query(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._last_account = {
+        "cash": 152_684.08,
+        "assure_enbuy_balance": 152_684.08,
+        "fin_enbuy_balance": 320_000,
+    }
+    service._last_account_monotonic = time.monotonic()
+    service.client.get_credit_subject = lambda symbol: {
+        "status": "ready",
+        "stock_code": symbol,
+        "eligible": False,
+        "subject": None,
+    }
+    service.client.get_credit_opvolume = lambda *_args: pytest.fail("non-financing subjects do not need opvolume")
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "603159.SH",
+        "price": 24.54,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["financing_buying_power_amount"] == 0
+    assert preview["credit_opvolume"]["reason"] == "not_financing_subject"
+    assert preview["credit_buy_mode"] == "collateral"
 
 
 def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Path):
