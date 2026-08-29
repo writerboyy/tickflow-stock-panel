@@ -475,6 +475,52 @@ async def test_sector_strength_close_snapshot_persists_at_market_close(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_sector_strength_paginates_full_vendor_ranking(tmp_path, monkeypatch):
+    """厂商对超大 st 静默降级（st=1000 只回个位数行），必须按 60/页翻页拉全榜单。"""
+    _configured(monkeypatch)
+    now = datetime(2026, 5, 15, 10, 0, tzinfo=CN_TZ)
+    monkeypatch.setattr(collector_module, "cn_now", lambda: now)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: now.date())
+
+    def make_row(index):
+        return [f"P{index:03d}", f"板块{index:03d}", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500]
+
+    def respond(params):
+        index = int(params.get("Index") or 0)
+        if index >= 85:
+            return {"Day": ["2026-05-15"], "list": []}
+        count = min(60, 85 - index)
+        payload = {
+            "Day": ["2026-05-15"],
+            "Title": ["第二季度机构增仓"],
+            "list": [make_row(index + offset + 1) for offset in range(count)],
+        }
+        if index == 60:
+            payload["list_soninfo"] = [["P901", "子板块", 10.0, 1.0, 0.1, 10, 2, 5, 3, 1.0, 50]]
+            payload["list_son"] = ["P085"]
+        return payload
+
+    calls = []
+    collector = KaipanlaCollector(
+        tmp_path, lambda: FakeClient({"sector_strength": respond}, calls),
+    )
+
+    assert await collector.refresh_sector_strength(now.date()) == 86
+    rows = collector.sector_strength_snapshot()["rows"]
+    assert len(rows) == 86
+    assert rows[0]["rank"] == 1
+    assert rows[0]["plate_id"] == "P001"
+    assert rows[-1]["rank"] == 86
+    assert rows[-1]["rank_count"] == 86
+    assert rows[-1]["is_child"] is True
+    assert rows[-1]["parent_plate_id"] == "P085"
+    assert collector.sector_strength_snapshot()["institution_label"] == "第二季度机构增仓"
+    requested = [params for endpoint, params in calls if endpoint == "sector_strength"]
+    assert {params["Index"] for params in requested} == {0, 60}
+    assert all(params["st"] == 60 for params in requested)
+
+
+@pytest.mark.asyncio
 async def test_auction_manifest_requires_all_live_checkpoints_and_bid_details(tmp_path, monkeypatch):
     _configured(monkeypatch)
     responses = {

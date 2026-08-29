@@ -45,6 +45,49 @@ def test_shortline_socket_snapshot_uses_current_top_boards(tmp_path, monkeypatch
     assert snapshot["rows"][0]["main_net"] == 100.0
 
 
+def test_shortline_preload_covers_sixty_boards_beyond_original_top_ten(tmp_path, monkeypatch):
+    """成分行情预加载覆盖强度榜前 60 名（从最初的前 10 放宽）。"""
+    collector = KaipanlaCollector(tmp_path)
+    today = date(2026, 8, 18)
+    collector._sector_strength = {
+        "state": "live",
+        "as_of": today.isoformat(),
+        "refreshed_at": "2026-08-18T10:00:00+08:00",
+        "rows": [
+            {"plate_id": f"80{1000 + rank}", "rank": rank, "strength": 500 - rank}
+            for rank in range(1, 71)
+        ],
+    }
+
+    class SocketClient:
+        def __init__(self, _packet):
+            pass
+
+        @staticmethod
+        def fetch_blocks(plate_ids):
+            plate_ids = list(plate_ids)
+            assert len(plate_ids) == 60
+            assert "801010" in plate_ids
+            assert "801060" in plate_ids
+            assert "801061" not in plate_ids
+            return {
+                plate_id: [{
+                    "plate_id": plate_id, "code": "600000", "symbol": "600000",
+                    "name": "浦发银行", "last_price": 10.2, "change_pct": 0.02,
+                    "amount": 1000.0, "turnover_rate": 0.03, "main_net": 100.0,
+                }]
+                for plate_id in plate_ids
+            }
+
+    monkeypatch.setattr("app.plugins.kaipanla.collector.load_socket_login_packet", lambda: b"packet")
+    monkeypatch.setattr("app.plugins.kaipanla.collector.KaipanlaSocketClient", SocketClient)
+
+    assert asyncio.run(collector.refresh_shortline_constituents(today)) == 60
+    snapshot = collector.shortline_constituents_snapshot()
+    assert snapshot["state"] == "live"
+    assert len(snapshot["plate_ids"]) == 60
+
+
 @pytest.mark.asyncio
 async def test_shortline_bootstrap_refreshes_close_snapshot_after_close(
     tmp_path,

@@ -80,6 +80,14 @@ _ROW_KEY = {115: "info", 30: "info", 100: "list"}
 _MAX_PAGES = 100
 _FUND_INTERVAL_PAGE_SIZE = 1000
 _REFERENCE_PAGE_SIZE = 1000
+# 板块强度榜分页：厂商对超大 st 会静默降级到个位数默认页（实测 st=1000 只回 8 行，
+# st=60 正常返回 60 行），必须用文档页大小 60 顺序翻页；10 页封顶防异常循环。
+_SECTOR_STRENGTH_PAGE_SIZE = 60
+_SECTOR_STRENGTH_MAX_PAGES = 10
+# 短线成分行情预加载板块数上限：全榜单 300+ 个板块每个 5s 周期都抓成分会
+# 把刷新循环拖到分钟级，反而拖死头部板块的数据新鲜度。前 60 名覆盖候选池
+# 与板块地位评分的实际需求；榜单外的板块仍可按需单抓（shortline_constituents_for_plate）。
+_SHORTLINE_PRELOAD_PLATE_LIMIT = 60
 
 
 def _in_sector_strength_window(value: clock_time) -> bool:
@@ -732,22 +740,52 @@ class KaipanlaCollector:
         """Poll today's board ranking without carrying an old trading day forward."""
         institution_label = None
         try:
+            payloads = []
             async with self._client_factory() as client:
-                payload = await client.request(
-                    "sector_strength",
-                    {
-                        "Day": trade_date.isoformat(),
-                        "Index": 0,
-                        "st": _REFERENCE_PAGE_SIZE,
-                    },
-                )
-            reported = payload.get("Day") if isinstance(payload, dict) else None
+                for page in range(_SECTOR_STRENGTH_MAX_PAGES):
+                    payload = await client.request(
+                        "sector_strength",
+                        {
+                            "Day": trade_date.isoformat(),
+                            "Index": page * _SECTOR_STRENGTH_PAGE_SIZE,
+                            "st": _SECTOR_STRENGTH_PAGE_SIZE,
+                        },
+                    )
+                    payloads.append(payload)
+                    raw_list = payload.get("list") if isinstance(payload, dict) else None
+                    if not isinstance(raw_list, list) or len(raw_list) < _SECTOR_STRENGTH_PAGE_SIZE:
+                        break
+            first = payloads[0] if payloads else {}
+            reported = first.get("Day") if isinstance(first, dict) else None
             if isinstance(reported, list):
                 reported = reported[0] if reported else None
             if reported not in (None, "") and parse_trade_date(reported) != trade_date:
                 raise ValueError("实时板块强度返回的交易日不是当天")
-            rows = parse_sector_strength(payload)
-            titles = payload.get("Title") if isinstance(payload, dict) else None
+            merged_list: list = []
+            merged_soninfo: list = []
+            merged_son: list = []
+            titles = None
+            for payload in payloads:
+                if not isinstance(payload, dict):
+                    continue
+                if titles is None:
+                    titles = payload.get("Title")
+                if isinstance(payload.get("list"), list):
+                    merged_list.extend(payload["list"])
+                son_info = payload.get("list_soninfo")
+                son = payload.get("list_son")
+                if (
+                    isinstance(son_info, list)
+                    and isinstance(son, list)
+                    and len(son) == len(son_info)
+                ):
+                    merged_soninfo.extend(son_info)
+                    merged_son.extend(son)
+            merged: dict = {"list": merged_list}
+            if merged_soninfo:
+                merged["list_soninfo"] = merged_soninfo
+                merged["list_son"] = merged_son
+            rows = parse_sector_strength(merged)
             if isinstance(titles, list) and titles:
                 institution_label = str(titles[0] or "").strip() or None
         except Exception:  # noqa: BLE001
@@ -804,10 +842,11 @@ class KaipanlaCollector:
             -_number(row.get("strength"), float("-inf")),
             str(row.get("plate_id") or ""),
         ))
-        # 精选板块列表全量覆盖，不再只取前 10：厂商榜单本身即「精选」边界，
-        # 排名 11 名以后的板块也需要当日成分行情做板块强度/地位评分。
+        # 成分行情预加载覆盖强度榜前 _SHORTLINE_PRELOAD_PLATE_LIMIT 名
+        # （从最初的前 10 放宽；全榜单 300+ 板块周期抓取会拖垮刷新节奏）。
         plate_ids = list(dict.fromkeys(
-            str(row.get("plate_id") or "").strip() for row in ranked
+            str(row.get("plate_id") or "").strip()
+            for row in ranked[:_SHORTLINE_PRELOAD_PLATE_LIMIT]
         ))
         captured_at = cn_now().isoformat()
         login_packet = load_socket_login_packet()
