@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -56,6 +56,24 @@ _QMT_TERMINAL_ORDER_STATUS_LABELS = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_iso(seconds_ago: float = 0.0) -> str:
+    """ISO timestamp for ``seconds_ago`` in the past, matching ``_now()``."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+def _age_seconds(stamp: str | None) -> float:
+    """Seconds since an ISO timestamp, or ``inf`` when it cannot be read."""
+    if not stamp:
+        return float("inf")
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError:
+        return float("inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
 
 
 def _encode_zmq_payload(value: dict[str, Any]) -> bytes:
@@ -124,9 +142,25 @@ _CREDIT_BACKGROUND_RPC_TIMEOUT_SECONDS = 3.0
 # A failed query is retried after this long instead of poisoning the symbol
 # for the rest of the session.
 _CREDIT_OPVOLUME_ERROR_CACHE_SECONDS = 30.0
-# Symbols warmed per request. The broker query is asynchronous and serialized
-# on the background socket, so a larger batch only delays the tail.
-_CREDIT_OPVOLUME_WARM_LIMIT = 12
+# How long a stored per-symbol limit may be shown as-is. The broker query costs
+# ~1.7s, so the limit is computed once, kept here and refreshed in the
+# background rather than recomputed on every preview.
+_CREDIT_SYMBOL_LIMIT_TTL_SECONDS = 60.0
+# The stored limit belongs to the price it was computed at; re-ask when the
+# quote drifts further than this share of it.
+_CREDIT_SYMBOL_LIMIT_PRICE_TOLERANCE = 0.005
+# The broker's financing subject list changes rarely, so it is persisted and
+# re-read on this cadence instead of per session.
+_CREDIT_SUBJECT_LIST_SYNC_SECONDS = 7 * 24 * 3600.0
+# Background renewal cadence and lead time. Renewal keeps an active symbol
+# fresh so a click does not land on an expiring entry.
+_CREDIT_SYMBOL_RENEW_INTERVAL_SECONDS = 15.0
+_CREDIT_SYMBOL_RENEW_LEAD_SECONDS = 15.0
+# A symbol stops being renewed this long after its last preview.
+_CREDIT_SYMBOL_ACTIVE_SECONDS = 1800.0
+# Account refresh cadence. ``get_asset`` is slow, so it runs on the background
+# socket often enough to stay inside ``auto_sync_interval``.
+_ACCOUNT_CACHE_REFRESH_SECONDS = 10.0
 
 _CREDIT_RAW_FIELD_TARGETS = {
     "m_dFinEnbuyBalance": ("fin_enbuy_balance",),
@@ -513,8 +547,14 @@ class QmtZmqRpcClient:
         with self._lock:
             self._retired = True
             self._close_dealer_locked()
-        with self._background_lock:
-            self._close_background_dealer_locked()
+        # A background credit or asset query can still be mid-flight for
+        # several seconds. Shutdown must not wait for it; ``_retired`` already
+        # makes every later call fail fast.
+        if self._background_lock.acquire(timeout=1.0):
+            try:
+                self._close_background_dealer_locked()
+            finally:
+                self._background_lock.release()
         with self._credit_state_lock:
             executor = self._credit_executor
             self._credit_executor = None
@@ -529,14 +569,18 @@ class QmtZmqRpcClient:
             raise QmtRpcError("QMT RPC 返回的账户与本地配置不一致")
         return {"server_time": data.get("server_time") if isinstance(data, dict) else None}
 
-    def get_asset(self) -> dict[str, Any]:
+    def get_asset(self, background: bool = False) -> dict[str, Any]:
         """Read assets and disambiguate credit-account financing fields.
 
         Older bridge versions returned the quota as ``fin_enable_balance``.
         The raw ACCOUNT row is authoritative when available, so use it to
         remove that ambiguous value and preserve the actual financing fields.
+
+        This query costs 3-4s on the broker side, so the periodic cache
+        refresh uses ``background=True`` to keep the interactive socket free.
         """
-        asset = self.call("get_asset", {"account_id": self.account_id})
+        send = self.call_background if background else self.call
+        asset = send("get_asset", {"account_id": self.account_id})
         if not isinstance(asset, dict):
             raise QmtRpcError("QMT 账户资产响应格式无效")
         if self.account_type != "CREDIT":
@@ -545,7 +589,7 @@ class QmtZmqRpcClient:
             return asset
 
         try:
-            rows = self.call("query_account_infos", {"account_id": self.account_id})
+            rows = send("query_account_infos", {"account_id": self.account_id})
         except Exception:  # noqa: BLE001 - older bridges may not expose this query
             return asset
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
@@ -684,41 +728,6 @@ class QmtZmqRpcClient:
             mode,
         )
 
-    def warm_credit_opvolume(
-        self,
-        items: list[dict[str, Any]],
-        credit_buy_mode: str = "financing",
-    ) -> int:
-        """Pre-ask the broker for max volumes so a later dialog hits the cache.
-
-        The broker's per-symbol query takes a couple of seconds to resolve, so
-        the only way to show it inside one second is to start it before the
-        dialog opens. Returns how many queries were newly scheduled.
-        """
-        if self.account_type != "CREDIT":
-            return 0
-        mode = str(credit_buy_mode or "financing").strip().lower()
-        if mode not in _CREDIT_BUY_MODES:
-            return 0
-        scheduled = 0
-        for item in items[:_CREDIT_OPVOLUME_WARM_LIMIT]:
-            if not isinstance(item, dict):
-                continue
-            symbol = str(item.get("symbol") or "").strip().upper()
-            price = _float(item.get("price")) or 0.0
-            if not symbol or price <= 0:
-                continue
-            key = (symbol, round(float(price), 6), mode)
-            with self._credit_state_lock:
-                cached = self._cached_credit_opvolume_locked(key)
-                if cached is not None and cached.get("status") in {"ready", "error", "unavailable"}:
-                    continue
-                if self._credit_opvolume_futures.get(key) is not None:
-                    continue
-                self._schedule_credit_opvolume_locked(key, symbol, price, mode)
-            scheduled += 1
-        return scheduled
-
     def get_credit_opvolume(
         self,
         stock_code: str,
@@ -843,17 +852,41 @@ class QmtZmqRpcClient:
                 "eligible": False,
                 "subject": None,
             }
-        raw_status = matched.get("m_eFinStatus")
-        try:
-            eligible = int(raw_status) == 48
-        except (TypeError, ValueError):
-            eligible = str(raw_status or "").strip().upper() in {"48", "NORMAL", "OK"}
         return {
             "status": "ready",
             "stock_code": symbol,
-            "eligible": eligible,
+            "eligible": self._credit_subject_row_eligible(matched),
             "subject": matched,
         }
+
+    @staticmethod
+    def _credit_subject_row_symbol(row: dict[str, Any]) -> str:
+        """Normalise one contract row into a ``CODE.EXCHANGE`` symbol."""
+        instrument = str(
+            row.get("m_strInstrumentID")
+            or row.get("instrument_id")
+            or row.get("stock_code")
+            or row.get("symbol")
+            or ""
+        ).strip().upper()
+        if not instrument:
+            return ""
+        if "." in instrument:
+            return instrument
+        exchange = str(row.get("m_strExchangeID") or row.get("exchange_id") or "").strip().upper()
+        return f"{instrument}.{exchange}" if exchange else instrument
+
+    @staticmethod
+    def _credit_subject_row_eligible(row: dict[str, Any]) -> bool:
+        raw_status = row.get("m_eFinStatus")
+        try:
+            return int(raw_status) == 48
+        except (TypeError, ValueError):
+            return str(raw_status or "").strip().upper() in {"48", "NORMAL", "OK"}
+
+    def fetch_credit_subjects(self) -> list[dict[str, Any]]:
+        """Read the broker's financing subject list over the background socket."""
+        return self._fetch_credit_subjects()
 
     def snapshot(self) -> dict[str, Any]:
         """同一轮读取账户、持仓、委托和成交；任一步失败则整轮失败。"""
@@ -967,6 +1000,94 @@ class QmtTradingService:
                     order_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )""",
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS qmt_credit_symbol_limit (
+                    symbol TEXT NOT NULL,
+                    credit_mode TEXT NOT NULL,
+                    eligible INTEGER,
+                    price REAL,
+                    max_volume INTEGER,
+                    max_amount REAL,
+                    status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    eligible_updated_at TEXT,
+                    PRIMARY KEY (symbol, credit_mode)
+                )""",
+            )
+
+    def _connect(self) -> sqlite3.Connection:
+        # Background threads write to the same file; give SQLite room to wait
+        # for the write lock instead of failing fast.
+        return sqlite3.connect(self._db_path, timeout=10.0)
+
+    def _read_credit_limit(self, symbol: str, mode: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT eligible, price, max_volume, max_amount, status,
+                          updated_at, last_accessed_at, eligible_updated_at
+                   FROM qmt_credit_symbol_limit WHERE symbol = ? AND credit_mode = ?""",
+                (symbol, mode),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "eligible": None if row[0] is None else bool(row[0]),
+            "price": row[1],
+            "max_volume": row[2],
+            "max_amount": row[3],
+            "status": row[4],
+            "updated_at": row[5],
+            "last_accessed_at": row[6],
+            "eligible_updated_at": row[7],
+        }
+
+    def _touch_credit_limit(self, symbol: str, mode: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """UPDATE qmt_credit_symbol_limit
+                   SET last_accessed_at = ? WHERE symbol = ? AND credit_mode = ?""",
+                (_now(), symbol, mode),
+            )
+
+    def _write_credit_limit(
+        self,
+        symbol: str,
+        mode: str,
+        result: dict[str, Any],
+        price: float,
+        eligible: bool | None = None,
+    ) -> None:
+        status = str(result.get("status") or "unknown")
+        max_volume = result.get("max_volume")
+        max_amount = result.get("max_amount")
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO qmt_credit_symbol_limit (
+                       symbol, credit_mode, eligible, price, max_volume, max_amount,
+                       status, updated_at, last_accessed_at, eligible_updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol, credit_mode) DO UPDATE SET
+                       eligible = COALESCE(excluded.eligible, eligible),
+                       price = excluded.price,
+                       max_volume = excluded.max_volume,
+                       max_amount = excluded.max_amount,
+                       status = excluded.status,
+                       updated_at = excluded.updated_at""",
+                (
+                    symbol,
+                    mode,
+                    None if eligible is None else int(eligible),
+                    float(price),
+                    int(max_volume) if isinstance(max_volume, (int, float)) else None,
+                    float(max_amount) if isinstance(max_amount, (int, float)) else None,
+                    status,
+                    now,
+                    now,
+                    now if eligible is not None else None,
+                ),
             )
 
     def status(self) -> dict[str, Any]:
@@ -1261,7 +1382,7 @@ class QmtTradingService:
         with self._lock:
             client = self.client
             generation = self._connection_generation
-        asset = client.get_asset()
+        asset = client.get_asset(background=True)
         account = {
             "name": self.client.account_id,
             **_normalise_account(asset, self.account_type),
@@ -1307,8 +1428,13 @@ class QmtTradingService:
                         # Account cash is needed by the UI immediately; do not
                         # make it wait for positions, orders and trades.
                         threading.Thread(
-                            target=self._warm_account_cache,
+                            target=self._account_cache_loop,
                             name="qmt-account-cache",
+                            daemon=True,
+                        ).start()
+                        threading.Thread(
+                            target=self._credit_limit_loop,
+                            name="qmt-credit-limit",
                             daemon=True,
                         ).start()
                         first_cycle = False
@@ -1356,11 +1482,107 @@ class QmtTradingService:
             self.start_auto_sync(position_risk_service)
         return self.status()
 
-    def _warm_account_cache(self) -> None:
-        try:
-            self._sync_account_cache()
-        except Exception:
-            pass
+    @property
+    def _account_cache_refresh_seconds(self) -> float:
+        """Refresh faster than half the freshness window so it never lapses."""
+        return max(4.0, min(_ACCOUNT_CACHE_REFRESH_SECONDS, self.auto_sync_interval / 2))
+
+    def _account_cache_loop(self) -> None:
+        """Keep the account amounts fresh without a preview ever paying for it.
+
+        ``get_asset`` takes 3-4s on the broker side. A preview that finds the
+        cache older than ``auto_sync_interval`` runs it inline, which showed
+        up as a ~4.7s stall once per sync cycle. Refreshing on a fixed,
+        shorter cadence keeps the interactive path on the cache.
+        """
+        while not self._auto_stop.is_set():
+            try:
+                self._sync_account_cache()
+            except Exception:
+                pass
+            if self._auto_stop.wait(self._account_cache_refresh_seconds):
+                break
+
+    def _credit_limit_loop(self) -> None:
+        """Keep stored symbol limits fresh and the subject list current.
+
+        Renewal runs ahead of the TTL so a later dialog reads a value that is
+        already there instead of waiting ~1.7s for the broker.
+        """
+        while not self._auto_stop.is_set():
+            try:
+                self._maintain_credit_limits()
+            except Exception:
+                pass
+            if self._auto_stop.wait(_CREDIT_SYMBOL_RENEW_INTERVAL_SECONDS):
+                break
+
+    def _maintain_credit_limits(self) -> None:
+        if self.account_type != "CREDIT":
+            return
+        if _age_seconds(self._credit_subject_list_synced_at()) > _CREDIT_SUBJECT_LIST_SYNC_SECONDS:
+            self._sync_credit_subject_list()
+        self._renew_one_credit_limit()
+
+    def _credit_subject_list_synced_at(self) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(eligible_updated_at) FROM qmt_credit_symbol_limit",
+            ).fetchone()
+        return row[0] if row else None
+
+    def _sync_credit_subject_list(self) -> int:
+        """Persist which securities the broker allows financing buys on."""
+        rows = self.client.fetch_credit_subjects()
+        now = _now()
+        payload = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = QmtZmqRpcClient._credit_subject_row_symbol(row)
+            if not symbol:
+                continue
+            payload.append(
+                (symbol, "financing", int(QmtZmqRpcClient._credit_subject_row_eligible(row))),
+            )
+        if not payload:
+            return 0
+        with self._connect() as conn:
+            conn.executemany(
+                """INSERT INTO qmt_credit_symbol_limit (
+                       symbol, credit_mode, eligible, price, max_volume, max_amount,
+                       status, updated_at, last_accessed_at, eligible_updated_at
+                   ) VALUES (?, ?, ?, NULL, NULL, NULL, 'unknown', ?, ?, ?)
+                   ON CONFLICT(symbol, credit_mode) DO UPDATE SET
+                       eligible = excluded.eligible,
+                       eligible_updated_at = excluded.eligible_updated_at""",
+                [(symbol, mode, eligible, now, now, now) for symbol, mode, eligible in payload],
+            )
+        return len(payload)
+
+    def _renew_one_credit_limit(self) -> bool:
+        """Refresh the oldest stored limit that is still in use."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT symbol, credit_mode, price FROM qmt_credit_symbol_limit
+                   WHERE status = 'ready' AND max_amount IS NOT NULL
+                     AND last_accessed_at > ? AND updated_at < ?
+                   ORDER BY updated_at ASC LIMIT 1""",
+                (
+                    _utc_iso(_CREDIT_SYMBOL_ACTIVE_SECONDS),
+                    _utc_iso(_CREDIT_SYMBOL_LIMIT_TTL_SECONDS - _CREDIT_SYMBOL_RENEW_LEAD_SECONDS),
+                ),
+            ).fetchone()
+        if row is None:
+            return False
+        symbol, mode, price = row[0], row[1], row[2]
+        if not price or price <= 0:
+            return False
+        detail = self.client.get_credit_opvolume(
+            symbol, price, mode, timeout_seconds=_CREDIT_OPVOLUME_BACKGROUND_TIMEOUT_SECONDS,
+        )
+        self._write_credit_limit(symbol, mode, detail, price)
+        return True
 
     def stop(self) -> None:
         self._auto_stop.set()
@@ -1413,6 +1635,34 @@ class QmtTradingService:
             credit_buy_mode != "financing" and amount not in (None, 0.0)
         ):
             return amount, label, financing_available, None
+        # A stored answer beats any broker round trip: eligibility only moves
+        # when the broker changes its list, and the limit is refreshed ahead of
+        # its TTL by the background loop.
+        stored = self._read_credit_limit(symbol, credit_buy_mode)
+        if stored is not None:
+            self._touch_credit_limit(symbol, credit_buy_mode)
+            if stored.get("eligible") is False:
+                return 0.0, "该股票不可融资买入", financing_available, {
+                    "status": "ready",
+                    "stock_code": symbol,
+                    "max_volume": 0,
+                    "max_amount": 0,
+                    "reason": "not_financing_subject",
+                    "cached": True,
+                }
+            if self._credit_limit_is_fresh(stored, price):
+                return (
+                    round(float(stored["max_amount"]), 2),
+                    "该股票最大融资可买",
+                    financing_available,
+                    {
+                        "status": "ready",
+                        "stock_code": symbol,
+                        "max_volume": stored.get("max_volume"),
+                        "max_amount": stored.get("max_amount"),
+                        "cached": True,
+                    },
+                )
         if credit_buy_mode == "financing":
             subject_getter = getattr(self.client, "get_credit_subject", None)
             if callable(subject_getter):
@@ -1436,6 +1686,7 @@ class QmtTradingService:
                         "max_amount": 0,
                         "reason": "not_financing_subject",
                     }
+                    self._write_credit_limit(symbol, credit_buy_mode, detail, price, eligible=False)
                     return 0.0, "该股票不可融资买入", financing_available, detail
         getter = getattr(self.client, "get_credit_opvolume", None)
         if not callable(getter):
@@ -1457,11 +1708,31 @@ class QmtTradingService:
                         detail = getter(symbol, price, credit_buy_mode)
         except Exception:  # noqa: BLE001 - an unavailable bridge can use the fallback mode
             detail = {"status": "unavailable", "stock_code": symbol, "max_volume": None}
+        if isinstance(detail, dict) and detail.get("status") in {"ready", "unavailable", "error"}:
+            # ``unavailable`` is how the bridge reports a non-financing subject.
+            self._write_credit_limit(
+                symbol, credit_buy_mode, detail, price,
+                eligible=False if detail.get("status") == "unavailable" else None,
+            )
         if not isinstance(detail, dict) or detail.get("status") != "ready":
             if isinstance(detail, dict) and detail.get("status") == "pending":
-                # A symbol-specific financing limit is not known yet. Do not
-                # use the account-level financing field while the broker query
-                # is in flight; the next preview poll will replace this value.
+                # A symbol-specific financing limit is not known yet. Show the
+                # stored one while the broker answers instead of falling back to
+                # the account-level financing field, which is a different number.
+                if stored is not None and stored.get("max_amount") is not None:
+                    return (
+                        round(float(stored["max_amount"]), 2),
+                        "该股票最大融资可买",
+                        financing_available,
+                        {
+                            "status": "ready",
+                            "stock_code": symbol,
+                            "max_volume": stored.get("max_volume"),
+                            "max_amount": stored.get("max_amount"),
+                            "cached": True,
+                            "stale": True,
+                        },
+                    )
                 return 0.0, label, financing_available, detail
             return amount, label, financing_available, detail if isinstance(detail, dict) else None
         try:
@@ -1477,6 +1748,18 @@ class QmtTradingService:
             financing_available,
             detail,
         )
+
+    @staticmethod
+    def _credit_limit_is_fresh(stored: dict[str, Any], price: float) -> bool:
+        """Whether a stored limit can still be shown for this price."""
+        if stored.get("status") != "ready" or stored.get("max_amount") is None:
+            return False
+        if _age_seconds(stored.get("updated_at")) > _CREDIT_SYMBOL_LIMIT_TTL_SECONDS:
+            return False
+        stored_price = _float(stored.get("price"))
+        if stored_price is None or stored_price <= 0:
+            return False
+        return abs(price - stored_price) / stored_price <= _CREDIT_SYMBOL_LIMIT_PRICE_TOLERANCE
 
     def _validate_order(self, request: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
         if not self.trade_enabled:
@@ -1720,12 +2003,6 @@ class QmtTradingService:
             "capped": candidate["capped"],
             "reason": candidate["reason"],
         }
-
-    def warm_credit_opvolume(self, items: list[dict[str, Any]], credit_buy_mode: str = "financing") -> int:
-        """Pre-ask the broker for per-symbol max volumes before a dialog opens."""
-        if not self.client.configured:
-            return 0
-        return self.client.warm_credit_opvolume(items, credit_buy_mode)
 
     def preview_order(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "").upper()

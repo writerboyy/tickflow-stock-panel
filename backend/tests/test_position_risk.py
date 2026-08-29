@@ -19,7 +19,14 @@ from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict, default_rule_options
-from app.services.qmt_trading import QmtRpcError, QmtTradingService, QmtZmqRpcClient, _normalise_account
+from app.services.qmt_trading import (
+    QmtRpcError,
+    QmtTradingService,
+    QmtZmqRpcClient,
+    _age_seconds,
+    _normalise_account,
+    _utc_iso,
+)
 from app.services.quote_service import QuoteService
 from app.services.watchlist_ocr.provider import OcrProvider
 from app.tickflow.capabilities import Cap, CapabilityLimits, CapabilitySet
@@ -689,33 +696,6 @@ def test_qmt_background_credit_rpc_keeps_the_interactive_socket_free():
         client.close()
 
 
-def test_qmt_credit_opvolume_warm_only_schedules_new_symbols():
-    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
-    fetched = []
-
-    def fake_fetch(key, symbol, price, mode, _timeout):
-        fetched.append((symbol, mode))
-        return {
-            "status": "ready",
-            "stock_code": symbol,
-            "max_volume": 100,
-            "max_amount": round(price * 100, 2),
-        }
-
-    client._fetch_credit_opvolume = fake_fetch
-    items = [{"symbol": "600000.SH", "price": 10.0}, {"symbol": "600519.SH", "price": 1500.0}]
-    try:
-        assert client.warm_credit_opvolume(items) == 2
-        assert client.warm_credit_opvolume(items) == 0
-        deadline = time.monotonic() + 2
-        while len(fetched) < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert sorted(fetched) == [("600000.SH", "financing"), ("600519.SH", "financing")]
-        assert client.warm_credit_opvolume(items) == 0
-    finally:
-        client.close()
-
-
 def test_qmt_credit_opvolume_error_expires_instead_of_poisoning_the_symbol():
     client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
     attempts = []
@@ -729,9 +709,8 @@ def test_qmt_credit_opvolume_error_expires_instead_of_poisoning_the_symbol():
         return results[min(len(attempts) - 1, len(results) - 1)]
 
     client._fetch_credit_opvolume = fake_fetch
-    items = [{"symbol": "600000.SH", "price": 10.0}]
     try:
-        def settle(expected: str) -> str:
+        def settle(expected: str) -> None:
             deadline = time.monotonic() + 2
             status = "pending"
             while time.monotonic() < deadline:
@@ -740,36 +719,134 @@ def test_qmt_credit_opvolume_error_expires_instead_of_poisoning_the_symbol():
                     break
                 time.sleep(0.01)
             assert status == expected
-            return status
 
-        assert client.warm_credit_opvolume(items) == 1
         settle("error")
-        assert client.warm_credit_opvolume(items) == 0
+        assert len(attempts) == 1
+        # The cached error is replayed rather than re-asked...
+        assert client.get_credit_opvolume("600000.SH", 10.0, "financing")["status"] == "error"
+        assert len(attempts) == 1
+        # ...until it expires, then the symbol can succeed again.
         client._credit_opvolume_error_until.clear()
-        assert client.warm_credit_opvolume(items) == 1
         settle("ready")
         assert client.get_credit_opvolume("600000.SH", 10.0, "financing")["max_volume"] == 500
     finally:
         client.close()
 
 
-def test_qmt_credit_opvolume_warm_caps_the_batch_and_skips_stock_accounts():
-    credit = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
-    credit._fetch_credit_opvolume = lambda key, symbol, price, mode, _t: {
+def _backdate_credit_limit(service: QmtTradingService, symbol: str, seconds: float) -> None:
+    with service._connect() as conn:
+        conn.execute(
+            "UPDATE qmt_credit_symbol_limit SET updated_at = ? WHERE symbol = ?",
+            (_utc_iso(seconds), symbol),
+        )
+
+
+def _ready_limit(symbol: str, price: float, volume: int = 9_000) -> dict:
+    return {
         "status": "ready",
         "stock_code": symbol,
-        "max_volume": 100,
-        "max_amount": round(price * 100, 2),
+        "max_volume": volume,
+        "max_amount": round(price * volume, 2),
     }
-    items = [{"symbol": f"6000{index:02d}.SH", "price": 10.0} for index in range(30)]
-    try:
-        assert credit.warm_credit_opvolume(items) == 12
-    finally:
-        credit.close()
 
-    stock = QmtZmqRpcClient(_qmt_settings(qmt_account_type="STOCK"))
-    stock._fetch_credit_opvolume = lambda *_args: pytest.fail("stock accounts have no credit limit")
-    assert stock.warm_credit_opvolume(items) == 0
+
+def test_stored_symbol_limit_is_served_without_asking_the_broker(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._last_account = {
+        "cash": 152_684.08,
+        "assure_enbuy_balance": 152_684.08,
+        "fin_enbuy_balance": 500_000,
+    }
+    service._last_account_monotonic = time.monotonic()
+    # Large enough that financing beats the collateral fallback, so the preview
+    # keeps financing instead of switching modes.
+    service._write_credit_limit("600000.SH", "financing", _ready_limit("600000.SH", 10.0, 40_000), 10.0)
+    service.client.get_credit_opvolume = lambda *_a: pytest.fail("a fresh stored limit needs no broker query")
+    service.client.get_credit_subject = lambda *_a: pytest.fail("eligibility is already stored")
+
+    preview = service.preview_order({
+        "action": "BUY",
+        "symbol": "600000.SH",
+        "price": 10.0,
+        "price_type": "LIMIT",
+        "allocation_mode": "quarter",
+        "credit_buy_mode": "financing",
+    })
+
+    assert preview["basis_label"] == "该股票最大融资可买"
+    assert preview["buying_power_amount"] == 400_000
+    assert preview["credit_opvolume"]["cached"] is True
+
+
+def test_expired_symbol_limit_is_shown_while_the_broker_refreshes(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._write_credit_limit("600000.SH", "financing", _ready_limit("600000.SH", 10.0), 10.0)
+    _backdate_credit_limit(service, "600000.SH", 300.0)
+    service.client.get_credit_opvolume = lambda *_a, **_k: {
+        "status": "pending",
+        "stock_code": "600000.SH",
+        "max_volume": None,
+        "max_amount": None,
+    }
+
+    amount, label, _available, detail = service._credit_symbol_buying_power(
+        "600000.SH", 10.0, "financing", {"fin_enbuy_balance": 500_000},
+    )
+
+    assert label == "该股票最大融资可买"
+    assert amount == 90_000
+    assert detail["stale"] is True
+    assert detail["cached"] is True
+
+
+def test_stored_non_financing_subject_needs_no_broker_query(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._write_credit_limit(
+        "603159.SH", "financing",
+        {"status": "unavailable", "stock_code": "603159.SH", "max_volume": None},
+        24.54,
+        eligible=False,
+    )
+    service.client.get_credit_opvolume = lambda *_a: pytest.fail("a stored non-subject needs no broker query")
+
+    amount, label, _available, _detail = service._credit_symbol_buying_power(
+        "603159.SH", 24.54, "financing", {"fin_enbuy_balance": 500_000},
+    )
+
+    assert amount == 0.0
+    assert label == "该股票不可融资买入"
+
+
+def test_credit_subject_list_sync_persists_eligibility(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service.client.fetch_credit_subjects = lambda: [
+        {"m_strInstrumentID": "600036", "m_strExchangeID": "SH", "m_eFinStatus": 48},
+        {"m_strInstrumentID": "603159", "m_strExchangeID": "SH", "m_eFinStatus": 47},
+    ]
+
+    assert service._sync_credit_subject_list() == 2
+    assert service._read_credit_limit("600036.SH", "financing")["eligible"] is True
+    assert service._read_credit_limit("603159.SH", "financing")["eligible"] is False
+    # A weekly sync must not repeat itself once the table is current.
+    assert _age_seconds(service._credit_subject_list_synced_at()) < 60
+
+
+def test_credit_limit_renewal_refreshes_the_oldest_active_row(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
+    service._write_credit_limit("600000.SH", "financing", _ready_limit("600000.SH", 10.0), 10.0)
+    service._write_credit_limit("600519.SH", "financing", _ready_limit("600519.SH", 1500.0, 200), 1500.0)
+    _backdate_credit_limit(service, "600000.SH", 120.0)
+    _backdate_credit_limit(service, "600519.SH", 60.0)
+    renewed = []
+
+    def fake_opvolume(symbol, price, mode, timeout_seconds=None, background=False):
+        renewed.append(symbol)
+        return _ready_limit(symbol, price, 100)
+
+    service.client.get_credit_opvolume = fake_opvolume
+
+    assert service._renew_one_credit_limit() is True
+    assert renewed == ["600000.SH"]
 
 
 def test_qmt_client_matches_financing_subject_by_exchange_and_status():
@@ -903,6 +980,29 @@ def test_credit_order_preview_rejects_non_financing_subject_before_opvolume_quer
     assert preview["financing_buying_power_amount"] == 0
     assert preview["credit_opvolume"]["reason"] == "not_financing_subject"
     assert preview["credit_buy_mode"] == "collateral"
+
+
+def test_qmt_client_reads_asset_over_the_background_socket_when_asked():
+    client = QmtZmqRpcClient(_qmt_settings(qmt_account_type="CREDIT"))
+    seen = []
+
+    def fake_background(method, params, timeout_seconds=None):
+        seen.append((method, timeout_seconds))
+        return {"cash": 1.0}
+
+    client.call_background = fake_background
+    client.call = lambda *_args: pytest.fail("background asset read must not use the interactive socket")
+    assert client.get_asset(background=True) == {"cash": 1.0}
+    # A credit account also reads the raw ACCOUNT row; both must stay off the
+    # interactive socket, which the failing ``call`` above proves.
+    assert [method for method, _timeout in seen] == ["get_asset", "query_account_infos"]
+
+
+def test_qmt_account_cache_refresh_stays_inside_the_freshness_window(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_auto_sync_interval_seconds=30))
+    assert service._account_cache_refresh_seconds <= service.auto_sync_interval / 2
+    service.auto_sync_interval = 10.0
+    assert service._account_cache_refresh_seconds <= 5.0
 
 
 def test_qmt_trading_service_rejects_order_when_trade_switch_is_off(tmp_path: Path):
