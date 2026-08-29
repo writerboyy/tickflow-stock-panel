@@ -568,17 +568,17 @@ def test_comprehensive_score_gene_only_scales_and_caps_grade():
         },
     })
 
+    # 历史基因占 50%：次日收红 20 分 ×0.5 + 封板成功 20 分 ×1.0
     history = result["dimensions"]["history"]
-    assert history["score"] == pytest.approx(18.0)
-    assert history["max_score"] == pytest.approx(24.0)
-    assert history["full_max_score"] == pytest.approx(30.0)
+    assert history["score"] == pytest.approx(30.0)
+    assert history["max_score"] == pytest.approx(40.0)
+    assert history["full_max_score"] == pytest.approx(50.0)
     assert history["unavailable_components"] == ["consecutive_ability"]
-    # 18/24 = 75 → A 档，但数据完整度不足 → 封顶 B
+    # 30/40 = 75 → A 档，但数据完整度不足 → 封顶 B
     assert result["comprehensive_score"] == pytest.approx(75.0)
     assert result["grade"] == "B"
-    # 满分基数 = 30 + 30 + 35（日K位置移除后拉升健康度满分由 40 降为 35）
-    # 24/95 = 0.2526… → round 到 0.25
-    assert result["data_completeness"] == pytest.approx(0.25)
+    # 满分基数 = 50（历史基因）+ 25（板块强度）+ 25（拉升健康度）
+    assert result["data_completeness"] == pytest.approx(0.40)
     # 真实数据驱动的警示保留；缺项的假信号全部消失
     assert "次日收红率偏低" in result["warnings"]
     assert "板块涨幅不大，安全" not in result["strengths"]
@@ -607,13 +607,14 @@ def test_comprehensive_score_sector_overheat_uses_real_data_only():
     result = comprehensive_score({"sector": sector})
 
     sentiment = result["dimensions"]["sentiment"]
-    assert sentiment["max_score"] == pytest.approx(30.0)
-    assert sentiment["components"]["sector_pattern"] == pytest.approx(12.2, abs=0.05)
-    # 过热：5日涨幅 18% → 1 分；连涨 5 天 → 1 分；排名 1/50 顶部 → 0 分
-    assert sentiment["components"]["overheat_risk"] == pytest.approx(2.0)
-    assert sentiment["components"]["sector_current"] == pytest.approx(5.0)
+    assert sentiment["max_score"] == pytest.approx(25.0)
+    # 板块形态：rotation 16.22/20 × 12.5
+    assert sentiment["components"]["sector_pattern"] == pytest.approx(10.14, abs=0.05)
+    # 过热：5日涨幅 18% → 0.8；连涨 5 天 → 0.8；排名 1/50 顶部 → 0
+    assert sentiment["components"]["overheat_risk"] == pytest.approx(1.6)
+    assert sentiment["components"]["sector_current"] == pytest.approx(4.2)
     health = result["dimensions"]["health"]
-    assert health["components"]["sector_position"] == pytest.approx(15.0)
+    assert health["components"]["sector_position"] == pytest.approx(9.6)
     assert "板块绝对龙头" in result["strengths"]
     assert "主线板块" in result["strengths"]
     assert "板块涨幅过大，注意回调风险" in result["warnings"]
@@ -627,34 +628,35 @@ def test_comprehensive_score_sealed_stock_scores_pullup_not_capital():
     result = comprehensive_score({"intraday_flow": flow})
 
     health = result["dimensions"]["health"]
-    # 一波流放量拉升：用时 4 + 流畅 3 + 封板前量能 4 = 11/11
-    assert health["components"]["pullup_form"] == pytest.approx(11.0)
+    # 一波流放量拉升：用时 2.6 + 流畅 1.9 + 封板前量能 2.6 = 7.1/7.1
+    assert health["components"]["pullup_form"] == pytest.approx(7.1)
     # 封板后资金流向失真 → 数据不足，不再拿「主力流出」扣分
     assert "capital_flow" in health["unavailable_components"]
-    # 日K位置已移除，拉升健康度满分为 板块地位 15 + 拉升形态 11 + 资金强度 10
+    # 拉升健康度满分 = 板块地位 9.6 + 拉升形态 7.1 + 资金强度 6.4 + 均线形态 1.9
     assert "daily_k_pattern" not in health["components"]
-    assert health["max_score"] == pytest.approx(11.0)
-    assert health["full_max_score"] == pytest.approx(35.0)
+    assert health["max_score"] == pytest.approx(7.1)
+    assert health["full_max_score"] == pytest.approx(25.0)
     assert "一波流拉升" in result["strengths"]
     assert "主力资金流出" not in result["warnings"]
 
 
-def test_health_dimension_drops_daily_k_and_rescales_full_total():
-    """日K位置移除后：拉升健康度满分上限 40→35，总分基数 100→95。
+def test_dimension_weights_history_heavy_with_rest_split():
+    """历史涨停基因占 50%，板块强度与拉升健康度各占 25%，合计 100。
 
-    基数必须跟着降，否则 data_completeness 永远到不了 1.0，
-    「数据不完整封顶 B」这条规则会把所有评级静默压死。
+    data_completeness 的分母取各维度 full_max_score 之和，三者必须合计 100，
+    否则完整度永远到不了 1.0，「数据不完整封顶 B」会把所有评级静默压死。
     """
     result = comprehensive_score({})
     dimensions = result["dimensions"]
 
-    assert dimensions["health"]["full_max_score"] == pytest.approx(35.0)
-    assert "daily_k_pattern" not in dimensions["health"]["components"]
-    assert sum(item["full_max_score"] for item in dimensions.values()) == pytest.approx(95.0)
+    assert dimensions["history"]["full_max_score"] == pytest.approx(50.0)
+    assert dimensions["sentiment"]["full_max_score"] == pytest.approx(25.0)
+    assert dimensions["health"]["full_max_score"] == pytest.approx(25.0)
+    assert sum(item["full_max_score"] for item in dimensions.values()) == pytest.approx(100.0)
 
 
-def test_strengths_and_warnings_drop_ma_signals_with_daily_k():
-    """均线相关的优势/警示由日K位置驱动，随该维度一并移除。"""
+def test_ma_alignment_scores_but_emits_no_text_signal():
+    """均线形态已恢复为拉升健康度的评分项，但不再产出文字优势/警示。"""
     flow = intraday_flow_detail(
         _sealed_pullup_intraday(), previous_close=10.0, limit_up=11.0,
         external_flow={"buy_ratio": 0.70, "sell_ratio": 0.30},
@@ -664,6 +666,23 @@ def test_strengths_and_warnings_drop_ma_signals_with_daily_k():
     assert "perfect_ma" not in result["strengths"]
     assert "完美多头排列" not in result["strengths"]
     assert "均线压制" not in result["warnings"]
+
+
+def test_health_scores_ma_alignment_by_strict_ma_ladder():
+    """均线形态五档：完美多头 1.9 / 强多头 1.6 / 中多头 1.3 / 弱多头 0.6 / 其余 0。"""
+    def health_for(price: float, ma5: float, ma10: float, ma20: float, ma60: float) -> float:
+        technical = technical_detail({
+            "close": price, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
+            "momentum_5d": 0.0, "momentum_20d": 0.0, "vol_ratio_5d": 1.0,
+            "macd_dif": 0.0, "macd_dea": 0.0, "macd_hist": 0.0, "rsi_14": 60.0,
+        })
+        return comprehensive_score({"technical": technical})["dimensions"]["health"]
+
+    assert health_for(12.0, 11.0, 10.0, 9.0, 8.0)["components"]["ma_alignment"] == pytest.approx(1.9)
+    assert health_for(12.0, 11.0, 10.0, 9.0, 9.5)["components"]["ma_alignment"] == pytest.approx(1.6)
+    assert health_for(12.0, 11.0, 10.0, 10.5, 9.0)["components"]["ma_alignment"] == pytest.approx(1.3)
+    assert health_for(12.0, 11.0, 11.5, 10.0, 9.0)["components"]["ma_alignment"] == pytest.approx(0.6)
+    assert health_for(10.0, 11.0, 10.0, 9.0, 8.0)["components"]["ma_alignment"] == pytest.approx(0.0)
 
 
 def test_comprehensive_score_flags_choppy_pullup():
@@ -704,14 +723,14 @@ def test_rotation_only_detail_scores_daily_rotation_and_gates_realtime_parts():
 
     result = comprehensive_score({"sector": detail})
     sentiment = result["dimensions"]["sentiment"]
-    # 剩余日频分项按 90 -> 30 等比例缩放；实时分项缺失时不计分。
+    # 剩余日频分项按 90 -> 25 等比例缩放；实时分项缺失时不计分。
     assert sentiment["components"] == {
-        "relative_momentum": pytest.approx(4.3, abs=0.05),
-        "trend": pytest.approx(3.3, abs=0.05),
-        "persistence": pytest.approx(1.3, abs=0.05),
-        "stability": pytest.approx(1.9, abs=0.05),
+        "relative_momentum": pytest.approx(3.6, abs=0.05),
+        "trend": pytest.approx(2.8, abs=0.05),
+        "persistence": pytest.approx(1.1, abs=0.05),
+        "stability": pytest.approx(1.6, abs=0.05),
     }
-    assert sentiment["max_score"] == pytest.approx(14.3, abs=0.05)
+    assert sentiment["max_score"] == pytest.approx(11.9, abs=0.05)
     assert sentiment["unavailable_components"] == [
         "breadth", "money_flow", "liquidity",
     ]
@@ -746,11 +765,11 @@ def test_comprehensive_score_uses_institutional_sector_components_without_leader
     })
 
     sentiment = result["dimensions"]["sentiment"]
-    assert sentiment["score"] == pytest.approx(27.3)
-    assert sentiment["max_score"] == pytest.approx(30.0)
+    assert sentiment["score"] == pytest.approx(22.8)
+    assert sentiment["max_score"] == pytest.approx(25.0)
     assert sentiment["unavailable_components"] == []
-    assert sentiment["components"]["relative_momentum"] == pytest.approx(6.7)
-    assert sentiment["components"]["money_flow"] == pytest.approx(5.0)
+    assert sentiment["components"]["relative_momentum"] == pytest.approx(5.6)
+    assert sentiment["components"]["money_flow"] == pytest.approx(4.2)
     assert "leadership" not in sentiment["components"]
 
 

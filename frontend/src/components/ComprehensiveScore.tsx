@@ -72,6 +72,7 @@ const COMPONENT_LABELS: Record<string, string> = {
   pullup_form: '拉升形态',
   intraday_volume_price: '分钟量价',
   capital_flow: '资金强度',
+  ma_alignment: '均线形态',
 }
 
 function ProgressBar({ value, max, color = 'bg-accent' }: { value: number; max: number; color?: string }) {
