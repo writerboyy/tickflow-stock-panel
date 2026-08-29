@@ -804,8 +804,10 @@ class KaipanlaCollector:
             -_number(row.get("strength"), float("-inf")),
             str(row.get("plate_id") or ""),
         ))
+        # 精选板块列表全量覆盖，不再只取前 10：厂商榜单本身即「精选」边界，
+        # 排名 11 名以后的板块也需要当日成分行情做板块强度/地位评分。
         plate_ids = list(dict.fromkeys(
-            str(row.get("plate_id") or "").strip() for row in ranked[:10]
+            str(row.get("plate_id") or "").strip() for row in ranked
         ))
         captured_at = cn_now().isoformat()
         login_packet = load_socket_login_packet()
