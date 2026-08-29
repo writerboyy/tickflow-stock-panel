@@ -37,6 +37,7 @@ interface DimensionScore {
   components: Record<string, number>
   unavailableComponents?: string[]
   label: string
+  displayValue?: string
 }
 
 const GRADE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -101,8 +102,8 @@ function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: Dim
           ? <span className="shrink-0 text-[10px] text-warning">数据不足</span>
           : (
             <span className="shrink-0 font-mono text-xs text-foreground">
-              {dimension.score.toFixed(1)}/{dimension.maxScore.toFixed(0)}
-              {dimension.fullMaxScore != null && dimension.fullMaxScore > dimension.maxScore
+              {dimension.displayValue ?? `${dimension.score.toFixed(1)}/${dimension.maxScore.toFixed(0)}`}
+              {!dimension.displayValue && dimension.fullMaxScore != null && dimension.fullMaxScore > dimension.maxScore
                 ? <span className="ml-0.5 text-[9px] text-muted">/{dimension.fullMaxScore.toFixed(0)}</span>
                 : null}
             </span>
@@ -127,9 +128,9 @@ function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: Dim
             {noData ? <div className="text-[9px] text-muted">缺项不计分，等数据返回后自动刷新</div> : null}
           </div>
           {detailRows.length > 0 ? <div className="mt-2 space-y-1 border-t border-border/70 pt-2">
-            {detailRows.map(row => <div key={row.label} className="flex items-center justify-between gap-2 text-[9px]">
-              <span className="min-w-0 truncate text-muted">{row.label}</span>
-              <span className={`shrink-0 text-right font-mono ${row.tone || 'text-secondary'}`}>{row.value}</span>
+            {detailRows.map(row => <div key={row.label} className="flex items-start justify-between gap-2 text-[9px]">
+              <span className="min-w-0 max-w-[42%] shrink-0 truncate text-muted">{row.label}</span>
+              <span className={`min-w-0 flex-1 break-words text-right font-mono ${row.tone || 'text-secondary'}`}>{row.value}</span>
             </div>)}
           </div> : null}
         </>
