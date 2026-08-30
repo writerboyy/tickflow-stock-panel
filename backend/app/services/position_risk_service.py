@@ -1469,12 +1469,12 @@ class PositionRiskService:
             event_token=peak_token,
             cooldown_seconds=0 if not peak_cfg.get("_legacy_mode") else max(0, int(_finite(peak_cfg.get("cooldown_seconds")) or 300)),
         )
+        effective_stop = _finite(runtime.get("effective_stop_price"))
+        if peak_active and not peak_suppressed and not peak_cfg.get("_legacy_mode"):
+            pullback_stop = intraday_high - (_finite(features.get("atr14_5m")) or 0) * (_finite(peak_cfg.get("pullback_atr_multiple")) or 1.5)
+            effective_stop = max(effective_stop or 0, pullback_stop)
+            runtime["effective_stop_price"] = effective_stop
         if peak_active and not peak_suppressed and peak_should_emit:
-            effective_stop = _finite(runtime.get("effective_stop_price"))
-            if not peak_cfg.get("_legacy_mode"):
-                pullback_stop = intraday_high - (_finite(features.get("atr14_5m")) or 0) * (_finite(peak_cfg.get("pullback_atr_multiple")) or 1.5)
-                effective_stop = max(effective_stop or 0, pullback_stop)
-                runtime["effective_stop_price"] = effective_stop
             dynamic_candidates.append({
                 "rule_id": "intraday_peak_pullback",
                 "label": "盘中冲高回落",

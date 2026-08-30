@@ -498,6 +498,46 @@ def test_dynamic_rule_partial_override_keeps_enabled_defaults(tmp_path: Path):
     assert config["action_pct"] == 75
 
 
+def test_dynamic_peak_protection_only_moves_up_when_event_token_repeats(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [{
+            "symbol": "600036.SH", "name": "招商银行", "quantity": 1000,
+            "available": 1000, "cost_price": 10,
+        }],
+        "overrides": {"600036.SH": {"rules": {"stop_loss": {"enabled": True}}}},
+    }, 0)
+    service._preload_history({"600036.SH"})
+    portfolio = service.store.load()
+    position = portfolio["positions"][0]
+    bars = [
+        {"datetime": "2026-08-07T10:00:00", "close": 11.0, "closed": True},
+        {"datetime": "2026-08-07T10:05:00", "close": 11.0, "closed": True},
+    ]
+    base_features = {
+        "available": True, "fresh": True, "as_of": "2026-08-07T10:05:00",
+        "atr14_5m": 0.2, "closed_bars_5m": bars,
+    }
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 11.0, "timestamp": "2026-08-07T10:06:00"},
+        datetime(2026, 8, 7, 10, 6),
+        intraday_features={**base_features, "session_bars": [{"high": 12.0}]},
+    )
+    first_stop = service.store.get_runtime("position:600036.SH")["effective_stop_price"]
+    service._evaluate_position(
+        portfolio, position,
+        {"symbol": "600036.SH", "last_price": 11.0, "timestamp": "2026-08-07T10:07:00"},
+        datetime(2026, 8, 7, 10, 7),
+        intraday_features={**base_features, "session_bars": [{"high": 13.0}]},
+    )
+    second_stop = service.store.get_runtime("position:600036.SH")["effective_stop_price"]
+
+    assert first_stop == pytest.approx(11.7)
+    assert second_stop == pytest.approx(12.7)
+
+
 def test_dynamic_peak_pullback_requires_two_closed_bars_and_atr():
     config = {"enabled": True, "activation_r": 1.0, "pullback_atr_multiple": 1.5, "confirm_bars": 2}
     bars = [
