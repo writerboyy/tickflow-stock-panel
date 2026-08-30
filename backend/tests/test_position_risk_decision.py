@@ -143,3 +143,15 @@ def test_hard_stop_price_without_explicit_enable_does_not_force_exit():
     )
 
     assert decision["action"] != "exit"
+
+
+def test_dynamic_exit_rules_have_priority_over_ordinary_reduction():
+    decision = build_position_decision(
+        _feature(dynamic_exit_rules=["volume_price_divergence"]),
+        position={"cost_price": 10.0},
+    )
+
+    assert decision["action"] == "exit"
+    assert decision["suggested_pct"] == 100
+    assert decision["event"]["kind"] == "dynamic_exit"
+    assert decision["manual_confirmation"] is True

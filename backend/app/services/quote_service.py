@@ -272,6 +272,7 @@ class QuoteService:
         self._intraday_consumers: dict[str, tuple[str, set[str]]] = {}
         self._intraday_prev_close: dict[str, dict[str, float]] = {}
         self._intraday_signal_cache: dict[str, tuple[tuple, dict[str, dict], set[str]]] = {}
+        self._opening_volume_baseline_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         # 午休/收盘最终同步状态: 到边界后必须成功拉取一版行情, 再进入休盘态。
         self._final_sync_done: set[tuple[date, str]] = set()
         self._final_sync_failed: dict[tuple[date, str], str] = {}
@@ -391,6 +392,8 @@ class QuoteService:
     def set_repo(self, repo) -> None:
         """注入 KlineRepository, 用于实时落盘。"""
         self._repo = repo
+        with self._lock:
+            self._opening_volume_baseline_cache.clear()
 
     def set_app_state(self, app_state) -> None:
         """注入 FastAPI app.state, 用于获取 strategy_monitor 等单例。"""
@@ -926,7 +929,16 @@ class QuoteService:
                 if bucket + timedelta(minutes=5) <= cutoff:
                     grouped.setdefault(bucket, []).append(bar)
             bars_5m: list[dict[str, Any]] = []
+            obv = 0.0
+            previous_close_5m: float | None = None
             for bucket, values in sorted(grouped.items()):
+                close = values[-1]["close"]
+                if previous_close_5m is not None:
+                    if close > previous_close_5m:
+                        obv += sum(item["volume"] for item in values)
+                    elif close < previous_close_5m:
+                        obv -= sum(item["volume"] for item in values)
+                previous_close_5m = close
                 bars_5m.append({
                     "datetime": bucket,
                     "open": values[0]["open"],
@@ -936,9 +948,12 @@ class QuoteService:
                     "volume": sum(item["volume"] for item in values),
                     "amount": sum(item["amount"] for item in values),
                     "source_bars": len(values),
+                    "closed": len(values) == 5,
+                    "obv": obv,
                 })
             closes_1m = [bar["close"] for bar in bars_1m if bar["close"] > 0]
-            closes_5m = [bar["close"] for bar in bars_5m if bar["close"] > 0]
+            complete_bars_5m = [bar for bar in bars_5m if bar["closed"]]
+            closes_5m = [bar["close"] for bar in complete_bars_5m if bar["close"] > 0]
             opening = [
                 bar for bar in bars_1m
                 if dt_time(9, 31) <= bar["datetime"].time() < dt_time(10, 0)
@@ -956,6 +971,10 @@ class QuoteService:
                 and {bar["datetime"].time() for bar in opening_five_minute_bars}
                 == {dt_time(9, minute) for minute in range(31, 36)}
             )
+            opening_volume_valid = opening_five_minute_complete and all(
+                _finite(bar.get("volume")) is not None and float(bar["volume"]) >= 0
+                for bar in opening_five_minute_bars
+            )
             previous_volumes = [bar["volume"] for bar in bars_1m[-21:-1] if bar["volume"] > 0]
             latest_volume = bars_1m[-1]["volume"] if bars_1m else 0.0
             average_volume = sum(previous_volumes) / len(previous_volumes) if previous_volumes else None
@@ -964,6 +983,9 @@ class QuoteService:
             momentum_5m = closes_5m[-1] / closes_5m[-2] - 1 if len(closes_5m) >= 2 and closes_5m[-2] else None
             vwap = _finite((snapshot.get("vwap") or {}).get(symbol))
             reason = "" if fresh else ("分钟数据为空" if not rows else "分钟数据过期")
+            opening_baseline = self._opening_volume_baseline(
+                symbol, now.date(), asset_type,
+            )
             result[symbol] = {
                 "symbol": symbol,
                 "available": bool(fresh),
@@ -973,7 +995,7 @@ class QuoteService:
                 "as_of": latest_dt.isoformat() if latest_dt else None,
                 "age_seconds": age_seconds,
                 "bars_1m": len(bars_1m),
-                "bars_5m": len(bars_5m),
+                "bars_5m": len(complete_bars_5m),
                 "last_price": latest_close,
                 "session_vwap": vwap,
                 "opening_range_high": max((bar["high"] for bar in opening), default=None),
@@ -983,9 +1005,9 @@ class QuoteService:
                 "ema9_5m": self._ema(closes_5m, 9),
                 "ema20_5m": self._ema(closes_5m, 20),
                 "atr14_1m": self._atr(bars_1m, 14),
-                "atr14_5m": self._atr(bars_5m, 14),
-                "five_minute_high": max((bar["high"] for bar in bars_5m[-3:]), default=None),
-                "five_minute_low": min((bar["low"] for bar in bars_5m[-3:]), default=None),
+                "atr14_5m": self._atr(complete_bars_5m, 14),
+                "five_minute_high": max((bar["high"] for bar in complete_bars_5m[-3:]), default=None),
+                "five_minute_low": min((bar["low"] for bar in complete_bars_5m[-3:]), default=None),
                 "momentum_1m": momentum_1m,
                 "momentum_5m": momentum_5m,
                 "relative_volume": latest_volume / average_volume if average_volume else None,
@@ -1002,6 +1024,7 @@ class QuoteService:
                 },
                 "opening_five_minute": {
                     "available": opening_five_minute_complete,
+                    "volume_valid": opening_volume_valid,
                     "as_of": opening_five_minute_bars[-1]["datetime"].isoformat()
                     if opening_five_minute_bars else None,
                     "open": opening_five_minute_bars[0]["open"] if opening_five_minute_bars else None,
@@ -1010,13 +1033,100 @@ class QuoteService:
                     "low": min((bar["low"] for bar in opening_five_minute_bars), default=None),
                     "volume": sum(bar["volume"] for bar in opening_five_minute_bars),
                     "amount": sum(bar["amount"] for bar in opening_five_minute_bars),
+                    **opening_baseline,
                 },
                 "previous_day_high": (previous_levels.get(symbol) or {}).get("high"),
                 "previous_day_low": (previous_levels.get(symbol) or {}).get("low"),
                 "session_bars": bars_1m,
                 "closed_bars": bars_1m[-20:],
-                "closed_bars_5m": bars_5m[-20:],
+                # Dynamic exits need 24 bars for the double-peak scan.  Expose
+                # only complete buckets so a delayed one-minute bar cannot be
+                # mistaken for a closed five-minute confirmation.
+                "closed_bars_5m": complete_bars_5m[-60:],
+                "latest_closed_5m_token": complete_bars_5m[-1]["datetime"].isoformat() if complete_bars_5m else None,
             }
+        return result
+
+    def _opening_volume_baseline(
+        self,
+        symbol: str,
+        trading_date: date,
+        asset_type: str,
+        *,
+        sessions: int = 20,
+    ) -> dict[str, Any]:
+        """读取过去完整交易日的 09:31-09:35 成交量中位数，按资产类型缓存。"""
+        key = (asset_type, symbol, trading_date.isoformat())
+        with self._lock:
+            cached = self._opening_volume_baseline_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+        unavailable = {"baseline_median_volume": None, "baseline_samples": 0, "baseline_available": False}
+        if self._repo is None:
+            return unavailable
+        getter = getattr(self._repo, "get_minute_range", None)
+        if not callable(getter):
+            return unavailable
+        try:
+            frame = getter(
+                [symbol],
+                trading_date - timedelta(days=90),
+                trading_date - timedelta(days=1),
+                asset_type,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.debug("早盘量能基准读取失败", exc_info=True)
+            return unavailable
+        if frame is None or frame.is_empty() or "datetime" not in frame.columns:
+            return unavailable
+        samples: dict[str, dict[str, float]] = {}
+        invalid_days: set[str] = set()
+        expected_times = {dt_time(9, minute) for minute in range(31, 36)}
+        for row in frame.to_dicts():
+            raw_dt = row.get("datetime") or row.get("date")
+            if not isinstance(raw_dt, datetime):
+                try:
+                    raw_dt = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    continue
+            # TickFlow 历史分钟采用 UTC-naive；带时区值则先转北京时间。
+            if raw_dt.tzinfo:
+                local_dt = raw_dt.astimezone(CN_TZ).replace(tzinfo=None)
+            else:
+                local_dt = raw_dt + timedelta(hours=8)
+            minute = local_dt.time().replace(second=0, microsecond=0)
+            if minute not in expected_times:
+                continue
+            volume = _finite(row.get("volume"))
+            day = local_dt.date().isoformat()
+            if local_dt.time().second != 0 or local_dt.time().microsecond != 0:
+                invalid_days.add(day)
+                continue
+            if volume is None or volume < 0:
+                invalid_days.add(day)
+                continue
+            day_values = samples.setdefault(day, {})
+            if minute.strftime("%H:%M") in day_values:
+                invalid_days.add(day)
+                continue
+            day_values[minute.strftime("%H:%M")] = volume
+        complete = [
+            sum(values.values())
+            for day, values in sorted(samples.items())
+            if day not in invalid_days and set(values) == {value.strftime("%H:%M") for value in expected_times}
+        ][-sessions:]
+        if len(complete) < sessions:
+            result = unavailable
+        else:
+            middle = len(complete) // 2
+            median = complete[middle] if len(complete) % 2 else (complete[middle - 1] + complete[middle]) / 2
+            result = {
+                "baseline_median_volume": median,
+                "baseline_samples": len(complete),
+                "baseline_available": True,
+            }
+        with self._lock:
+            self._opening_volume_baseline_cache[key] = dict(result)
         return result
 
     def get_intraday_signals(

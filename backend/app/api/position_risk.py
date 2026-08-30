@@ -30,6 +30,14 @@ class OverridePayload(BaseModel):
     override: dict[str, Any]
 
 
+class BatchOverridePayload(BaseModel):
+    revision: int
+    scope: Literal["selected", "all"]
+    symbols: list[str] = Field(default_factory=list)
+    rules: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    clear_rule_ids: list[str] = Field(default_factory=list)
+
+
 class QmtOrderPayload(BaseModel):
     action: str
     symbol: str
@@ -147,6 +155,56 @@ def replace_portfolio(payload: PortfolioPayload, request: Request):
     except (RevisionConflict, ValueError) as exc:
         raise _map_error(exc) from exc
     return {"ok": True, "portfolio": saved, "message": "持仓快照已替换；风险高水位已重置"}
+
+
+@router.put("/overrides/batch")
+def update_overrides_batch(payload: BatchOverridePayload, request: Request):
+    service = _service(request)
+    valid_rules = set(default_rule_options()["rules"])
+    unknown = (set(payload.rules) | set(payload.clear_rule_ids)) - valid_rules
+    if unknown:
+        raise HTTPException(400, f"未知风控规则: {', '.join(sorted(unknown))}")
+    requested = {str(symbol).strip().upper() for symbol in payload.symbols if str(symbol).strip()}
+    affected_symbols: list[str] = []
+
+    def update(value: dict[str, Any]) -> None:
+        positions = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in value.get("positions") or []
+        }
+        affected = requested if payload.scope == "selected" else positions
+        if payload.scope == "selected" and not affected:
+            raise ValueError("selected 范围必须至少包含一个持仓标的")
+        invalid = affected - positions
+        if invalid:
+            raise ValueError(f"只能覆盖当前持仓标的: {', '.join(sorted(invalid))}")
+        overrides = value.setdefault("overrides", {})
+        for symbol in sorted(affected):
+            current = overrides.setdefault(symbol, {})
+            current_rules = current.setdefault("rules", {})
+            for rule_id, config in payload.rules.items():
+                if not isinstance(config, dict):
+                    raise ValueError(f"规则 {rule_id} 配置必须为对象")
+                current_rules[rule_id] = {**(current_rules.get(rule_id) or {}), **config}
+            for rule_id in payload.clear_rule_ids:
+                current_rules.pop(rule_id, None)
+            if not current_rules:
+                current.pop("rules", None)
+            if not current:
+                overrides.pop(symbol, None)
+        affected_symbols.extend(sorted(affected))
+
+    try:
+        saved = service.store.update(payload.revision, update)
+    except (RevisionConflict, ValueError) as exc:
+        raise _map_error(exc) from exc
+    service._notify_updated()  # noqa: SLF001
+    return {
+        "ok": True,
+        "portfolio": saved,
+        "affected_symbols": sorted(set(affected_symbols)),
+        "revision": saved["revision"],
+    }
 
 
 @router.put("/overrides/{symbol}")

@@ -160,6 +160,12 @@ def build_position_decision(
             or (limit_down is not None and price <= limit_down + 0.001)
         )
     )
+    dynamic_rules = [str(value) for value in feature.get("dynamic_exit_rules") or [] if str(value)]
+    dynamic_guard = bool(
+        dynamic_rules
+        and feature.get("available") is True
+        and feature.get("fresh") is True
+    )
     at_limit_up = bool(limit_up is not None and price is not None and price >= limit_up - max(0.001, limit_up * 1e-6))
     conflicting = bool(
         positive_count > 0
@@ -173,6 +179,23 @@ def build_position_decision(
         risk_level = "high"
         event = None
         watch_conditions = ["确认可用数量、涨跌停可成交状态和实际成交回报"]
+    elif dynamic_guard and core_ready:
+        labels = {
+            "intraday_peak_pullback": "冲高回落",
+            "sector_leader_weakening": "板块/龙头相关性走弱",
+            "volume_price_divergence": "双峰量价背离",
+            "opening_volume_selloff": "早盘放量杀跌",
+        }
+        evidence.extend(
+            {"source": "dynamic_exit", "label": labels.get(rule_id, rule_id), "detail": "闭合分钟 K 线规则已确认"}
+            for rule_id in dynamic_rules
+        )
+        action = "exit"
+        suggested_pct = 100
+        risk_level = "high"
+        reason = "动态行为退出规则已确认，建议人工确认清仓"
+        event = {"kind": "dynamic_exit", "label": "动态行为退出", "optional_action_pct": 100}
+        watch_conditions = ["确认可用数量、涨跌停可成交状态和人工确认委托"]
     elif not core_ready:
         action = "observe"
         suggested_pct = 0

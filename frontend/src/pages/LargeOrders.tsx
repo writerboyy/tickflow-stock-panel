@@ -15,6 +15,7 @@ import {
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { PositionRiskImportDialog } from '@/components/PositionRiskImportDialog'
+import { Modal } from '@/components/Modal'
 import { LARGE_ORDER_FIELDS, POSITION_RISK_RULE_FIELDS } from '@/lib/positionRiskRuleFields'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { toast } from '@/components/Toast'
@@ -24,6 +25,7 @@ import {
   type AiStockReport,
   type PositionRiskOptions,
   type PositionRiskEvent,
+  type PositionRiskFeatureSnapshot,
   type PositionRiskPosition,
   type PositionRiskPortfolio,
   type PositionRiskStatus,
@@ -103,21 +105,24 @@ const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown', 'take_profit_ladd
 const STOP_LOSS_RULE_GROUPS = [
   ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['波动与时间保护', ['atr_protection', 'time_stop']],
-  ['隔日短线保护', ['intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit', 'opening_range_failure', 't_plus_one_exit']],
+  ['动态行为退出', ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff']],
+  ['隔日短线保护', ['next_day_gap_down', 'next_day_gap_up_take_profit', 'opening_range_failure', 't_plus_one_exit']],
   ['涨跌停退出', ['broken_limit_up', 'resealed_limit_up', 'sealed_order_shrink_50', 'sealed_order_shrink_80', 'limit_down']],
 ] as const
 const ADVANCED_RULES = ['fund_flow_pressure', 'large_buy', 'large_sell', 'continuous_outflow', 'orderbook_imbalance', 'daily_equity_loss', 'equity_drawdown', 'unrealized_loss', 'total_exposure', 'symbol_concentration', 'clustered_severe_events', 'quote_interruption'] as const
 const SHORT_TERM_RULES = new Set([
   'take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop',
-  'intraday_peak_pullback', 'next_day_gap_down', 'next_day_gap_up_take_profit',
+  'next_day_gap_down', 'next_day_gap_up_take_profit',
   'opening_range_failure', 't_plus_one_exit',
 ])
+const ACTIVE_RULES = new Set([...SHORT_TERM_RULES, 'intraday_peak_pullback'])
+const DYNAMIC_EXIT_RULES = ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const
 type RiskModuleTab = 'take_profit' | 'stop_loss'
 
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
   stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利回撤', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
-  intraday_peak_pullback: '盘中冲高回落', next_day_gap_down: '次日跳空低开', next_day_gap_up_take_profit: '次日高开止盈', opening_range_failure: '开盘区间失败', t_plus_one_exit: 'T+1 强制退出',
+  intraday_peak_pullback: '盘中冲高回落', sector_leader_weakening: '板块/龙头相关性走弱', volume_price_divergence: '双峰量价背离', opening_volume_selloff: '早盘放量杀跌', next_day_gap_down: '次日跳空低开', next_day_gap_up_take_profit: '次日高开止盈', opening_range_failure: '开盘区间失败', t_plus_one_exit: 'T+1 强制退出',
   five_minute_drawdown: '5 分钟回撤', vwap_breakdown: '分时均价负偏离超限', broken_limit_up: '炸板', resealed_limit_up: '回封',
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
@@ -170,7 +175,9 @@ function effectiveRule(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
 
 function isRuleEnabled(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string) {
   const config = effectiveRule(portfolio, symbol, ruleId)
-  return config.enabled === true && (!SHORT_TERM_RULES.has(ruleId) || config.active === true)
+  const dynamicDefault = ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'].includes(ruleId)
+  const enabled = config.enabled ?? dynamicDefault
+  return enabled === true && (!ACTIVE_RULES.has(ruleId) || config.active !== false)
 }
 
 function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
@@ -198,13 +205,13 @@ function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: Positio
       lines: takeProfitLines.length ? takeProfitLines : ['未启用'],
     },
     {
-      tab: 'stop_loss', label: '止损',
-      lines: isRuleEnabled(portfolio, symbol, 'stop_loss')
-        ? [
-            riskFieldText(portfolio, symbol, 'stop_loss', 'threshold'),
-            riskFieldText(portfolio, symbol, 'stop_loss', 'action_pct'),
-          ]
-        : ['未启用'],
+      tab: 'stop_loss', label: '止损 / 动态退出',
+      lines: (isRuleEnabled(portfolio, symbol, 'stop_loss')
+        ? [riskFieldText(portfolio, symbol, 'stop_loss', 'threshold')]
+        : ['硬止损未启用'])
+        .concat((['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const)
+        .filter(ruleId => isRuleEnabled(portfolio, symbol, ruleId) || !portfolio.overrides[symbol]?.rules?.[ruleId])
+        .map(ruleId => RULE_LABELS[ruleId] ?? ruleId)),
     },
   ]
   return (
@@ -256,7 +263,104 @@ function StatusDot({ status }: { status: PositionRiskStatus }) {
   return <span className={cn('h-2 w-2 rounded-full', active ? 'bg-bear' : warning ? 'bg-warning' : 'bg-muted')} />
 }
 
-function PositionInspector({ row, options, initialTab, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; initialTab: RiskModuleTab; onClose: () => void }) {
+type BatchDynamicDraft = Record<string, Record<string, number | boolean>>
+
+function createBatchDynamicDraft(options?: PositionRiskOptions): BatchDynamicDraft {
+  return Object.fromEntries(DYNAMIC_EXIT_RULES.map(ruleId => {
+    const defaults = options?.rules[ruleId] ?? {}
+    return [ruleId, {
+      enabled: defaults.enabled !== false,
+      active: ruleId === 'intraday_peak_pullback' ? true : undefined,
+      notify: defaults.notify !== false,
+      action_pct: Number(defaults.action_pct ?? 100),
+      ...Object.fromEntries((POSITION_RISK_RULE_FIELDS[ruleId] ?? []).filter(field => field.key !== 'action_pct').map(field => [
+        field.key,
+        Number(defaults[field.key] ?? field.defaultValue ?? 0),
+      ])),
+    }]
+  })) as BatchDynamicDraft
+}
+
+function BatchDynamicDialog({
+  scope,
+  count,
+  options,
+  pending,
+  onClose,
+  onSubmit,
+}: {
+  scope: 'selected' | 'all'
+  count: number
+  options?: PositionRiskOptions
+  pending: boolean
+  onClose: () => void
+  onSubmit: (rules: Record<string, Record<string, any>>, clearRuleIds: string[]) => void
+}) {
+  const [draft, setDraft] = useState<BatchDynamicDraft>(() => createBatchDynamicDraft(options))
+  const [cleared, setCleared] = useState<Set<string>>(new Set())
+  const update = (ruleId: string, key: string, value: number | boolean) => {
+    setDraft(current => ({ ...current, [ruleId]: { ...current[ruleId], [key]: value } }))
+  }
+  const submit = () => {
+    const rules: Record<string, Record<string, any>> = {}
+    for (const ruleId of DYNAMIC_EXIT_RULES) {
+      if (!cleared.has(ruleId)) {
+        const config = { ...draft[ruleId] }
+        if (ruleId === 'intraday_peak_pullback') config.active = config.enabled === true
+        rules[ruleId] = config
+      }
+    }
+    onSubmit(rules, [...cleared])
+  }
+  return (
+    <Modal onClose={onClose} labelledBy="batch-dynamic-risk-title" closeOnBackdrop={!pending} panelClassName="max-h-[90vh] w-[min(760px,94vw)] overflow-hidden bg-surface border border-border rounded-card shadow-xl">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <div><h2 id="batch-dynamic-risk-title" className="text-sm font-semibold">批量配置动态退出</h2><p className="mt-1 text-[10px] text-muted">应用到{scope === 'selected' ? `选中 ${count} 只持仓` : '全部当前持仓'}，未填写字段保留逐票覆盖。</p></div>
+        <button type="button" onClick={onClose} disabled={pending} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated disabled:opacity-50" aria-label="关闭"><X className="h-4 w-4" /></button>
+      </div>
+      <div className="max-h-[68vh] overflow-y-auto p-4">
+        <div className="space-y-4">
+          {DYNAMIC_EXIT_RULES.map(ruleId => {
+            const config = draft[ruleId]
+            const isCleared = cleared.has(ruleId)
+            return (
+              <section key={ruleId} className="border-y border-border py-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-secondary">{RULE_LABELS[ruleId]}</span>
+                  <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted">
+                    <label className="inline-flex items-center gap-1"><input type="checkbox" checked={config.enabled === true} disabled={pending || isCleared} onChange={event => update(ruleId, 'enabled', event.target.checked)} />启用</label>
+                    <label className="inline-flex items-center gap-1"><input type="checkbox" checked={config.notify === true} disabled={pending || isCleared} onChange={event => update(ruleId, 'notify', event.target.checked)} />通知</label>
+                    <label className="inline-flex items-center gap-1"><input type="checkbox" checked={isCleared} disabled={pending} onChange={event => setCleared(current => { const next = new Set(current); if (event.target.checked) next.add(ruleId); else next.delete(ruleId); return next })} />清除逐票覆盖</label>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {(POSITION_RISK_RULE_FIELDS[ruleId] ?? []).map(field => {
+                    const stored = Number(config[field.key] ?? field.defaultValue ?? 0)
+                    const display = field.percent ? stored * 100 : stored
+                    return <label key={field.key} className="min-w-0 text-[10px] text-muted"><span>{field.label}</span><span className="mt-1 flex h-7 items-center border border-border bg-background px-2"><input type="number" min={field.min} max={field.max} step={field.step} value={Number.isFinite(display) ? display : ''} disabled={pending || isCleared || config.enabled !== true} onChange={event => { const next = Number(event.target.value); if (Number.isFinite(next)) update(ruleId, field.key, field.percent ? next / 100 : next) }} className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none disabled:opacity-50" />{field.suffix && <span className="ml-1 shrink-0">{field.suffix}</span>}</span></label>
+                  })}
+                </div>
+              </section>
+            )
+          })}
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" onClick={onClose} disabled={pending} className="h-8 rounded-btn border border-border px-3 text-xs text-secondary disabled:opacity-50">取消</button><button type="button" onClick={submit} disabled={pending} className="h-8 rounded-btn bg-accent px-3 text-xs text-white disabled:opacity-50">{pending ? '应用中…' : '应用配置'}</button></div>
+    </Modal>
+  )
+}
+
+function DynamicExitSummary({ feature }: { feature?: PositionRiskFeatureSnapshot }) {
+  if (!feature || feature.data_status === 'unavailable' || feature.available !== true || feature.fresh !== true) {
+    return <div className="text-[10px] text-muted">动态退出 · 数据不足</div>
+  }
+  const rules = feature.dynamic_exit_rules ?? []
+  const labels = rules.map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
+  if (!rules.length) return <div className="text-[10px] text-muted">动态退出 · 已就绪，未触发</div>
+  return <div className="min-w-0"><div className="text-[10px] text-danger">建议清仓 100% · 待人工确认</div><div className="truncate text-[10px] text-secondary" title={labels.join('、')}>触发 {labels.join('、')}</div></div>
+}
+
+function PositionInspector({ row, options, feature, events, initialTab, onClose }: { row: PositionRiskPosition; options: PositionRiskOptions | undefined; feature?: PositionRiskFeatureSnapshot; events?: PositionRiskEvent[]; initialTab: RiskModuleTab; onClose: () => void }) {
   const portfolioQuery = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio })
   const queryClient = useQueryClient()
   const activeRuleTab = initialTab
@@ -268,14 +372,15 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
     mutationFn: (next: Record<string, any>) => api.positionRiskUpdateOverride(row.symbol, portfolio!.revision, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: QK.positionRisk }),
   })
-  const ruleConfig = (ruleId: string) => override.rules?.[ruleId] ?? {}
+  const ruleConfig = (ruleId: string) => override.rules?.[ruleId] ?? options?.rules[ruleId] ?? {}
   const ruleEnabled = (ruleId: string) => {
     const config = ruleConfig(ruleId)
-    return config.enabled === true && (!SHORT_TERM_RULES.has(ruleId) || config.active === true)
+    return config.enabled === true && (!ACTIVE_RULES.has(ruleId) || config.active !== false)
   }
   const setRuleEnabled = (ruleId: string, enabled: boolean) => {
-    const config = { ...ruleConfig(ruleId), enabled }
-    if (SHORT_TERM_RULES.has(ruleId)) config.active = enabled
+    // Keep a legacy peak-pullback override in percentage mode when toggling it.
+    const config = { ...(override.rules?.[ruleId] ?? {}), enabled }
+    if (ACTIVE_RULES.has(ruleId)) config.active = enabled
     mutation.mutate({
       ...override,
       rules: { ...(override.rules ?? {}), [ruleId]: config },
@@ -331,7 +436,7 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
             <span className="truncate">{RULE_LABELS[ruleId] ?? ruleId}</span>
           </button>
           <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>{evidenceOnly ? '采样' : '启用'}</span><input type="checkbox" checked={ruleEnabled(ruleId)} disabled={mutation.isPending} onChange={event => setRuleEnabled(ruleId, event.target.checked)} aria-label={`${ruleEnabled(ruleId) ? '停用' : '启用'}${RULE_LABELS[ruleId] ?? ruleId}`} /></label>
-          {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={override.rules?.[ruleId]?.notify === true} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
+          {!evidenceOnly && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>通知</span><input type="checkbox" checked={(override.rules?.[ruleId]?.notify ?? options?.rules[ruleId]?.notify) === true} disabled={mutation.isPending} onChange={event => setRuleNotify(ruleId, event.target.checked)} aria-label={`通知${RULE_LABELS[ruleId] ?? ruleId}信号`} /></label>}
           {(override.rules?.[ruleId]?.auto_execute ?? options?.rules[ruleId]?.auto_execute) !== undefined && <label className="flex shrink-0 items-center gap-1 text-[10px] text-muted"><span>自动委托</span><input type="checkbox" checked={override.rules?.[ruleId]?.auto_execute === true} disabled={mutation.isPending} onChange={event => setRuleAutoExecute(ruleId, event.target.checked)} /></label>}
         </div>
         {expanded && fields.length > 0 && (
@@ -428,10 +533,19 @@ function PositionInspector({ row, options, initialTab, onClose }: { row: Positio
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{row.name}</div>
             <div className="font-mono text-[11px] text-muted">{row.symbol}</div>
+            <div className="mt-2"><DynamicExitSummary feature={feature} /></div>
           </div>
           <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-btn hover:bg-elevated" aria-label="关闭"><X className="h-4 w-4" /></button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {events?.filter(event => event.symbol === row.symbol && event.triggered_rules?.length).slice(0, 3).map(event => (
+            <div key={`${event.fingerprint ?? event.ts}-evidence`} className="mb-3 border-y border-border py-2 text-[10px] text-muted">
+              <div className="text-secondary">最近动态证据 · {event.rule_name ?? event.rule_id}</div>
+              {event.triggered_rules?.length ? <div className="mt-1">合并规则：{event.triggered_rules.map(ruleId => RULE_LABELS[ruleId] ?? ruleId).join('、')}</div> : null}
+              {event.exit_evidence?.length ? <div className="mt-1">{event.exit_evidence.join('；')}</div> : null}
+              <div className="mt-1">建议清仓 {event.action_pct ?? 0}% · {event.action_eligible ? '待人工确认' : event.blocked_reason ?? '动作已门控'}</div>
+            </div>
+          ))}
           <div className="mt-4">
 
           {activeRuleTab === 'take_profit' && (
@@ -515,6 +629,8 @@ export function LargeOrders() {
   const [tradeRiskContext, setTradeRiskContext] = useState<QmtRiskTradeContext | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
   const [analysisPanel, setAnalysisPanel] = useState<{ symbol: string; name: string } | null>(null)
+  const [bulkSymbols, setBulkSymbols] = useState<Set<string>>(new Set())
+  const [batchScope, setBatchScope] = useState<'selected' | 'all' | null>(null)
   const openRiskSettings = (row: PositionRiskPosition, tab: RiskModuleTab) => setSelected({ row, tab })
   const portfolio = useQuery({ queryKey: QK.positionRisk, queryFn: api.positionRiskPortfolio, refetchInterval: 30_000 })
   const qmt = useQuery({ queryKey: QK.positionRiskQmt, queryFn: api.qmtStatus, refetchInterval: 30_000 })
@@ -557,6 +673,22 @@ export function LargeOrders() {
       toast(`已切换到${result.status.connection_mode === 'local' ? '本地' : '远程'} QMT`, 'success')
     },
   })
+  const batchRiskRules = useMutation({
+    mutationFn: (payload: { scope: 'selected' | 'all'; rules: Record<string, Record<string, any>>; clear_rule_ids: string[] }) => api.positionRiskBatchUpdateOverrides({
+      revision: portfolio.data!.revision,
+      scope: payload.scope,
+      symbols: payload.scope === 'selected' ? [...bulkSymbols] : [],
+      rules: payload.rules,
+      clear_rule_ids: payload.clear_rule_ids,
+    }),
+    onSuccess: result => {
+      queryClient.setQueryData(QK.positionRisk, result.portfolio)
+      queryClient.invalidateQueries({ queryKey: QK.positionRiskFeatures() })
+      setBulkSymbols(new Set())
+      setBatchScope(null)
+      toast(`已应用动态退出规则到 ${result.affected_symbols.length} 只持仓`, 'success')
+    },
+  })
   const probeLatency = qmtProbeQuery.data?.latency_ms ?? qmtProbe.data?.latency_ms ?? qmt.data?.latency_ms
   const probeButtonLabel = qmtProbe.isPending || qmtProbeQuery.isFetching
     ? '检查 QMT 连接（检查中…）'
@@ -573,6 +705,13 @@ export function LargeOrders() {
     () => (portfolio.data?.positions ?? []).map(row => row.symbol),
     [portfolio.data?.positions],
   )
+  const positionSymbolsKey = positionSymbols.join(',')
+  const riskFeatures = useQuery({
+    queryKey: QK.positionRiskFeatures(positionSymbolsKey),
+    queryFn: () => api.positionRiskFeatures(positionSymbols),
+    enabled: positionSymbols.length > 0,
+    refetchInterval: 30_000,
+  })
   const analysisReports = useQuery({
     queryKey: QK.stockAnalysisLatest(positionSymbols),
     queryFn: () => api.stockAnalysisReportsLatest(positionSymbols),
@@ -674,6 +813,8 @@ export function LargeOrders() {
         </div>
         {tab === 'positions' && <div className="flex items-center gap-2 self-end sm:self-auto">
           <label className="relative hidden sm:block"><Search className="absolute left-2 top-2 h-3.5 w-3.5 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="代码 / 名称" className="h-8 w-44 rounded-btn border border-border bg-transparent pl-7 pr-2 text-xs" /></label>
+          <button type="button" onClick={() => setBatchScope('selected')} disabled={!bulkSymbols.size || batchRiskRules.isPending} className="h-8 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">应用到选中 {bulkSymbols.size || ''}</button>
+          <button type="button" onClick={() => setBatchScope('all')} disabled={!data.positions.length || batchRiskRules.isPending} className="h-8 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">应用到全部</button>
         </div>}
       </div>
 
@@ -681,10 +822,12 @@ export function LargeOrders() {
           <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[1300px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
-              {['证券', '数量 / 可用', '成本', '现价', '持仓盈亏', '仓位', '最新分析', '风控设置', '操作'].map(label => <th key={label} className={cn('px-3 py-2 font-medium', ['成本', '现价', '持仓盈亏', '仓位'].includes(label) ? 'text-right' : 'text-left')}>{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
+              <th className="w-9 px-2 py-2"><input type="checkbox" checked={rows.length > 0 && rows.every(row => bulkSymbols.has(row.symbol))} onChange={event => setBulkSymbols(event.target.checked ? new Set(rows.map(row => row.symbol)) : new Set())} aria-label="全选当前持仓" /></th>
+              {['证券', '数量 / 可用', '成本', '现价', '持仓盈亏', '仓位', '最新分析', '动态退出', '风控设置', '操作'].map(label => <th key={label} className={cn('px-3 py-2 font-medium', ['成本', '现价', '持仓盈亏', '仓位'].includes(label) ? 'text-right' : 'text-left')}>{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
+                <td className="px-2 py-2"><input type="checkbox" checked={bulkSymbols.has(row.symbol)} onChange={event => setBulkSymbols(current => { const next = new Set(current); if (event.target.checked) next.add(row.symbol); else next.delete(row.symbol); return next })} aria-label={`选择${row.name}`} /></td>
                 <td className="px-3 py-2"><button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="text-left hover:text-accent" title="查看 K 线与分时"><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-muted">{row.symbol}</div></button></td>
                 <td className="px-3 py-2 font-mono">{row.quantity.toLocaleString()}<div className="text-[10px] text-muted">可用 {row.available.toLocaleString()}</div></td>
                 <td className="px-3 py-2 text-right font-mono">{price(row.cost_price)}</td>
@@ -692,6 +835,7 @@ export function LargeOrders() {
                 <td className={cn('px-3 py-2 text-right font-mono', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</td>
                 <td className="px-3 py-2 text-right font-mono">{pct(row.weight)}</td>
                 <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>
+                <td className="w-[210px] max-w-[210px] px-3 py-2"><DynamicExitSummary feature={riskFeatures.data?.features[row.symbol]} /></td>
                 <td className="w-[330px] max-w-[330px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></td>
                 <td className="px-3 py-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></td>
               </tr>)}
@@ -699,10 +843,11 @@ export function LargeOrders() {
           </table>
         </div>
         <div className="divide-y divide-border md:hidden">
-          {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[1fr_auto] gap-3 px-4 py-3 text-left">
+          {rows.map(row => <div key={row.symbol} className="grid w-full grid-cols-[auto_1fr_auto] gap-3 px-4 py-3 text-left">
+            <input type="checkbox" checked={bulkSymbols.has(row.symbol)} onChange={event => setBulkSymbols(current => { const next = new Set(current); if (event.target.checked) next.add(row.symbol); else next.delete(row.symbol); return next })} aria-label={`选择${row.name}`} />
             <div className="min-w-0">
               <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股</div><div className="mt-2 grid grid-cols-3 gap-2 text-[10px]"><div><div className="text-muted">成本</div><div className="mt-0.5 font-mono text-xs text-foreground">{price(row.cost_price)}</div></div><div><div className="text-muted">现价</div><div className="mt-0.5 font-mono text-xs text-foreground">{price(row.price)}</div></div><div><div className="text-muted">持仓盈亏</div><div className={cn('mt-0.5 font-mono text-xs', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></div></div></button>
-              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
+              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><DynamicExitSummary feature={riskFeatures.data?.features[row.symbol]} /></div><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
             </div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
@@ -713,8 +858,8 @@ export function LargeOrders() {
         {events.data?.events.length ? events.data.events.map((event, index) => <div key={`${event.fingerprint ?? event.ts}-${index}`} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[150px_120px_1fr_220px] sm:px-5">
           <time className="font-mono text-muted"><span className="block">{new Date(event.ts).toLocaleString('zh-CN')}</span>{(event.occurrence_count ?? 1) > 1 && event.first_ts ? <span className="mt-0.5 block text-[10px]">首次 {new Date(event.first_ts).toLocaleTimeString('zh-CN')}</span> : null}</time>
           {event.symbol ? <button type="button" onClick={() => setPreview({ symbol: event.symbol!, name: event.name || event.symbol! })} className="text-left hover:text-accent" title="查看 K 线与分时">{event.symbol} {event.name}</button> : <span>组合</span>}
-                  <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? '历史分时规则（已停用）' : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span></span>
-          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.auto_order_status && event.auto_order_status !== 'disabled' && <span className="text-[10px] text-muted">自动委托 {qmtOrderStatus(event.auto_order_status)}</span>}{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return <button type="button" onClick={() => openTradeForEvent(event, event.action_eligible === true)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title={event.action_eligible ? '打开统一交易面板并保留风控确认' : '打开手动下单面板'}>{event.action_eligible ? '确认委托' : '手动下单'}</button> })() : null}</span>
+          <span className="min-w-0"><span className="inline-flex flex-wrap items-center gap-1.5"><span className="rounded bg-elevated px-1.5 py-0.5 text-[11px] text-secondary">{event.rule_id?.startsWith('t:') ? '历史分时规则（已停用）' : event.rule_id === 'vwap_breakdown' ? RULE_LABELS.vwap_breakdown : event.rule_name || RULE_LABELS[event.rule_id || ''] || cnSignalText(event.message, signalNames)}</span>{event.triggered_rules?.length ? <span className="text-[10px] text-muted">合并 {event.triggered_rules.map(ruleId => RULE_LABELS[ruleId] ?? ruleId).join('、')}</span> : null}{(event.occurrence_count ?? 1) > 1 ? <span className="rounded bg-warning/10 px-1.5 py-0.5 font-mono text-[10px] text-warning">共 {event.occurrence_count} 次</span> : null}</span>{event.exit_evidence?.length ? <span className="mt-1 block truncate text-[10px] text-muted" title={event.exit_evidence.join('；')}>{event.exit_evidence.join('；')}</span> : null}</span>
+          <span className="flex flex-wrap items-center justify-end gap-2"><span className={event.severity === 'critical' ? 'text-danger' : event.severity === 'warn' ? 'text-warning' : 'text-muted'}>{event.severity === 'critical' ? '严重' : event.severity === 'warn' ? '警告' : '提示'} · 执行 {event.action_pct ?? 0}%</span>{event.blocked_reason && <span className="text-[10px] text-warning">{event.blocked_reason}</span>}{event.auto_order_status && event.auto_order_status !== 'disabled' && <span className="text-[10px] text-muted">自动委托 {qmtOrderStatus(event.auto_order_status)}</span>}{event.context_state && <span className={cn('text-[10px]', contextStateClass(event.context_state))}>{contextStateLabel(event.context_state)}</span>}{(event.trade_action === 'BUY' || event.trade_action === 'SELL') && event.symbol ? (() => { const row = data.positions.find(item => item.symbol === event.symbol); if (!row) return null; return <button type="button" onClick={() => openTradeForEvent(event, event.action_eligible === true)} className="h-7 rounded border border-border px-2 text-[10px] text-secondary hover:bg-elevated" title={event.action_eligible ? '打开统一交易面板并保留风控确认' : '打开手动下单面板'}>{event.action_eligible ? '确认委托' : '手动下单'}</button> })() : null}</span>
         </div>) : <EmptyState icon={FileClock} title="暂无触发记录" hint="持仓规则和监控中心命中会进入同一时间线" />}
       </div>}
 
@@ -745,7 +890,8 @@ export function LargeOrders() {
       </section> : null}
 
       <PositionRiskImportDialog open={importOpen} portfolio={data} onClose={() => setImportOpen(false)} />
-      {selected && <PositionInspector key={`${selected.row.symbol}-${selected.tab}`} row={selected.row} options={options.data} initialTab={selected.tab} onClose={() => setSelected(null)} />}
+      {batchScope && <BatchDynamicDialog key={`${batchScope}-${options.data ? 'ready' : 'loading'}`} scope={batchScope} count={batchScope === 'selected' ? bulkSymbols.size : data.positions.length} options={options.data} pending={batchRiskRules.isPending} onClose={() => { if (!batchRiskRules.isPending) setBatchScope(null) }} onSubmit={(rules, clearRuleIds) => batchRiskRules.mutate({ scope: batchScope, rules, clear_rule_ids: clearRuleIds })} />}
+      {selected && <PositionInspector key={`${selected.row.symbol}-${selected.tab}`} row={selected.row} options={options.data} feature={riskFeatures.data?.features[selected.row.symbol]} events={events.data?.events} initialTab={selected.tab} onClose={() => setSelected(null)} />}
       {tradeRow && <QmtTradePanel instrument={{ symbol: tradeRow.symbol, name: tradeRow.name, price: tradeRow.price ?? tradeRow.cost_price }} preset={tradePreset} riskContext={tradeRiskContext} onClose={() => { setTradeRow(null); setTradePreset(null); setTradeRiskContext(null) }} />}
       <StockPreviewDialog symbol={preview?.symbol ?? null} name={preview?.name} onClose={() => setPreview(null)} />
       {analysisPanel && <StockAnalysisDrawer symbol={analysisPanel.symbol} name={analysisPanel.name} onClose={() => setAnalysisPanel(null)} />}

@@ -80,9 +80,27 @@ def default_rule_options() -> dict[str, Any]:
             "sealed_order_shrink_80": {"enabled": False, "notify": False, "threshold": 0.80, "action_pct": 50},
             "limit_down": {"enabled": False, "notify": False, "action_pct": 100, "auto_execute": False},
             "intraday_peak_pullback": {
-                "enabled": True, "active": False, "notify": False, "activation_gain": 0.05,
-                "threshold": 0.03, "confirm_seconds": 5, "action_pct": 50,
+                "enabled": True, "active": True, "notify": True,
+                "activation_r": 1.0, "pullback_atr_multiple": 1.5, "confirm_bars": 2,
+                "activation_gain": 0.05, "threshold": 0.03, "confirm_seconds": 5, "action_pct": 100,
                 "cooldown_seconds": 300, "auto_execute": False,
+            },
+            "sector_leader_weakening": {
+                "enabled": True, "notify": True, "auto_execute": False, "action_pct": 100,
+                "correlation_window_days": 20, "min_correlation_samples": 20,
+                "min_correlation": 0.50, "decline_delta": 0.20,
+                "confirm_bars": 2, "underperformance_gap": -0.003,
+            },
+            "volume_price_divergence": {
+                "enabled": True, "notify": True, "auto_execute": False, "action_pct": 100,
+                "lookback_bars": 24, "min_peak_separation": 2,
+                "min_peak_prominence_atr": 0.5, "max_peak_volume_ratio": 0.80,
+                "confirm_bars": 2,
+            },
+            "opening_volume_selloff": {
+                "enabled": True, "notify": True, "auto_execute": False, "action_pct": 100,
+                "baseline_sessions": 20, "volume_multiple": 2.0,
+                "price_confirmations": 2, "window_end": "10:00",
             },
             "next_day_gap_down": {
                 "enabled": True, "active": False, "notify": False, "threshold": -0.03,

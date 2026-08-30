@@ -20,6 +20,12 @@ from app.indicators.pipeline import ENRICHED_COLUMNS
 from app.market_time import cn_now
 from app.services import alert_store
 from app.services.position_risk_context import PositionRiskContextService
+from app.services.position_risk_dynamic import (
+    evaluate_opening_volume_selloff,
+    evaluate_peak_pullback,
+    evaluate_sector_leader_weakening,
+    evaluate_volume_price_divergence,
+)
 from app.services.position_risk_decision import build_position_decision
 from app.services.position_risk_store import PositionRiskStore, default_rule_options
 from app.strategy.intraday_signals import INTRADAY_SIGNAL_LABELS
@@ -39,7 +45,15 @@ _NO_COOLDOWN_RULES = {
     "broken_limit_up",
     "limit_down",
 }
-_HARD_GUARD_RULES = {"stop_loss", "limit_down", "quote_interruption"}
+_HARD_GUARD_RULES = {
+    "stop_loss", "limit_down", "quote_interruption",
+    "intraday_peak_pullback", "sector_leader_weakening",
+    "volume_price_divergence", "opening_volume_selloff",
+}
+_DYNAMIC_DEFAULT_RULES = {
+    "intraday_peak_pullback", "sector_leader_weakening",
+    "volume_price_divergence", "opening_volume_selloff",
+}
 _ACTION_TTL_SECONDS = 120
 _BUILTIN_SIGNAL_DIRECTIONS = {
     "signal_ma_golden_5_20": "entry",
@@ -664,10 +678,20 @@ class PositionRiskService:
         override = (portfolio.get("overrides") or {}).get(symbol) or {}
         configured = (override.get("rules") or {}).get(rule_id)
         if not isinstance(configured, dict):
-            return {}
+            if rule_id not in _DYNAMIC_DEFAULT_RULES:
+                return {}
+            result = deepcopy(_RULE_DEFAULTS.get(rule_id) or {})
+            result["_legacy_mode"] = False
+            return result
         result = deepcopy(_RULE_DEFAULTS.get(rule_id) or {})
         result.pop("enabled", None)
         result.pop("active", None)
+        if rule_id in _DYNAMIC_DEFAULT_RULES:
+            result["_legacy_mode"] = (
+                rule_id == "intraday_peak_pullback"
+                and "activation_r" not in configured
+                and any(key in configured for key in ("activation_gain", "threshold", "confirm_seconds"))
+            )
         result.update(configured)
         return result
 
@@ -1006,6 +1030,14 @@ class PositionRiskService:
                 "hard_stop_price": hard_stop,
                 "hard_stop_enabled": stop_enabled,
                 "feature_snapshot_at": runtime.get("feature_snapshot_at") or item.get("as_of"),
+                "dynamic_exit_rules": [
+                    rule_id for rule_id in (
+                        "opening_volume_selloff", "sector_leader_weakening",
+                        "volume_price_divergence", "intraday_peak_pullback",
+                    )
+                    if bool((self._rule_states.get(f"{symbol}:{rule_id}") or {}).get("active"))
+                    and bool(item.get("available") and item.get("fresh"))
+                ],
                 "position_started_at": runtime.get("position_started_at"),
                 "t_trade_count": int((runtime.get("t_trade") or {}).get("count") or 0),
                 "t_trade_date": (runtime.get("t_trade") or {}).get("date"),
@@ -1077,6 +1109,9 @@ class PositionRiskService:
                     "signal_intraday_avg_cross_down": False,
                 }
         features = intraday_features or {}
+        context = self._contexts.get(symbol) or {}
+        if context.get("sector_relative_returns") and not features.get("sector_relative_returns"):
+            features = {**features, "sector_relative_returns": context["sector_relative_returns"]}
         features_available = bool(features.get("available") and features.get("fresh"))
         runtime_key = f"position:{symbol}"
         runtime = self.store.get_runtime(runtime_key, {}) or {}
@@ -1387,33 +1422,105 @@ class PositionRiskService:
                     feature_snapshot_at=features.get("as_of"),
                 )
 
-        # Overnight protections consume only closed bars.  The first quote after
-        # a data gap establishes the high-water mark above and is never treated
-        # as a fresh trigger by itself.
+        # Dynamic exits consume only closed bars.  Candidates are bundled below
+        # so one closed bar creates one human-confirmation action.
+        dynamic_candidates: list[dict[str, Any]] = []
         peak_cfg = self._rule_config(portfolio, symbol, "intraday_peak_pullback")
-        peak_activation = _finite(peak_cfg.get("activation_gain")) or 0.05
-        peak_threshold = max(0.0, _finite(peak_cfg.get("threshold")) or 0.03)
-        peak_confirm = max(0, int(_finite(peak_cfg.get("confirm_seconds")) or 5))
-        peak_pullback = bool(
-            positive_cost and features_available and intraday_high > 0
-            and intraday_high / positive_cost - 1 >= peak_activation
-            and price <= intraday_high * (1 - peak_threshold)
+        dynamic_initial_r = initial_r
+        closed_bars_5m = features.get("closed_bars_5m") or []
+        closed_peak_price = _finite((closed_bars_5m[-1] or {}).get("close")) if closed_bars_5m else None
+        peak_result = evaluate_peak_pullback(
+            # The new behavior is evaluated from a completed bucket.  Legacy
+            # percentage configurations retain their original quote semantics.
+            price=price if peak_cfg.get("_legacy_mode") else closed_peak_price,
+            intraday_high=intraday_high,
+            cost=positive_cost,
+            initial_r=dynamic_initial_r,
+            atr14_5m=_finite(features.get("atr14_5m")) if features_available else None,
+            closed_bars_5m=closed_bars_5m,
+            config=peak_cfg,
         )
-        peak_suppressed = self._recovery_suppressed(runtime, "intraday_peak_pullback", peak_pullback)
-        peak_active = self._sustained(runtime, "intraday_peak_pullback", peak_pullback, peak_confirm, now) if not peak_suppressed else False
-        if self._set_rule(
-            symbol, "intraday_peak_pullback", peak_active, now,
-            cooldown_seconds=max(0, int(_finite(peak_cfg.get("cooldown_seconds")) or 300)),
-        ) and not peak_suppressed:
-            pullback_stop = intraday_high * (1 - peak_threshold)
-            effective_stop = max(_finite(runtime.get("effective_stop_price")) or 0, pullback_stop)
-            runtime["effective_stop_price"] = effective_stop
+        peak_active = bool(peak_result.get("active")) if not peak_cfg.get("_legacy_mode") else bool(
+            peak_cfg.get("enabled") is True and peak_cfg.get("active", True) is True
+            and positive_cost and features_available and intraday_high > 0
+            and intraday_high / positive_cost - 1 >= (
+                _finite(peak_cfg.get("activation_gain"))
+                if _finite(peak_cfg.get("activation_gain")) is not None else 0.05
+            )
+            and price <= intraday_high * (
+                1 - max(
+                    0.0,
+                    _finite(peak_cfg.get("threshold"))
+                    if _finite(peak_cfg.get("threshold")) is not None else 0.03,
+                )
+            )
+        )
+        if peak_cfg.get("_legacy_mode"):
+            peak_confirm = max(0, int(_finite(peak_cfg.get("confirm_seconds")) or 5))
+            peak_active = self._sustained(runtime, "intraday_peak_pullback", peak_active, peak_confirm, now)
+        peak_suppressed = self._recovery_suppressed(runtime, "intraday_peak_pullback", peak_active)
+        peak_token = peak_result.get("token") or None
+        peak_should_emit = self._set_rule(
+            symbol, "intraday_peak_pullback", peak_active and not peak_suppressed, now,
+            event_token=peak_token,
+            cooldown_seconds=0 if not peak_cfg.get("_legacy_mode") else max(0, int(_finite(peak_cfg.get("cooldown_seconds")) or 300)),
+        )
+        if peak_active and not peak_suppressed and peak_should_emit:
+            effective_stop = _finite(runtime.get("effective_stop_price"))
+            if not peak_cfg.get("_legacy_mode"):
+                pullback_stop = intraday_high - (_finite(features.get("atr14_5m")) or 0) * (_finite(peak_cfg.get("pullback_atr_multiple")) or 1.5)
+                effective_stop = max(effective_stop or 0, pullback_stop)
+                runtime["effective_stop_price"] = effective_stop
+            dynamic_candidates.append({
+                "rule_id": "intraday_peak_pullback",
+                "label": "盘中冲高回落",
+                "severity": "critical",
+                "action_pct": _action_pct(peak_cfg, 100),
+                "reasons": [str(peak_result.get("reason") or "闭合 5 分钟 K 确认冲高回落")],
+                "token": peak_token,
+                "priority": 50,
+                "effective_stop_price": effective_stop,
+            })
+
+        context = self._contexts.get(symbol) or {}
+        dynamic_rules = (
+            ("opening_volume_selloff", "早盘放量杀跌", evaluate_opening_volume_selloff(features, now, self._rule_config(portfolio, symbol, "opening_volume_selloff")), 80),
+            ("sector_leader_weakening", "板块/龙头相关性走弱", evaluate_sector_leader_weakening(context, features, self._rule_config(portfolio, symbol, "sector_leader_weakening")), 70),
+            ("volume_price_divergence", "双峰量价背离", evaluate_volume_price_divergence(features.get("closed_bars_5m") or [], _finite(features.get("atr14_5m")) if features_available else None, self._rule_config(portfolio, symbol, "volume_price_divergence")), 60),
+        )
+        for rule_id, label, result, priority in dynamic_rules:
+            cfg = self._rule_config(portfolio, symbol, rule_id)
+            active = bool(result.get("active"))
+            token = str(result.get("token") or "") or None
+            should_emit = self._set_rule(
+                symbol, rule_id, active, now, event_token=token, cooldown_seconds=0,
+            )
+            if active and should_emit:
+                dynamic_candidates.append({
+                    "rule_id": rule_id,
+                    "label": label,
+                    "severity": "critical",
+                    "action_pct": _action_pct(cfg, 100),
+                    "reasons": [str(result.get("reason") or label)],
+                    "token": token,
+                    "priority": priority,
+                })
+        if dynamic_candidates:
+            primary = max(dynamic_candidates, key=lambda item: item["priority"])
+            triggered_rules = [item["rule_id"] for item in sorted(dynamic_candidates, key=lambda item: -item["priority"])]
+            bundle_token = "|".join(str(item.get("token") or "") for item in dynamic_candidates)
             self._emit(
-                portfolio, position, "intraday_peak_pullback", "盘中冲高回落", "warn",
-                _action_pct(peak_cfg, 50),
-                [f"盘中高点 {intraday_high:.3f} 回撤达到 {peak_threshold:.2%}，确认 {peak_confirm} 秒"],
-                initial_r=initial_r, r_multiple=r_multiple, effective_stop_price=effective_stop,
-                holding_day=holding_day, risk_stage="peak_pullback", feature_snapshot_at=features.get("as_of"),
+                portfolio, position, primary["rule_id"], primary["label"], primary["severity"],
+                max(int(item["action_pct"]) for item in dynamic_candidates),
+                [reason for item in dynamic_candidates for reason in item["reasons"]],
+                triggered_rules=triggered_rules,
+                priority=primary["priority"],
+                bundle_id=f"{symbol}:{bundle_token or now.strftime('%Y%m%d%H%M')}",
+                exit_evidence=[reason for item in dynamic_candidates for reason in item["reasons"]],
+                initial_r=initial_r, r_multiple=r_multiple,
+                effective_stop_price=primary.get("effective_stop_price"),
+                holding_day=holding_day, risk_stage=primary["rule_id"],
+                feature_snapshot_at=features.get("as_of"),
             )
 
         next_day = holding_day is not None and holding_day >= 1
@@ -2413,6 +2520,10 @@ class PositionRiskService:
         risk_stage: str | None = None,
         initial_r: float | None = None,
         holding_day: int | None = None,
+        triggered_rules: list[str] | None = None,
+        priority: int | None = None,
+        bundle_id: str | None = None,
+        exit_evidence: list[str] | None = None,
     ) -> None:
         symbol = position.get("symbol") if position else None
         config_symbol = symbol or "__portfolio__"
@@ -2439,7 +2550,7 @@ class PositionRiskService:
             else cn_now().replace(tzinfo=None)
         )
         event_token = str(state.get("last_event_token") or "")
-        fingerprint_raw = (
+        fingerprint_raw = bundle_id or (
             f"{event_time.date()}:{symbol or '__portfolio__'}:{rule_id}:{event_token}"
         )
         fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
@@ -2448,6 +2559,7 @@ class PositionRiskService:
         configured_action_pct = action_pct
         action_direction = trade_action
         action_eligible = False
+        blocked_reason = None
         if symbol and configured_action_pct > 0:
             if action_direction is None and not rule_id.startswith("signal:") and not rule_id.startswith("monitor:"):
                 action_direction = "SELL"
@@ -2460,8 +2572,9 @@ class PositionRiskService:
                 action_eligible = action_direction in {"BUY", "SELL"}
             elif context_state in {"supportive", "neutral"} and context.get("gate_open") is True:
                 action_eligible = action_direction in {"BUY", "SELL"}
-            elif context_state == "unavailable":
+            else:
                 action_pct = 0
+                blocked_reason = f"市场上下文阻止动作（{context_state}）"
         if symbol and action_direction == "SELL" and action_eligible:
             entry_date = _parse_date(position.get("entry_date") or position.get("opened_at"))
             if entry_date is not None:
@@ -2475,6 +2588,12 @@ class PositionRiskService:
                     )
                 if effective_holding_day is not None and effective_holding_day < 1:
                     action_eligible = False
+                    blocked_reason = "买入日不可卖出，T+1 门禁未通过"
+        if symbol and action_direction == "SELL" and action_eligible:
+            available = int(_finite(position.get("available")) or 0)
+            if available < 100:
+                action_eligible = False
+                blocked_reason = "可用数量不足一手，未生成确认委托"
         auto_order_status = "disabled"
         auto_order_idempotency_key = None
         auto_order_error = None
@@ -2499,7 +2618,23 @@ class PositionRiskService:
             "initial_r": initial_r,
             "holding_day": holding_day,
             "auto_order_status": auto_order_status,
+            "manual_confirmation": bool(
+                action_direction == "SELL"
+                and action_pct > 0
+                and action_eligible
+                and auto_order_status == "disabled"
+            ),
         }
+        if triggered_rules:
+            event["triggered_rules"] = triggered_rules
+        if priority is not None:
+            event["priority"] = priority
+        if bundle_id:
+            event["bundle_id"] = bundle_id
+        if exit_evidence:
+            event["exit_evidence"] = exit_evidence
+        if blocked_reason:
+            event["blocked_reason"] = blocked_reason
         if symbol:
             event["context_state"] = context_state
             event["emotion_phase"] = context.get("emotion_phase") or "数据不足"
@@ -2623,6 +2758,20 @@ class PositionRiskService:
         )
         if position is None:
             raise ValueError("当前持仓中不存在该标的")
+        if cleaned_action == "SELL":
+            entry_date = _parse_date(position.get("entry_date") or position.get("opened_at"))
+            if entry_date is not None:
+                holding_day = self._holding_days_for_position(
+                    cleaned_symbol,
+                    entry_date,
+                    current_time.date(),
+                    _is_continuous_trading(current_time),
+                )
+                if holding_day is None or holding_day < 1:
+                    raise ValueError("买入日不可卖出，T+1 门禁未通过")
+            available = int(_finite(position.get("available")) or 0)
+            if int(volume) > available:
+                raise ValueError("确认时可用数量不足，已拒绝委托")
         order = {
             "action": cleaned_action,
             "symbol": cleaned_symbol,

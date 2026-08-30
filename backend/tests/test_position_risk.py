@@ -18,6 +18,11 @@ from app.api.position_risk import _collapse_timeline_events, router as position_
 from app.services import alert_store
 from app.services.position_risk_ocr import import_position_image, parse_position_tokens
 from app.services.position_risk_service import PositionRiskService, localize_position_risk_text
+from app.services.position_risk_dynamic import (
+    evaluate_opening_volume_selloff,
+    evaluate_peak_pullback,
+    evaluate_volume_price_divergence,
+)
 from app.services.position_risk_store import PositionRiskStore, RevisionConflict, default_rule_options
 from app.services.qmt_trading import (
     QmtRpcError,
@@ -462,12 +467,147 @@ def test_portfolio_store_adds_new_large_order_defaults_to_existing_rule(tmp_path
     }
 
 
-def test_position_risk_modules_default_to_off_and_notifications_default_to_off(tmp_path: Path):
+def test_position_risk_dynamic_rules_default_to_enabled_and_notifying(tmp_path: Path):
     portfolio = PositionRiskStore(tmp_path).load()
     assert "template" not in portfolio
     assert portfolio["overrides"] == {}
     assert all("enabled" in rule for rule in default_rule_options()["rules"].values())
-    assert all(rule.get("notify") is False for rule in default_rule_options()["rules"].values())
+    rules = default_rule_options()["rules"]
+    for rule_id in ("intraday_peak_pullback", "sector_leader_weakening", "volume_price_divergence", "opening_volume_selloff"):
+        assert rules[rule_id]["enabled"] is True
+        assert rules[rule_id]["notify"] is True
+        assert rules[rule_id]["action_pct"] == 100
+        assert rules[rule_id]["auto_execute"] is False
+
+
+def test_dynamic_peak_pullback_requires_two_closed_bars_and_atr():
+    config = {"enabled": True, "activation_r": 1.0, "pullback_atr_multiple": 1.5, "confirm_bars": 2}
+    bars = [
+        {"datetime": "2026-08-20T10:00:00", "close": 11.2},
+        {"datetime": "2026-08-20T10:05:00", "close": 11.0},
+    ]
+    result = evaluate_peak_pullback(
+        price=11.0, intraday_high=12.0, cost=10.0, initial_r=1.0,
+        atr14_5m=0.5, closed_bars_5m=bars, config=config,
+    )
+    assert result["active"] is True
+    assert result["token"].endswith("2026-08-20T10:05:00")
+    assert evaluate_peak_pullback(
+        price=11.0, intraday_high=12.0, cost=10.0, initial_r=1.0,
+        atr14_5m=None, closed_bars_5m=bars, config=config,
+    )["available"] is False
+
+
+def test_volume_price_divergence_requires_new_high_low_volume_and_confirmation():
+    bars = [
+        {"datetime": f"2026-08-20T10:{minute:02d}:00", "high": high, "close": close, "volume": volume}
+        for minute, high, close, volume in (
+            (0, 10.0, 9.8, 100), (5, 10.5, 10.4, 110), (10, 10.1, 10.0, 90),
+            (15, 11.0, 10.9, 70), (20, 10.6, 10.5, 60), (25, 10.3, 10.2, 50),
+        )
+    ]
+    result = evaluate_volume_price_divergence(
+        bars, 1.0,
+        {"lookback_bars": 24, "min_peak_separation": 2, "min_peak_prominence_atr": 0.5, "max_peak_volume_ratio": 0.8, "confirm_bars": 2},
+    )
+    assert result["active"] is True
+    assert evaluate_volume_price_divergence(bars[:4], 1.0, {"confirm_bars": 2})["active"] is False
+
+
+def test_opening_volume_selloff_requires_history_and_two_price_checks():
+    feature = {
+        "last_price": 9.5, "session_vwap": 9.8,
+        "opening_five_minute": {
+            "open": 10.0, "low": 9.7, "volume": 2_000,
+            "baseline_median_volume": 1_000, "baseline_samples": 20,
+        },
+    }
+    result = evaluate_opening_volume_selloff(
+        feature, datetime(2026, 8, 20, 9, 36),
+        {"enabled": True, "baseline_sessions": 20, "volume_multiple": 2, "price_confirmations": 2},
+    )
+    assert result["active"] is True
+    assert evaluate_opening_volume_selloff(
+        feature, datetime(2026, 8, 20, 9, 35),
+        {"enabled": True, "baseline_sessions": 20},
+    )["available"] is False
+
+
+def test_opening_volume_baseline_requires_exact_five_minutes_and_caches(tmp_path: Path):
+    class MinuteRepo:
+        def __init__(self):
+            self.calls = 0
+
+        def get_minute_range(self, _symbols, _start, _end, _asset_type):
+            self.calls += 1
+            rows = []
+            for offset in range(20):
+                day = datetime(2026, 7, 1) + timedelta(days=offset)
+                for minute in range(31, 36):
+                    rows.append({
+                        "symbol": "600036.SH",
+                        "datetime": day.replace(hour=1, minute=minute),
+                        "volume": 100.0,
+                    })
+            rows.append({
+                "symbol": "600036.SH",
+                "datetime": datetime(2026, 7, 1, 1, 31),
+                "volume": 100.0,
+            })
+            return pl.DataFrame(rows)
+
+    repo = MinuteRepo()
+    service = QuoteService()
+    service.set_repo(repo)
+    first = service._opening_volume_baseline("600036.SH", date(2026, 8, 1), "stock")
+    second = service._opening_volume_baseline("600036.SH", date(2026, 8, 1), "stock")
+    assert first["baseline_available"] is False
+    assert second == first
+    assert repo.calls == 1
+
+
+def test_sector_leader_exit_fails_closed_without_minute_proxy():
+    from app.services.position_risk_dynamic import evaluate_sector_leader_weakening
+
+    context = {
+        "sector_correlation_current": 0.2,
+        "sector_correlation_baseline": 0.6,
+        "sector_correlation_samples": 20,
+    }
+    result = evaluate_sector_leader_weakening(
+        context,
+        {"sector_relative_returns": [-0.004, -0.005]},
+        {"enabled": True},
+    )
+    assert result == {"active": False, "available": False, "reason": "缺少可用板块/龙头闭合分钟代理"}
+
+
+def test_batch_override_endpoint_applies_only_current_holdings(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    service.store.replace({
+        "account": {"name": "账户", "cash": 10_000, "total_asset": 20_000},
+        "positions": [
+            {"symbol": "600036.SH", "name": "招商银行", "quantity": 1000, "available": 1000, "cost_price": 10},
+            {"symbol": "000001.SZ", "name": "平安银行", "quantity": 1000, "available": 1000, "cost_price": 10},
+        ],
+    }, 0)
+    app = FastAPI()
+    app.include_router(position_risk_router)
+    app.state.position_risk_service = service
+    client = TestClient(app)
+    response = client.put("/api/position-risk/overrides/batch", json={
+        "revision": 1,
+        "scope": "selected",
+        "symbols": ["600036.SH"],
+        "rules": {"volume_price_divergence": {"enabled": False}},
+    })
+    assert response.status_code == 200
+    assert response.json()["affected_symbols"] == ["600036.SH"]
+    assert response.json()["portfolio"]["overrides"]["600036.SH"]["rules"]["volume_price_divergence"]["enabled"] is False
+    invalid = client.put("/api/position-risk/overrides/batch", json={
+        "revision": 2, "scope": "selected", "symbols": ["999999.SH"], "rules": {},
+    })
+    assert invalid.status_code == 400
 
 
 def _qmt_settings(**overrides):

@@ -1107,6 +1107,12 @@ export interface PositionRiskEvent {
   auto_order_error?: string | null
   feature_snapshot_at?: string | null
   timeline_origin?: 'position_risk' | 'monitor_rule' | string
+  triggered_rules?: string[]
+  priority?: number
+  bundle_id?: string
+  blocked_reason?: string | null
+  exit_evidence?: string[]
+  manual_confirmation?: boolean
 }
 export interface PositionRiskPosition {
   symbol: string
@@ -1344,7 +1350,36 @@ export interface PositionRiskFeatureSnapshot {
   position_started_at?: number | null
   t_trade_count?: number
   t_trade_date?: string | null
-  closed_bars_5m?: Array<{ close?: number | null }>
+  closed_bars_5m?: Array<{
+    datetime?: string
+    open?: number | null
+    high?: number | null
+    low?: number | null
+    close?: number | null
+    volume?: number | null
+    obv?: number | null
+    closed?: boolean
+  }>
+  latest_closed_5m_token?: string | null
+  dynamic_exit_rules?: string[]
+  sector_relative_returns?: number[]
+  minute_proxy_available?: boolean
+  minute_proxy_kind?: 'leader' | 'sector_members' | string | null
+  minute_proxy_symbols?: string[]
+  opening_five_minute?: {
+    available?: boolean
+    volume_valid?: boolean
+    as_of?: string | null
+    open?: number | null
+    close?: number | null
+    high?: number | null
+    low?: number | null
+    volume?: number | null
+    baseline_median_volume?: number | null
+    baseline_samples?: number
+    baseline_available?: boolean
+    volume_ratio?: number | null
+  }
   daily?: {
     available?: boolean
     reason?: string
@@ -1399,6 +1434,15 @@ export interface PositionRiskContext {
   leader_correlation?: number | null
   correlation_samples?: number
   leader_correlation_samples?: number
+  sector_correlation_current?: number | null
+  sector_correlation_baseline?: number | null
+  sector_correlation_samples?: number
+  leader_correlation_current?: number | null
+  leader_correlation_baseline?: number | null
+  minute_proxy_available?: boolean
+  minute_proxy_kind?: string | null
+  minute_proxy_symbols?: string[]
+  sector_relative_returns?: number[]
   auction?: { available?: boolean; price?: number | null; volume?: number | null; amount?: number | null; as_of?: string | null }
   opening_five_minute?: {
     available?: boolean
@@ -3575,6 +3619,10 @@ export const api = {
   positionRiskUpdateOverride: (symbol: string, revision: number, override: Record<string, any>) =>
     request<{ ok: boolean; portfolio: PositionRiskPortfolio }>(`/api/position-risk/overrides/${encodeURIComponent(symbol)}`, {
       method: 'PUT', body: JSON.stringify({ revision, override }),
+    }),
+  positionRiskBatchUpdateOverrides: (payload: { revision: number; scope: 'selected' | 'all'; symbols?: string[]; rules: Record<string, Record<string, any>>; clear_rule_ids?: string[] }) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio; affected_symbols: string[]; revision: number }>('/api/position-risk/overrides/batch', {
+      method: 'PUT', body: JSON.stringify(payload),
     }),
   positionRiskEvents: () =>
     request<{ events: PositionRiskEvent[]; count: number }>('/api/position-risk/events'),

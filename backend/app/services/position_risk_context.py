@@ -118,6 +118,61 @@ def correlation_snapshot(
     }
 
 
+def correlation_window_snapshot(
+    history: pl.DataFrame | None,
+    symbol: str,
+    members: set[str],
+    leader_symbol: str | None,
+    *,
+    window: int = 20,
+) -> dict[str, Any]:
+    """返回最近窗口与前窗口相关性，供动态退出规则使用。"""
+    required = {"symbol", "date", "change_pct"}
+    if history is None or history.is_empty() or not required.issubset(history.columns):
+        return {"sector_current": None, "sector_baseline": None, "sector_samples": 0, "leader_current": None, "leader_baseline": None, "leader_samples": 0}
+    peers = sorted(member for member in members if member != symbol)
+    if len(peers) < 4:
+        return {"sector_current": None, "sector_baseline": None, "sector_samples": 0, "leader_current": None, "leader_baseline": None, "leader_samples": 0}
+    base = history.select(["symbol", "date", "change_pct"]).filter(
+        pl.col("change_pct").is_not_null() & pl.col("change_pct").is_finite(),
+    )
+    stock = base.filter(pl.col("symbol") == symbol).select(["date", pl.col("change_pct").alias("stock_return")])
+    sector = base.filter(pl.col("symbol").is_in(peers)).group_by("date").agg(
+        pl.col("change_pct").mean().alias("sector_return"),
+        pl.len().alias("member_count"),
+    ).filter(pl.col("member_count") >= 4)
+    joined = stock.join(sector, on="date", how="inner").sort("date")
+
+    def windows(frame: pl.DataFrame, right: str) -> tuple[float | None, float | None, int]:
+        clean = frame.select(["stock_return", right]).drop_nulls().filter(
+            pl.col("stock_return").is_finite() & pl.col(right).is_finite(),
+        )
+        if clean.height < window * 2:
+            return None, None, clean.height
+        previous = clean.slice(clean.height - window * 2, window)
+        current = clean.tail(window)
+        previous_value = _finite(previous.select(pl.corr("stock_return", right)).item())
+        current_value = _finite(current.select(pl.corr("stock_return", right)).item())
+        return current_value, previous_value, current.height
+
+    sector_current, sector_baseline, sector_samples = windows(joined, "sector_return")
+    leader_current = leader_baseline = None
+    leader_samples = 0
+    if leader_symbol and leader_symbol != symbol:
+        leader = base.filter(pl.col("symbol") == leader_symbol).select(["date", pl.col("change_pct").alias("leader_return")])
+        leader_current, leader_baseline, leader_samples = windows(
+            stock.join(leader, on="date", how="inner").sort("date"), "leader_return",
+        )
+    return {
+        "sector_current": sector_current,
+        "sector_baseline": sector_baseline,
+        "sector_samples": sector_samples,
+        "leader_current": leader_current,
+        "leader_baseline": leader_baseline,
+        "leader_samples": leader_samples,
+    }
+
+
 class PositionRiskContextService:
     """编排持仓市场上下文；全市场和历史计算按日期/TTL 缓存。"""
 
@@ -131,6 +186,9 @@ class PositionRiskContextService:
         self._rotation_cache: dict[tuple[str, int | None, str], dict[str, Any]] = {}
         self._correlation_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._history_cache: tuple[str, pl.DataFrame | None] | None = None
+        self._minute_proxy_symbols_cache: dict[tuple[str, str], tuple[str, ...]] = {}
+        self._minute_proxy_feature_cache: dict[tuple[str, str], tuple[str, dict[str, dict[str, Any]]]] = {}
+        self._minute_leader_feature_cache: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
         self._auction_quotes: dict[str, dict[str, Any]] = {}
         self._auction_date = ""
 
@@ -359,6 +417,20 @@ class PositionRiskContextService:
         overview = self._overview(data_date if historical else None)
         overview_date = str(overview.get("as_of") or "")[:10]
         effective_date = data_date or (date.fromisoformat(overview_date) if overview_date else None)
+        cache_date = (effective_date or now.date()).isoformat()
+        with self._lock:
+            self._minute_proxy_symbols_cache = {
+                key: value for key, value in self._minute_proxy_symbols_cache.items()
+                if key[0] == cache_date
+            }
+            self._minute_proxy_feature_cache = {
+                key: value for key, value in self._minute_proxy_feature_cache.items()
+                if key[0] == cache_date
+            }
+            self._minute_leader_feature_cache = {
+                key: value for key, value in self._minute_leader_feature_cache.items()
+                if key[0] == cache_date
+            }
         overview_current = effective_date is not None and overview_date == effective_date.isoformat()
         breadth = overview.get("breadth") or {}
         market_available = bool(
@@ -384,7 +456,13 @@ class PositionRiskContextService:
                 for target in [*concepts, *industries]:
                     target_map[str(target.get("key") or "")] = target
         snapshots = self._current_snapshots(list(target_map.values()), now, effective_date)
+        try:
+            stock_df, _ = self.quote_service.get_enriched_today()
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+            stock_df = pl.DataFrame()
         results: dict[str, dict[str, Any]] = {}
+        leader_features: dict[str, dict[str, Any]] = {}
+        minute_proxy_features: dict[str, dict[str, Any]] = {}
         for symbol in symbols:
             feature = features.get(symbol) or {}
             config = configs.get(symbol) or {}
@@ -403,6 +481,171 @@ class PositionRiskContextService:
                 str(leader.get("symbol") or "") or None,
                 effective_date or now.date(),
             ) if target else {"sector": None, "leader": None, "samples": 0, "leader_samples": 0}
+            window_correlations = correlation_window_snapshot(
+                self._correlation_history(effective_date or now.date()),
+                symbol,
+                sector_service.member_symbols(str(target.get("key") or "")) if target and sector_service else set(),
+                str(leader.get("symbol") or "") or None,
+            ) if target and sector_service else {}
+            dynamic_relative = {
+                **dict(feature.get("dynamic_context") or {}),
+                **{
+                    key: feature.get(key)
+                    for key in (
+                        "sector_correlation_current", "sector_correlation_baseline",
+                        "sector_correlation_samples", "leader_correlation_current",
+                        "leader_correlation_baseline",
+                    )
+                    if feature.get(key) is not None
+                },
+            }
+            leader_symbol = str(leader.get("symbol") or "").strip().upper()
+            cache_date = (effective_date or now.date()).isoformat()
+            stock_token = str(feature.get("latest_closed_5m_token") or "")
+            if leader_symbol and leader_symbol != symbol and leader_symbol not in leader_features:
+                leader_cache_key = (cache_date, leader_symbol)
+                with self._lock:
+                    cached_leader = self._minute_leader_feature_cache.get(leader_cache_key)
+                if cached_leader and cached_leader[0] == stock_token:
+                    leader_features[leader_symbol] = dict(cached_leader[1])
+                else:
+                    try:
+                        fetched = self.quote_service.get_intraday_features(
+                            {leader_symbol}, asset_type="stock", now=now,
+                        )
+                        leader_features[leader_symbol] = dict(fetched.get(leader_symbol) or {})
+                    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                        leader_features[leader_symbol] = {}
+                    with self._lock:
+                        self._minute_leader_feature_cache[leader_cache_key] = (
+                            stock_token, dict(leader_features[leader_symbol]),
+                        )
+            if leader_symbol and leader_symbol != symbol:
+                stock_bars = feature.get("closed_bars_5m") or []
+                leader_bars = leader_features.get(leader_symbol, {}).get("closed_bars_5m") or []
+                leader_by_time = {
+                    str(item.get("datetime")): _finite(item.get("close"))
+                    for item in leader_bars
+                }
+                relative_returns: list[float] = []
+                for previous, current in zip(stock_bars[-3:-1], stock_bars[-2:], strict=False):
+                    previous_close = _finite(previous.get("close"))
+                    current_close = _finite(current.get("close"))
+                    previous_leader = leader_by_time.get(str(previous.get("datetime")))
+                    current_leader = leader_by_time.get(str(current.get("datetime")))
+                    if (
+                        previous_close and current_close and previous_leader and current_leader
+                        and previous_leader > 0 and current_leader > 0
+                    ):
+                        relative_returns.append(
+                            (current_close / previous_close - 1)
+                            - (current_leader / previous_leader - 1),
+                        )
+                if len(relative_returns) >= 2:
+                    dynamic_relative["sector_relative_returns"] = relative_returns
+                    dynamic_relative["minute_proxy_available"] = True
+                    dynamic_relative["minute_proxy_kind"] = "leader"
+
+            # Prefer the selected leader when its closed bars are available.  If it
+            # is unavailable, use a deterministic top-five equal-weight member
+            # proxy without adding those symbols to the realtime subscription pool.
+            if not dynamic_relative.get("minute_proxy_available") and target and sector_service:
+                target_key = str(target.get("key") or "")
+                cache_key = ((effective_date or now.date()).isoformat(), target_key)
+                with self._lock:
+                    proxy_symbols = self._minute_proxy_symbols_cache.get(cache_key)
+                if proxy_symbols is None:
+                    members = sector_service.member_symbols(target_key) - {symbol}
+                    sorted_members = tuple(sorted(members))
+                    proxy_symbols = sorted_members
+                    if "amount" in stock_df.columns and "symbol" in stock_df.columns:
+                        ranked = (
+                            stock_df.filter(pl.col("symbol").is_in(list(members)))
+                            .select(["symbol", "amount"])
+                            .drop_nulls()
+                            .sort("amount", descending=True)
+                            .get_column("symbol")
+                            .to_list()
+                        )
+                        proxy_symbols = tuple(str(value).strip().upper() for value in ranked[:5] if str(value).strip())
+                    if not proxy_symbols:
+                        proxy_symbols = sorted_members[:5]
+                    else:
+                        proxy_symbols = proxy_symbols[:5]
+                    with self._lock:
+                        self._minute_proxy_symbols_cache = {
+                            key_value: value
+                            for key_value, value in self._minute_proxy_symbols_cache.items()
+                            if key_value[0] == cache_key[0]
+                        }
+                        self._minute_proxy_symbols_cache[cache_key] = proxy_symbols
+                if proxy_symbols:
+                    proxy_cache_key = (cache_date, target_key)
+                    with self._lock:
+                        cached_proxy = self._minute_proxy_feature_cache.get(proxy_cache_key)
+                    if cached_proxy and cached_proxy[0] == stock_token:
+                        minute_proxy_features.update({key: dict(value) for key, value in cached_proxy[1].items()})
+                    else:
+                        missing = [item for item in proxy_symbols if item not in minute_proxy_features]
+                        if missing:
+                            try:
+                                fetched = self.quote_service.get_intraday_features(
+                                    set(missing), asset_type="stock", now=now,
+                                )
+                                minute_proxy_features.update({
+                                    key: dict(value or {}) for key, value in fetched.items()
+                                })
+                            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                                pass
+                        with self._lock:
+                            self._minute_proxy_feature_cache[proxy_cache_key] = (
+                                stock_token,
+                                {key: dict(minute_proxy_features.get(key) or {}) for key in proxy_symbols},
+                            )
+                    stock_bars = feature.get("closed_bars_5m") or []
+                    proxy_by_time = {
+                        proxy: {
+                            str(item.get("datetime")): _finite(item.get("close"))
+                            for item in (minute_proxy_features.get(proxy, {}).get("closed_bars_5m") or [])
+                        }
+                        for proxy in proxy_symbols
+                    }
+                    relative_returns = []
+                    for previous, current in zip(stock_bars[-3:-1], stock_bars[-2:], strict=False):
+                        previous_close = _finite(previous.get("close"))
+                        current_close = _finite(current.get("close"))
+                        if not previous_close or not current_close:
+                            continue
+                        returns = []
+                        for values in proxy_by_time.values():
+                            previous_proxy = values.get(str(previous.get("datetime")))
+                            current_proxy = values.get(str(current.get("datetime")))
+                            if previous_proxy and current_proxy and previous_proxy > 0 and current_proxy > 0:
+                                returns.append(current_proxy / previous_proxy - 1)
+                        if returns:
+                            relative_returns.append(
+                                current_close / previous_close - 1 - sum(returns) / len(returns),
+                            )
+                    if len(relative_returns) >= 2:
+                        dynamic_relative["sector_relative_returns"] = relative_returns
+                        dynamic_relative["minute_proxy_available"] = True
+                        dynamic_relative["minute_proxy_kind"] = "sector_members"
+                        dynamic_relative["minute_proxy_symbols"] = list(proxy_symbols)
+            sector_current = dynamic_relative.get("sector_correlation_current")
+            if sector_current is None:
+                sector_current = window_correlations.get("sector_current")
+            sector_baseline = dynamic_relative.get("sector_correlation_baseline")
+            if sector_baseline is None:
+                sector_baseline = window_correlations.get("sector_baseline")
+            sector_samples = dynamic_relative.get("sector_correlation_samples")
+            if sector_samples is None:
+                sector_samples = window_correlations.get("sector_samples")
+            leader_current = dynamic_relative.get("leader_correlation_current")
+            if leader_current is None:
+                leader_current = window_correlations.get("leader_current")
+            leader_baseline = dynamic_relative.get("leader_correlation_baseline")
+            if leader_baseline is None:
+                leader_baseline = window_correlations.get("leader_baseline")
             auction = dict(feature.get("auction") or {})
             with self._lock:
                 captured = dict(self._auction_quotes.get(symbol) or {}) if self._auction_date == now.date().isoformat() else {}
@@ -412,7 +655,6 @@ class PositionRiskContextService:
             min_flow_samples = max(1, int(_finite(config.get("min_flow_samples")) or 3))
             flow_samples = int(_finite(feature.get("flow_samples")) or 0)
             relative_volume = _finite(feature.get("relative_volume"))
-            leader_symbol = str(leader.get("symbol") or "")
             sector_correlation_ok = (
                 correlations.get("sector") is not None
                 and int(correlations.get("samples") or 0) >= 10
@@ -487,6 +729,15 @@ class PositionRiskContextService:
                 "leader_correlation": correlations.get("leader"),
                 "correlation_samples": int(correlations.get("samples") or 0),
                 "leader_correlation_samples": int(correlations.get("leader_samples") or 0),
+                "sector_correlation_current": sector_current,
+                "sector_correlation_baseline": sector_baseline,
+                "sector_correlation_samples": int(sector_samples or 0),
+                "leader_correlation_current": leader_current,
+                "leader_correlation_baseline": leader_baseline,
+                "sector_relative_returns": list(dynamic_relative.get("sector_relative_returns") or []),
+                "minute_proxy_available": bool(dynamic_relative.get("minute_proxy_available")),
+                "minute_proxy_kind": dynamic_relative.get("minute_proxy_kind"),
+                "minute_proxy_symbols": list(dynamic_relative.get("minute_proxy_symbols") or []),
                 "auction": auction or {"available": False},
                 "opening_five_minute": {
                     **opening,
