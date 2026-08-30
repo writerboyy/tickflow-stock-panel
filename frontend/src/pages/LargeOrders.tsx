@@ -483,6 +483,7 @@ export function LargeOrders() {
   const [tradeRiskContext, setTradeRiskContext] = useState<QmtRiskTradeContext | null>(null)
   const [preview, setPreview] = useState<{ symbol: string; name: string } | null>(null)
   const [analysisPanel, setAnalysisPanel] = useState<{ symbol: string; name: string } | null>(null)
+  const [analysisEnabled, setAnalysisEnabled] = useState(false)
   const [bulkSymbols, setBulkSymbols] = useState<Set<string>>(new Set())
   const [batchScope, setBatchScope] = useState<'selected' | 'all' | null>(null)
   const openRiskSettings = (row: PositionRiskPosition, tab: RiskModuleTab) => setSelected({ row, tab })
@@ -569,7 +570,7 @@ export function LargeOrders() {
   const analysisReports = useQuery({
     queryKey: QK.stockAnalysisLatest(positionSymbols),
     queryFn: () => api.stockAnalysisReportsLatest(positionSymbols),
-    enabled: positionSymbols.length > 0,
+    enabled: analysisEnabled && positionSymbols.length > 0,
     staleTime: 30_000,
   })
   const rows = useMemo(() => {
@@ -672,6 +673,7 @@ export function LargeOrders() {
           ))}
         </div>
         {tab === 'positions' && <div className="flex items-center gap-2 self-end sm:self-auto">
+          <label className="inline-flex h-8 items-center gap-1.5 rounded-btn border border-border px-2 text-[11px] text-secondary" title="开启后加载并显示持仓个股分析"><input type="checkbox" checked={analysisEnabled} onChange={event => { const enabled = event.target.checked; setAnalysisEnabled(enabled); if (!enabled) setAnalysisPanel(null) }} />个股分析</label>
           <label className="relative hidden sm:block"><Search className="absolute left-2 top-2 h-3.5 w-3.5 text-muted" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="代码 / 名称" className="h-8 w-44 rounded-btn border border-border bg-transparent pl-7 pr-2 text-xs" /></label>
           <button type="button" onClick={() => setBatchScope('selected')} disabled={!bulkSymbols.size || batchRiskRules.isPending} className="h-8 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">应用到选中 {bulkSymbols.size || ''}</button>
           <button type="button" onClick={() => setBatchScope('all')} disabled={!data.positions.length || batchRiskRules.isPending} className="h-8 rounded-btn border border-border px-2 text-[11px] hover:bg-elevated disabled:opacity-50">应用到全部</button>
@@ -683,7 +685,7 @@ export function LargeOrders() {
           <table className="w-full min-w-[1300px] text-xs">
             <thead className="sticky top-0 bg-background text-muted"><tr className="border-b border-border">
               <th className="w-9 px-2 py-2"><input type="checkbox" checked={rows.length > 0 && rows.every(row => bulkSymbols.has(row.symbol))} onChange={event => setBulkSymbols(event.target.checked ? new Set(rows.map(row => row.symbol)) : new Set())} aria-label="全选当前持仓" /></th>
-              {['证券', '数量 / 可用', '成本', '现价', '持仓盈亏', '仓位', '最新分析', '动态退出', '风控设置', '操作'].map(label => <th key={label} className={cn('px-3 py-2 font-medium', ['成本', '现价', '持仓盈亏', '仓位'].includes(label) ? 'text-right' : 'text-left')}>{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
+              {['证券', '数量 / 可用', '成本', '现价', '持仓盈亏', '仓位', ...(analysisEnabled ? ['最新分析'] : []), '动态退出', '风控设置', '操作'].map(label => <th key={label} className={cn('px-3 py-2 font-medium', ['成本', '现价', '持仓盈亏', '仓位'].includes(label) ? 'text-right' : 'text-left')}>{label === '仓位' ? <button type="button" onClick={() => setPositionSort(current => current === 'desc' ? 'asc' : 'desc')} className="inline-flex items-center gap-1 font-medium hover:text-foreground" title="按仓位排序" aria-label={`按仓位${positionSort === 'asc' ? '升序' : '降序'}排序`}>仓位{positionSort ? <span className="font-mono text-[10px] text-accent">{positionSort === 'asc' ? '↑' : '↓'}</span> : null}</button> : label}</th>)}
             </tr></thead>
             <tbody className="divide-y divide-border/70">
               {rows.map(row => <tr key={row.symbol} className="hover:bg-elevated/35">
@@ -694,7 +696,7 @@ export function LargeOrders() {
                 <td className="px-3 py-2 text-right font-mono">{price(row.price)}</td>
                 <td className={cn('px-3 py-2 text-right font-mono', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</td>
                 <td className="px-3 py-2 text-right font-mono">{pct(row.weight)}</td>
-                <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>
+                {analysisEnabled && <td className="px-3 py-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /></td>}
                 <td className="w-[210px] max-w-[210px] px-3 py-2"><DynamicExitSummary feature={riskFeatures.data?.features[row.symbol]} /></td>
                 <td className="w-[330px] max-w-[330px] px-3 py-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></td>
                 <td className="px-3 py-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-7 rounded px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></td>
@@ -707,7 +709,7 @@ export function LargeOrders() {
             <input type="checkbox" checked={bulkSymbols.has(row.symbol)} onChange={event => setBulkSymbols(current => { const next = new Set(current); if (event.target.checked) next.add(row.symbol); else next.delete(row.symbol); return next })} aria-label={`选择${row.name}`} />
             <div className="min-w-0">
               <button type="button" onClick={() => setPreview({ symbol: row.symbol, name: row.name })} className="min-w-0 text-left" title="查看 K 线与分时"><div className="font-medium hover:text-accent">{row.name}<span className="ml-2 font-mono text-[10px] text-muted">{row.symbol}</span></div><div className="mt-1 text-xs text-muted">{row.quantity.toLocaleString()} 股</div><div className="mt-2 grid grid-cols-3 gap-2 text-[10px]"><div><div className="text-muted">成本</div><div className="mt-0.5 font-mono text-xs text-foreground">{price(row.cost_price)}</div></div><div><div className="text-muted">现价</div><div className="mt-0.5 font-mono text-xs text-foreground">{price(row.price)}</div></div><div><div className="text-muted">持仓盈亏</div><div className={cn('mt-0.5 font-mono text-xs', row.profit_loss != null && row.profit_loss >= 0 ? 'text-bull' : 'text-bear')}>{holdingPnl(row.profit_loss)}</div></div></div></button>
-              <div className="mt-2 border-t border-border/70 pt-2"><StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} /><div className="mt-2"><DynamicExitSummary feature={riskFeatures.data?.features[row.symbol]} /></div><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
+              <div className="mt-2 border-t border-border/70 pt-2">{analysisEnabled && <StockAnalysisStatus row={row} report={analysisReports.data?.reports[row.symbol]} loading={analysisReports.isLoading} onOpen={() => setAnalysisPanel({ symbol: row.symbol, name: row.name })} />}<div className="mt-2"><DynamicExitSummary feature={riskFeatures.data?.features[row.symbol]} /></div><div className="mt-2"><RiskSettingsSummary portfolio={data} symbol={row.symbol} onOpen={tab => openRiskSettings(row, tab)} /></div></div>
             </div>
             <div className="flex items-center gap-2"><button type="button" onClick={() => openTradeForRow(row)} className="h-8 rounded-btn px-2 text-[11px] text-secondary hover:bg-elevated hover:text-foreground" title="打开交易面板" aria-label={`打开${row.name}交易面板`}>交易</button></div>
           </div>)}
