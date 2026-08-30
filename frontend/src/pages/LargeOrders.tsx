@@ -142,8 +142,8 @@ function holdingPnl(value: number | null | undefined) {
   return `${value >= 0 ? '+' : ''}${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
-function todayPnl(totalAsset: number | null | undefined, previousCloseTotalAsset: number | null | undefined) {
-  if (totalAsset == null || previousCloseTotalAsset == null || !Number.isFinite(totalAsset) || !Number.isFinite(previousCloseTotalAsset)) return null
+function todayPnl(totalAsset: number | null | undefined, previousCloseTotalAsset: number | null | undefined, available = true) {
+  if (!available || totalAsset == null || previousCloseTotalAsset == null || !Number.isFinite(totalAsset) || !Number.isFinite(previousCloseTotalAsset)) return null
   return totalAsset - previousCloseTotalAsset
 }
 
@@ -587,7 +587,10 @@ export function LargeOrders() {
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
-  const accountTodayPnl = todayPnl(data.account.total_asset, data.account.previous_close_total_asset)
+  const qmtTotalAsset = qmt.data?.state === 'ready' ? qmt.data.account?.total_asset : null
+  const currentTotalAsset = qmtTotalAsset ?? data.account.total_asset
+  const accountTodayPnl = todayPnl(currentTotalAsset, data.account.previous_close_total_asset, data.runtime.status !== 'data_unavailable')
+  const qmtConnectionMode = qmt.data?.connection_mode ?? 'remote'
   const runtimeReason = compactRuntimeReason(data.runtime.reason)
   const openTradeForRow = (row: PositionRiskPosition) => {
     setSelected(null)
@@ -634,18 +637,21 @@ export function LargeOrders() {
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">
           <span className="font-medium">{data.account.name}</span>
           <span className="text-muted">持仓 <b className="font-mono text-foreground">{data.positions.length}</b></span>
-          <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(data.account.total_asset)}</b></span>
-          <span className={cn('text-muted', accountTodayPnl != null && (accountTodayPnl >= 0 ? 'text-bull' : 'text-bear'))}>今日盈亏 <b className="font-mono">{holdingPnl(accountTodayPnl)}</b></span>
+          <span className="text-muted">总资产 <b className="font-mono text-foreground">{money(currentTotalAsset)}</b></span>
+          <span className={cn('text-muted', accountTodayPnl != null && (accountTodayPnl >= 0 ? 'text-bull' : 'text-bear'))} title={accountTodayPnl == null ? '行情不可用或缺少上日收盘总资产，暂无法计算' : undefined}>今日盈亏 <b className="font-mono">{holdingPnl(accountTodayPnl)}</b></span>
           <span className={cn('inline-flex items-center gap-1.5', data.runtime.status === 'websocket' ? 'text-bear' : data.runtime.status === 'polling_degraded' || data.runtime.status === 'reconnecting' ? 'text-warning' : 'text-muted')}><StatusDot status={data.runtime.status} />{STATUS_LABEL[data.runtime.status]}</span>
           <span className={cn('inline-flex items-center gap-1.5', qmt.data?.state === 'ready' ? 'text-bear' : qmt.data?.configured ? 'text-warning' : 'text-muted')}><StatusDot status={qmt.data?.state === 'ready' ? 'websocket' : 'data_unavailable'} />QMT {qmt.data?.state === 'ready' ? '已连接' : qmt.data?.configured ? '待检查' : '未配置'}</span>
-          <span className="inline-flex items-center rounded-btn bg-elevated p-0.5" title="切换 QMT 连接位置">
+          <span className="inline-flex items-center gap-1.5 text-muted" title="切换 QMT 连接位置">
+            <span className="whitespace-nowrap text-[10px]">当前连接：{qmtConnectionMode === 'local' ? '本地' : '远程'}</span>
+            <span className="inline-flex items-center rounded-btn border border-border bg-elevated p-0.5">
             {(['remote', 'local'] as const).map(mode => {
-              const active = (qmt.data?.connection_mode ?? 'remote') === mode
+              const active = qmtConnectionMode === mode
               const available = Boolean(qmt.data) && (mode === 'local' ? qmt.data?.local_configured === true : qmt.data?.remote_configured === true)
-              return <button key={mode} type="button" onClick={() => qmtConnection.mutate(mode)} disabled={active || !available || qmtConnection.isPending} className={cn('h-6 rounded px-2 text-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-50', active ? 'bg-surface text-foreground shadow-sm' : 'text-muted hover:text-foreground')}>
+              return <button key={mode} type="button" onClick={() => qmtConnection.mutate(mode)} disabled={active || !available || qmtConnection.isPending} className={cn('h-6 rounded px-2 text-[10px] font-medium transition-colors disabled:cursor-not-allowed', active ? 'bg-accent/20 text-accent ring-1 ring-inset ring-accent/50 disabled:opacity-100' : 'text-muted hover:text-foreground disabled:opacity-50')}>
                 {mode === 'local' ? '本地' : '远程'}
               </button>
             })}
+            </span>
           </span>
           <span className={qmt.data?.auto_sync_running ? 'text-bear' : 'text-muted'}>{qmt.data?.auto_sync_running ? `自动同步 ${qmt.data.auto_sync_interval_seconds}秒` : '自动同步未运行'}</span>
           <label className="inline-flex items-center gap-1.5 text-muted" title={!qmt.data?.trade_authorized ? '后端未授权实盘交易' : '取消勾选可暂停本次运行的实盘下单'}><input type="checkbox" checked={qmt.data?.trade_enabled === true} disabled={!qmt.data?.configured || !qmt.data?.trade_authorized || qmtToggle.isPending} onChange={event => qmtToggle.mutate(event.target.checked)} />实盘模式</label>
