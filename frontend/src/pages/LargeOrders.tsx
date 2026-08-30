@@ -102,8 +102,7 @@ function qmtOrderPrice(value: unknown, priceType?: string) {
 }
 
 const STOP_LOSS_RULE_GROUPS = [
-  ['动态行为退出', ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff']],
-  ['涨停行为', ['broken_limit_up']],
+  ['动态行为退出', ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff', 'broken_limit_up']],
 ] as const
 const SHORT_TERM_RULES = new Set([
   'take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop',
