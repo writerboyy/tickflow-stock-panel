@@ -2084,6 +2084,50 @@ def test_qmt_submit_preserves_limit_board_order_source(tmp_path: Path):
     assert result["status"] == "accepted_pending"
 
 
+def test_qmt_submit_returns_unknown_when_bridge_submitted_but_order_lookup_lagged(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
+    service.trade_enabled = True
+    calls = []
+
+    def fake_call(method, _params):
+        calls.append(method)
+        if method == "get_asset":
+            return {"cash": 100_000}
+        if method == "get_positions":
+            return {"001696.SZ": {"stock_code": "001696.SZ", "available": 400}}
+        if method == "submit_orders_batch":
+            raise QmtRpcError(
+                "passorder submitted but order not found in system "
+                "(stock=001696.SZ action=SELL price=15.14 volume=400, 30 lookup(s))",
+            )
+        if method == "query_orders":
+            return []
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    result = service.submit_order({
+        "idempotency_key": "lagged-lookup-1",
+        "action": "SELL",
+        "symbol": "001696.SZ",
+        "volume": 400,
+        "price": 15.14,
+        "price_type": "LIMIT",
+    })
+
+    assert result["status"] == "unknown"
+    assert result["order_sys_id"] is None
+    assert "原幂等键禁止重发" in result["error"]
+    assert calls == ["get_positions", "submit_orders_batch", "query_orders"]
+    assert service.submit_order({
+        "idempotency_key": "lagged-lookup-1",
+        "action": "SELL",
+        "symbol": "001696.SZ",
+        "volume": 400,
+        "price": 15.14,
+        "price_type": "LIMIT",
+    })["status"] == "unknown"
+
+
 def test_qmt_submit_records_order_timeline_and_real_broker_time(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_trade_enabled=True))
     service.trade_enabled = True

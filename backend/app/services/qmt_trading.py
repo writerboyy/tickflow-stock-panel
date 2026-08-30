@@ -32,6 +32,12 @@ class QmtOrderPreflightError(QmtRpcError):
     """The order was rejected before a submit request was sent to QMT."""
 
 
+def _is_uncertain_passorder_error(error: BaseException) -> bool:
+    """识别桥接层已经调用 passorder、但暂未回查到委托号的结果。"""
+    message = str(error).casefold()
+    return "passorder" in message and "order not found" in message
+
+
 _CN_TZ = ZoneInfo("Asia/Shanghai")
 _SAFE_B64_PREFIX = "b64s:"
 _SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
@@ -2297,6 +2303,37 @@ class QmtTradingService:
                     {"account_id": self.client.account_id, "strategy_name": strategy_name, "batch_id": idempotency_key, "orders": [params]},
                 )
             except Exception as exc:
+                # Some QMT bridges return an error after passorder succeeded
+                # but before the order becomes visible to query_orders. Do a
+                # final reconciliation and expose an explicit unknown state;
+                # never let the caller retry the same idempotency key.
+                if _is_uncertain_passorder_error(exc):
+                    remote = self._remote_order_for_submission(idempotency_key, order_tag)
+                    if remote is not None and (
+                        remote.get("order_sys_id") or remote.get("user_order_id")
+                    ):
+                        response_time = _now()
+                        row.update({key: value for key, value in remote.items() if value is not None})
+                        row.update(
+                            idempotency_key=idempotency_key,
+                            strategy_name=str(row.get("strategy_name") or strategy_name),
+                            status=str(remote.get("status") or "accepted_pending"),
+                            error=None,
+                            qmt_response_at=response_time,
+                            qmt_accepted_at=response_time,
+                            updated_at=response_time,
+                        )
+                        self._remember_order(row)
+                        return row
+                    response_time = _now()
+                    row.update(
+                        status="unknown",
+                        qmt_response_at=response_time,
+                        updated_at=response_time,
+                        error="QMT 已调用 passorder，但暂未在委托列表找到订单；请在 QMT 核对，原幂等键禁止重发",
+                    )
+                    self._remember_order(row)
+                    return row
                 row.update(status="unknown", updated_at=_now(), error=str(exc))
                 self._remember_order(row)
                 raise
