@@ -74,7 +74,7 @@ def default_rule_options() -> dict[str, Any]:
             "ma20_breakdown": {"enabled": False, "notify": False, "buffer": 0.002, "sustain_seconds": 5, "action_pct": 50},
             "five_minute_drawdown": {"enabled": False, "notify": False, "threshold": 0.03, "action_pct": 25, "auto_execute": False},
             "vwap_breakdown": {"enabled": False, "notify": False, "buffer": 0.01, "sustain_seconds": 30, "action_pct": 25, "auto_execute": False},
-            "broken_limit_up": {"enabled": False, "notify": False, "action_pct": 50, "auto_execute": False},
+            "broken_limit_up": {"enabled": True, "notify": True, "action_pct": 50, "auto_execute": False},
             "resealed_limit_up": {"enabled": False, "notify": False, "action_pct": 0},
             "sealed_order_shrink_50": {"enabled": False, "notify": False, "threshold": 0.50, "action_pct": 25},
             "sealed_order_shrink_80": {"enabled": False, "notify": False, "threshold": 0.80, "action_pct": 50},

@@ -478,6 +478,9 @@ def test_position_risk_dynamic_rules_default_to_enabled_and_notifying(tmp_path: 
         assert rules[rule_id]["notify"] is True
         assert rules[rule_id]["action_pct"] == 100
         assert rules[rule_id]["auto_execute"] is False
+    assert rules["broken_limit_up"]["enabled"] is True
+    assert rules["broken_limit_up"]["notify"] is True
+    assert rules["broken_limit_up"]["auto_execute"] is False
 
 
 def test_dynamic_rule_partial_override_keeps_enabled_defaults(tmp_path: Path):
@@ -496,6 +499,16 @@ def test_dynamic_rule_partial_override_keeps_enabled_defaults(tmp_path: Path):
     assert config["notify"] is True
     assert config["auto_execute"] is False
     assert config["action_pct"] == 75
+
+
+def test_broken_limit_up_uses_enabled_default_without_override(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+
+    config = service._rule_config({"overrides": {}}, "600036.SH", "broken_limit_up")
+
+    assert config["enabled"] is True
+    assert config["notify"] is True
+    assert config["auto_execute"] is False
 
 
 def test_dynamic_peak_protection_only_moves_up_when_event_token_repeats(tmp_path: Path):

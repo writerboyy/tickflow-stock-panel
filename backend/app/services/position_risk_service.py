@@ -52,7 +52,7 @@ _HARD_GUARD_RULES = {
 }
 _DYNAMIC_DEFAULT_RULES = {
     "intraday_peak_pullback", "sector_leader_weakening",
-    "volume_price_divergence", "opening_volume_selloff",
+    "volume_price_divergence", "opening_volume_selloff", "broken_limit_up",
 }
 _ACTION_TTL_SECONDS = 120
 _BUILTIN_SIGNAL_DIRECTIONS = {

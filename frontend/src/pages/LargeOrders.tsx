@@ -175,7 +175,7 @@ function isRuleEnabled(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
 }
 
 function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
-  const sellRuleLines = (['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const)
+  const sellRuleLines = (['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff', 'broken_limit_up'] as const)
     .filter(ruleId => isRuleEnabled(portfolio, symbol, ruleId) || !portfolio.overrides[symbol]?.rules?.[ruleId])
     .map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
   return (
