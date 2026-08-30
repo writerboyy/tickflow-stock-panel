@@ -667,6 +667,16 @@ def test_batch_override_endpoint_applies_only_current_holdings(tmp_path: Path):
     })
     assert invalid.status_code == 400
 
+    wildcard = client.put("/api/position-risk/overrides/batch", json={
+        "revision": 2, "scope": "all", "symbols": ["*"], "rules": {},
+    })
+    assert wildcard.status_code == 400
+
+    all_with_symbols = client.put("/api/position-risk/overrides/batch", json={
+        "revision": 2, "scope": "all", "symbols": ["600036.SH"], "rules": {},
+    })
+    assert all_with_symbols.status_code == 400
+
 
 def _qmt_settings(**overrides):
     values = {

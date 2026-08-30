@@ -164,6 +164,11 @@ def update_overrides_batch(payload: BatchOverridePayload, request: Request):
     unknown = (set(payload.rules) | set(payload.clear_rule_ids)) - valid_rules
     if unknown:
         raise HTTPException(400, f"未知风控规则: {', '.join(sorted(unknown))}")
+    raw_symbols = [str(symbol).strip().upper() for symbol in payload.symbols if str(symbol).strip()]
+    if any(any(marker in symbol for marker in ("*", "?", "%")) for symbol in raw_symbols):
+        raise HTTPException(400, "批量持仓覆盖不允许使用通配符")
+    if payload.scope == "all" and raw_symbols:
+        raise HTTPException(400, "scope=all 不应传入 symbols，由服务端解析当前持仓")
     requested = {str(symbol).strip().upper() for symbol in payload.symbols if str(symbol).strip()}
     affected_symbols: list[str] = []
 
