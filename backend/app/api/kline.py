@@ -637,12 +637,15 @@ def get_minute_batch(request: Request, body: dict):
     # 不落库 (见下方 sync_minute_batch 无 on_segment), 盘中它恒返回上次全量同步日,
     # 用它做判据会导致 trade_date 永久回退到昨天, 再因 expected=240 判定昨日"完整"
     # 而不再补拉今天, 形成永远显示昨日的死循环。
-    # 判据改为: 周末必回退; 工作日收盘后(>=15:30)仍无今日日K → 节假日, 回退。
+    # 判据改为: 周末/工作日开盘前回退; 收盘后(>=15:30)仍无今日日K → 节假日, 回退。
     if not trade_date_str:
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        # 开盘前当天尚未产生分钟K，即使是工作日也必须先展示最近完整交易日。
+        # 盘中不能依赖本地 latest_minute_date_global()，否则实时补拉会被误判为休市。
+        now_cn = cn_now()
+        before_open = (now_cn.hour, now_cn.minute) < (9, 30)
+        need_fallback = today.weekday() >= 5 or before_open  # 周末/盘前回退
         if not need_fallback:
-            now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
             if after_close:
                 latest_daily = repo.latest_daily_date()
@@ -842,11 +845,12 @@ def get_minute(
 
     if trade_date is None:
         # 默认看今天, 而不是本地落盘的最近日 (盘中后者是昨天)。
-        # 非交易日(周末/节假日)才回退到本地最近有数据的交易日。
+        # 非交易日或开盘前回退到本地最近有数据的交易日。
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        now_cn = cn_now()
+        before_open = (now_cn.hour, now_cn.minute) < (9, 30)
+        need_fallback = today.weekday() >= 5 or before_open  # 周末/盘前回退
         if not need_fallback:
-            now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
             if after_close:
                 latest_daily = repo.latest_daily_date()

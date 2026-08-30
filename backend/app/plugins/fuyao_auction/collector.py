@@ -16,6 +16,7 @@ from app.plugins.fuyao.client import FuyaoClient, FuyaoError
 from app.plugins.fuyao.provider import get_api_key
 from app.plugins.fuyao_auction.storage import (
     TABLE_ID,
+    available_trading_dates,
     ensure_config,
     partition_path,
     publish,
@@ -341,6 +342,7 @@ class FuyaoAuctionCollector:
         if not self.configured and result.get("state") != "running":
             result.update({"state": "unconfigured", "message": "未配置 FUYAO_API_KEY"})
         result.update({"configured": self.configured, "trade_date": day.isoformat()})
+        result["trading_dates"] = available_trading_dates(self.data_dir)
         result.update(read_status(self.data_dir, day))
         manifest = load_ingestion_manifest(self.data_dir, "fuyao", TABLE_ID, day.isoformat())
         if manifest and result.get("state") not in {"running", "completed"}:

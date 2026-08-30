@@ -9,7 +9,13 @@ import pytest
 from app.plugins.fuyao import client as fuyao_client
 from app.plugins.fuyao_auction import collector as collector_module
 from app.plugins.fuyao_auction.collector import FuyaoAuctionCollector
-from app.plugins.fuyao_auction.storage import TABLE_ID, partition_path, publish, read_status
+from app.plugins.fuyao_auction.storage import (
+    TABLE_ID,
+    available_trading_dates,
+    partition_path,
+    publish,
+    read_status,
+)
 from app.services.ingestion_manifest import load_ingestion_manifest
 import app.plugins.fuyao_auction.router as router_module
 
@@ -181,6 +187,32 @@ def test_status_does_not_reuse_previous_trade_date_state(tmp_path, monkeypatch):
     assert status["checkpoint"] is None
     assert status["rows"] == 0
     assert status["message"] == "今日暂无竞价数据"
+
+
+def test_status_exposes_local_trading_calendar(tmp_path, monkeypatch):
+    monkeypatch.setattr(collector_module, "get_api_key", lambda: "key")
+    (tmp_path / "kline_daily" / "date=2026-08-28").mkdir(parents=True)
+    (tmp_path / "kline_daily" / "date=2026-08-31").mkdir(parents=True)
+    collector = FuyaoAuctionCollector(tmp_path)
+    monkeypatch.setattr(collector_module, "cn_today", lambda: date(2026, 8, 31))
+
+    assert collector.status()["trading_dates"] == ["2026-08-28", "2026-08-31"]
+
+
+def test_available_trading_dates_reads_calendar_partitions(tmp_path):
+    for root, values in (
+        ("kline_daily", ["2026-08-28", "2026-08-31"]),
+        ("ext_data/ext_fuyao_auction/timeseries", ["2026-08-27"]),
+    ):
+        for value in values:
+            (tmp_path / root / f"date={value}").mkdir(parents=True)
+    (tmp_path / "kline_daily" / "date=not-a-date").mkdir(parents=True)
+
+    assert available_trading_dates(tmp_path) == [
+        "2026-08-27",
+        "2026-08-28",
+        "2026-08-31",
+    ]
 
 
 def test_client_auction_snapshot_builds_documented_query(monkeypatch):

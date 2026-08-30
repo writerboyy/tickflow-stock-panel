@@ -483,6 +483,57 @@ def test_get_minute_batch_splits_stock_and_etf(monkeypatch):
     assert "510300.SH" in result["data"]
 
 
+def test_get_minute_batch_falls_back_before_open_on_weekday(monkeypatch):
+    """工作日开盘前没有当日分钟K时，分时图使用最近完整交易日。"""
+    from app.api import kline as kline_api
+
+    today = date(2026, 8, 31)  # Monday
+    previous = date(2026, 8, 28)
+    monkeypatch.setattr(kline_api, "cn_today", lambda: today)
+    monkeypatch.setattr(kline_api, "cn_now", lambda: datetime(2026, 8, 31, 9, 0))
+
+    mock_repo = MagicMock()
+    mock_repo.get_etf_symbol_set.return_value = set()
+    mock_repo.get_minute_batch.return_value = pl.DataFrame()
+    mock_repo.latest_minute_date_global.return_value = previous
+    request = MagicMock()
+    request.app.state.repo = mock_repo
+    request.app.state.capabilities.has.return_value = True
+    request.app.state.capabilities.limits.return_value = None
+
+    live = _mock_minute_df("600519.SH")
+    sync = MagicMock(return_value=live)
+    monkeypatch.setattr(kline_api.kline_sync, "sync_minute_batch", sync)
+
+    result = kline_api.get_minute_batch(request, {"symbols": ["600519.SH"]})
+
+    assert result["data"]["600519.SH"]
+    assert mock_repo.get_minute_batch.call_args.args[1] == previous
+    assert sync.call_args.kwargs["start_time"].date() == previous
+
+
+def test_get_minute_falls_back_before_open_on_weekday(monkeypatch):
+    """单标的分时接口与批量接口保持相同的盘前交易日回退语义。"""
+    from app.api import kline as kline_api
+
+    today = date(2026, 8, 31)
+    previous = date(2026, 8, 28)
+    monkeypatch.setattr(kline_api, "cn_today", lambda: today)
+    monkeypatch.setattr(kline_api, "cn_now", lambda: datetime(2026, 8, 31, 9, 0))
+    mock_repo = MagicMock()
+    mock_repo.resolve_asset_type.return_value = "stock"
+    mock_repo.latest_minute_date.return_value = previous
+    mock_repo.get_minute.return_value = _mock_minute_df("600519.SH")
+    mock_repo.get_daily.return_value = pl.DataFrame()
+    request = MagicMock()
+    request.app.state.repo = mock_repo
+
+    result = kline_api.get_minute(request, symbol="600519.SH", trade_date=None)
+
+    assert result["date"] == previous.isoformat()
+    assert mock_repo.get_minute.call_args.args[1] == previous
+
+
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------
 
 def test_sync_minute_batch_custom_calls_on_segment(monkeypatch):

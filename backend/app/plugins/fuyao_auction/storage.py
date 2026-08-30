@@ -231,3 +231,30 @@ def read_status(data_dir: Path, trade_date: date) -> dict:
         "checkpoints": sorted(frame["checkpoint"].drop_nulls().unique().to_list()) if "checkpoint" in frame.columns else [],
         "latest_collected_at": frame["collected_at"].max() if "collected_at" in frame.columns else None,
     }
+
+
+def available_trading_dates(data_dir: Path) -> list[str]:
+    """Return locally known exchange trading dates for date controls."""
+    dates: set[str] = set()
+    roots = (
+        Path(data_dir) / "kline_daily",
+        Path(data_dir) / "kline_etf_daily",
+        Path(data_dir) / "ext_data" / TABLE_ID / "timeseries",
+    )
+    for root in roots:
+        if not root.exists():
+            continue
+        try:
+            entries = root.iterdir()
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir() or not entry.name.startswith("date="):
+                continue
+            value = entry.name.removeprefix("date=")
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                continue
+            dates.add(value)
+    return sorted(dates)

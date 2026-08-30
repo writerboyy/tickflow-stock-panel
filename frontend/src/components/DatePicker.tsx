@@ -15,6 +15,8 @@ interface DatePickerProps {
   onChange: (v: string) => void
   min?: string
   max?: string
+  /** Optional exchange calendar; dates outside it are disabled. */
+  availableDates?: readonly string[]
   placeholder?: string
   className?: string
   buttonClassName?: string
@@ -44,6 +46,7 @@ export function DatePicker({
   onChange,
   min,
   max,
+  availableDates,
   placeholder = '选择日期',
   className = '',
   buttonClassName = '',
@@ -61,6 +64,10 @@ export function DatePicker({
   // 当前显示的月份
   const [viewYear, setViewYear] = useState(() => viewDate(value, min, max).year)
   const [viewMonth, setViewMonth] = useState(() => viewDate(value, min, max).month)
+  const availableDateSet = availableDates ? new Set(availableDates) : null
+  const isDisabled = (dateStr: string) =>
+    (!!min && dateStr < min) || (!!max && dateStr > max) ||
+    (!!availableDateSet && !availableDateSet.has(dateStr))
 
   // 当 value 外部变化时同步 view
   useEffect(() => {
@@ -136,12 +143,12 @@ export function DatePicker({
     const m = viewMonth === 0 ? 11 : viewMonth - 1
     const y = viewMonth === 0 ? viewYear - 1 : viewYear
     const ds = toDateStr(y, m, d)
-    cells.push({ day: d, cur: false, dateStr: ds, disabled: !!min && ds < min || !!max && ds > max })
+    cells.push({ day: d, cur: false, dateStr: ds, disabled: isDisabled(ds) })
   }
   // 当月
   for (let d = 1; d <= daysInMonth; d++) {
     const ds = toDateStr(viewYear, viewMonth, d)
-    cells.push({ day: d, cur: true, dateStr: ds, disabled: !!min && ds < min || !!max && ds > max })
+    cells.push({ day: d, cur: true, dateStr: ds, disabled: isDisabled(ds) })
   }
   // 下月头部 — 补齐到 6 行 × 7 = 42
   const remain = 42 - cells.length
@@ -149,7 +156,7 @@ export function DatePicker({
     const m = viewMonth === 11 ? 0 : viewMonth + 1
     const y = viewMonth === 11 ? viewYear + 1 : viewYear
     const ds = toDateStr(y, m, d)
-    cells.push({ day: d, cur: false, dateStr: ds, disabled: !!min && ds < min || !!max && ds > max })
+    cells.push({ day: d, cur: false, dateStr: ds, disabled: isDisabled(ds) })
   }
 
   const displayLabel = value || placeholder

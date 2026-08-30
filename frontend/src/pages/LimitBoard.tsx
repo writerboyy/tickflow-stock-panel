@@ -422,6 +422,7 @@ function AuctionTable({
   date,
   minDate,
   maxDate,
+  availableDates,
   onDateChange,
   checkpoint,
   onCheckpointChange,
@@ -438,6 +439,7 @@ function AuctionTable({
   date: string
   minDate?: string
   maxDate?: string
+  availableDates?: readonly string[]
   onDateChange: (value: string) => void
   checkpoint: string
   onCheckpointChange: (value: string) => void
@@ -566,7 +568,7 @@ function AuctionTable({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <DatePicker value={date} onChange={onDateChange} min={minDate} max={maxDate} buttonClassName="h-7 px-2 text-[10px]" />
+          <DatePicker value={date} onChange={onDateChange} min={minDate} max={maxDate} availableDates={availableDates} buttonClassName="h-7 px-2 text-[10px]" />
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索代码/名称" aria-label="搜索集合竞价股票" className="h-7 w-32 rounded-btn border border-border bg-base pl-7 pr-2 text-[10px] text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60" />
@@ -2244,8 +2246,18 @@ export function LimitBoard() {
     refetchInterval: 15_000,
     placeholderData: previous => previous,
   })
-  const auctionDate = selectedAuctionDate ?? fuyaoAuctionStatus.data?.trade_date ?? ''
-  const auctionMaxDate = fuyaoAuctionStatus.data?.trade_date
+  const auctionTradingDates = fuyaoAuctionStatus.data?.trading_dates ?? []
+  const latestAuctionTradingDate = auctionTradingDates.length > 0
+    ? auctionTradingDates[auctionTradingDates.length - 1]
+    : fuyaoAuctionStatus.data?.trade_date
+  const auctionDate = selectedAuctionDate &&
+    (auctionTradingDates.length === 0 || auctionTradingDates.includes(selectedAuctionDate))
+    ? selectedAuctionDate
+    : (fuyaoAuctionStatus.data?.trade_date &&
+      (auctionTradingDates.length === 0 || auctionTradingDates.includes(fuyaoAuctionStatus.data.trade_date))
+      ? fuyaoAuctionStatus.data.trade_date
+      : latestAuctionTradingDate ?? '')
+  const auctionMaxDate = latestAuctionTradingDate
   const fuyaoAuctionRows = useQuery({
     queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 5_000, AUCTION_COLUMNS.join(','), auctionComparison ? '0925' : auctionCheckpoint),
     queryFn: () => api.extDataRows('ext_fuyao_auction', {
@@ -2586,6 +2598,7 @@ export function LimitBoard() {
           conceptBySymbol={auctionConceptBySymbol}
           date={auctionDate}
           maxDate={auctionMaxDate}
+          availableDates={fuyaoAuctionStatus.data?.trading_dates}
           onDateChange={setSelectedAuctionDate}
           checkpoint={auctionCheckpoint}
           onCheckpointChange={setAuctionCheckpoint}

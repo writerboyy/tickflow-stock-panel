@@ -5405,6 +5405,7 @@ export interface FuyaoAuctionStatus {
   server_timestamp?: number | null
   auction_phase?: string | null
   partition_exists?: boolean
+  trading_dates?: string[]
 }
 
 export interface FuyaoAuctionKeyResult extends FuyaoAuctionStatus {
