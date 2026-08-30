@@ -101,11 +101,9 @@ function qmtOrderPrice(value: unknown, priceType?: string) {
   return priceType === 'LATEST' ? '最新价' : priceType || '—'
 }
 
-const TAKE_PROFIT_RULES = ['take_profit_ladder'] as const
 const STOP_LOSS_RULE_GROUPS = [
-  ['基础保护', ['stop_loss', 'structure_stop', 'atr_protection']],
   ['动态行为退出', ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff']],
-  ['交易约束', ['limit_down']],
+  ['涨停行为', ['broken_limit_up']],
 ] as const
 const SHORT_TERM_RULES = new Set([
   'take_profit_ladder', 'structure_stop', 'atr_protection', 'time_stop',
@@ -114,7 +112,7 @@ const SHORT_TERM_RULES = new Set([
 ])
 const ACTIVE_RULES = new Set([...SHORT_TERM_RULES, 'intraday_peak_pullback'])
 const DYNAMIC_EXIT_RULES = ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const
-type RiskModuleTab = 'all' | 'take_profit' | 'stop_loss'
+type RiskModuleTab = 'all' | 'stop_loss'
 
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
@@ -177,28 +175,10 @@ function isRuleEnabled(portfolio: PositionRiskPortfolio, symbol: string, ruleId:
   return enabled === true && (!ACTIVE_RULES.has(ruleId) || config.active !== false)
 }
 
-function riskFieldText(portfolio: PositionRiskPortfolio, symbol: string, ruleId: string, fieldKey: string) {
-  const field = POSITION_RISK_RULE_FIELDS[ruleId]?.find(item => item.key === fieldKey)
-  if (!field) return `${fieldKey} —`
-  const config = effectiveRule(portfolio, symbol, ruleId)
-  const raw = config[fieldKey] ?? field.defaultValue
-  const numeric = Number(raw)
-  if (!Number.isFinite(numeric)) return `${field.label} —`
-  const display = field.percent ? numeric * 100 : numeric
-  const value = Number.isInteger(display) ? String(display) : display.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
-  return `${field.label} ${value}${field.suffix}`
-}
-
 function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: PositionRiskPortfolio; symbol: string; onOpen: (tab: RiskModuleTab) => void }) {
-  const sellRuleLines = [
-    isRuleEnabled(portfolio, symbol, 'take_profit_ladder')
-      ? `分批 ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'first_r')} / ${riskFieldText(portfolio, symbol, 'take_profit_ladder', 'second_r')}`
-      : null,
-    isRuleEnabled(portfolio, symbol, 'stop_loss') ? riskFieldText(portfolio, symbol, 'stop_loss', 'threshold') : '硬性保护未启用',
-  ].filter((line): line is string => line !== null)
-    .concat((['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const)
-      .filter(ruleId => isRuleEnabled(portfolio, symbol, ruleId) || !portfolio.overrides[symbol]?.rules?.[ruleId])
-      .map(ruleId => RULE_LABELS[ruleId] ?? ruleId))
+  const sellRuleLines = (['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const)
+    .filter(ruleId => isRuleEnabled(portfolio, symbol, ruleId) || !portfolio.overrides[symbol]?.rules?.[ruleId])
+    .map(ruleId => RULE_LABELS[ruleId] ?? ruleId)
   return (
     <button type="button" onClick={() => onOpen('all')} className="min-h-[82px] w-full min-w-0 rounded border border-border px-1.5 py-1 text-left text-[10px] leading-4 hover:border-accent/50 hover:bg-elevated" title="卖出规则参数">
       <span className="block truncate text-secondary">卖出规则</span>
@@ -472,18 +452,8 @@ function PositionInspector({ row, options, feature, events, initialTab, onClose 
           ))}
           <div className="mt-4">
 
-          {(activeRuleTab === 'take_profit' || activeRuleTab === 'all') && (
-            <section className="mt-4">
-              <div className="mb-2 flex items-end justify-between gap-3">
-                <div><h3 className="text-xs font-semibold text-secondary">卖出规则</h3><p className="mt-1 text-[10px] text-muted">阶段 {row.risk_stage ?? 'initial'} · {row.r_multiple == null ? 'R 未计算' : `${row.r_multiple.toFixed(2)}R`} · 有效保护价 {price(row.effective_stop_price)}</p></div>
-              </div>
-              <div className="divide-y divide-border border-y border-border">{renderRuleRows(TAKE_PROFIT_RULES)}</div>
-            </section>
-          )}
-
           {(activeRuleTab === 'stop_loss' || activeRuleTab === 'all') && (
             <div className="mt-4 space-y-5">
-              <div className="border-y border-border px-1 py-2 text-[10px] text-muted">初始 1R {row.initial_r == null ? '数据不足' : price(row.initial_r)} · 持仓第 {row.holding_day == null ? '未知' : row.holding_day} 个交易日 · 有效保护价 {price(row.effective_stop_price)}</div>
               {STOP_LOSS_RULE_GROUPS.map(([group, rules]) => (
                 <section key={group}>
                   <h3 className="mb-2 text-xs font-semibold text-secondary">{group}</h3>
