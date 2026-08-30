@@ -103,7 +103,7 @@ function qmtOrderPrice(value: unknown, priceType?: string) {
 
 const TAKE_PROFIT_RULES = ['take_profit', 'trailing_drawdown', 'take_profit_ladder'] as const
 const STOP_LOSS_RULE_GROUPS = [
-  ['硬止损与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
+  ['硬性保护与分时结构', ['stop_loss', 'structure_stop', 'ma5_breakdown', 'ma10_breakdown', 'ma20_breakdown', 'five_minute_drawdown', 'vwap_breakdown']],
   ['波动与时间保护', ['atr_protection', 'time_stop']],
   ['动态行为退出', ['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff']],
   ['隔日短线保护', ['next_day_gap_down', 'next_day_gap_up_take_profit', 'opening_range_failure', 't_plus_one_exit']],
@@ -121,13 +121,13 @@ type RiskModuleTab = 'take_profit' | 'stop_loss'
 
 const RULE_LABELS: Record<string, string> = {
   market_context: '市场上下文门控',
-  stop_loss: '成本止损', take_profit: '固定止盈', trailing_drawdown: '盈利回撤', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
-  intraday_peak_pullback: '盘中冲高回落', sector_leader_weakening: '板块/龙头相关性走弱', volume_price_divergence: '双峰量价背离', opening_volume_selloff: '早盘放量杀跌', next_day_gap_down: '次日跳空低开', next_day_gap_up_take_profit: '次日高开止盈', opening_range_failure: '开盘区间失败', t_plus_one_exit: 'T+1 强制退出',
+  stop_loss: '成本保护', take_profit: '固定收益卖出', trailing_drawdown: '盈利回撤卖出', ma5_breakdown: '破 MA5', ma10_breakdown: '破 MA10', ma20_breakdown: '破 MA20',
+  intraday_peak_pullback: '盘中冲高回落', sector_leader_weakening: '板块/龙头相关性走弱', volume_price_divergence: '双峰量价背离', opening_volume_selloff: '早盘放量杀跌', next_day_gap_down: '次日跳空低开', next_day_gap_up_take_profit: '次日高开卖出', opening_range_failure: '开盘区间失败', t_plus_one_exit: 'T+1 强制退出',
   five_minute_drawdown: '5 分钟回撤', vwap_breakdown: '分时均价负偏离超限', broken_limit_up: '炸板', resealed_limit_up: '回封',
   sealed_order_shrink_50: '封单减少 50%', sealed_order_shrink_80: '封单减少 80%', limit_down: '跌停', large_buy: '大单买入',
   large_sell: '大单卖出', continuous_outflow: '连续净流出', orderbook_imbalance: '盘口失衡', daily_equity_loss: '当日权益亏损',
   fund_flow_pressure: '资金卖压',
-  take_profit_ladder: 'R 倍数分批止盈', structure_stop: '分时结构止损', atr_protection: 'ATR 移动保护', time_stop: '时间止损',
+  take_profit_ladder: 'R 倍数分批卖出', structure_stop: '分时结构保护', atr_protection: 'ATR 移动保护', time_stop: '时间保护退出',
   equity_drawdown: '账户高点回撤', unrealized_loss: '持仓总浮亏', total_exposure: '总仓位', symbol_concentration: '单票集中度',
   clustered_severe_events: '严重事件聚集', quote_interruption: '行情中断',
 }
@@ -201,14 +201,14 @@ function RiskSettingsSummary({ portfolio, symbol, onOpen }: { portfolio: Positio
   ].filter((line): line is string => line !== null)
   const modules: Array<{ tab: RiskModuleTab; label: string; lines: string[] }> = [
     {
-      tab: 'take_profit', label: '止盈',
+      tab: 'take_profit', label: '卖出规则',
       lines: takeProfitLines.length ? takeProfitLines : ['未启用'],
     },
     {
-      tab: 'stop_loss', label: '止损 / 动态退出',
+      tab: 'stop_loss', label: '卖出规则 / 动态退出',
       lines: (isRuleEnabled(portfolio, symbol, 'stop_loss')
         ? [riskFieldText(portfolio, symbol, 'stop_loss', 'threshold')]
-        : ['硬止损未启用'])
+        : ['硬性保护未启用'])
         .concat((['intraday_peak_pullback', 'sector_leader_weakening', 'volume_price_divergence', 'opening_volume_selloff'] as const)
         .filter(ruleId => isRuleEnabled(portfolio, symbol, ruleId) || !portfolio.overrides[symbol]?.rules?.[ruleId])
         .map(ruleId => RULE_LABELS[ruleId] ?? ruleId)),
@@ -551,7 +551,7 @@ function PositionInspector({ row, options, feature, events, initialTab, onClose 
           {activeRuleTab === 'take_profit' && (
             <section className="mt-4">
               <div className="mb-2 flex items-end justify-between gap-3">
-                <div><h3 className="text-xs font-semibold text-secondary">止盈规则</h3><p className="mt-1 text-[10px] text-muted">阶段 {row.risk_stage ?? 'initial'} · {row.r_multiple == null ? 'R 未计算' : `${row.r_multiple.toFixed(2)}R`} · 有效保护价 {price(row.effective_stop_price)}</p></div>
+                <div><h3 className="text-xs font-semibold text-secondary">卖出规则</h3><p className="mt-1 text-[10px] text-muted">阶段 {row.risk_stage ?? 'initial'} · {row.r_multiple == null ? 'R 未计算' : `${row.r_multiple.toFixed(2)}R`} · 有效保护价 {price(row.effective_stop_price)}</p></div>
               </div>
               <div className="divide-y divide-border border-y border-border">{renderRuleRows(TAKE_PROFIT_RULES)}</div>
             </section>

@@ -22,7 +22,7 @@ export const LARGE_ORDER_FIELDS: PositionRiskRuleField[] = [
 
 export const POSITION_RISK_RULE_FIELDS: Record<string, PositionRiskRuleField[]> = {
   stop_loss: [
-    { key: 'mode', label: '止损模式', suffix: '', min: 0, step: 1, type: 'select', options: [['fixed', '固定百分比'], ['atr', 'ATR 波动率'], ['max_fixed_atr', '固定与 ATR 取更严格']] },
+    { key: 'mode', label: '保护模式', suffix: '', min: 0, step: 1, type: 'select', options: [['fixed', '固定百分比'], ['atr', 'ATR 波动率'], ['max_fixed_atr', '固定与 ATR 取更严格']] },
     { key: 'threshold', label: '亏损阈值', suffix: '%', min: -100, max: 0, step: 1, percent: true, defaultValue: -0.10 },
     { key: 'atr_multiple', label: 'ATR14 倍数', suffix: '倍', min: 0.1, step: 0.1, defaultValue: 1.5 },
     { key: 'fees_buffer', label: '费用滑点缓冲', suffix: '%', min: 0, max: 10, step: 0.1, percent: true, defaultValue: 0.002 },
