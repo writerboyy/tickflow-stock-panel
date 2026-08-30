@@ -114,9 +114,9 @@ export function StockPanel({
     setDailyResult(null)
   }, [symbol])
 
-  // 当分时开启、无选中日期时，自动选中最新日期
+  // 当分时开启且当前日期不在日K结果中时，自动选中最新日期，保持两图同步。
   useEffect(() => {
-    if (showIntraday && !selectedDate && rows.length > 0) {
+    if (showIntraday && rows.length > 0 && (!selectedDate || !rows.some(row => row.date === selectedDate))) {
       setSelectedDate(rows[rows.length - 1].date)
     }
   }, [showIntraday, selectedDate, rows])
