@@ -480,6 +480,24 @@ def test_position_risk_dynamic_rules_default_to_enabled_and_notifying(tmp_path: 
         assert rules[rule_id]["auto_execute"] is False
 
 
+def test_dynamic_rule_partial_override_keeps_enabled_defaults(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+    portfolio = {
+        "overrides": {
+            "600036.SH": {
+                "rules": {"volume_price_divergence": {"action_pct": 75}},
+            },
+        },
+    }
+
+    config = service._rule_config(portfolio, "600036.SH", "volume_price_divergence")
+
+    assert config["enabled"] is True
+    assert config["notify"] is True
+    assert config["auto_execute"] is False
+    assert config["action_pct"] == 75
+
+
 def test_dynamic_peak_pullback_requires_two_closed_bars_and_atr():
     config = {"enabled": True, "activation_r": 1.0, "pullback_atr_multiple": 1.5, "confirm_bars": 2}
     bars = [

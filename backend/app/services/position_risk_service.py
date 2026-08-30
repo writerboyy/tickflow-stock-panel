@@ -684,8 +684,12 @@ class PositionRiskService:
             result["_legacy_mode"] = False
             return result
         result = deepcopy(_RULE_DEFAULTS.get(rule_id) or {})
-        result.pop("enabled", None)
-        result.pop("active", None)
+        # Dynamic exits are enabled by default even when an override only
+        # changes one parameter.  Preserve the historical behavior for the
+        # other rules, whose presence in overrides is the opt-in contract.
+        if rule_id not in _DYNAMIC_DEFAULT_RULES:
+            result.pop("enabled", None)
+            result.pop("active", None)
         if rule_id in _DYNAMIC_DEFAULT_RULES:
             result["_legacy_mode"] = (
                 rule_id == "intraday_peak_pullback"
