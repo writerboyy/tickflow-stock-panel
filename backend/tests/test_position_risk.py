@@ -1406,6 +1406,32 @@ def test_qmt_order_preview_allocates_fraction_and_fixed_amount(tmp_path: Path):
     assert sell["actual_amount"] == 3_500
 
 
+def test_qmt_order_preview_explains_frozen_position(tmp_path: Path):
+    service = QmtTradingService(tmp_path, _qmt_settings())
+
+    def fake_call(method, _params):
+        if method == "get_positions":
+            return {
+                "001696.SZ": {
+                    "stock_code": "001696.SZ",
+                    "volume": 400,
+                    "available": 0,
+                    "frozen_volume": 400,
+                },
+            }
+        raise AssertionError(method)
+
+    service.client.call = fake_call
+    with pytest.raises(ValueError, match="总持仓 400 股，已冻结 400 股"):
+        service.preview_order({
+            "action": "SELL",
+            "symbol": "001696.SZ",
+            "price": 15.14,
+            "price_type": "LIMIT",
+            "allocation_mode": "quarter",
+        })
+
+
 def test_credit_order_preview_uses_credit_buying_power_not_cash(tmp_path: Path):
     service = QmtTradingService(tmp_path, _qmt_settings(qmt_account_type="CREDIT"))
 

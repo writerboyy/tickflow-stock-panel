@@ -939,8 +939,10 @@ class QmtZmqRpcClient:
             symbol = str(item.get("stock_code") or code or "").strip().upper()
             volume = int(item.get("volume") or 0)
             available = int(item.get("available") or item.get("can_use_volume") or 0)
+            frozen_volume = int(item.get("frozen_volume") or item.get("frozen") or 0)
+            on_road_volume = int(item.get("on_road_volume") or item.get("on_road") or 0)
             cost = _float(item.get("cost") or item.get("cost_price") or item.get("open_price"))
-            if not symbol or volume < 0 or available < 0:
+            if not symbol or volume < 0 or available < 0 or frozen_volume < 0 or on_road_volume < 0:
                 raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}")
             if volume == 0:
                 if available != 0:
@@ -961,6 +963,8 @@ class QmtZmqRpcClient:
                 "name": str(item.get("stock_name") or item.get("name") or symbol),
                 "quantity": volume,
                 "available": available,
+                "frozen_volume": frozen_volume,
+                "on_road_volume": on_road_volume,
                 "cost_price": cost,
                 "price": price if price is not None and price > 0 else None,
                 "market_value": market_value,
@@ -1952,7 +1956,15 @@ class QmtTradingService:
         if action == "SELL":
             positions = snapshot.get("positions") or []
             row = next((item for item in positions if item.get("symbol") == symbol), None)
-            if not row or int(row.get("available") or 0) < volume:
+            available = int((row or {}).get("available") or 0)
+            if row is None or available < volume:
+                frozen = int((row or {}).get("frozen_volume") or 0)
+                quantity = int((row or {}).get("quantity") or 0)
+                if frozen > 0:
+                    raise ValueError(
+                        f"QMT 可用持仓不足：总持仓 {quantity} 股，已冻结 {frozen} 股，"
+                        "请在 QMT 确认撤单并等待冻结释放",
+                    )
                 raise ValueError("QMT 可用持仓不足，已拒绝卖出")
         elif price_type == "LIMIT":
             account = snapshot.get("account") or {}
@@ -2065,6 +2077,13 @@ class QmtTradingService:
             )
             available_volume = int((row or {}).get("available") or 0)
             if row is None or available_volume <= 0:
+                frozen = int((row or {}).get("frozen_volume") or 0)
+                quantity = int((row or {}).get("quantity") or 0)
+                if frozen > 0:
+                    raise ValueError(
+                        f"QMT 可用持仓不足：总持仓 {quantity} 股，已冻结 {frozen} 股，"
+                        "请在 QMT 确认撤单并等待冻结释放",
+                    )
                 raise ValueError("QMT 可用持仓不足，无法计算卖出金额")
             basis_amount = available_volume * price
             primary_basis_amount = basis_amount
@@ -2190,7 +2209,13 @@ class QmtTradingService:
                 snapshot = {
                     "account": {},
                     "positions": [
-                        {"symbol": item.get("symbol"), "available": item.get("available", 0)}
+                        {
+                            "symbol": item.get("symbol"),
+                            "available": item.get("available", 0),
+                            "quantity": item.get("quantity", 0),
+                            "frozen_volume": item.get("frozen_volume", 0),
+                            "on_road_volume": item.get("on_road_volume", 0),
+                        }
                         for item in cached_snapshot.get("positions") or []
                     ],
                 }
@@ -2218,11 +2243,20 @@ class QmtTradingService:
             symbol = str(item.get("stock_code") or code or "").strip().upper()
             try:
                 available = int(item.get("available") or item.get("can_use_volume") or 0)
+                quantity = int(item.get("volume") or item.get("quantity") or 0)
+                frozen_volume = int(item.get("frozen_volume") or item.get("frozen") or 0)
+                on_road_volume = int(item.get("on_road_volume") or item.get("on_road") or 0)
             except (TypeError, ValueError) as exc:
                 raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}") from exc
-            if not symbol or available < 0:
+            if not symbol or quantity < 0 or available < 0 or frozen_volume < 0 or on_road_volume < 0:
                 raise QmtRpcError(f"QMT 持仓字段无效: {symbol or code}")
-            positions.append({"symbol": symbol, "available": available})
+            positions.append({
+                "symbol": symbol,
+                "available": available,
+                "quantity": quantity,
+                "frozen_volume": frozen_volume,
+                "on_road_volume": on_road_volume,
+            })
         return {"account": {}, "positions": positions}
 
     def submit_order(self, request: dict[str, Any]) -> dict[str, Any]:
