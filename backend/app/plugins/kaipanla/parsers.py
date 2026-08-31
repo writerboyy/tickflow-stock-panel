@@ -137,63 +137,9 @@ def parse_capital_net(payload: dict, code: str) -> dict:
         "capital_net_points": len(points),
         "capital_net_last_time": last.get("time"),
         "capital_net_close": last.get("big_order_net"),
-        "capital_buy_close": last.get("intraday_buy"),
-        "capital_sell_close": last.get("intraday_sell"),
+                "capital_buy_close": last.get("intraday_buy"),
+                "capital_sell_close": last.get("intraday_sell"),
     }
-
-
-def parse_large_order_statistics(payload: dict, code: str, trade_date: date) -> dict | None:
-    """取目标交易日的日度大单净额；不把历史数组的最后一项假定为当天。"""
-    dates = _rows({"List": payload.get("Date")}, "List")
-    values = {name: _rows({"List": payload.get(key)}, "List") for name, key in (
-        ("tdjl_net_amount", "TDJL"),
-        ("ddjl_net_amount", "DDJL"),
-        ("zdjl_net_amount", "ZDJL"),
-        ("xdjl_net_amount", "XDJL"),
-    )}
-    if any(len(rows) != len(dates) for rows in values.values()):
-        raise ResponseShapeError("大单统计日期与金额数组长度不一致")
-    for index, value in enumerate(dates):
-        if parse_trade_date(value) != trade_date:
-            continue
-        tdjl = _float(values["tdjl_net_amount"][index], "TDJL")
-        ddjl = _float(values["ddjl_net_amount"][index], "DDJL")
-        return {
-            "symbol": code,
-            "code": code,
-            "tdjl_net_amount": tdjl,
-            "ddjl_net_amount": ddjl,
-            "zdjl_net_amount": _float(values["zdjl_net_amount"][index], "ZDJL"),
-            "xdjl_net_amount": _float(values["xdjl_net_amount"][index], "XDJL"),
-            "main_net_amount_over_300k": tdjl + ddjl if tdjl is not None and ddjl is not None else None,
-        }
-    return None
-
-
-def parse_large_order_net_flow(payload: dict, code: str) -> list[dict]:
-    """解析开盘啦 /13 主力净额分钟趋势。"""
-    trade_date = parse_trade_date(payload.get("day"))
-    result: list[dict] = []
-    for index, row in enumerate(_rows(payload, "dadanjinge")):
-        if not isinstance(row, list) or len(row) != 2:
-            raise ResponseShapeError(f"dadanjinge[{index}] 必须恰好包含 2 列")
-        event_time = _text(row[0], f"dadanjinge[{index}].time", required=True)
-        net_amount = _float(row[1], f"dadanjinge[{index}].net_amount")
-        if net_amount is None:
-            raise ResponseShapeError(f"dadanjinge[{index}].net_amount 缺失")
-        day = trade_date.isoformat() if trade_date is not None else None
-        result.append(
-            {
-                "event_id": _event_id(code, day or "", event_time),
-                "symbol": code,
-                "code": code,
-                "trade_date": day,
-                "time": event_time,
-                "net_amount": net_amount,
-                "source": "kaipanla_13_net_flow",
-            }
-        )
-    return result
 
 
 def parse_large_order_trades(payload: dict, code: str) -> list[dict]:
@@ -306,38 +252,6 @@ def parse_northbound_sector(payload: dict) -> tuple[date, list[dict]]:
                 "state": _int(row[8], "state"),
                 "total_increase_amount": _float(payload.get("Sum_ZCJE"), "Sum_ZCJE"),
                 "total_holding_amount": _float(payload.get("Sum_ZCC"), "Sum_ZCC"),
-            }
-        )
-    return report_date, rows
-
-
-def parse_northbound_stocks(payload: dict, plate_id: str) -> tuple[date, list[dict]]:
-    """解析一个北向板块下的季度个股持仓。"""
-    report_date = parse_trade_date(payload.get("Date"))
-    if report_date is None:
-        raise ResponseShapeError("北向个股持仓缺少报告期")
-    rows = []
-    for index, row in enumerate(_rows(payload, "List")):
-        if not isinstance(row, list) or len(row) != 12:
-            raise ResponseShapeError(f"List[{index}] 必须恰好包含 12 列")
-        code = _text(row[0], f"List[{index}].code", required=True)
-        rows.append(
-            {
-                "report_date": report_date.isoformat(),
-                "plate_id": plate_id,
-                "symbol": code,
-                "code": code,
-                "name": _text(row[1], f"List[{index}].name"),
-                "increase_amount": _float(row[2], "increase_amount"),
-                "increase_ratio": _float(row[3], "increase_ratio"),
-                "holding_amount": _float(row[4], "holding_amount"),
-                "holding_shares": _float(row[5], "holding_shares"),
-                "total_shares": _float(row[6], "total_shares"),
-                "market_cap": _float(row[7], "market_cap"),
-                "holding_ratio": _float(row[8], "holding_ratio"),
-                "market_ratio": _float(row[9], "market_ratio"),
-                "float_market_cap": _float(row[10], "float_market_cap"),
-                "state": _int(row[11], "state"),
             }
         )
     return report_date, rows
@@ -519,34 +433,6 @@ def parse_sector_strength(payload: dict) -> list[dict]:
     return rows
 
 
-def parse_sector_constituents(payload: dict, plate_id: str) -> list[dict]:
-    """解析一个开盘啦板块在目标交易日的完整成分。"""
-    rows = []
-    for index, row in enumerate(_rows(payload, "list")):
-        if not isinstance(row, list) or len(row) < 41:
-            raise ResponseShapeError(f"list[{index}] 至少需要 41 列")
-        code = _text(row[0], f"list[{index}].code", required=True)
-        rows.append(
-            {
-                "plate_id": plate_id,
-                "symbol": code,
-                "code": code,
-                "name": _text(row[1], f"list[{index}].name"),
-                "tags": _text(row[4], "tags"),
-                "last_price": _float(row[5], "last_price"),
-                "change_pct": _float(row[6], "change_pct"),
-                "amount": _float(row[7], "amount"),
-                "turnover_rate": _float(row[8], "turnover_rate"),
-                "float_market_value": _float(row[10], "float_market_value"),
-                "main_net": _float(row[13], "main_net"),
-                "limit_tag": _text(row[23], "limit_tag"),
-                "rank_tag": _text(row[24], "rank_tag"),
-                "limit_count": _int(row[40], "limit_count"),
-            }
-        )
-    return rows
-
-
 def parse_auction(payload: dict) -> list[dict]:
     """解析 /115、/30 的 17 列数组，未文档化位置不进入标准表。"""
     result: list[dict] = []
@@ -612,67 +498,6 @@ def parse_bid_detail(payload: dict) -> dict:
         "bid_low_price": _float(payload.get("lprice"), "lprice"),
         "bid_open_price": _float(payload.get("openpx"), "openpx"),
     }
-
-
-def parse_limitup(payload: dict) -> list[dict]:
-    nums = payload.get("nums") or {}
-    if not isinstance(nums, dict):
-        raise ResponseShapeError("nums 不是对象")
-    common = {
-        "market_advance_count": _int(nums.get("SZJS"), "nums.SZJS"),
-        "market_decline_count": _int(nums.get("XDJS"), "nums.XDJS"),
-        "market_limitup_count": _int(nums.get("ZT"), "nums.ZT"),
-        "market_limitdown_count": _int(nums.get("DT"), "nums.DT"),
-        "market_broken_rate_pct": _float(nums.get("ZBL"), "nums.ZBL"),
-        "yesterday_limitup_change_pct": _float(nums.get("yestRase"), "nums.yestRase"),
-    }
-    merged: dict[str, dict] = {}
-    for plate_index, plate in enumerate(_rows(payload, "list")):
-        if not isinstance(plate, dict):
-            raise ResponseShapeError(f"list[{plate_index}] 不是对象")
-        plate_code = _text(plate.get("ZSCode"), "ZSCode")
-        plate_name = _text(plate.get("ZSName"), "ZSName")
-        stocks = plate.get("StockList")
-        if not isinstance(stocks, list):
-            raise ResponseShapeError(f"list[{plate_index}].StockList 不是数组")
-        for stock_index, row in enumerate(stocks):
-            if not isinstance(row, list) or len(row) < 18:
-                raise ResponseShapeError(
-                    f"list[{plate_index}].StockList[{stock_index}] 至少需要 18 列"
-                )
-            code = _text(row[0], "StockList.code", required=True)
-            item = merged.setdefault(
-                code,
-                {
-                    "symbol": code,
-                    "code": code,
-                    "name": _text(row[1], "StockList.name", required=True),
-                    "plate_codes": [],
-                    "plate_names": [],
-                    "limitup_timestamp": _int(row[6], "limitup_timestamp"),
-                    "sealed_order_amount": _float(row[8], "sealed_order_amount"),
-                    "board_label": _text(row[9], "board_label"),
-                    "consecutive_limitups": _int(row[10], "consecutive_limitups"),
-                    "themes": _text(row[11], "themes"),
-                    "turnover_pct": _float(row[14], "turnover_pct"),
-                    "float_market_cap": _float(row[15], "float_market_cap"),
-                    "reason": _text(row[16], "reason"),
-                    "reason_detail": _text(row[17], "reason_detail"),
-                    **common,
-                },
-            )
-            if plate_code and plate_code not in item["plate_codes"]:
-                item["plate_codes"].append(plate_code)
-            if plate_name and plate_name not in item["plate_names"]:
-                item["plate_names"].append(plate_name)
-    return [
-        {
-            **item,
-            "plate_codes": ";".join(item["plate_codes"]),
-            "plate_names": ";".join(item["plate_names"]),
-        }
-        for item in merged.values()
-    ]
 
 
 def parse_limit_up_expression(payload: dict, trade_date: date) -> dict:

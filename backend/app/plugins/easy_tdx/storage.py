@@ -18,7 +18,6 @@ INDUSTRY_TABLE = "ext_industry_tdx"
 MARGIN_TABLE = "ext_tdx_margin"
 FORECAST_TABLE = "ext_tdx_forecast"
 EXPRESS_TABLE = "ext_tdx_express"
-DIVIDEND_HISTORY_TABLE = "ext_tdx_dividend_history"
 _LOCK = threading.Lock()
 _LOCKS: dict[Path, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
@@ -95,24 +94,6 @@ def _reference_configs() -> list[ExtConfig]:
                 ExtField("summary", "string", "原始快报摘要"),
             ],
             description="EasyTDX F10 正式业绩快报栏目；未匹配数值格式时只保留原始摘要",
-            symbol_map={"type": "mapped", "col": "symbol"},
-            code_map={"type": "mapped", "col": "code"},
-        ),
-        ExtConfig(
-            id=DIVIDEND_HISTORY_TABLE,
-            label="EasyTDX 分红历史",
-            mode="timeseries",
-            fields=base + [
-                ExtField("record_date", "string", "股权登记日"),
-                ExtField("ex_dividend_date", "string", "除权派息日"),
-                ExtField("board_date", "string", "董事会日期"),
-                ExtField("plan", "string", "通达信原始分红方案"),
-                ExtField("cash_per_share", "float", "每股税前现金分红（元）"),
-                ExtField("progress", "string", "方案进度"),
-                ExtField("progress_code", "string", "通达信方案进度码"),
-                ExtField("source", "string", "数据来源"),
-            ],
-            description="EasyTDX 通达信 7615 F10 已实施现金分红历史，按股权登记日分区",
             symbol_map={"type": "mapped", "col": "symbol"},
             code_map={"type": "mapped", "col": "code"},
         ),
@@ -197,7 +178,7 @@ def replace_industry_snapshot(data_dir: Path, rows: list[dict]) -> int:
 
 
 def _partition_path(data_dir: Path, table_id: str, value: date) -> Path:
-    partition = f"year={value.year}" if table_id == DIVIDEND_HISTORY_TABLE else f"date={value}"
+    partition = f"date={value}"
     return Path(data_dir) / "ext_data" / table_id / "timeseries" / partition / "part.parquet"
 
 

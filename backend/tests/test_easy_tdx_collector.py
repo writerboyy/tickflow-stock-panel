@@ -8,15 +8,12 @@ import polars as pl
 import pytest
 
 from app.plugins.easy_tdx.client import (
-    _cash_per_share,
-    fetch_dividend_history_rows,
     fetch_industry_rows,
     normalize_industry_rows,
     parse_f10_reference,
 )
 from app.plugins.easy_tdx.collector import EasyTdxCollector
 from app.plugins.easy_tdx.storage import (
-    DIVIDEND_HISTORY_TABLE,
     INDUSTRY_TABLE,
     EXPRESS_TABLE,
     FORECAST_TABLE,
@@ -104,49 +101,6 @@ def test_fetch_industry_rows_uses_easy_tdx_public_api(monkeypatch):
         "industry_tdx": "T01",
     }]
     assert calls == [(5.0, 0)]
-
-
-def test_fetch_dividend_history_keeps_only_implemented_cash_records(monkeypatch):
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self):
-            return br'''{"ErrorCode":0,"ResultSets":[{"ColName":["rq","T003","T004","T021","T023","T036","aT036"],"Content":[["2024-12-31","2025-04-23","10\u6d3e0.9\u5143(\u542b\u7a0e)","2025-05-26","2025-05-27","\u5b9e\u65bd\u65b9\u6848","036003"],["2025-06-30","2025-08-29","10\u6d3e0.3\u5143(\u542b\u7a0e)",null,null,"\u8463\u4e8b\u4f1a\u9884\u6848","036001"],["2025-12-31","2026-04-22","\u4e0d\u5206\u914d\u4e0d\u8f6c\u589e","2026-06-16","2026-06-17","\u5b9e\u65bd\u65b9\u6848","036003"]]}]}'''
-
-    monkeypatch.setattr("app.plugins.easy_tdx.client.urlopen", lambda *_args, **_kwargs: Response())
-
-    assert fetch_dividend_history_rows(["300187"]) == [{
-        "symbol": "300187.SZ",
-        "code": "300187",
-        "report_date": "2025-05-26",
-        "record_date": "2025-05-26",
-        "ex_dividend_date": "2025-05-27",
-        "board_date": "2025-04-23",
-        "plan": "10派0.9元(含税)",
-        "cash_per_share": 0.09,
-        "progress": "实施方案",
-        "progress_code": "036003",
-        "source": "tdx_7615_f10",
-    }]
-
-
-def test_fetch_dividend_history_rejects_partial_source_failure(monkeypatch):
-    monkeypatch.setattr(
-        "app.plugins.easy_tdx.client.fetch_dividend_history_batch",
-        lambda _codes, timeout: ([], {"300187": "TimeoutError"}),
-    )
-
-    with pytest.raises(RuntimeError, match="不能判为有效空数据"):
-        fetch_dividend_history_rows(["300187"])
-
-
-def test_cash_per_share_uses_original_share_base_for_transfer_plans():
-    assert _cash_per_share("10转增3股派1元(含税)") == 0.1
-    assert _cash_per_share("10送5股派2元(含税)") == 0.2
 
 
 def test_parse_f10_reference_requires_explicit_sections():
@@ -302,25 +256,16 @@ async def test_f10_collection_writes_separate_reference_tables(tmp_path):
 │预计公司2026年01-06月归属于上市公司股东的净利润为873000万元至920000万元，与上年同期相比变动幅度为88.8%至98.97%。
 ├────────────────────
 """
-    dividends = [{
-        "symbol": "000858.SZ", "code": "000858", "report_date": "2026-06-16",
-        "record_date": "2026-06-16", "ex_dividend_date": "2026-06-17", "board_date": "2026-04-22",
-        "plan": "10派0.3元(含税)", "cash_per_share": 0.03, "progress": "实施方案",
-        "progress_code": "036003", "source": "tdx_7615_f10",
-    }]
     collector = EasyTdxCollector(
         tmp_path,
         f10_fetcher=lambda _codes: [("000858", text)],
-        dividend_fetcher=lambda _codes: dividends,
     )
 
-    assert await collector.collect_f10(["000858"]) == 3
+    assert await collector.collect_f10(["000858"]) == 2
     margin = pl.read_parquet(tmp_path / "ext_data" / MARGIN_TABLE / "timeseries" / "date=2026-07-30" / "part.parquet")
     forecast = pl.read_parquet(tmp_path / "ext_data" / FORECAST_TABLE / "timeseries" / "date=2026-07-15" / "part.parquet")
     assert margin.to_dicts()[0]["margin_balance_10k"] == 474212.95
     assert forecast.to_dicts()[0]["report_period"] == "2026-06-30"
-    dividend = pl.read_parquet(tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE / "timeseries" / "year=2026" / "part.parquet")
-    assert dividend.to_dicts()[0]["cash_per_share"] == 0.03
     assert not (tmp_path / "ext_data" / EXPRESS_TABLE / "timeseries").exists()
     manifests = tmp_path / "ext_data" / "_ingestion" / "easy_tdx"
     express_manifest = json.loads(next((manifests / EXPRESS_TABLE).glob("*.json")).read_text())
@@ -348,38 +293,14 @@ async def test_f10_batches_resume_failed_sources_and_publish_datasets_independen
             raise RuntimeError("source unavailable")
         return [(code, margin_text) for code in batch]
 
-    def fetch_dividends(batch: list[str]):
-        return [
-            {
-                "symbol": f"{code}.SH",
-                "code": code,
-                "report_date": "2026-06-16",
-                "record_date": "2026-06-16",
-                "ex_dividend_date": "2026-06-17",
-                "board_date": "2026-04-22",
-                "plan": "10派0.3元(含税)",
-                "cash_per_share": 0.03,
-                "progress": "实施方案",
-                "progress_code": "036003",
-                "source": "tdx_7615_f10",
-            }
-            for code in batch
-        ]
-
     collector = EasyTdxCollector(
         tmp_path,
         f10_fetcher=fetch_f10,
-        dividend_fetcher=fetch_dividends,
     )
 
-    assert await collector.collect_f10(codes) == 51
+    assert await collector.collect_f10(codes) == 0
     assert [len(batch) for batch in calls] == [50, 1, 1, 1]
     assert not (tmp_path / "ext_data" / MARGIN_TABLE / "timeseries").exists()
-    dividend_path = (
-        tmp_path / "ext_data" / DIVIDEND_HISTORY_TABLE
-        / "timeseries" / "year=2026" / "part.parquet"
-    )
-    assert pl.read_parquet(dividend_path).height == 51
     margin_manifest_path = next(
         (tmp_path / "ext_data" / "_ingestion" / "easy_tdx" / MARGIN_TABLE).glob("*.json")
     )
@@ -407,7 +328,6 @@ async def test_f10_missing_symbol_response_is_not_treated_as_section_absent(tmp_
     collector = EasyTdxCollector(
         tmp_path,
         f10_fetcher=lambda _codes: [("600000", text)],
-        dividend_fetcher=lambda _codes: [],
     )
 
     assert await collector.collect_f10(["600000", "600001"]) == 0
@@ -447,7 +367,6 @@ async def test_f10_changed_input_does_not_publish_stale_staging_batches(tmp_path
     collector = EasyTdxCollector(
         tmp_path,
         f10_fetcher=fetch_f10,
-        dividend_fetcher=lambda _codes: [],
     )
 
     assert await collector.collect_f10([f"{600000 + index:06d}" for index in range(51)]) == 51

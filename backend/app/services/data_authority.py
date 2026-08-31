@@ -213,14 +213,6 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
         (DISPLAY_USAGE, FILTER_USAGE),
         ("change_pct",),
     ),
-    "ext_kpl_funds": ExtensionAuthority(
-        "ext_kpl_funds",
-        "deprecated-overlap",
-        "tickflow.realtime_quotes",
-        "flow_structure_is_extension_but_quote_like_fields_are_context_only",
-        (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-        ("price", "change_pct", "amount", "turnover_pct", "market_cap"),
-    ),
     "ext_kpl_auction": ExtensionAuthority(
         "ext_kpl_auction",
         "extension",
@@ -239,14 +231,6 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
         "fuyao.auction_snapshot",
         "auction_snapshot_context_only",
         (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-    ),
-    "ext_kpl_limitup": ExtensionAuthority(
-        "ext_kpl_limitup",
-        "deprecated-overlap",
-        "tickflow.enriched_limit_state",
-        "limit_reason_is_extension_but_limit_metrics_are_context_only",
-        (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-        ("turnover_pct", "float_market_cap", "consecutive_limitups"),
     ),
     "ext_kpl_lhb": ExtensionAuthority(
         "ext_kpl_lhb",
@@ -282,22 +266,6 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
         "kaipanla_northbound_sector_holding",
         "quarterly_holding_context_not_daily_flow",
         (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-    ),
-    "ext_kpl_northbound_stock": ExtensionAuthority(
-        "ext_kpl_northbound_stock",
-        "deprecated-overlap",
-        "tickflow.financials",
-        "northbound_holding_is_extension_but_share_and_market_cap_fields_are_context_only",
-        (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-        ("total_shares", "market_cap", "float_market_cap"),
-    ),
-    "ext_kpl_sector_constituents": ExtensionAuthority(
-        "ext_kpl_sector_constituents",
-        "deprecated-overlap",
-        "tickflow.daily",
-        "sector_membership_is_extension_but_quote_like_fields_are_context_only",
-        (DISPLAY_USAGE, FILTER_USAGE, DIMENSION_USAGE),
-        ("last_price", "change_pct", "amount", "turnover_rate", "float_market_value"),
     ),
     "ext_kpl_shareholder_changes": ExtensionAuthority(
         "ext_kpl_shareholder_changes",
@@ -340,14 +308,6 @@ EXTENSION_POLICIES: dict[str, ExtensionAuthority] = {
         "factor_input_export",
         "audited_local_factor_export; unsupported_fields_remain_null",
         (FACTOR_USAGE, DISPLAY_USAGE, FILTER_USAGE),
-    ),
-    "ext_tdx_dividend_history": ExtensionAuthority(
-        "ext_tdx_dividend_history",
-        "deprecated-overlap",
-        "tickflow.corporate_actions",
-        "record_date_context_only; event_date_replay_uses_corporate_actions",
-        (DISPLAY_USAGE, FILTER_USAGE, EVENT_USAGE),
-        ("cash_per_share", "record_date", "ex_dividend_date"),
     ),
 }
 

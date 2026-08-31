@@ -27,31 +27,24 @@ from app.services.ext_data import (
 from app.services.ingestion_manifest import stable_content_hash, update_ingestion_manifest
 
 AUCTION_TABLE = "ext_kpl_auction"
-LIMITUP_TABLE = "ext_kpl_limitup"
 LHB_TABLE = "ext_kpl_lhb"
 REGULATORY_TABLE = "ext_kpl_regulatory"
-FUNDS_TABLE = "ext_kpl_funds"
 NORTHBOUND_SECTOR_TABLE = "ext_kpl_northbound_sector"
-NORTHBOUND_STOCK_TABLE = "ext_kpl_northbound_stock"
 SHAREHOLDER_TABLE = "ext_kpl_shareholder_changes"
 SHAREHOLDER_COUNT_TABLE = "ext_kpl_shareholder_counts"
 LHB_MOVEMENT_TABLE = "ext_kpl_lhb_movement"
 LHB_DETAIL_TABLE = "ext_kpl_lhb_detail"
-SECTOR_CONSTITUENT_TABLE = "ext_kpl_sector_constituents"
 SECTOR_STRENGTH_INTRADAY_DB = "sector_strength.sqlite3"
+
 TABLE_IDS = (
     AUCTION_TABLE,
-    LIMITUP_TABLE,
     LHB_TABLE,
     REGULATORY_TABLE,
-    FUNDS_TABLE,
     NORTHBOUND_SECTOR_TABLE,
-    NORTHBOUND_STOCK_TABLE,
     SHAREHOLDER_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     LHB_MOVEMENT_TABLE,
     LHB_DETAIL_TABLE,
-    SECTOR_CONSTITUENT_TABLE,
 )
 
 _DTYPES = {
@@ -122,38 +115,6 @@ def _auction_config() -> ExtConfig:
     )
 
 
-def _limitup_config() -> ExtConfig:
-    return ExtConfig(
-        id=LIMITUP_TABLE,
-        label="开盘啦涨停复盘",
-        mode="timeseries",
-        fields=_base_fields()
-        + [
-            ExtField("collected_at", "string", "采集时间"),
-            ExtField("plate_codes", "string", "板块代码"),
-            ExtField("plate_names", "string", "板块名称"),
-            ExtField("limitup_timestamp", "int", "涨停时间戳"),
-            ExtField("sealed_order_amount", "float", "封单额（元）"),
-            ExtField("board_label", "string", "连板标签"),
-            ExtField("consecutive_limitups", "int", "连板数"),
-            ExtField("themes", "string", "个股属性"),
-            ExtField("turnover_pct", "float", "实际换手（%）"),
-            ExtField("float_market_cap", "float", "实际流通市值（元）"),
-            ExtField("reason", "string", "涨停原因"),
-            ExtField("reason_detail", "string", "详细涨停原因"),
-            ExtField("market_advance_count", "int", "上涨家数"),
-            ExtField("market_decline_count", "int", "下跌家数"),
-            ExtField("market_limitup_count", "int", "涨停家数"),
-            ExtField("market_limitdown_count", "int", "跌停家数"),
-            ExtField("market_broken_rate_pct", "float", "炸板率（%）"),
-            ExtField("yesterday_limitup_change_pct", "float", "昨日涨停表现（%）"),
-        ],
-        description="开盘啦 /15 盘后涨停复盘、题材及详细涨停原因",
-        symbol_map={"type": "mapped", "col": "symbol"},
-        code_map={"type": "mapped", "col": "code"},
-    )
-
-
 def _lhb_config() -> ExtConfig:
     return ExtConfig(
         id=LHB_TABLE,
@@ -219,43 +180,6 @@ def _regulatory_config() -> ExtConfig:
     )
 
 
-def _funds_config() -> ExtConfig:
-    return ExtConfig(
-        id=FUNDS_TABLE,
-        label="开盘啦资金流",
-        mode="timeseries",
-        fields=_base_fields()
-        + [
-            ExtField("collected_at", "string", "采集时间"),
-            ExtField("price", "float", "收盘价"),
-            ExtField("change_pct", "float", "涨跌幅（%）"),
-            ExtField("main_buy", "float", "主力买入额"),
-            ExtField("main_sell", "float", "主力卖出额"),
-            ExtField("main_net", "float", "主力净额"),
-            ExtField("turnover_pct", "float", "换手率（%）"),
-            ExtField("amount", "float", "成交额"),
-            ExtField("market_cap", "float", "市值"),
-            ExtField("themes", "string", "题材"),
-            ExtField("main_type", "string", "主力类型"),
-            ExtField("net_inflow_days", "int", "连续净流入天数"),
-            ExtField("capital_net_points_json", "string", "分时大单净额"),
-            ExtField("capital_net_points", "int", "分时点数"),
-            ExtField("capital_net_last_time", "string", "最后分时"),
-            ExtField("capital_net_close", "float", "收盘大单净额"),
-            ExtField("capital_buy_close", "float", "收盘累计买入额"),
-            ExtField("capital_sell_close", "float", "收盘累计卖出额"),
-            ExtField("tdjl_net_amount", "float", "特大单净额"),
-            ExtField("ddjl_net_amount", "float", "大单净额"),
-            ExtField("zdjl_net_amount", "float", "中单净额"),
-            ExtField("xdjl_net_amount", "float", "小单净额"),
-            ExtField("main_net_amount_over_300k", "float", "30万以上大单净额"),
-        ],
-        description="开盘啦全市场区间主力资金、大单净额及分时大单净额收盘快照",
-        symbol_map={"type": "mapped", "col": "symbol"},
-        code_map={"type": "mapped", "col": "code"},
-    )
-
-
 def _northbound_sector_config() -> ExtConfig:
     return ExtConfig(
         id=NORTHBOUND_SECTOR_TABLE,
@@ -277,33 +201,6 @@ def _northbound_sector_config() -> ExtConfig:
             ExtField("collected_at", "string", "采集时间"),
         ],
         description="开盘啦北向资金季度板块持仓，不是每日北向净买入",
-    )
-
-
-def _northbound_stock_config() -> ExtConfig:
-    return ExtConfig(
-        id=NORTHBOUND_STOCK_TABLE,
-        label="开盘啦北向个股持仓",
-        mode="timeseries",
-        fields=_base_fields()
-        + [
-            ExtField("report_date", "string", "报告期"),
-            ExtField("plate_id", "string", "板块代码"),
-            ExtField("increase_amount", "float", "增持金额"),
-            ExtField("increase_ratio", "float", "增持比例"),
-            ExtField("holding_amount", "float", "北向持仓金额"),
-            ExtField("holding_shares", "float", "北向持股数"),
-            ExtField("total_shares", "float", "总股本"),
-            ExtField("market_cap", "float", "市值"),
-            ExtField("holding_ratio", "float", "北向持股比例"),
-            ExtField("market_ratio", "float", "市场占比"),
-            ExtField("float_market_cap", "float", "流通市值"),
-            ExtField("state", "int", "状态"),
-            ExtField("collected_at", "string", "采集时间"),
-        ],
-        description="开盘啦北向资金季度板块个股持仓，不是每日北向净买入",
-        symbol_map={"type": "mapped", "col": "symbol"},
-        code_map={"type": "mapped", "col": "code"},
     )
 
 
@@ -398,46 +295,16 @@ def _lhb_detail_config() -> ExtConfig:
     )
 
 
-def _sector_constituent_config() -> ExtConfig:
-    return ExtConfig(
-        id=SECTOR_CONSTITUENT_TABLE,
-        label="开盘啦历史板块成分",
-        mode="timeseries",
-        fields=_base_fields()
-        + [
-            ExtField("plate_id", "string", "板块代码"),
-            ExtField("tags", "string", "标签"),
-            ExtField("last_price", "float", "收盘价"),
-            ExtField("change_pct", "float", "涨跌幅（%）"),
-            ExtField("amount", "float", "成交额"),
-            ExtField("turnover_rate", "float", "换手率（%）"),
-            ExtField("float_market_value", "float", "流通市值"),
-            ExtField("main_net", "float", "主力净额"),
-            ExtField("limit_tag", "string", "涨停标签"),
-            ExtField("rank_tag", "string", "排名标签"),
-            ExtField("limit_count", "int", "连板数"),
-            ExtField("collected_at", "string", "采集时间"),
-        ],
-        description="开盘啦板块历史成分及对应交易日行情，不是官方指数 PIT 成分",
-        symbol_map={"type": "mapped", "col": "symbol"},
-        code_map={"type": "mapped", "col": "code"},
-    )
-
-
 def configs() -> list[ExtConfig]:
     return [
         _auction_config(),
-        _limitup_config(),
         _lhb_config(),
         _regulatory_config(),
-        _funds_config(),
         _northbound_sector_config(),
-        _northbound_stock_config(),
         _shareholder_config(),
         _shareholder_count_config(),
         _lhb_movement_config(),
         _lhb_detail_config(),
-        _sector_constituent_config(),
     ]
 
 
@@ -456,73 +323,6 @@ def ensure_configs(data_dir: Path) -> None:
 
 def _partition_path(data_dir: Path, table_id: str, trade_date: date) -> Path:
     return data_dir / "ext_data" / table_id / "timeseries" / f"date={trade_date}" / "part.parquet"
-
-
-def read_sector_constituents(
-    data_dir: Path,
-    trade_date: date,
-    plate_id: str,
-) -> list[dict]:
-    """Read one board's persisted membership for a completed trading day."""
-    path = _partition_path(data_dir, SECTOR_CONSTITUENT_TABLE, trade_date)
-    if not path.exists():
-        return []
-    try:
-        frame = pl.scan_parquet(path).filter(
-            pl.col("plate_id") == str(plate_id),
-        ).collect()
-    except (OSError, pl.exceptions.PolarsError):
-        return []
-    if frame.is_empty():
-        return []
-    return frame.to_dicts()
-
-
-def read_sector_constituent_memberships(
-    data_dir: Path,
-    trade_date: date,
-) -> pl.DataFrame:
-    """Read all persisted board memberships with one parquet scan."""
-    columns = ["plate_id", "symbol", "code", "name", "tags"]
-    schema = {column: pl.String for column in columns}
-    path = _partition_path(data_dir, SECTOR_CONSTITUENT_TABLE, trade_date)
-    if not path.exists():
-        return pl.DataFrame(schema=schema)
-    try:
-        available = set(pl.read_parquet_schema(path))
-        selected = [column for column in columns if column in available]
-        if not {"plate_id", "symbol"}.issubset(selected):
-            return pl.DataFrame(schema=schema)
-        frame = pl.scan_parquet(path).select(selected).collect()
-    except (OSError, pl.exceptions.PolarsError):
-        return pl.DataFrame(schema=schema)
-    missing = [column for column in columns if column not in frame.columns]
-    return frame.with_columns(
-        *(pl.lit(None, dtype=pl.String).alias(column) for column in missing),
-    ).select(columns)
-
-
-def read_funds_large_order_reference(
-    data_dir: Path,
-    trade_date: date,
-    *,
-    symbol: str | None = None,
-) -> pl.DataFrame:
-    """Read the documented daily 300k+ net amount as event context only."""
-    from app.services.data_authority import EVENT_USAGE, assert_extension_field_usage
-
-    field = "main_net_amount_over_300k"
-    assert_extension_field_usage(FUNDS_TABLE, field, EVENT_USAGE)
-    path = _partition_path(data_dir, FUNDS_TABLE, trade_date)
-    if not path.exists():
-        return pl.DataFrame(schema={"symbol": pl.String, field: pl.Float64})
-    frame = pl.read_parquet(path)
-    if "symbol" not in frame.columns or field not in frame.columns:
-        return pl.DataFrame(schema={"symbol": pl.String, field: pl.Float64})
-    frame = frame.select("symbol", field).unique(subset=["symbol"], keep="last")
-    if symbol:
-        frame = frame.filter(pl.col("symbol") == symbol.strip().upper())
-    return frame
 
 
 def _path_lock(path: Path) -> threading.Lock:

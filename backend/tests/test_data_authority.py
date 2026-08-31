@@ -86,7 +86,8 @@ def test_legacy_extension_config_persists_schema_and_authority_metadata(tmp_path
 
 def test_extension_overlap_fields_cannot_be_requested_as_canonical_inputs():
     assert "change_pct" in deprecated_overlap_fields("ext_money_flow")
-    assert "market_cap" in deprecated_overlap_fields("ext_kpl_funds")
+    # ext_kpl_funds 已随 deprecated-overlap 清理整体移除，不再登记重叠字段。
+    assert deprecated_overlap_fields("ext_kpl_funds") == set()
 
     with pytest.raises(ValueError, match="TickFlow canonical"):
         assert_extension_field_usage("ext_money_flow", "change_pct", CANONICAL_USAGE)

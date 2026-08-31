@@ -1340,15 +1340,9 @@ class LargeOrderService:
             ).with_columns(
                 pl.coalesce("name", "name_incoming").alias("name")
             ).drop("name_incoming")
-        data_dir = self._storage.data_dir
-        from app.plugins.kaipanla.storage import read_funds_large_order_reference
-
-        reference = read_funds_large_order_reference(
-            data_dir,
-            trade_date,
-            symbol=symbol,
-        )
-        reference_available = not reference.is_empty()
+        # ext_kpl_funds 参考表已随 deprecated-overlap 清理移除，
+        # 对账参考列恒为空，reference_status 报告为 reference_missing。
+        reference: pl.DataFrame | None = None
         if not merged.is_empty():
             numeric_defaults = {
                 "proxy_buy_amount": 0.0,
@@ -1368,12 +1362,9 @@ class LargeOrderService:
                     for column, value in numeric_defaults.items()
                 ]
             )
-            if reference_available:
-                merged = merged.join(reference, on="symbol", how="left")
-            else:
-                merged = merged.with_columns(
-                    pl.lit(None, dtype=pl.Float64).alias("main_net_amount_over_300k")
-                )
+            merged = merged.with_columns(
+                pl.lit(None, dtype=pl.Float64).alias("main_net_amount_over_300k")
+            )
             proxy_total = pl.col("proxy_buy_amount") + pl.col("proxy_sell_amount")
             precise_total = pl.col("precise_buy_amount") + pl.col("precise_sell_amount")
             merged = merged.with_columns(
