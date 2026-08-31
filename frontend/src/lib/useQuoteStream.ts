@@ -192,12 +192,8 @@ export function useQuoteStream(
 
       es.addEventListener('limit_board_updated', () => {
         qc.invalidateQueries({ queryKey: QK.limitBoard, exact: true })
-        qc.invalidateQueries({
-          predicate: query => (
-            String(query.queryKey[0]) === 'limit-board'
-            && query.queryKey[1] === 'candidate-score'
-          ),
-        })
+        // 弹窗评分会按需读取并处理临时空快照；不要跟随整页 6 秒刷新
+        // 反复失效，否则单股评分会被连续重算。
       })
 
       es.addEventListener('strategy_alert', (e: MessageEvent) => {

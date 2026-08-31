@@ -742,8 +742,8 @@ function LimitBoardAllocationDialog({
     // 确认弹窗打开时按需拉一次完整 v5 评分；行上已有 comprehensive
     // （打板池行后端直接带快照）时不请求。
     enabled: kind === 'board' && Boolean(row.symbol) && !rowDetail.comprehensive,
-    staleTime: 5_000,
-    gcTime: 60_000,
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
     retry: false,
     // 撞上后台评分锁时旧接口可能先返回一个没有生成时间的空快照。
     // 仅对这种临时结果重试；已完成计算但数据不足时不重复请求。

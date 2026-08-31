@@ -51,6 +51,7 @@ _PREMIUM_FILTER_COLUMNS = {
 _SCORE_REFRESH_SECONDS = 5.0
 _SCORE_DISPLAY_CACHE_SECONDS = 60.0
 _SCORE_ON_DEMAND_WAIT_SECONDS = 15.0
+_SCORE_PREVIEW_CACHE_SECONDS = 30.0
 _SECTOR_CANDIDATE_LIMIT = 15
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_NEAR_LIMIT_PER_SECTOR = 5
@@ -273,6 +274,7 @@ class LimitBoardService:
             tuple[dict[str, Any] | None, dict[str, dict[str, Any]]],
         ] = {}
         self._score_refresh_at = 0.0
+        self._score_preview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._rotation_date: date | None = None
         self._rotation_cache: dict[tuple[str, int | None], dict[str, Any]] = {}
         self._history_ready = False
@@ -3699,6 +3701,7 @@ class LimitBoardService:
         now: datetime,
         *,
         wait_for_lock: bool = False,
+        replace_cache: bool = True,
     ) -> bool:
         symbols = {
             str(item.get("symbol") or "").strip().upper()
@@ -3994,8 +3997,13 @@ class LimitBoardService:
                     }
                 else:
                     refreshed[symbol] = current
-            changed = refreshed != previous_cache
-            runtime["candidate_scores"] = refreshed
+            next_cache = (
+                refreshed
+                if replace_cache
+                else {**previous_cache, **refreshed}
+            )
+            changed = next_cache != previous_cache
+            runtime["candidate_scores"] = next_cache
             runtime["candidate_score_snapshots"] = valid_snapshots
             self._score_refresh_at = now_mono
             return changed
@@ -4164,33 +4172,55 @@ class LimitBoardService:
         """On-demand v5 score for one symbol (confirm-dialog preview).
 
         Sector-strength / radar entries are not part of the recurring scoring
-        scan set until they join the board pool, so the dialog triggers this
-        per-symbol refresh. The full scan set is always passed because
-        ``_refresh_candidate_scores`` replaces the whole candidate-score cache.
+        scan set until they join the board pool. Keep a short-lived preview
+        cache and refresh only the requested symbol instead of recalculating
+        the complete recurring scan set.
         """
         cleaned = str(symbol or "").strip().upper()
         if not cleaned:
             raise ValueError("缺少股票代码")
+        now_mono = time.monotonic()
+        with self._lock:
+            for cached_symbol, (cached_at, _entry) in list(
+                self._score_preview_cache.items()
+            ):
+                if now_mono - cached_at >= _SCORE_PREVIEW_CACHE_SECONDS:
+                    self._score_preview_cache.pop(cached_symbol, None)
+            cached = self._score_preview_cache.get(cleaned)
+        if cached and now_mono - cached[0] < _SCORE_PREVIEW_CACHE_SECONDS:
+            entry = cached[1]
+            return {
+                "symbol": cleaned,
+                "candidate_score": entry.get("candidate_score"),
+                "candidate_score_state": (
+                    entry.get("candidate_score_state") or "unavailable"
+                ),
+                "candidate_score_as_of": entry.get("candidate_score_as_of"),
+                "candidate_score_detail": entry.get("candidate_score_detail") or {},
+                "candidate_reasons": entry.get("candidate_reasons") or [],
+            }
         config = self.store.load_config()
         runtime = self._runtime_for_today()
         rows, _selected, board_pool, _buy_pool = self._view_collections(runtime, config)
         scoring = self._scoring_rows(rows, board_pool)
-        known = {
-            str(item.get("symbol") or "").strip().upper() for item in scoring
-        }
-        if cleaned not in known:
-            row = next(
-                (
-                    item for item in [*board_pool, *rows]
-                    if str(item.get("symbol") or "").strip().upper() == cleaned
-                ),
-                None,
-            )
-            scoring = [*scoring, row or {"symbol": cleaned}]
+        row = next(
+            (
+                item for item in [*scoring, *board_pool, *rows]
+                if str(item.get("symbol") or "").strip().upper() == cleaned
+            ),
+            {"symbol": cleaned},
+        )
         self._refresh_candidate_scores(
-            runtime, scoring, cn_now(), wait_for_lock=True,
+            runtime,
+            [row],
+            cn_now(),
+            wait_for_lock=True,
+            replace_cache=False,
         )
         entry = (runtime.get("candidate_scores") or {}).get(cleaned) or {}
+        if entry.get("candidate_score_as_of"):
+            with self._lock:
+                self._score_preview_cache[cleaned] = (time.monotonic(), dict(entry))
         return {
             "symbol": cleaned,
             "candidate_score": entry.get("candidate_score"),

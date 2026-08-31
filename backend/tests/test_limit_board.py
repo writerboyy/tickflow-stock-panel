@@ -1485,6 +1485,29 @@ def test_candidate_score_refresh_can_wait_for_active_scan(tmp_path):
     assert runtime["candidate_scores"]["600000.SH"]["candidate_score_as_of"] == now.isoformat()
 
 
+def test_candidate_score_refresh_can_merge_targeted_preview(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = {
+        "candidate_scores": {
+            "600001.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_state": "live",
+            },
+        },
+    }
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        now,
+        replace_cache=False,
+    )
+
+    assert set(runtime["candidate_scores"]) == {"600000.SH", "600001.SH"}
+    assert runtime["candidate_scores"]["600001.SH"]["candidate_score"] == 70.0
+
+
 def test_candidate_intraday_features_allow_same_day_final_bars_after_close(tmp_path):
     service, quotes, _config = make_service(tmp_path)
     captured = {}
@@ -4625,18 +4648,27 @@ def test_limit_board_api_rejects_invalid_advanced_settings(tmp_path):
     assert service.store.load_config()["revision"] == 0
 
 
-def test_candidate_score_snapshot_appends_symbol_outside_scan_set(tmp_path, monkeypatch):
-    """按需评分：板块强度/雷达入口标的（不在评分扫描集）也能拿到完整 v5 快照。"""
+def test_candidate_score_snapshot_refreshes_only_symbol_outside_scan_set(tmp_path, monkeypatch):
+    """按需评分只刷新板块/雷达入口标的，并复用短时预览缓存。"""
     service, _quotes, _config = make_service(tmp_path)
     runtime = service._runtime_for_today()
     runtime["symbols"] = {"600000.SH": {"source_modes": ["first_board"]}}
     service.store.save_runtime(runtime)
     calls: list[list[str]] = []
     waits: list[bool] = []
+    replacements: list[bool] = []
+    current_mono = [100.0]
+    monkeypatch.setattr(
+        "app.services.limit_board_service.time.monotonic",
+        lambda: current_mono[0],
+    )
 
-    def score(runtime, rows, _now, *, wait_for_lock=False):
+    def score(
+        runtime, rows, _now, *, wait_for_lock=False, replace_cache=True,
+    ):
         calls.append(sorted(str(row["symbol"]) for row in rows))
         waits.append(wait_for_lock)
+        replacements.append(replace_cache)
         runtime["candidate_scores"] = {
             "605159.SH": {
                 "candidate_score": 88.0,
@@ -4653,13 +4685,19 @@ def test_candidate_score_snapshot_appends_symbol_outside_scan_set(tmp_path, monk
     monkeypatch.setattr(service, "_refresh_candidate_scores", score)
 
     snapshot = service.candidate_score_snapshot("605159.SH")
-    # 全量扫描集（strong rows）+ 追加的按需标的，一次传入，防止缓存被整体覆盖。
-    assert calls == [["600000.SH", "605159.SH"]]
-    assert waits == [True]
+    current_mono[0] = 110.0
+    cached = service.candidate_score_snapshot("605159.SH")
+    current_mono[0] = 131.0
+    refreshed = service.candidate_score_snapshot("605159.SH")
+    assert calls == [["605159.SH"], ["605159.SH"]]
+    assert waits == [True, True]
+    assert replacements == [False, False]
     assert snapshot["symbol"] == "605159.SH"
     assert snapshot["candidate_score"] == 88.0
     assert snapshot["candidate_score_state"] == "live"
     assert snapshot["candidate_score_detail"]["comprehensive"]["comprehensive_score"] == 88.0
+    assert cached == snapshot
+    assert refreshed == snapshot
 
     with pytest.raises(ValueError):
         service.candidate_score_snapshot("")
@@ -4682,9 +4720,12 @@ def test_candidate_score_snapshot_no_duplicates_for_board_pool_member(tmp_path, 
     service.store.save_runtime(runtime)
     calls: list[list[str]] = []
 
-    def score(runtime, rows, _now, *, wait_for_lock=False):
+    def score(
+        runtime, rows, _now, *, wait_for_lock=False, replace_cache=True,
+    ):
         calls.append([str(row["symbol"]) for row in rows])
         assert wait_for_lock is True
+        assert replace_cache is False
         runtime["candidate_scores"] = {
             "605159.SH": {
                 "candidate_score": 70.0,
