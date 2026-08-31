@@ -4,8 +4,8 @@
 「概念分析 → 涨幅RPS轮动」对话框渲染。
 
 数据来源全部复用现有资产, 不引入新数据源:
-  - 个股历史涨跌幅: repo.get_enriched_range(..., columns=["symbol","date","change_pct"])
-    命中启动时构建的 _enriched_history_cache (0ms, 含 change_pct 小数列)
+  - 个股历史涨跌幅: 优先用 repo.get_enriched_range(...) 的启动内存缓存；
+    缓存因数据代次变化不可用时，窄读近期 enriched Parquet 并批量计算 change_pct
   - 概念成分股映射: 复用 market_overview_builder 的 _dimension_field / _read_ext_rows /
     _symbol_keys / _dimension_values, 与看板/复盘的概念聚合口径完全一致
 
@@ -20,6 +20,7 @@ from datetime import date, timedelta
 
 import polars as pl
 
+from app.parquet import scan_enriched_parquet
 from app.services.market_overview_builder import (
     _dimension_field,
     _dimension_values,
@@ -44,11 +45,51 @@ def invalidate_cache() -> None:
 
 
 def _latest_enriched_date(repo) -> date | None:
-    """取 enriched 缓存里的最新交易日(矩阵的右端=最新日期)。"""
-    cache = repo._enriched_history_cache  # noqa: SLF001 —— 缓存字段无公开 getter
+    """取磁盘最新 enriched 交易日，旧仓库实现降级读内存缓存。"""
+    loader = getattr(repo, "latest_enriched_date", None)
+    if callable(loader):
+        latest = loader("stock")
+        if latest is not None:
+            return latest
+    cache = getattr(repo, "_enriched_history_cache", None)
     if cache is None or cache.is_empty() or "date" not in cache.columns:
         return None
     return cache["date"].max()
+
+
+def _load_change_pct_from_parquet(repo, start: date, end: date) -> pl.DataFrame:
+    """窄读近期 enriched 分区并批量计算日涨跌幅。"""
+    root = repo.store.data_dir / "kline_daily_enriched"
+    if not root.exists():
+        return pl.DataFrame()
+
+    parts: list[str] = []
+    for partition in root.glob("date=*"):
+        try:
+            partition_date = date.fromisoformat(partition.name.removeprefix("date="))
+        except ValueError:
+            continue
+        if start <= partition_date <= end:
+            parts.extend(str(path) for path in sorted(partition.glob("*.parquet")))
+    if not parts:
+        return pl.DataFrame()
+
+    try:
+        return (
+            scan_enriched_parquet(parts)
+            .filter((pl.col("date") >= start) & (pl.col("date") <= end))
+            .select("symbol", "date", "close")
+            .sort(["symbol", "date"])
+            .with_columns(
+                (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0)
+                .alias("change_pct")
+            )
+            .select("symbol", "date", "change_pct")
+            .collect()
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("rps_rotation: parquet history fallback failed", exc_info=True)
+        return pl.DataFrame()
 
 
 def _load_concept_map_df(repo, kind: str = "concept") -> tuple[pl.DataFrame, int]:
@@ -151,13 +192,20 @@ def build_rps_rotation(repo, days: int = 12, kind: str = "concept", level: int |
         logger.info("rps_rotation: no %s data (ext dimension not fetched yet)", kind)
         return {"dates": [], "columns": {}, "concept_count": 0}
 
-    # 2. 取最近 N 交易日的个股 change_pct(命中内存缓存)
-    start = latest - timedelta(days=days * 2 + 10)  # 日历天 ≈ 2/3 交易日, 多取余量
+    # 2. 取最近交易日的个股 change_pct（内存优先，磁盘回退）
+    # 缓存保存完整 30 日窗口，避免先请求 7 日后同一缓存无法再返回 30 日。
+    start = latest - timedelta(days=30 * 2 + 10)
     df = repo.get_enriched_range(
         start, latest, columns=["symbol", "date", "change_pct"]
     )
     if df is None or df.is_empty():
-        return {"dates": [], "columns": {}, "concept_count": 0}
+        df = _load_change_pct_from_parquet(repo, start, latest)
+        if df.is_empty():
+            return {"dates": [], "columns": {}, "concept_count": 0}
+        logger.info(
+            "rps_rotation: using parquet history fallback rows=%d range=%s~%s",
+            len(df), start, latest,
+        )
 
     # 3. 把个股 symbol 映射到维度成员, 一只股票拆成多行(每个成员一行)
     #    symbol 大写匹配(map_df 的 _sym_up 已大写)

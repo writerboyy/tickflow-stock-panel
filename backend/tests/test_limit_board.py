@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -1451,6 +1452,37 @@ def test_candidate_score_refresh_uses_five_second_window_and_bypasses_for_new_sy
     current_mono[0] = 110.0
     service._refresh_candidate_scores(runtime, second, now)
     assert calls[0] == 3
+
+
+def test_candidate_score_refresh_can_wait_for_active_scan(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    runtime = {"candidate_scores": {}}
+    now = datetime(2026, 8, 17, 10, 0, tzinfo=CN_TZ)
+    started = threading.Event()
+    finished = threading.Event()
+
+    service._score_lock.acquire()
+
+    def refresh():
+        started.set()
+        service._refresh_candidate_scores(
+            runtime,
+            [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+            now,
+            wait_for_lock=True,
+        )
+        finished.set()
+
+    thread = threading.Thread(target=refresh)
+    thread.start()
+    try:
+        assert started.wait(1)
+        assert finished.wait(0.05) is False
+    finally:
+        service._score_lock.release()
+    assert finished.wait(2)
+    thread.join(timeout=1)
+    assert runtime["candidate_scores"]["600000.SH"]["candidate_score_as_of"] == now.isoformat()
 
 
 def test_candidate_intraday_features_allow_same_day_final_bars_after_close(tmp_path):
@@ -4600,9 +4632,11 @@ def test_candidate_score_snapshot_appends_symbol_outside_scan_set(tmp_path, monk
     runtime["symbols"] = {"600000.SH": {"source_modes": ["first_board"]}}
     service.store.save_runtime(runtime)
     calls: list[list[str]] = []
+    waits: list[bool] = []
 
-    def score(runtime, rows, _now):
+    def score(runtime, rows, _now, *, wait_for_lock=False):
         calls.append(sorted(str(row["symbol"]) for row in rows))
+        waits.append(wait_for_lock)
         runtime["candidate_scores"] = {
             "605159.SH": {
                 "candidate_score": 88.0,
@@ -4621,6 +4655,7 @@ def test_candidate_score_snapshot_appends_symbol_outside_scan_set(tmp_path, monk
     snapshot = service.candidate_score_snapshot("605159.SH")
     # 全量扫描集（strong rows）+ 追加的按需标的，一次传入，防止缓存被整体覆盖。
     assert calls == [["600000.SH", "605159.SH"]]
+    assert waits == [True]
     assert snapshot["symbol"] == "605159.SH"
     assert snapshot["candidate_score"] == 88.0
     assert snapshot["candidate_score_state"] == "live"
@@ -4647,8 +4682,9 @@ def test_candidate_score_snapshot_no_duplicates_for_board_pool_member(tmp_path, 
     service.store.save_runtime(runtime)
     calls: list[list[str]] = []
 
-    def score(runtime, rows, _now):
+    def score(runtime, rows, _now, *, wait_for_lock=False):
         calls.append([str(row["symbol"]) for row in rows])
+        assert wait_for_lock is True
         runtime["candidate_scores"] = {
             "605159.SH": {
                 "candidate_score": 70.0,
