@@ -51,6 +51,7 @@ import {
   api,
   type QmtCreditBuyMode,
   type QmtOrderPreview,
+  type ExtDataRowsResult,
   type LimitBoardEvent,
   type LimitBoardApproachingLimitUpItem,
   type LimitBoardQuoteSnapshot,
@@ -2328,7 +2329,7 @@ export function LimitBoard() {
       enabled: tab === 'auction' && auctionTailRank && Boolean(auctionDate),
       staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
       refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
-      placeholderData: previous => previous,
+      placeholderData: (previous: ExtDataRowsResult | undefined) => previous,
     })),
   })
   // The provider exposes auction snapshots, not net order flow; keep the proxy explicit in the UI.

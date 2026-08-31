@@ -136,7 +136,7 @@ export function RepairDataPanel({
     </div>
 
     {tab === 'daily' ? <div className="mx-auto mt-5 max-w-md">
-      <RepairDailyPanel caps={caps} isRunning={isRunning} latestDate={latestDate} onStart={onDailyStart} />
+      <RepairDailyPanel hasCap={Boolean(caps?.capabilities?.['kline.daily.batch'])} isRunning={isRunning} latestDate={latestDate} onStart={onDailyStart} />
     </div> : null}
 
     {tab === 'etf' ? <div className="mt-4 space-y-4">
