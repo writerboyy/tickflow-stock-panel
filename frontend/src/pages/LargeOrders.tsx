@@ -589,7 +589,7 @@ export function LargeOrders() {
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
   const qmtReady = qmt.data?.state === 'ready'
-  const qmtTotalAsset = qmtReady ? qmt.data.account?.total_asset : null
+  const qmtTotalAsset = qmt.data?.state === 'ready' ? qmt.data.account?.total_asset : null
   const currentTotalAsset = qmtTotalAsset ?? data.account.total_asset
   const accountTodayPnl = data.account.today_profit_loss ?? (qmtReady ? null : todayPnl(currentTotalAsset, data.account.previous_close_total_asset, data.runtime.status !== 'data_unavailable'))
   const accountTodayPnlTitle = data.account.today_profit_loss != null
