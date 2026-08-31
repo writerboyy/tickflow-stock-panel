@@ -83,7 +83,7 @@ def _paper_latest_by_symbol(frame: Any) -> Any:
 
 
 class _PaperHistoricalRepository:
-    """Read-only paper-clock adapter for UTC-naive minute and tick history."""
+    """Read-only adapter for legacy UTC-naive minute and tick history."""
 
     def __init__(self, repo: Any) -> None:
         self._repo = repo
@@ -205,7 +205,7 @@ class _PaperHistoricalRepository:
 
 
 def _paper_schedule_repo(repo: Any) -> Any:
-    """Adapt UTC-naive intraday history only for Beijing-clock scheduling."""
+    """Adapt only legacy UTC-naive repositories for Beijing-clock scheduling."""
     if (
         repo is None
         or getattr(repo, "_paper_clock_adapter", False) is True

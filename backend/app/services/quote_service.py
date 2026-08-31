@@ -1102,11 +1102,13 @@ class QuoteService:
                     raw_dt = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00"))
                 except (TypeError, ValueError):
                     continue
-            # TickFlow 历史分钟采用 UTC-naive；带时区值则先转北京时间。
+            # 仓库分钟契约是北京时间墙钟；仅显式标记的旧 UTC 仓库需要平移。
             if raw_dt.tzinfo:
                 local_dt = raw_dt.astimezone(CN_TZ).replace(tzinfo=None)
-            else:
+            elif getattr(self._repo, "intraday_datetime_basis", "beijing_naive") == "utc_naive":
                 local_dt = raw_dt + timedelta(hours=8)
+            else:
+                local_dt = raw_dt
             minute = local_dt.time().replace(second=0, microsecond=0)
             if minute not in expected_times:
                 continue

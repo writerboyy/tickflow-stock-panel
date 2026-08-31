@@ -64,8 +64,8 @@ def _setup_custom_provider(monkeypatch, provider: object, has_dataset: bool = Tr
     )
 
 
-def test_tickflow_minute_epoch_is_normalized_to_utc_wall_clock():
-    """TickFlow epoch is kept as the UTC-naive wall-clock expected by upstream."""
+def test_tickflow_minute_epoch_is_normalized_to_beijing_wall_clock():
+    """TickFlow epoch 01:35 UTC is normalized to 09:35 Beijing time."""
     raw = pl.DataFrame({
         "symbol": ["510300.SH"],
         "timestamp": [1779327300000],
@@ -74,7 +74,20 @@ def test_tickflow_minute_epoch_is_normalized_to_utc_wall_clock():
     })
     normalized = kline_sync._normalize_minute(raw)
     value = normalized["datetime"][0]
-    assert (value.hour, value.minute) == (1, 35)
+    assert (value.hour, value.minute) == (9, 35)
+
+
+def test_migrate_legacy_minute_clock_runs_once_and_preserves_beijing_rows(tmp_path):
+    partition = tmp_path / "kline_minute" / "date=2026-08-31" / "part.parquet"
+    partition.parent.mkdir(parents=True)
+    frame = _mock_minute_df("600519.SH").with_columns(
+        pl.Series("datetime", [datetime(2026, 8, 31, 1, 35)])
+    )
+    frame.write_parquet(partition)
+
+    assert kline_sync.migrate_legacy_minute_clock(tmp_path) == 1
+    assert pl.read_parquet(partition)["datetime"][0] == datetime(2026, 8, 31, 9, 35)
+    assert kline_sync.migrate_legacy_minute_clock(tmp_path) == 0
 
 
 def test_write_minute_partition_drops_invalid_rows_and_normalizes_ohlc(tmp_path):
@@ -532,6 +545,27 @@ def test_get_minute_falls_back_before_open_on_weekday(monkeypatch):
 
     assert result["date"] == previous.isoformat()
     assert mock_repo.get_minute.call_args.args[1] == previous
+
+
+def test_get_minute_normalizes_legacy_utc_rows_before_response(monkeypatch):
+    from app.api import kline as kline_api
+
+    today = date(2026, 8, 31)
+    monkeypatch.setattr(kline_api, "cn_today", lambda: today)
+    monkeypatch.setattr(kline_api, "cn_now", lambda: datetime(2026, 8, 31, 9, 31))
+    mock_repo = MagicMock()
+    mock_repo.resolve_asset_type.return_value = "stock"
+    mock_repo.latest_daily_date.return_value = today
+    mock_repo.get_minute.return_value = _mock_minute_df("600519.SH").with_columns(
+        pl.lit(datetime(2026, 8, 31, 1, 35)).alias("datetime")
+    )
+    request = MagicMock()
+    request.app.state.repo = mock_repo
+
+    result = kline_api.get_minute(request, symbol="600519.SH", trade_date=today)
+
+    assert result["source"] == "local"
+    assert result["rows"][0]["datetime"] == datetime(2026, 8, 31, 9, 35)
 
 
 # ---------- 测试 10: sync_minute_batch 自定义源成功时调 on_segment (Issue 1) ----------

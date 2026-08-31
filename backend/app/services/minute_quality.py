@@ -32,8 +32,8 @@ _BEIJING_CONTINUOUS_TIMES = _minute_range(time(9, 31), time(11, 30)) | _minute_r
 _BEIJING_AUCTION_TIME = time(9, 30)
 _BEIJING_ALLOWED_TIMES = _BEIJING_CONTINUOUS_TIMES | {_BEIJING_AUCTION_TIME}
 
-# TickFlow timestamps are UTC epochs. The repository stores their UTC-naive
-# wall-clock representation and the frontend adds UTC+8 for display.
+# TickFlow timestamps are UTC epochs. The repository stores Beijing-naive
+# wall-clock timestamps; legacy partitions may still contain UTC-naive values.
 _UTC_REFERENCE_DATE = date(2000, 1, 1)
 _UTC_CONTINUOUS_TIMES = {
     (datetime.combine(_UTC_REFERENCE_DATE, value) - timedelta(hours=8)).time()
@@ -66,8 +66,8 @@ def minute_clock_basis(frame: pl.DataFrame) -> str:
 
 
 def minute_frame_is_canonical(frame: pl.DataFrame) -> bool:
-    """Return whether a frame uses the repository's UTC-naive minute clock."""
-    return minute_clock_basis(frame) == "utc_naive"
+    """Return whether a frame uses the repository's Beijing-naive minute clock."""
+    return minute_clock_basis(frame) == "beijing_naive"
 
 
 def sanitize_minute_rows(frame: pl.DataFrame) -> pl.DataFrame:
@@ -106,24 +106,24 @@ def sanitize_minute_rows(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def normalize_minute_clock(frame: pl.DataFrame) -> tuple[pl.DataFrame, str, int]:
-    """Convert Beijing-naive rows to UTC-naive, including mixed partitions."""
+    """Convert legacy UTC-naive rows to Beijing-naive, including mixed partitions."""
     basis = minute_clock_basis(frame)
-    if basis == "utc_naive":
+    if basis == "beijing_naive":
         return frame, basis, 0
-    if basis not in {"beijing_naive", "mixed_or_invalid"}:
+    if basis not in {"utc_naive", "mixed_or_invalid"}:
         return frame, basis, 0
-    beijing_rows = frame.filter(
-        pl.col("datetime").dt.strftime("%H:%M").is_in(_BEIJING_TIME_STRINGS)
+    utc_rows = frame.filter(
+        pl.col("datetime").dt.strftime("%H:%M").is_in(_UTC_TIME_STRINGS)
     ).height
-    if not beijing_rows:
+    if not utc_rows:
         return frame, basis, 0
     normalized = frame.with_columns(
-        pl.when(pl.col("datetime").dt.strftime("%H:%M").is_in(_BEIJING_TIME_STRINGS))
-        .then(pl.col("datetime").dt.offset_by("-8h"))
+        pl.when(pl.col("datetime").dt.strftime("%H:%M").is_in(_UTC_TIME_STRINGS))
+        .then(pl.col("datetime").dt.offset_by("8h"))
         .otherwise(pl.col("datetime"))
         .alias("datetime")
     )
-    return normalized, basis, beijing_rows
+    return normalized, basis, utc_rows
 
 
 def minute_group_complete(frame: pl.DataFrame) -> bool:
@@ -141,13 +141,10 @@ def minute_group_complete(frame: pl.DataFrame) -> bool:
     )
     if valid.height != frame.height or valid["datetime"].n_unique() != frame.height:
         return False
-    basis = minute_clock_basis(valid)
-    if basis == "utc_naive":
-        required, allowed = _UTC_CONTINUOUS_TIMES, _UTC_ALLOWED_TIMES
-    elif basis == "beijing_naive":
-        required, allowed = _BEIJING_CONTINUOUS_TIMES, _BEIJING_ALLOWED_TIMES
-    else:
+    valid, _basis, _shifted = normalize_minute_clock(valid)
+    if minute_clock_basis(valid) != "beijing_naive":
         return False
+    required, allowed = _BEIJING_CONTINUOUS_TIMES, _BEIJING_ALLOWED_TIMES
     time_strings = set(
         valid.select(pl.col("datetime").dt.strftime("%H:%M").unique()).to_series().to_list()
     )
