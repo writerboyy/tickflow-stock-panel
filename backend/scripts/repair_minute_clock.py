@@ -1,4 +1,4 @@
-"""Normalize persisted minute timestamps to the repository UTC-naive contract."""
+"""Normalize persisted minute timestamps to the repository Beijing-naive contract."""
 
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ def _build_shadow(
     if not source_files:
         raise FileNotFoundError(f"minute table not found: {source_root}")
 
-    shadow_root = data_dir / f".{table}.utc-normalize-{repair_id}"
+    shadow_root = data_dir / f".{table}.beijing-normalize-{repair_id}"
     shadow_root.mkdir()
     for child in source_root.iterdir():
         if child.is_file() and child.name != "repair-manifest.json":
@@ -212,8 +212,8 @@ def _build_shadow(
             "trade_date": expected_date,
             "incoming_rows": frame.height,
             "rejected_rows": rejected,
-            "source": "utc_clock_repair",
-            "datetime_basis": "utc_naive",
+            "source": "beijing_clock_repair",
+            "datetime_basis": "beijing_naive",
             "basis_before": basis,
             "shifted_rows": shifted,
             "deduplicated_rows": deduplicated,
@@ -247,7 +247,7 @@ def _build_shadow(
         "deduplicated_rows": deduplicated_rows,
         "conflicting_duplicate_groups": conflict_groups,
         "basis_counts": basis_counts,
-        "datetime_basis": "utc_naive",
+        "datetime_basis": "beijing_naive",
         "selected_start": start_date.isoformat() if start_date else None,
         "selected_end": end_date.isoformat() if end_date else None,
     }
@@ -284,7 +284,7 @@ def repair(
     try:
         for table, shadow, manifest in built:
             source = data_dir / table
-            backup = data_dir / f".{table}.pre-utc-normalize-{repair_id}"
+            backup = data_dir / f".{table}.pre-beijing-normalize-{repair_id}"
             if backup.exists():
                 raise FileExistsError(f"backup already exists: {backup}")
             os.replace(source, backup)

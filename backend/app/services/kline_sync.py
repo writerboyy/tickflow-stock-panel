@@ -623,6 +623,37 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     return df.select(keep)
 
 
+def migrate_legacy_minute_clock(data_dir, asset_type: AssetType = "stock") -> int:
+    """Migrate persisted UTC-naive minute rows to the Beijing contract once."""
+    from app.services.minute_quality import normalize_minute_clock
+
+    minute_dir = data_dir / _minute_table(asset_type)
+    marker = minute_dir / ".beijing_wall_clock_v1"
+    if marker.exists():
+        return 0
+    files = sorted(minute_dir.glob("date=*/part.parquet"))
+    if not files:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("empty", encoding="utf-8")
+        return 0
+
+    shifted = 0
+    for path in files:
+        frame = pl.read_parquet(path)
+        normalized, _basis, rows_shifted = normalize_minute_clock(frame)
+        if rows_shifted:
+            _atomic_write_parquet(normalized, path)
+            shifted += rows_shifted
+    marker.write_text("migrated", encoding="utf-8")
+    if shifted:
+        logger.info(
+            "%s minute timestamps migrated from UTC-naive to Beijing-naive: %d rows",
+            asset_type,
+            shifted,
+        )
+    return shifted
+
+
 def _compact_klines_to_df(raw, default_symbol: str | None = None) -> pl.DataFrame:
     """SDK as_dataframe=False 的 K 线原始数据 (CompactKlineData, 列式) → polars 直转。
 

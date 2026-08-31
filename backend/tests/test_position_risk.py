@@ -606,6 +606,8 @@ def test_opening_volume_selloff_requires_history_and_two_price_checks():
 
 def test_opening_volume_baseline_requires_exact_five_minutes_and_caches(tmp_path: Path):
     class MinuteRepo:
+        intraday_datetime_basis = "beijing_naive"
+
         def __init__(self):
             self.calls = 0
 
@@ -617,12 +619,12 @@ def test_opening_volume_baseline_requires_exact_five_minutes_and_caches(tmp_path
                 for minute in range(31, 36):
                     rows.append({
                         "symbol": "600036.SH",
-                        "datetime": day.replace(hour=1, minute=minute),
+                        "datetime": day.replace(hour=9, minute=minute),
                         "volume": 100.0,
                     })
             rows.append({
                 "symbol": "600036.SH",
-                "datetime": datetime(2026, 7, 1, 1, 31),
+                "datetime": datetime(2026, 7, 1, 9, 31),
                 "volume": 100.0,
             })
             return pl.DataFrame(rows)
@@ -635,6 +637,32 @@ def test_opening_volume_baseline_requires_exact_five_minutes_and_caches(tmp_path
     assert first["baseline_available"] is False
     assert second == first
     assert repo.calls == 1
+
+
+def test_opening_volume_baseline_uses_beijing_naive_repository_clock():
+    class MinuteRepo:
+        intraday_datetime_basis = "beijing_naive"
+
+        def get_minute_range(self, _symbols, _start, _end, _asset_type):
+            return pl.DataFrame([
+                {
+                    "symbol": "600036.SH",
+                    "datetime": (datetime(2026, 7, 1) + timedelta(days=day)).replace(
+                        hour=9,
+                        minute=minute,
+                    ),
+                    "volume": 100.0,
+                }
+                for day in range(20)
+                for minute in range(31, 36)
+            ])
+
+    service = QuoteService()
+    service.set_repo(MinuteRepo())
+    result = service._opening_volume_baseline("600036.SH", date(2026, 8, 1), "stock")
+
+    assert result["baseline_available"] is True
+    assert result["baseline_median_volume"] == 500.0
 
 
 def test_sector_leader_exit_fails_closed_without_minute_proxy():

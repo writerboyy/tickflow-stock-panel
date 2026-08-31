@@ -15,7 +15,7 @@ from app.market_time import CN_TZ, cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
-from app.services.minute_quality import minute_frame_is_canonical
+from app.services.minute_quality import minute_frame_is_canonical, normalize_minute_clock
 
 logger = logging.getLogger(__name__)
 
@@ -669,6 +669,8 @@ def get_minute_batch(request: Request, body: dict):
             df_local = df_etf
         elif not df_etf.is_empty():
             df_local = pl.concat([df_local, df_etf], how="diagonal_relaxed")
+    if not df_local.is_empty() and "datetime" in df_local.columns:
+        df_local, _basis, _shifted = normalize_minute_clock(df_local)
 
     # 期望条数 (盘中按当前时刻估算, 盘后 240)
     now = cn_now()
@@ -783,6 +785,9 @@ def get_minute_range(
     minute = repo.get_minute_range([symbol], start, end, asset_type=asset_type)
     if minute.is_empty() or "datetime" not in minute.columns:
         return {**base_response, "sessions": [], "source": "none"}
+
+    # 上游统一使用北京时间墙钟；旧分区可能仍是 UTC 墙钟，读取边界统一修正。
+    minute, _basis, _shifted = normalize_minute_clock(minute)
 
     minute = minute.with_columns(
         pl.col("datetime").dt.date().alias("_trade_date"),
@@ -905,6 +910,8 @@ def get_minute(
             }
 
     df = repo.get_minute(symbol, trade_date, asset_type=asset_type)
+    if not df.is_empty() and "datetime" in df.columns:
+        df, _basis, _shifted = normalize_minute_clock(df)
 
     # 完整交易日应有 240 条分钟K；如果是今天(盘中)，期望条数按已交易分钟估算
     expected = 240

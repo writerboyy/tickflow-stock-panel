@@ -39,7 +39,7 @@ def test_minute_clock_basis_distinguishes_legacy_and_canonical_rows():
     assert minute_clock_basis(mixed) == "mixed_or_invalid"
 
 
-def test_normalize_minute_clock_shifts_legacy_rows_and_dedupes_at_call_site():
+def test_normalize_minute_clock_shifts_legacy_utc_rows_to_beijing():
     frame = _frame([
         datetime(2026, 8, 26, 9, 30),
         datetime(2026, 8, 26, 1, 30),
@@ -50,14 +50,14 @@ def test_normalize_minute_clock_shifts_legacy_rows_and_dedupes_at_call_site():
     assert basis == "mixed_or_invalid"
     assert shifted == 1
     assert normalized["datetime"].to_list() == [
-        datetime(2026, 8, 26, 1, 30),
-        datetime(2026, 8, 26, 1, 30),
+        datetime(2026, 8, 26, 9, 30),
+        datetime(2026, 8, 26, 9, 30),
     ]
 
 
-def test_minute_frame_is_canonical_accepts_only_utc_naive_clock():
-    assert minute_frame_is_canonical(_frame([datetime(2026, 8, 26, 1, 30)]))
-    assert not minute_frame_is_canonical(_frame([datetime(2026, 8, 26, 9, 30)]))
+def test_minute_frame_is_canonical_accepts_only_beijing_naive_clock():
+    assert minute_frame_is_canonical(_frame([datetime(2026, 8, 26, 9, 30)]))
+    assert not minute_frame_is_canonical(_frame([datetime(2026, 8, 26, 1, 30)]))
     assert not minute_frame_is_canonical(pl.DataFrame())
 
 
@@ -111,7 +111,7 @@ def test_duplicate_repair_rejects_unexplained_price_conflict(tmp_path):
         _resolve_duplicate_rows(frame, tmp_path, "kline_minute", date(2026, 8, 24))
 
 
-def test_minute_partition_write_normalizes_legacy_beijing_clock(tmp_path):
+def test_minute_partition_write_keeps_beijing_clock(tmp_path):
     frame = _frame([datetime(2026, 8, 24, 9, 31)])
 
     assert kline_sync._write_minute_partition(frame, tmp_path / "kline_minute") == 1
@@ -119,7 +119,7 @@ def test_minute_partition_write_normalizes_legacy_beijing_clock(tmp_path):
     stored = pl.read_parquet(
         tmp_path / "kline_minute/date=2026-08-24/part.parquet"
     )
-    assert stored["datetime"].item() == datetime(2026, 8, 24, 1, 31)
+    assert stored["datetime"].item() == datetime(2026, 8, 24, 9, 31)
     assert minute_frame_is_canonical(stored)
 
 

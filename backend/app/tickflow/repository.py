@@ -128,6 +128,15 @@ class DataStore:
 
         # DuckDB 内存模式 — 不建 .db 文件(§7.1)
         self.db = duckdb.connect(database=":memory:")
+        # Upstream minute ingestion stores Beijing-naive timestamps. Repair
+        # legacy UTC-naive partitions before exposing repository views.
+        try:
+            from app.services.kline_sync import migrate_legacy_minute_clock
+
+            migrate_legacy_minute_clock(self.data_dir, "stock")
+            migrate_legacy_minute_clock(self.data_dir, "etf")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("legacy minute clock migration skipped: %s", exc)
         self._register_views()
 
     def _migrate_legacy_data_dir(self) -> None:
@@ -341,9 +350,8 @@ class DataStore:
 class KlineRepository:
     """日 K / 分钟 K 的读写入口。"""
 
-    # Intraday parquet timestamps are stored as UTC-naive values. Paper
-    # scheduling is the only caller that needs to reinterpret that clock.
-    intraday_datetime_basis = "utc_naive"
+    # Intraday parquet timestamps follow the shared Beijing-naive contract.
+    intraday_datetime_basis = "beijing_naive"
 
     def __init__(self, store: DataStore) -> None:
         self.store = store

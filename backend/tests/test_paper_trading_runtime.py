@@ -126,13 +126,13 @@ def test_paper_historical_repository_maps_utc_naive_ticks_for_scheduled_fills():
 
 def test_shared_market_data_keeps_canonical_repository_clock():
     class CanonicalRepository:
-        intraday_datetime_basis = "utc_naive"
+        intraday_datetime_basis = "beijing_naive"
 
     repo = CanonicalRepository()
     hub = MarketDataHub(object(), repo)
 
     assert hub.repo is repo
-    assert _paper_schedule_repo(repo) is not repo
+    assert _paper_schedule_repo(repo) is repo
 
 
 def test_scheduled_execution_adapts_utc_history_without_mutating_repository(monkeypatch, tmp_path):
@@ -150,7 +150,7 @@ def run(context):
         config=FreeStrategyConfig(asset_type="stock", benchmark_symbol="X"),
     )
 
-    class CanonicalRepository:
+    class LegacyRepository:
         intraday_datetime_basis = "utc_naive"
 
         def get_minute_snapshot(self, symbols, at, _asset_type):
@@ -175,7 +175,7 @@ def run(context):
         "status": "running",
         "config": {"market_mode": "bar_1m", "asset_type": "stock"},
     })
-    repo = CanonicalRepository()
+    repo = LegacyRepository()
 
     _process_scheduled_day(
         store,
