@@ -26,6 +26,7 @@ import {
   ShoppingCart,
   SlidersHorizontal,
   Trash2,
+  TrendingUp,
   Wifi,
   X,
 } from 'lucide-react'
@@ -74,6 +75,16 @@ type AuctionComparisonRow = {
   symbol: string
   name?: string
   snapshots: Record<string, Record<string, any>>
+}
+type TailAuctionRow = {
+  symbol: string
+  name?: string
+  finalAmount: number
+  finalVolume: number | null
+  finalPct: number | null
+  priceChangePct: number | null
+  amountDelta: number | null
+  unmatchedDelta: number | null
 }
 const LIMIT_BOARD_MARKET_REFRESH_SECONDS = 6
 const LIMIT_BOARD_MARKET_REFRESH_MS = LIMIT_BOARD_MARKET_REFRESH_SECONDS * 1000
@@ -387,6 +398,13 @@ function auctionAmount(value: unknown): string {
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 
+function auctionSignedAmount(value: unknown): string {
+  const amount = auctionFiniteNumber(value)
+  if (amount == null) return '--'
+  if (amount === 0) return auctionAmount(amount)
+  return `${amount > 0 ? '+' : '-'}${auctionAmount(Math.abs(amount))}`
+}
+
 function auctionMarketCap(value: unknown): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '--'
   if (Math.abs(value) >= 1_000_000_000_000) return `${(value / 1_000_000_000_000).toFixed(2)}万亿`
@@ -432,6 +450,10 @@ function AuctionTable({
   onCheckpointChange,
   comparison,
   onComparisonChange,
+  tailRows,
+  tailLoading,
+  tailRank,
+  onTailRankChange,
   loading,
   comparisonLoading,
   onOpen,
@@ -449,6 +471,10 @@ function AuctionTable({
   onCheckpointChange: (value: string) => void
   comparison: boolean
   onComparisonChange: (value: boolean) => void
+  tailRows: TailAuctionRow[]
+  tailLoading: boolean
+  tailRank: boolean
+  onTailRankChange: (value: boolean) => void
   loading: boolean
   comparisonLoading: boolean
   onOpen: (symbol: string, name?: string) => void
@@ -510,6 +536,11 @@ function AuctionTable({
       })
   }, [comparisonRows, search, sortDirection, sortKey])
 
+  const visibleTailRows = useMemo(() => {
+    const term = search.trim().toLowerCase()
+    return tailRows.filter(row => !term || row.symbol.toLowerCase().includes(term) || String(row.name || '').toLowerCase().includes(term))
+  }, [search, tailRows])
+
   const checkpointOptions = [
     ['0915', '09:15'],
     ['0920', '09:20'],
@@ -518,10 +549,10 @@ function AuctionTable({
     ['1457', '14:57'],
     ['1500', '15:00'],
   ] as const
-  const displayRows = comparison ? visibleComparisonRows : visibleRows
-  const displayCount = comparison ? comparisonRows.length : rows.length
+  const displayRows = tailRank ? visibleTailRows : comparison ? visibleComparisonRows : visibleRows
+  const displayCount = tailRank ? tailRows.length : comparison ? comparisonRows.length : rows.length
   const tableContainerRef = useRef<HTMLDivElement>(null)
-  const virtualized = !comparison && visibleRows.length > VIRTUAL_LIST_THRESHOLD
+  const virtualized = !comparison && !tailRank && visibleRows.length > VIRTUAL_LIST_THRESHOLD
   const { getScrollElement, scrollMargin } = useParentScroll(tableContainerRef, virtualized)
   const rowVirtualizer = useVirtualizer({
     count: virtualized ? visibleRows.length : 0,
@@ -566,9 +597,9 @@ function AuctionTable({
     <section className="overflow-hidden rounded-btn border border-border bg-surface">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
         <div>
-          <div className="text-xs font-medium">集合竞价</div>
+          <div className="text-xs font-medium">{tailRank ? '尾盘抢筹排名' : '集合竞价'}</div>
           <div className="mt-0.5 text-[10px] text-muted">
-            {loading || comparisonLoading ? '正在读取扶摇数据' : date ? `${date} · ${displayCount}${comparison ? ' 只重点股票' : ' 条'} · ${date !== status?.trade_date ? '历史数据' : status?.configured ? status.state === 'completed' ? '已落库' : status.message || '待更新' : '未配置扶摇 API Key'}` : '未配置扶摇 API Key'}
+            {loading || comparisonLoading || tailLoading ? '正在读取扶摇数据' : date ? `${date} · ${displayCount}${tailRank ? ' 只尾盘排名' : comparison ? ' 只重点股票' : ' 条'} · ${date !== status?.trade_date ? '历史数据' : status?.configured ? status.state === 'completed' ? '已落库' : status.message || '待更新' : '未配置扶摇 API Key'}` : '未配置扶摇 API Key'}
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -577,15 +608,44 @@ function AuctionTable({
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <input value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索代码/名称" aria-label="搜索集合竞价股票" className="h-7 w-32 rounded-btn border border-border bg-base pl-7 pr-2 text-[10px] text-foreground placeholder:text-muted/50 focus:outline-none focus:border-accent/60" />
           </div>
-          <select value={checkpoint} onChange={event => onCheckpointChange(event.target.value)} aria-label="选择集合竞价时点" disabled={comparison} className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60 disabled:opacity-50">
+          <select value={checkpoint} onChange={event => onCheckpointChange(event.target.value)} aria-label="选择集合竞价时点" disabled={comparison || tailRank} className="h-7 rounded-btn border border-border bg-base px-2 text-[10px] text-secondary focus:outline-none focus:border-accent/60 disabled:opacity-50">
             {checkpointOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
-          <button type="button" aria-pressed={comparison} onClick={() => onComparisonChange(!comparison)} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 text-[10px] font-medium ${comparison ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:border-accent/40 hover:text-foreground'}`}><Layers3 className="h-3.5 w-3.5" />三点对比</button>
+          <button type="button" aria-pressed={tailRank} onClick={() => onTailRankChange(!tailRank)} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 text-[10px] font-medium ${tailRank ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:border-accent/40 hover:text-foreground'}`}><TrendingUp className="h-3.5 w-3.5" />尾盘抢筹</button>
+          <button type="button" aria-pressed={comparison} disabled={tailRank} onClick={() => onComparisonChange(!comparison)} className={`inline-flex h-7 items-center gap-1 rounded-btn border px-2 text-[10px] font-medium ${comparison ? 'border-accent/50 bg-accent/15 text-accent' : 'border-border text-secondary hover:border-accent/40 hover:text-foreground'} disabled:cursor-not-allowed disabled:opacity-50`}><Layers3 className="h-3.5 w-3.5" />三点对比</button>
         </div>
       </div>
       {date === status?.trade_date && status?.error_code != null && status.message ? <div className="border-b border-danger/30 bg-danger/5 px-3 py-2 text-[10px] text-danger">{status.message}</div> : null}
       {displayRows.length === 0 ? (
-        <EmptyState icon={Flame} title={loading || comparisonLoading ? '集合竞价加载中' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
+        <EmptyState icon={Flame} title={loading || comparisonLoading || tailLoading ? '集合竞价加载中' : tailRank ? '暂无尾盘排名数据' : '暂无集合竞价数据'} hint={status?.configured ? '请先在设置页采集竞价快照，或切换其他时点' : '请在设置页配置扶摇 API Key'} />
+      ) : tailRank ? (
+        <div ref={tableContainerRef} className="overflow-x-auto">
+          <div className="border-b border-border px-3 py-2 text-[10px] text-muted">数据源未提供逐笔净抢筹额，主排序采用 15:00 收盘竞价额；抢筹幅度为 14:57→15:00 竞价价变化，增量额为两个时点的竞价额差值。</div>
+          <table className="w-full min-w-[980px] border-collapse text-[10px]">
+            <thead className="bg-elevated/30 text-muted"><tr className="border-b border-border">
+              <th className="w-12 px-3 py-2 text-right font-medium">排名</th>
+              <th className="px-3 py-2 text-left font-medium">股票</th>
+              <th className="px-2 py-2 text-right font-medium">15:00竞价额</th>
+              <th className="px-2 py-2 text-right font-medium">竞价量</th>
+              <th className="px-2 py-2 text-right font-medium">15:00涨幅</th>
+              <th className="px-2 py-2 text-right font-medium">抢筹幅度</th>
+              <th className="px-2 py-2 text-right font-medium">竞价额增量</th>
+              <th className="px-3 py-2 text-right font-medium">未匹配变化</th>
+            </tr></thead>
+            <tbody>
+              {visibleTailRows.map((row, index) => <tr key={row.symbol} className="border-b border-border/70 hover:bg-elevated/30">
+                <td className="px-3 py-2 text-right font-mono text-muted">{index + 1}</td>
+                <td className="px-3 py-2"><button type="button" onClick={() => onOpen(row.symbol, row.name)} className="text-left hover:text-accent"><div className="font-medium text-foreground">{row.name || row.symbol || '--'}</div><div className="mt-0.5 font-mono text-[9px] text-muted">{row.symbol}</div></button></td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionAmount(row.finalAmount)}</td>
+                <td className="px-2 py-2 text-right font-mono text-secondary">{auctionNumber(row.finalVolume)}</td>
+                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.finalPct)}`}>{auctionPercent(row.finalPct)}</td>
+                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.priceChangePct)}`}>{auctionPercent(row.priceChangePct)}</td>
+                <td className={`px-2 py-2 text-right font-mono ${auctionTone(row.amountDelta)}`}>{auctionSignedAmount(row.amountDelta)}</td>
+                <td className={`px-3 py-2 text-right font-mono ${auctionTone(row.unmatchedDelta)}`}>{auctionNumber(row.unmatchedDelta)}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
       ) : comparison ? (
         <div ref={tableContainerRef} className="overflow-x-auto">
           <table className="w-full min-w-[980px] border-collapse text-[10px]">
@@ -2189,6 +2249,7 @@ export function LimitBoard() {
   const [selectedAuctionDate, setSelectedAuctionDate] = useState<string | null>(null)
   const [auctionCheckpoint, setAuctionCheckpoint] = useState('0925')
   const [auctionComparison, setAuctionComparison] = useState(false)
+  const [auctionTailRank, setAuctionTailRank] = useState(false)
   const [allocationDialog, setAllocationDialog] = useState<AllocationDialogState | null>(null)
   const [selectedBuyPoolSymbols, setSelectedBuyPoolSymbols] = useState<Set<string>>(() => new Set())
   const [selectedPoolSymbols, setSelectedPoolSymbols] = useState<Set<string>>(() => new Set())
@@ -2251,10 +2312,66 @@ export function LimitBoard() {
       checkpoint: auctionComparison ? '0925' : auctionCheckpoint,
       columns: AUCTION_COLUMNS,
     }),
-    enabled: tab === 'auction' && Boolean(auctionDate),
+    enabled: tab === 'auction' && !auctionTailRank && Boolean(auctionDate),
     staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
     refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
   })
+  const tailAuctionSnapshots = useQueries({
+    queries: (['1457', '1500'] as const).map(checkpoint => ({
+      queryKey: QK.extDataRows('ext_fuyao_auction', auctionDate, 20_000, AUCTION_COLUMNS.join(','), checkpoint),
+      queryFn: () => api.extDataRows('ext_fuyao_auction', {
+        date: auctionDate,
+        limit: 20_000,
+        checkpoint,
+        columns: AUCTION_COLUMNS,
+      }),
+      enabled: tab === 'auction' && auctionTailRank && Boolean(auctionDate),
+      staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
+      refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
+      placeholderData: previous => previous,
+    })),
+  })
+  // The provider exposes auction snapshots, not net order flow; keep the proxy explicit in the UI.
+  const tailAuctionRows = useMemo<TailAuctionRow[]>(() => {
+    if (!auctionTailRank) return []
+    const snapshots = new Map<string, Map<string, Record<string, any>>>()
+    for (const [index, checkpoint] of (['1457', '1500'] as const).entries()) {
+      const rows = tailAuctionSnapshots[index]?.data?.rows ?? []
+      const bySymbol = new Map<string, Record<string, any>>()
+      for (const row of rows) {
+        const symbol = String(row.symbol || '').trim().toUpperCase()
+        if (symbol) bySymbol.set(symbol, row)
+      }
+      snapshots.set(checkpoint, bySymbol)
+    }
+    const live = snapshots.get('1457')
+    const final = snapshots.get('1500')
+    if (!live || !final || final.size === 0) return []
+    const result: TailAuctionRow[] = []
+    for (const [symbol, finalRow] of final) {
+      const finalAmount = auctionFiniteNumber(finalRow.auction_amount)
+      if (finalAmount == null || finalAmount <= 0) continue
+      const liveRow = live.get(symbol)
+      const liveAmount = auctionFiniteNumber(liveRow?.auction_amount)
+      const finalVolume = auctionFiniteNumber(finalRow.auction_volume)
+      const finalPrice = auctionFiniteNumber(finalRow.auction_price)
+      const livePrice = auctionFiniteNumber(liveRow?.auction_price)
+      const finalUnmatched = auctionFiniteNumber(finalRow.auction_unmatched)
+      const liveUnmatched = auctionFiniteNumber(liveRow?.auction_unmatched)
+      result.push({
+        symbol,
+        name: finalRow.name,
+        finalAmount,
+        finalVolume,
+        finalPct: auctionFiniteNumber(finalRow.auction_pct),
+        priceChangePct: finalPrice != null && livePrice != null && livePrice !== 0 ? (finalPrice - livePrice) / livePrice * 100 : null,
+        amountDelta: liveAmount != null ? finalAmount - liveAmount : null,
+        unmatchedDelta: finalUnmatched != null && liveUnmatched != null ? finalUnmatched - liveUnmatched : null,
+      })
+    }
+    return result.sort((left, right) => right.finalAmount - left.finalAmount)
+  }, [auctionTailRank, tailAuctionSnapshots])
+  const tailAuctionLoading = tailAuctionSnapshots.some(query => query.isLoading || query.isFetching)
   const conceptExtData = useQuery({
     queryKey: QK.extDataRows('ext_gn_ths', undefined, 6_000, '所属概念'),
     queryFn: () => api.extDataRows('ext_gn_ths', { limit: 6_000, columns: ['所属概念'] }),
@@ -2573,6 +2690,7 @@ export function LimitBoard() {
         /></Suspense> : tab === 'auction' ? <AuctionTable
           rows={fuyaoAuctionRows.data?.rows ?? []}
           comparisonRows={auctionComparisonRows}
+          tailRows={tailAuctionRows}
           status={fuyaoAuctionStatus.data}
           conceptBySymbol={auctionConceptBySymbol}
           date={auctionDate}
@@ -2582,7 +2700,10 @@ export function LimitBoard() {
           checkpoint={auctionCheckpoint}
           onCheckpointChange={setAuctionCheckpoint}
           comparison={auctionComparison}
-          onComparisonChange={setAuctionComparison}
+          onComparisonChange={value => { setAuctionComparison(value); if (value) setAuctionTailRank(false) }}
+          tailLoading={tailAuctionLoading}
+          tailRank={auctionTailRank}
+          onTailRankChange={value => { setAuctionTailRank(value); if (value) setAuctionComparison(false) }}
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
