@@ -588,17 +588,20 @@ export function LargeOrders() {
   if (portfolio.isLoading) return <div className="grid h-full place-items-center"><Loader2 className="h-6 w-6 animate-spin text-accent" /></div>
   if (portfolio.isError || !portfolio.data) return <EmptyState icon={AlertTriangle} title="持仓风控加载失败" hint="请检查后端服务后重试" />
   const data = portfolio.data
-  const qmtReady = qmt.data?.state === 'ready'
+  const qmtConfigured = qmt.data?.configured === true
+  const qmtUnavailable = qmt.data?.configured === false
   const qmtTotalAsset = qmt.data?.state === 'ready' ? qmt.data.account?.total_asset : null
   const currentTotalAsset = qmtTotalAsset ?? data.account.total_asset
-  const accountTodayPnl = data.account.today_profit_loss ?? (qmtReady ? null : todayPnl(currentTotalAsset, data.account.previous_close_total_asset, data.runtime.status !== 'data_unavailable'))
+  const accountTodayPnl = data.account.today_profit_loss ?? (qmtUnavailable ? todayPnl(currentTotalAsset, data.account.previous_close_total_asset, data.runtime.status !== 'data_unavailable') : null)
   const accountTodayPnlTitle = data.account.today_profit_loss != null
     ? 'QMT 持仓统计 float_profit 合计（毛收益，未扣佣金等费用）'
-    : qmtReady
+    : qmtConfigured
       ? 'QMT 今日盈亏尚未同步'
-      : accountTodayPnl == null
-        ? '行情不可用或缺少上日收盘总资产，暂无法计算'
-        : undefined
+      : qmt.data == null
+        ? '正在读取 QMT 账户状态'
+        : accountTodayPnl == null
+          ? '行情不可用或缺少上日收盘总资产，暂无法计算'
+          : undefined
   const qmtConnectionMode = qmt.data?.connection_mode ?? 'remote'
   const runtimeReason = compactRuntimeReason(data.runtime.reason)
   const openTradeForRow = (row: PositionRiskPosition) => {
