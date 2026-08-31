@@ -2387,6 +2387,7 @@ def test_qmt_snapshot_rejects_available_above_volume():
         {"600036.SH": {"stock_code": "600036.SH", "volume": 100, "available": 200, "cost": 10}},
         [],
         [],
+        [],
     ])
     client.call = lambda _method, _params=None: next(responses)
     with pytest.raises(QmtRpcError, match="可用数量大于持仓数量"):
@@ -2450,6 +2451,7 @@ def test_qmt_snapshot_derives_latest_buy_entry_date():
         {"cash": 1_000, "total_asset": 2_000, "market_value": 1_000},
         {"600036.SH": {"stock_code": "600036.SH", "volume": 100, "available": 100, "cost": 10}},
         [],
+        [],
         [
             {"stock_code": "600036.SH", "action": "BUY", "trade_time": "2026-08-20 10:00:00"},
             {"stock_code": "600036.SH", "action": "BUY", "trade_time": "2026-08-21 10:00:00"},
@@ -2458,6 +2460,53 @@ def test_qmt_snapshot_derives_latest_buy_entry_date():
     client.call = lambda _method, _params=None: next(responses)
     snapshot = client.snapshot()
     assert snapshot["positions"][0]["entry_date"] == "2026-08-21"
+
+
+def test_qmt_snapshot_sums_position_statistics_float_profit_for_today_pnl():
+    client = QmtZmqRpcClient(_qmt_settings())
+
+    def fake_call(method, _params=None):
+        responses = {
+            "ping": {"account_id": "account-1"},
+            "get_asset": {"cash": 152_684.08, "total_asset": 763_771.51},
+            "get_positions": {},
+            "get_position_statistics": [
+                {"stock_code": "600036.SH", "position": 100, "float_profit": 3_337.02},
+                {"stock_code": "513310.SH", "position": 0, "float_profit": 1_504.98},
+                {"stock_code": "000001.SZ", "position": 0, "float_profit": None},
+            ],
+            "query_orders": [],
+            "query_trades": [],
+        }
+        return responses[method]
+
+    client.call = fake_call
+
+    snapshot = client.snapshot()
+
+    assert snapshot["account"]["today_profit_loss"] == pytest.approx(4_842.0)
+
+
+def test_qmt_snapshot_tolerates_unavailable_position_statistics():
+    client = QmtZmqRpcClient(_qmt_settings())
+
+    def fake_call(method, _params=None):
+        if method == "get_position_statistics":
+            raise QmtRpcError("method unavailable")
+        responses = {
+            "ping": {"account_id": "account-1"},
+            "get_asset": {"cash": 1_000, "total_asset": 2_000},
+            "get_positions": {},
+            "query_orders": [],
+            "query_trades": [],
+        }
+        return responses[method]
+
+    client.call = fake_call
+
+    snapshot = client.snapshot()
+
+    assert "today_profit_loss" not in snapshot["account"]
 
 
 def test_qmt_snapshot_accepts_negative_amortized_cost():
@@ -2471,6 +2520,7 @@ def test_qmt_snapshot_accepts_negative_amortized_cost():
                 "cost": -0.025899966666666666,
             },
         },
+        [],
         [],
         [],
     ])
@@ -2493,6 +2543,7 @@ def test_qmt_snapshot_preserves_position_price_and_market_value():
         }},
         [],
         [],
+        [],
     ])
     client.call = lambda _method, _params=None: next(responses)
 
@@ -2511,6 +2562,7 @@ def test_qmt_snapshot_derives_position_price_from_market_value():
             "stock_code": "600036.SH", "volume": 100, "available": 100,
             "cost": 10, "market_value": 1_250,
         }},
+        [],
         [],
         [],
     ])
@@ -2595,6 +2647,23 @@ def test_qmt_sync_preserves_negative_amortized_cost_and_skips_relative_pnl(tmp_p
     row = service.view()["positions"][0]
     assert row["profit_loss"] == pytest.approx((18.0 + 0.0259) * 100)
     assert row["profit_loss_pct"] is None
+
+
+def test_qmt_sync_persists_today_profit_loss(tmp_path: Path):
+    service = PositionRiskService(tmp_path, _Repo(), _Quotes(), SimpleNamespace(paper_supervisor=None))
+
+    saved = service.replace_from_qmt({
+        "account_id": "account-1",
+        "account": {
+            "name": "account-1",
+            "cash": 1_000,
+            "total_asset": 2_000,
+            "today_profit_loss": -123.456,
+        },
+        "positions": [],
+    })
+
+    assert saved["account"]["today_profit_loss"] == -123.46
 
 
 def test_qmt_sync_updates_broker_price_without_resetting_position_identity(tmp_path: Path):

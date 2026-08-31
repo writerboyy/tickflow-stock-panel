@@ -332,12 +332,17 @@ def test_realtime_gate_allows_clean_data(tmp_path, monkeypatch):
     )
     qs = _QuoteServiceStub()
     request = _gate_state(tmp_path, qs, repo=None)
+    subscription_refreshes = []
+    request.app.state.position_risk_service = SimpleNamespace(
+        refresh_subscription=lambda: subscription_refreshes.append(True),
+    )
     req = settings_api.RealtimeQuotesPrefs(realtime_quotes_enabled=True)
 
     result = settings_api.update_realtime_quotes(req, request)
     assert result["realtime_quotes_enabled"] is True
     assert qs.enabled is True
     assert saved == {"realtime_quotes_enabled": True}
+    assert subscription_refreshes == [True]
 
 
 def test_realtime_gate_ignores_old_issues_beyond_window(tmp_path, monkeypatch):

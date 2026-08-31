@@ -223,6 +223,9 @@ def _normalise_account(asset: dict[str, Any], account_type: str | None = None) -
         "total_asset": _float(asset.get("total_asset")),
         "market_value": _float(asset.get("market_value")),
     }
+    today_profit_loss = _float(asset.get("today_profit_loss"))
+    if today_profit_loss is not None:
+        account["today_profit_loss"] = today_profit_loss
     for field in _CREDIT_ASSET_FIELDS:
         value = _float(asset.get(field))
         if value is not None and value >= 0:
@@ -906,6 +909,13 @@ class QmtZmqRpcClient:
         self.probe()
         asset = self.get_asset()
         positions = self.call("get_positions", {"account_id": self.account_id})
+        try:
+            position_statistics = self.call(
+                "get_position_statistics",
+                {"account_id": self.account_id},
+            )
+        except QmtRpcError:
+            position_statistics = []
         orders = self.call("query_orders", {"account_id": self.account_id, "strategy_name": ""})
         trades = self.call("query_trades", {"account_id": self.account_id, "strategy_name": ""})
         if not isinstance(asset, dict) or not isinstance(positions, dict):
@@ -971,12 +981,28 @@ class QmtZmqRpcClient:
                 "asset_type": "etf" if symbol.startswith(("15", "16", "50", "51", "56", "58")) else "stock",
                 "entry_date": entry_dates.get(symbol),
             })
+        account = {
+            "name": self.account_id,
+            **_normalise_account(asset, self.account_type),
+        }
+        float_profits = []
+        statistics_rows = position_statistics if isinstance(position_statistics, list) else []
+        for row in statistics_rows:
+            if not isinstance(row, dict):
+                continue
+            raw_value = (
+                row.get("float_profit")
+                if "float_profit" in row
+                else row.get("m_dFloatProfit")
+            )
+            value = _float(raw_value)
+            if value is not None:
+                float_profits.append(value)
+        if float_profits:
+            account["today_profit_loss"] = float(pl.Series("float_profit", float_profits).sum())
         return {
             "account_id": self.account_id,
-            "account": {
-                "name": self.account_id,
-                **_normalise_account(asset, self.account_type),
-            },
+            "account": account,
             "positions": normalized_positions,
             "orders": orders if isinstance(orders, list) else [],
             "trades": trades if isinstance(trades, list) else [],

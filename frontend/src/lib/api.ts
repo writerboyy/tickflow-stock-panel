@@ -1249,6 +1249,7 @@ export interface PositionRiskPortfolio {
     cash: number | null
     total_asset: number | null
     previous_close_total_asset: number | null
+    today_profit_loss?: number | null
     high_watermark: number | null
   }
   positions: PositionRiskPosition[]

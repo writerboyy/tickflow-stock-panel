@@ -2979,12 +2979,14 @@ class PositionRiskService:
             })
         current = self.store.load()
         account_id = str(snapshot.get("account_id") or account.get("name") or "").strip()
+        today_profit_loss = _finite(account.get("today_profit_loss"))
         account_value = {
             **current.get("account", {}),
             "name": account_id or str(current["account"].get("name") or "QMT账户"),
             "cash": round(cash, 2),
             "total_asset": round(total_asset, 2),
             "previous_close_total_asset": _finite(current["account"].get("previous_close_total_asset")) or total_asset,
+            "today_profit_loss": round(today_profit_loss, 2) if today_profit_loss is not None else None,
         }
         position_fields = ("symbol", "name", "asset_type", "quantity", "available", "cost_price", "entry_date")
         snapshot_fields = (*position_fields, "import_price", "market_value")
@@ -2999,7 +3001,7 @@ class PositionRiskService:
         )
         account_changed = any(
             current.get("account", {}).get(field) != account_value.get(field)
-            for field in ("name", "cash", "total_asset")
+            for field in ("name", "cash", "total_asset", "today_profit_loss")
         )
         first_qmt_sync = self.store.get_runtime("qmt_account_id") != account_id
         sync_state = {"synced_at": snapshot.get("synced_at"), "account_id": account_id}

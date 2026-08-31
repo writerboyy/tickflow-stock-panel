@@ -13,6 +13,21 @@ def test_realtime_quotes_default_to_enabled_when_allowed(monkeypatch):
     assert preferences.get_realtime_quotes_enabled() is True
 
 
+def test_realtime_quotes_default_to_enabled_when_capability_lookup_fails(monkeypatch):
+    monkeypatch.setattr(preferences, "load", lambda: {})
+
+    def raise_capability_error(cls):
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr(
+        QuoteService,
+        "is_realtime_allowed",
+        classmethod(raise_capability_error),
+    )
+
+    assert preferences.get_realtime_quotes_enabled() is True
+
+
 def test_realtime_quotes_preserve_explicit_disabled_value(monkeypatch):
     monkeypatch.setattr(preferences, "load", lambda: {"realtime_quotes_enabled": False})
     monkeypatch.setattr(QuoteService, "is_realtime_allowed", classmethod(lambda cls: True))

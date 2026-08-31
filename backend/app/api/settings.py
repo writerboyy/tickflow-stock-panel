@@ -907,6 +907,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     from app.services import preferences
     qs = getattr(request.app.state, "quote_service", None)
     depth_svc = getattr(request.app.state, "depth_service", None)
+    position_risk_svc = getattr(request.app.state, "position_risk_service", None)
 
     def _sync_depth_polling(realtime_on: bool) -> None:
         """实时行情开关联动 depth 盘中轮询: 开→恢复(仍受监控开关/能力门控), 关→立即停。
@@ -920,6 +921,10 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         else:
             depth_svc.stop_polling()
 
+    def _sync_position_risk() -> None:
+        if position_risk_svc:
+            position_risk_svc.refresh_subscription()
+
     allowed = qs.is_realtime_allowed() if qs else True
     if req.realtime_quotes_enabled and not allowed:
         # 当前档位不允许开启实时行情 — 强制关闭
@@ -927,6 +932,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if qs:
             qs.disable()
         _sync_depth_polling(False)
+        _sync_position_risk()
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
     if req.realtime_quotes_enabled and qs and qs.is_paused():
         # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
@@ -964,6 +970,7 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         else:
             qs.disable()
     _sync_depth_polling(req.realtime_quotes_enabled)
+    _sync_position_risk()
 
     return {"realtime_quotes_enabled": req.realtime_quotes_enabled, "realtime_allowed": allowed}
 
