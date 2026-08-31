@@ -66,14 +66,7 @@ def save(updates: dict) -> dict:
 
 
 def get_realtime_quotes_enabled() -> bool:
-    data = load()
-    if "realtime_quotes_enabled" in data:
-        return bool(data["realtime_quotes_enabled"])
-    try:
-        from app.services.quote_service import QuoteService
-        return QuoteService.is_realtime_allowed()
-    except Exception:
-        return False
+    return load().get("realtime_quotes_enabled", False)
 
 
 def get_indices_nav_pinned() -> bool:
@@ -91,24 +84,6 @@ def get_realtime_quote_interval() -> float:
     return load().get("realtime_quote_interval", 6.0)
 
 
-def get_realtime_watchlist_symbols() -> list[str]:
-    """Free 档自选实时监控标的:直接取自选页前 5 个。"""
-    try:
-        from app.services import watchlist
-        rows = watchlist.list_symbols()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("load watchlist for realtime failed: %s", e)
-        return []
-    out: list[str] = []
-    for row in rows:
-        symbol = str((row or {}).get("symbol") or "").strip().upper()
-        if symbol and symbol not in out:
-            out.append(symbol)
-        if len(out) >= 5:
-            break
-    return out
-
-
 def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
     current = load()
@@ -122,11 +97,6 @@ def set_realtime_quote_interval(interval: float) -> float:
 
 def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
-
-
-def get_etf_minute_sync_enabled() -> bool:
-    """ETF 分钟K是否随盘后管道自动同步。默认关闭。"""
-    return load().get("etf_minute_sync_enabled", False)
 
 
 def get_minute_intraday_refresh() -> bool:
@@ -221,6 +191,27 @@ def get_minute_sync_segment_days() -> int:
     """
     return max(5, min(30, load().get("minute_sync_segment_days", 20)))
 
+# ===== 盘中分钟增量刷新 (Expert 专有) =====
+
+# 稳态轮为 intraday.universe 单请求增量, 无脉冲并发, 间隔可低至 3s;
+# 全天修复轮 (intraday.batch 28 块爆发) 的 rpm 安全与间隔无关, 由轮次
+# 调度 max(间隔, 单轮完成) 天然防重叠。
+_MINUTE_REFRESH_INTERVAL_MIN = 3
+_MINUTE_REFRESH_INTERVAL_MAX = 120
+
+
+def get_minute_refresh_enabled() -> bool:
+    """盘中分钟K增量落盘开关。默认关闭; 能力门控 (Expert) 在服务层判断。"""
+    return bool(load().get("minute_refresh_enabled", False))
+
+
+def get_minute_refresh_interval() -> int:
+    """盘中分钟增量刷新间隔(秒)。默认 6,范围 [3, 120]。"""
+    return max(
+        _MINUTE_REFRESH_INTERVAL_MIN,
+        min(_MINUTE_REFRESH_INTERVAL_MAX, int(load().get("minute_refresh_interval", 6))),
+    )
+
 
 # ===== 数据源选择 (默认 TickFlow；第一阶段仅日K切换入口) =====
 
@@ -267,14 +258,18 @@ def get_daily_data_provider() -> str:
 
 
 def get_adj_factor_provider() -> str:
-    provider = str(load().get("adj_factor_provider", "same_as_daily") or "same_as_daily").lower()
-    if provider == "same_as_daily":
-        return provider
-    return provider if provider in _allowed_data_providers() else "same_as_daily"
+    # 「跟随日K」(same_as_daily) 特殊值已下线: 存量配置里的旧值按非法值回退 tickflow
+    provider = str(load().get("adj_factor_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 def get_minute_data_provider() -> str:
     provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
+
+
+def get_depth5_data_provider() -> str:
+    provider = str(load().get("depth5_data_provider", "tickflow") or "tickflow").lower()
     return provider if provider in _allowed_data_providers() else "tickflow"
 
 
@@ -537,11 +532,6 @@ def get_depth_polling_interval() -> float:
     return float(load().get("depth_polling_interval", 10.0))
 
 
-def get_kaipanla_raw_archive_compression() -> bool:
-    """开盘啦原始响应归档是否 gzip 压缩。默认压缩, 不删除历史文件。"""
-    return bool(load().get("kaipanla_raw_archive_compression", True))
-
-
 def set_depth_polling_interval(interval: float) -> float:
     """保存 depth 轮询间隔。套餐范围 clamp 由 depth_service 按档位做。"""
     interval = max(1.0, min(600.0, float(interval)))
@@ -736,120 +726,6 @@ def get_realtime_quote_scope() -> dict:
         "realtime_index_mode": get_realtime_index_mode(),
         "realtime_index_symbols": get_realtime_index_symbols(),
     }
-
-
-# ===== 实时大单 =====
-
-_LARGE_ORDER_DEFAULTS = {
-    "large_orders_enabled": True,
-    "large_orders_score_threshold": 75,
-    "large_orders_cooldown_seconds": 120,
-    "large_orders_deep_dive_interval_seconds": 60,
-    "large_orders_max_deep_dive_symbols": 3,
-    "large_orders_candidate_limit": 50,
-    "large_orders_min_limit_up_gap_pct": 0.02,
-    "large_orders_market_segments": ["main", "star", "chinext"],
-    "large_orders_exclude_bse": True,
-    "large_orders_exclude_st": True,
-    "large_orders_config_version": "large_orders_v2",
-}
-_LARGE_ORDER_MARKET_SEGMENTS = ("main", "star", "chinext", "bse", "st")
-
-
-def _get_large_order_market_segments(data: dict) -> list[str]:
-    raw = data.get("large_orders_market_segments")
-    if isinstance(raw, list):
-        selected = {str(item) for item in raw}
-        return [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
-
-    segments = list(_LARGE_ORDER_DEFAULTS["large_orders_market_segments"])
-    if not bool(data.get("large_orders_exclude_bse", True)):
-        segments.append("bse")
-    if not bool(data.get("large_orders_exclude_st", True)):
-        segments.append("st")
-    return segments
-
-
-def get_large_orders_preferences() -> dict:
-    data = load()
-    market_segments = _get_large_order_market_segments(data)
-
-    def bounded_int(key: str, default: int, lower: int, upper: int) -> int:
-        try:
-            value = int(data.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return max(lower, min(upper, value))
-
-    def bounded_float(key: str, default: float, lower: float, upper: float) -> float:
-        try:
-            value = float(data.get(key, default))
-        except (TypeError, ValueError):
-            value = default
-        return max(lower, min(upper, value))
-
-    return {
-        "enabled": bool(data.get("large_orders_enabled", _LARGE_ORDER_DEFAULTS["large_orders_enabled"])),
-        "score_threshold": bounded_int("large_orders_score_threshold", 75, 50, 100),
-        "cooldown_seconds": bounded_int("large_orders_cooldown_seconds", 120, 30, 3600),
-        "deep_dive_interval_seconds": bounded_int("large_orders_deep_dive_interval_seconds", 60, 15, 600),
-        "max_deep_dive_symbols": bounded_int("large_orders_max_deep_dive_symbols", 3, 0, 10),
-        "candidate_limit": bounded_int("large_orders_candidate_limit", 50, 10, 200),
-        "min_limit_up_gap_pct": bounded_float("large_orders_min_limit_up_gap_pct", 0.02, 0.0, 0.10),
-        "market_segments": market_segments,
-        "exclude_bse": "bse" not in market_segments,
-        "exclude_st": "st" not in market_segments,
-        "version": "large_orders_v2",
-    }
-
-
-def set_large_orders_preferences(updates: dict) -> dict:
-    allowed = {
-        "enabled": "large_orders_enabled",
-        "score_threshold": "large_orders_score_threshold",
-        "cooldown_seconds": "large_orders_cooldown_seconds",
-        "deep_dive_interval_seconds": "large_orders_deep_dive_interval_seconds",
-        "max_deep_dive_symbols": "large_orders_max_deep_dive_symbols",
-        "candidate_limit": "large_orders_candidate_limit",
-        "min_limit_up_gap_pct": "large_orders_min_limit_up_gap_pct",
-    }
-    saved: dict = {}
-    for key, storage_key in allowed.items():
-        if key not in updates or updates[key] is None:
-            continue
-        if key == "enabled":
-            saved[storage_key] = bool(updates[key])
-        elif key == "min_limit_up_gap_pct":
-            saved[storage_key] = float(updates[key])
-        else:
-            saved[storage_key] = int(updates[key])
-    if updates:
-        market_segments = _get_large_order_market_segments(load())
-        if updates.get("market_segments") is not None:
-            selected = {str(item) for item in updates["market_segments"]}
-            market_segments = [
-                item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected
-            ]
-        else:
-            if updates.get("exclude_bse") is not None:
-                if bool(updates["exclude_bse"]):
-                    market_segments = [item for item in market_segments if item != "bse"]
-                elif "bse" not in market_segments:
-                    market_segments.append("bse")
-            if updates.get("exclude_st") is not None:
-                if bool(updates["exclude_st"]):
-                    market_segments = [item for item in market_segments if item != "st"]
-                elif "st" not in market_segments:
-                    market_segments.append("st")
-        selected = set(market_segments)
-        market_segments = [item for item in _LARGE_ORDER_MARKET_SEGMENTS if item in selected]
-        saved.update({
-            "large_orders_market_segments": market_segments,
-            "large_orders_exclude_bse": "bse" not in market_segments,
-            "large_orders_exclude_st": "st" not in market_segments,
-        })
-        save(saved)
-    return get_large_orders_preferences()
 
 
 def get_sse_refresh_pages() -> dict[str, bool]:
@@ -1047,6 +923,13 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["minute_intraday_refresh_interval"] = max(
             _INTRADAY_REFRESH_INTERVAL_MIN,
             min(_INTRADAY_REFRESH_INTERVAL_MAX, int(cfg["minute_intraday_refresh_interval"])))
+    if "minute_refresh_enabled" in cfg:
+        updates["minute_refresh_enabled"] = bool(cfg["minute_refresh_enabled"])
+    if "minute_refresh_interval" in cfg:
+        # clamp 到 [3, 120], 与 getter 一致, 防前端传越界值
+        updates["minute_refresh_interval"] = max(
+            _MINUTE_REFRESH_INTERVAL_MIN,
+            min(_MINUTE_REFRESH_INTERVAL_MAX, int(cfg["minute_refresh_interval"])))
     if "monitor_ext_fields" in cfg:
         raw = cfg["monitor_ext_fields"] or {}
         updates["monitor_ext_fields"] = {
@@ -1068,6 +951,8 @@ def get_realtime_monitor_config() -> dict:
         "screener_auto_run": get_screener_auto_run(),
         "minute_intraday_refresh": get_minute_intraday_refresh(),
         "minute_intraday_refresh_interval": get_minute_intraday_refresh_interval(),
+        "minute_refresh_enabled": get_minute_refresh_enabled(),
+        "minute_refresh_interval": get_minute_refresh_interval(),
         "monitor_ext_fields": get_monitor_ext_fields(),
     }
 
@@ -1142,40 +1027,3 @@ def set_financial_sync_time(table: str, iso_ts: str) -> None:
     times = get_financial_sync_times()
     times[table] = iso_ts
     save({"financial_sync_times": times})
-
-
-# ===== QMT 交易快捷金额预设 =====
-# 交易面板中快捷金额按钮的 4 个档位,用户可编辑,重启后仍保留。
-
-_QMT_QUICK_AMOUNT_PRESETS_DEFAULT = [10_000, 20_000, 30_000, 40_000]
-_QMT_QUICK_AMOUNT_MIN = 100
-_QMT_QUICK_AMOUNT_MAX = 10_000_000
-
-
-def _normalize_quick_amount(value, index: int) -> int:
-    """将单个快捷金额值规范化为合法整数。"""
-    try:
-        amount = int(value)
-    except (TypeError, ValueError):
-        return _QMT_QUICK_AMOUNT_PRESETS_DEFAULT[index]
-    return max(_QMT_QUICK_AMOUNT_MIN, min(_QMT_QUICK_AMOUNT_MAX, amount))
-
-
-def get_qmt_quick_amount_presets() -> list[int]:
-    """返回 QMT 交易快捷金额预设,长度固定为 4。"""
-    raw = load().get("qmt_quick_amount_presets")
-    if not isinstance(raw, list):
-        return list(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT)
-    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(raw[:4])]
-    while len(cleaned) < 4:
-        cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
-    return cleaned
-
-
-def set_qmt_quick_amount_presets(presets: list) -> list[int]:
-    """保存并返回规范后的 QMT 交易快捷金额预设。"""
-    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(presets[:4])]
-    while len(cleaned) < 4:
-        cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
-    save({"qmt_quick_amount_presets": cleaned})
-    return cleaned

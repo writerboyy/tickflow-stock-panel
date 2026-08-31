@@ -2,8 +2,12 @@
 
 设计:
   - job_store/ 文件夹,每个 job 一个 {id}.json,最多保留 max_jobs 个文件
-  - running/pending 状态的 job 仅存内存(高频读写)
-  - succeeded/failed 后写入独立文件并从内存释放
+  - create()/start() 即落盘 pending/running 快照(进度只更新内存) ——
+    进程意外死亡(uvicorn --reload 热重载 / 被 kill)时记录不蒸发
+  - succeeded/failed 后写入终态并从内存释放
+  - 实例化时扫描磁盘,把上个进程遗留的 pending/running 孤儿记录补标为
+    failed(中断);finished_at 取文件 mtime(最后已知存活时刻),不用下次
+    开机时间虚增时长
   - 列表查询 = 内存中的活跃 job + 磁盘文件扫描,按时间排序
   - 单个查询 = 内存优先,没有则读磁盘
   - 创建新 job 前检查文件数量,>= max_jobs 时删除最老的文件
@@ -15,7 +19,7 @@ import logging
 import os
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -97,10 +101,6 @@ def _default_store_dir() -> Path:
 _STORE_DIR = _default_store_dir()
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
 class JobStore:
     def __init__(self, max_jobs: int = 50, store_dir: Path = _STORE_DIR) -> None:
         self._max_jobs = max_jobs
@@ -109,11 +109,12 @@ class JobStore:
         self._active_id: str | None = None
         self._lock = threading.Lock()
         self._store_dir.mkdir(parents=True, exist_ok=True)
+        self._reap_orphans()
 
     # ===== persistence =====
 
     def _write_file(self, job: dict[str, Any]) -> None:
-        """将终态 job 写入独立 JSON 文件。"""
+        """将 job 快照写入独立 JSON 文件(create/start/终态均落盘)。"""
         path = self._store_dir / f"{job['id']}.json"
         try:
             path.write_text(
@@ -158,6 +159,42 @@ class JobStore:
         jobs.sort(key=lambda j: j.get("started_at") or "", reverse=True)
         return jobs
 
+    def _reap_orphans(self) -> None:
+        """启动补录: 把上个进程遗留的 pending/running 记录标为中断。
+
+        单例在进程启动时实例化,此时磁盘上的 pending/running 必然来自已死
+        亡的进程(uvicorn --reload 热重载 / 被 kill)—— 不补录则这些记录
+        永远停留在「运行中」, 同步历史里既看不到结果也看不到失败, 即
+        「数据在、记录丢」。finished_at 取文件 mtime(最后一次落盘 = 最后
+        已知存活时刻), 避免拿下次开机时间虚增 duration。
+        """
+        for f in self._store_dir.glob("*.json"):
+            try:
+                j = json.loads(f.read_text("utf-8"))
+            except Exception:
+                continue
+            orig_status = j.get("status")
+            if not j.get("id") or orig_status not in ("pending", "running"):
+                continue
+            j["status"] = "failed"
+            j["error"] = "后端重启,任务中断(启动时补录)"
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
+                end = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                end = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            # mtime 早于 started_at(时钟回拨等)时夹住, 避免 duration 为负
+            if j.get("started_at") and end < j["started_at"]:
+                end = j["started_at"]
+            j["finished_at"] = end
+            j["duration_s"] = _duration_s(j)
+            logger.warning(
+                "job_store: 补录中断任务 %s (上个进程遗留 %s 记录)",
+                j["id"],
+                orig_status,
+            )
+            self._write_file(j)
+
     # ===== lifecycle =====
 
     def create(
@@ -193,7 +230,7 @@ class JobStore:
                     return self._active_id, False
 
             job_id = uuid.uuid4().hex[:10]
-            self._active_jobs[job_id] = {
+            job = {
                 "id": job_id,
                 "status": "pending",
                 "stage": "init",
@@ -208,7 +245,11 @@ class JobStore:
                 "error": None,
                 "timeout_s": timeout_s,
             }
+            self._active_jobs[job_id] = job
             self._active_id = job_id
+            # pending 即落盘: 进程在 start() 前死亡时记录也不丢
+            self._delete_oldest()
+            self._write_file(job)
         _register_cancel_flag(job_id)
         return job_id, True
 
@@ -222,6 +263,8 @@ class JobStore:
             # 心跳基准初始化为启动时刻: start() 到首次 progress() 之间的
             # 初始化阶段(解析标的池等)同样计入停滞计时。
             j["last_progress_at"] = j["started_at"]
+            # running 快照落盘: 进程死亡后由下次启动的 _reap_orphans 补录
+            self._write_file(j)
 
     def succeed(self, job_id: str, result: Any) -> None:
         with self._lock:
@@ -229,7 +272,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "succeeded"
-            j["finished_at"] = _utc_now_iso()
+            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             j["progress"] = 100
             j["result"] = result
             j["duration_s"] = _duration_s(j)
@@ -238,30 +281,19 @@ class JobStore:
             self._delete_oldest()
             self._write_file(j)
 
-    def fail(
-        self,
-        job_id: str,
-        error: str,
-        *,
-        expected_last_progress_at: str | None = None,
-    ) -> bool:
+    def fail(self, job_id: str, error: str) -> None:
         with self._lock:
-            j = self._active_jobs.get(job_id)
+            j = self._active_jobs.pop(job_id, None)
             if not j:
-                return False
-            current_activity = j.get("last_progress_at") or j.get("started_at")
-            if expected_last_progress_at is not None and current_activity != expected_last_progress_at:
-                return False
-            self._active_jobs.pop(job_id, None)
+                return
             j["status"] = "failed"
-            j["finished_at"] = _utc_now_iso()
+            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             j["error"] = error
             j["duration_s"] = _duration_s(j)
             if self._active_id == job_id:
                 self._active_id = None
             self._delete_oldest()
             self._write_file(j)
-            return True
 
     # ===== progress =====
 
@@ -276,18 +308,15 @@ class JobStore:
                 if cancelled is not None and cancelled.is_set():
                     raise JobCancelledError(job_id)
                 return
-            previous_stage = j["stage"]
             j["stage"] = stage
             j["progress"] = max(0, min(100, int(pct)))
             j["last_progress_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             if stage_pct is not None:
                 j["stage_pct"] = max(0, min(100, int(stage_pct)))
-            elif previous_stage != stage:
+            elif j["stage"] != stage:
                 j["stage_pct"] = 0
-            now = _utc_now_iso()
-            j["last_progress_at"] = now
             entry = {
-                "ts": now,
+                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "stage": stage,
                 "msg": msg,
             }
@@ -335,12 +364,6 @@ class JobStore:
     def active_id(self) -> str | None:
         return self._active_id
 
-    def is_active(self, job_id: str) -> bool:
-        """任务记录仍处于 pending/running 时返回 True,供 worker 协作式取消检查。"""
-        with self._lock:
-            j = self._active_jobs.get(job_id)
-            return bool(j and j.get("status") in ("pending", "running"))
-
     def reap_stale(self, timeout_s: int | None = None) -> None:
         """回收卡死的 running job。两种判定:
 
@@ -378,7 +401,7 @@ class JobStore:
             started_at = started
             last_alive_at = last_alive
         # 时间计算放到锁外(避免 datetime 解析持锁)。
-        # 时间形如 "2026-07-04T12:00:00Z"。
+        # started_at 形如 "2026-07-04T12:00:00Z"(start() 用 datetime.utcnow 存)。
         # 两端都用 timezone-aware UTC 比较,避免 naive/aware 混用导致 TypeError。
         try:
             start_dt = _parse_utc(started_at)
@@ -435,7 +458,6 @@ def _summary(j: dict[str, Any]) -> dict[str, Any]:
         "progress": j["progress"],
         "stage_pct": j.get("stage_pct", 0),
         "started_at": j["started_at"],
-        "last_progress_at": j.get("last_progress_at"),
         "finished_at": j["finished_at"],
         "duration_s": j["duration_s"],
         "result": j["result"],
