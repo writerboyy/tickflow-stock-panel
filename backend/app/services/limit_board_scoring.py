@@ -183,36 +183,15 @@ def intraday_flow_detail(
 ) -> dict[str, Any] | None:
     """Score live intraday trend and capital-flow direction.
 
-    Minute bars are the required live input.  Active buy/sell ratios remain
-    distinct from the Kaipanla cumulative main-net-flow speed contract.
+    Minute bars drive the trend and pull-up shape. Reliable active buy/sell
+    ratios can still contribute the independent capital component when minute
+    bars are unavailable. They remain distinct from the Kaipanla cumulative
+    main-net-flow speed contract, which requires minute turnover for scaling.
 
     ``limit_up`` enables decision-time pull-up metrics (启动点、拉升用时、
     拉升回撤、封板前量能、触板/封板状态)。没有涨停价时这些字段输出 None，
     由综合评分的数据门控显式标记为数据不足。
     """
-    if not isinstance(intraday, dict) or not intraday.get("available"):
-        return None
-    bars = [
-        row for row in (intraday.get("session_bars") or intraday.get("closed_bars") or [])
-        if isinstance(row, dict)
-        and finite(row.get("close")) is not None
-        and finite(row.get("amount")) is not None
-    ]
-    if not bars:
-        return None
-
-    closes = [float(finite(row.get("close")) or 0.0) for row in bars]
-    base = finite(previous_close)
-    if base is None or base <= 0:
-        base = finite(bars[0].get("open"))
-    if base is None or base <= 0:
-        return None
-    last_price = closes[-1]
-    trend_pct = last_price / base - 1.0
-    underwater_ratio = sum(value < base for value in closes) / len(closes)
-    vwap = finite(intraday.get("session_vwap"))
-    vwap_gap_pct = last_price / vwap - 1.0 if vwap and vwap > 0 else None
-
     buy_ratio = finite((external_flow or {}).get("buy_ratio"))
     sell_ratio = finite((external_flow or {}).get("sell_ratio"))
     net_flow_speed = finite((external_flow or {}).get("net_flow_speed"))
@@ -236,6 +215,85 @@ def intraday_flow_detail(
         net_flow_ratio = buy_ratio - sell_ratio
     else:
         buy_ratio = sell_ratio = net_flow_ratio = None
+
+    if not capital_available:
+        flow_state = "unavailable"
+        capital_source_label = "暂无实时主动资金"
+    elif external_source == "kaipanla_net_flow":
+        flow_state = "balanced"
+        capital_source_label = "开盘啦主力净额涨速"
+    elif net_flow_ratio is not None and net_flow_ratio >= 0.10:
+        flow_state = "inflow"
+        capital_source_label = "实时主动大单"
+    elif net_flow_ratio is not None and net_flow_ratio <= -0.10:
+        flow_state = "outflow"
+        capital_source_label = "实时主动大单"
+    else:
+        flow_state = "balanced"
+        capital_source_label = "实时主动大单"
+
+    bars = [
+        row for row in (
+            (intraday.get("session_bars") or intraday.get("closed_bars") or [])
+            if isinstance(intraday, dict) and intraday.get("available")
+            else []
+        )
+        if isinstance(row, dict)
+        and finite(row.get("close")) is not None
+        and finite(row.get("amount")) is not None
+    ]
+    if not bars:
+        # 主动买卖比例本身可独立评价资金强度；主力净额涨速仍依赖分钟成交额，
+        # 缺少分钟行情时保持不可计算，避免把无量纲速度误当主动资金比例。
+        if not capital_available or net_flow_ratio is None:
+            return None
+        capital_score = _linear(net_flow_ratio, -0.60, 0.60, 18.0)
+        return {
+            "score": round(capital_score, 2),
+            "max_score": 50.0,
+            "components": {"net_flow": round(capital_score, 2)},
+            "capital_score": round(capital_score, 2),
+            "capital_max_score": 18.0,
+            "flow_state": flow_state,
+            "capital_source_label": capital_source_label,
+            "buy_ratio": buy_ratio,
+            "sell_ratio": sell_ratio,
+            "net_flow_ratio": net_flow_ratio,
+            "net_flow_amount": net_flow_amount,
+            "net_flow_delta": net_flow_delta,
+            "net_flow_speed": net_flow_speed,
+            "net_flow_speed_ratio": None,
+            "net_flow_window_minutes": finite(
+                (external_flow or {}).get("net_flow_window_minutes")
+            ),
+            "net_flow_as_of": (external_flow or {}).get("net_flow_as_of"),
+            "flow_metric": "active_ratio",
+            "flow_source": flow_source,
+            "capital_available": True,
+            "amount_growth": None,
+            "bars": 0,
+            "limit_up": finite(limit_up),
+            "sealed_now": False,
+            "pull_up_start_index": None,
+            "pull_up_minutes": None,
+            "pull_up_max_drawdown": None,
+            "pull_up_gain": None,
+            "pre_seal_amount_growth": None,
+            "minute_available": False,
+            "as_of": as_of,
+        }
+
+    closes = [float(finite(row.get("close")) or 0.0) for row in bars]
+    base = finite(previous_close)
+    if base is None or base <= 0:
+        base = finite(bars[0].get("open"))
+    if base is None or base <= 0:
+        return None
+    last_price = closes[-1]
+    trend_pct = last_price / base - 1.0
+    underwater_ratio = sum(value < base for value in closes) / len(closes)
+    vwap = finite(intraday.get("session_vwap"))
+    vwap_gap_pct = last_price / vwap - 1.0 if vwap and vwap > 0 else None
 
     outflow_streak = 0
     latest = closes[-1]
@@ -337,25 +395,13 @@ def intraday_flow_detail(
     trend_score = sum(components[key] for key in ("trend", "vwap", "underwater", "price_volume"))
     capital_score = sum(components[key] for key in ("net_flow", "outflow_continuity"))
     trend_state = "strong" if trend_score >= 18.0 else "weak" if trend_score < 10.0 else "neutral"
-    if not capital_available:
-        flow_state = "unavailable"
-        capital_source_label = "暂无实时主动资金"
-    elif external_source == "kaipanla_net_flow":
+    if capital_available and external_source == "kaipanla_net_flow":
         flow_state = (
             "inflow" if (net_flow_ratio or 0.0) >= 0.10
             else "outflow" if (net_flow_ratio or 0.0) <= -0.10
             else "balanced"
         )
         capital_source_label = "开盘啦主力净额涨速"
-    elif net_flow_ratio is not None and net_flow_ratio >= 0.10:
-        flow_state = "inflow"
-        capital_source_label = "实时主动大单"
-    elif net_flow_ratio is not None and net_flow_ratio <= -0.10:
-        flow_state = "outflow"
-        capital_source_label = "实时主动大单"
-    else:
-        flow_state = "balanced"
-        capital_source_label = "实时主动大单"
     return {
         "score": round(sum(components.values()), 2),
         "max_score": 50.0,
@@ -395,6 +441,7 @@ def intraday_flow_detail(
         "pull_up_max_drawdown": pull_up_max_drawdown,
         "pull_up_gain": pull_up_gain,
         "pre_seal_amount_growth": pre_seal_amount_growth,
+        "minute_available": True,
         "day_open": day_open,
         "day_high": day_high,
         "day_low": day_low,

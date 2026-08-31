@@ -162,6 +162,52 @@ def test_quote_service_keeps_ws_minutes_for_shared_snapshot():
     assert snapshot["rows"][0]["close"] == 10.1
 
 
+def test_quote_service_seeds_local_minutes_when_live_provider_is_unavailable(monkeypatch):
+    class LocalMinuteRepo:
+        def get_minute_range(self, symbols, start, end, asset_type):
+            assert symbols == ["600000.SH"]
+            assert start == end == datetime(2026, 7, 17).date()
+            assert asset_type == "stock"
+            return pl.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                # 兼容历史遗留 UTC naive 分区，评分链路必须归一到北京墙钟。
+                "datetime": [
+                    datetime(2026, 7, 17, 1, 30),
+                    datetime(2026, 7, 17, 1, 31),
+                ],
+                "open": [10.0, 10.1],
+                "high": [10.1, 10.2],
+                "low": [9.9, 10.0],
+                "close": [10.1, 10.2],
+                "volume": [100.0, 120.0],
+                "amount": [101_000.0, 122_400.0],
+            })
+
+    monkeypatch.setattr(
+        "app.services.kline_sync.intraday_monitor_support",
+        lambda _capset: {"available": False, "max_symbols": 0},
+    )
+    monkeypatch.setattr(
+        "app.services.kline_sync.fetch_intraday_monitor_batch",
+        lambda *_args, **_kwargs: pytest.fail("分钟能力不可用时不应调用实时分钟源"),
+    )
+    service = QuoteService()
+    service.set_repo(LocalMinuteRepo())
+
+    snapshot = service.get_intraday_snapshot(
+        {"600000.SH"}, asset_type="stock", now=datetime(2026, 7, 17, 10, 0),
+    )
+
+    assert snapshot["available"] is True
+    assert [row["datetime"] for row in snapshot["rows"]] == [
+        datetime(2026, 7, 17, 9, 30),
+        datetime(2026, 7, 17, 9, 31),
+    ]
+    assert snapshot["vwap"]["600000.SH"] == pytest.approx(
+        (101_000.0 + 122_400.0) / ((100.0 + 120.0) * 100.0)
+    )
+
+
 def test_quote_service_does_not_add_gap_volume_to_recovery_minute():
     service = QuoteService()
     service.set_intraday_consumer("position-risk", {"600000.SH"}, "stock")

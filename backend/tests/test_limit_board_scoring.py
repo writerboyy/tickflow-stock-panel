@@ -198,6 +198,40 @@ def test_intraday_flow_prefers_realtime_large_order_ratios_and_requires_live_min
     assert intraday_flow_detail({"available": False}, previous_close=10.0) is None
 
 
+def test_intraday_flow_keeps_precise_capital_signal_without_minute_bars():
+    detail = intraday_flow_detail(
+        None,
+        previous_close=10.0,
+        external_flow={
+            "data_quality": "precise",
+            "buy_ratio": 0.8,
+            "sell_ratio": 0.2,
+        },
+    )
+
+    assert detail is not None
+    assert detail["bars"] == 0
+    assert detail["capital_available"] is True
+    assert detail["net_flow_ratio"] == pytest.approx(0.6)
+    assert detail["pull_up_minutes"] is None
+
+    health = comprehensive_score({"intraday_flow": detail})["dimensions"]["health"]
+    assert "capital_flow" in health["components"]
+    assert "capital_flow" not in health["unavailable_components"]
+    assert "pullup_form" in health["unavailable_components"]
+
+
+def test_intraday_flow_rejects_proxy_capital_signal_without_minute_bars():
+    assert intraday_flow_detail(
+        None,
+        external_flow={
+            "data_quality": "proxy_only",
+            "buy_ratio": 0.8,
+            "sell_ratio": 0.2,
+        },
+    ) is None
+
+
 def test_intraday_flow_scores_kaipanla_main_net_speed_without_claiming_active_trades():
     detail = intraday_flow_detail({
         "available": True,

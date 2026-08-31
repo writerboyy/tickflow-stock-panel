@@ -1544,7 +1544,7 @@ function scoreDetailRows(
     ] : [{ label: '板块细则', value: '暂无数据', tone: 'text-warning' }],
     health: flow || technical ? [
       ...(flow ? [
-        { label: '触板状态', value: flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
+        { label: '触板状态', value: flow.minute_available === false ? '暂无分钟数据' : flow.sealed_now ? '已封板/贴板' : flow.touch_index != null ? '已触板' : '未触板', tone: flow.sealed_now ? 'text-bull' : undefined },
         { label: '拉升用时', value: flow.pull_up_minutes == null ? '--' : `${flow.pull_up_minutes} 分钟` },
         { label: '拉升回撤', value: ratioPct(flow.pull_up_max_drawdown, 1) },
         { label: '封板前量能', value: scoreDetailSignedPercent(flow.pre_seal_amount_growth, 1) },

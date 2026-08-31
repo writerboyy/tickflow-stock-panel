@@ -3530,10 +3530,13 @@ class LimitBoardService:
             underwater = float(intraday_flow.get("underwater_ratio") or 0.0)
             net_flow = intraday_flow.get("net_flow_ratio")
             if intraday_flow.get("capital_available"):
-                reasons.append(
-                    f"分时强度/资金 {float(intraday_flow.get('score') or 0):.1f}/15"
-                    f" · 水下 {underwater:.0%} · 净流向 {float(net_flow or 0):+.0%}"
-                )
+                if intraday_flow.get("minute_available") is False:
+                    reasons.append(f"主动资金净流向 {float(net_flow or 0):+.0%}")
+                else:
+                    reasons.append(
+                        f"分时强度/资金 {float(intraday_flow.get('score') or 0):.1f}/15"
+                        f" · 水下 {underwater:.0%} · 净流向 {float(net_flow or 0):+.0%}"
+                    )
             else:
                 reasons.append("分时强度已计算，实时资金数据待补")
         if sector:
@@ -3927,6 +3930,7 @@ class LimitBoardService:
                 flow_detail = detail.get("intraday_flow") or {}
                 complete = (
                     bool(flow_detail.get("capital_available"))
+                    and flow_detail.get("minute_available") is not False
                     and all(detail.get(key) for key in _SCORE_WEIGHTS)
                     and bool((detail.get("sector") or {}).get("rotation_available", True))
                 )

@@ -1667,6 +1667,7 @@ export interface LimitBoardRow {
       pull_up_max_drawdown?: number | null
       pull_up_gain?: number | null
       pre_seal_amount_growth?: number | null
+      minute_available?: boolean
       day_open?: number
       day_high?: number
       day_low?: number

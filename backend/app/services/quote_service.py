@@ -714,7 +714,7 @@ class QuoteService:
                     bucket["amount"] += amount_delta
 
     def _seed_intraday_rows(self, asset_type: str, symbols: set[str], now: datetime) -> None:
-        """按分钟接口补齐当天历史，WS 已聚合行保留为权威输入。"""
+        """用本地分钟分区和实时分钟能力补齐当天历史，WS 行保持权威。"""
         if not symbols:
             return
         trade_date = now.date()
@@ -733,23 +733,41 @@ class QuoteService:
             if not seeded:
                 return
         from app.services.kline_sync import fetch_intraday_monitor_batch, intraday_monitor_support
+        from app.services.minute_quality import normalize_minute_clock
+
+        frames: list[pl.DataFrame] = []
+        local_getter = getattr(self._repo, "get_minute_range", None)
+        if callable(local_getter):
+            try:
+                local = local_getter(
+                    sorted(seeded), trade_date, trade_date, asset_type,
+                )
+                if local is not None and not local.is_empty():
+                    local, _basis, _shifted = normalize_minute_clock(local)
+                    frames.append(local)
+            except Exception:  # noqa: BLE001
+                logger.debug("共享分时读取本地分钟数据失败", exc_info=True)
+
         capset = getattr(self._app_state, "capabilities", None)
         support = intraday_monitor_support(capset)
-        if not support["available"]:
-            return
-        max_symbols = int(support["max_symbols"])
-        frames: list[pl.DataFrame] = []
-        for offset in range(0, len(seeded), max_symbols):
-            frame = fetch_intraday_monitor_batch(
-                sorted(seeded)[offset:offset + max_symbols], capset, now=now,
-            )
-            if not frame.is_empty():
-                frames.append(frame)
+        if support["available"]:
+            max_symbols = max(1, int(support["max_symbols"]))
+            ordered = sorted(seeded)
+            for offset in range(0, len(ordered), max_symbols):
+                frame = fetch_intraday_monitor_batch(
+                    ordered[offset:offset + max_symbols], capset, now=now,
+                )
+                if not frame.is_empty():
+                    frames.append(frame)
         with self._lock:
             self._intraday_fetch_symbols.setdefault(key, set()).update(seeded)
         if not frames:
             return
-        minute_df = pl.concat(frames, how="diagonal_relaxed")
+        # 本地帧先加入、实时帧后加入；相同分钟由实时帧覆盖，WS 聚合行仍由下方
+        # setdefault 保留为最高优先级。
+        minute_df = pl.concat(frames, how="diagonal_relaxed").unique(
+            subset=["symbol", "datetime"], keep="last",
+        )
         cutoff = now.replace(second=0, microsecond=0)
         rows = minute_df.filter(
             pl.col("datetime").dt.date() == trade_date,
