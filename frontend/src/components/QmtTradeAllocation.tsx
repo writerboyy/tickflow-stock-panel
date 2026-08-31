@@ -28,6 +28,11 @@ export const QMT_ALLOCATION_OPTIONS: ReadonlyArray<{ value: QmtTradeAllocationMo
 
 export const QMT_QUICK_AMOUNT_PRESETS = [10_000, 20_000, 30_000, 40_000] as const
 
+export function minimumQmtQuickAmount(presets?: readonly number[] | null): number {
+  const validAmounts = presets?.filter(amount => Number.isFinite(amount) && amount >= 100) ?? []
+  return Math.min(...(validAmounts.length ? validAmounts : QMT_QUICK_AMOUNT_PRESETS))
+}
+
 const MONEY = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 export function qmtAllocationLabel(action: QmtTradeAllocationAction, mode: QmtTradeAllocationMode): string {

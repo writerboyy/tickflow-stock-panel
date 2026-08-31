@@ -33,10 +33,14 @@ import { EmptyState } from '@/components/EmptyState'
 import { DatePicker } from '@/components/DatePicker'
 import { Modal } from '@/components/Modal'
 import { PageHeader } from '@/components/PageHeader'
-import { QmtTradeAllocationControls, type QmtTradeAllocationMode } from '@/components/QmtTradeAllocation'
+import {
+  minimumQmtQuickAmount,
+  QmtTradeAllocationControls,
+  type QmtTradeAllocationMode,
+} from '@/components/QmtTradeAllocation'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { ComprehensiveScore, type ComprehensiveScoreDetails } from '@/components/ComprehensiveScore'
-import { useQuoteStatus } from '@/lib/useSharedQueries'
+import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import {
   api,
@@ -79,7 +83,6 @@ type AdvancedSettings = LimitBoardView['settings']
 type PoolAllocationMode = 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
 /** 新增打板池/买入池时的默认资金方式 */
 const DEFAULT_POOL_ALLOCATION_MODE: PoolAllocationMode = 'fixed'
-const DEFAULT_POOL_ALLOCATION_VALUE = 20_000
 type AllocationDialogState = {
   row: LimitBoardRow
   kind: 'buy' | 'board' | 'edit'
@@ -698,12 +701,15 @@ function LimitBoardAllocationDialog({
   onClose: () => void
   onConfirm: (mode: PoolAllocationMode, value: number | undefined, creditBuyMode: QmtCreditBuyMode, orderPrice?: number) => void
 }) {
+  const { data: preferences } = usePreferences()
+  const minimumQuickAmount = minimumQmtQuickAmount(preferences?.qmt_quick_amount_presets)
   const [mode, setMode] = useState<PoolAllocationMode>(
     kind === 'edit' ? normalizePoolAllocationMode(initialMode) : DEFAULT_POOL_ALLOCATION_MODE,
   )
-  const [value, setValue] = useState<number>(
-    initialValue ?? (kind === 'edit' ? 0 : DEFAULT_POOL_ALLOCATION_VALUE),
+  const [valueOverride, setValueOverride] = useState<number | null>(
+    initialValue ?? (kind === 'edit' ? 0 : null),
   )
+  const value = valueOverride ?? minimumQuickAmount
   const [creditBuyMode, setCreditBuyMode] = useState<QmtCreditBuyMode>(
     kind === 'edit' ? (initialCreditBuyMode ?? row.credit_buy_mode ?? 'financing') : (initialCreditBuyMode ?? 'financing'),
   )
@@ -1121,7 +1127,7 @@ function LimitBoardAllocationDialog({
             mode={mode as QmtTradeAllocationMode}
             value={value}
             onModeChange={next => setMode(next as PoolAllocationMode)}
-            onValueChange={setValue}
+            onValueChange={setValueOverride}
             disabled={pending}
             options={allocationOptions}
             disabledModes={{ available: !qmtReady }}
@@ -2366,7 +2372,6 @@ export function LimitBoard() {
       row: withCandidateScore(manualActionRow(stock.symbol, stock.name, stock.close, stock.change_pct, null)),
       kind: 'board',
       initialMode: DEFAULT_POOL_ALLOCATION_MODE,
-      initialValue: DEFAULT_POOL_ALLOCATION_VALUE,
     })
   }, [withCandidateScore])
   const updatePoolMutate = updatePool.mutate
