@@ -1819,7 +1819,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
                     selectStock(item.thscode)
                   }
                 }}
-                className={`relative w-full shrink-0 rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors ${cardHoverClass} focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
+                className={`relative h-fit w-full shrink-0 self-start rounded-btn border border-border bg-surface px-2.5 py-2 text-left outline-none transition-colors ${cardHoverClass} focus-visible:ring-1 focus-visible:ring-warning ${cardStateClass}`}
                 title="联动强势股、实时板块与成分股"
               >
                 <div className="flex items-center gap-1.5"><button type="button" onClick={event => { event.stopPropagation(); onOpenStock(item.thscode, item.name || item.ticker) }} className="min-w-0 flex-1 truncate text-left text-xs font-medium hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-warning" title="查看行情">{item.name || item.ticker}</button><span className="shrink-0 font-mono text-[10px] text-secondary">{quote?.last_price?.toFixed(2) ?? '--'}</span><span className={`shrink-0 font-mono text-[10px] ${visual.changeText}`}>{scorePct(quote?.change_pct, 2)}</span><span className="shrink-0 font-mono text-[10px] text-accent">#{index + 1}</span><div className="flex shrink-0 items-center gap-0.5">
