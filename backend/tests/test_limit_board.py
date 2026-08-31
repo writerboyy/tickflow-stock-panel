@@ -1624,6 +1624,50 @@ def test_candidate_score_refresh_ignores_snapshot_from_old_score_model_after_res
     assert current["candidate_score_state"] == "unavailable"
 
 
+def test_candidate_score_refresh_ignores_legacy_net_flow_snapshot_after_endpoint_switch(
+    tmp_path,
+):
+    service, _quotes, _config = make_service(tmp_path)
+    captured_at = datetime(2026, 8, 19, 10, 0, tzinfo=CN_TZ)
+    runtime = {
+        "candidate_scores": {},
+        "candidate_score_snapshots": {
+            "600000.SH": {
+                "candidate_score": 70.0,
+                "candidate_score_state": "live",
+                "candidate_score_as_of": captured_at.isoformat(),
+                "candidate_score_detail": {
+                    "intraday_flow": {
+                        "flow_source": "kaipanla_net_flow",
+                        "flow_metric": "main_net_speed",
+                        "capital_available": True,
+                    },
+                    "comprehensive": {"score_model_version": SCORE_MODEL_VERSION},
+                },
+            },
+        },
+    }
+
+    service._refresh_candidate_scores(
+        runtime,
+        [{"symbol": "600000.SH", "source_modes": ["first_board"]}],
+        captured_at + timedelta(seconds=30),
+    )
+
+    current = runtime["candidate_scores"]["600000.SH"]
+    assert current["candidate_score"] is None
+    assert current["candidate_score_state"] == "unavailable"
+
+
+def test_large_order_update_invalidates_candidate_score_refresh(tmp_path):
+    service, _quotes, _config = make_service(tmp_path)
+    service._score_refresh_at = 123.0
+
+    service.notify_large_orders_updated()
+
+    assert service._score_refresh_at == 0.0
+
+
 @pytest.mark.parametrize("hour,minute", [(11, 45), (15, 30)])
 def test_candidate_score_refresh_keeps_final_valid_score_outside_trading_hours(
     tmp_path, monkeypatch, hour, minute,

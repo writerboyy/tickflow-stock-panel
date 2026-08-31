@@ -17,7 +17,7 @@ from typing import Any
 
 import polars as pl
 
-from app.market_time import CN_TZ, cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, limit_price, price_limit_pct
 from app.plugins.kaipanla.client import KaipanlaClient, KaipanlaRequestError
 from app.plugins.kaipanla.credentials import load_credentials
@@ -252,6 +252,11 @@ class LargeOrderService:
         }
         with self._lock:
             self._score_symbols = cleaned
+        if self._running:
+            # Score refreshes can happen after the last quote callback (for
+            # example after the market closes), so do not wait for another
+            # market tick before requesting the precise tape.
+            self._schedule_deep_dive()
 
     def _scope_symbols(self) -> set[str] | None:
         position_symbols = self._position_symbols()
@@ -638,13 +643,34 @@ class LargeOrderService:
         proxy_buy = max(0.0, float(tracker["buy"]))
         proxy_sell = max(0.0, float(tracker["sell"]))
         proxy_amount = proxy_buy + proxy_sell
-        cutoff = now_ts - window
+        precise_now_ts = now_ts
+        current_time = datetime.fromtimestamp(now_ts, tz=CN_TZ)
+        if not in_continuous_session(current_time):
+            same_day_trade_times = []
+            for item in state["trade_events"]:
+                event_time = _as_datetime(
+                    item.get("timestamp") or item.get("event_time") or item.get("time")
+                )
+                if (
+                    event_time is not None
+                    and event_time.date() == current_time.date()
+                    and event_time.timestamp() <= now_ts
+                ):
+                    same_day_trade_times.append(event_time.timestamp())
+            if same_day_trade_times:
+                # During lunch/after close the provider's latest precise tape
+                # is the valid as-of point until a new session update arrives.
+                precise_now_ts = max(same_day_trade_times)
+        cutoff = precise_now_ts - window
         trades = []
         for item in state["trade_events"]:
             event_time = _as_datetime(
                 item.get("timestamp") or item.get("event_time") or item.get("time")
             )
-            if event_time is not None and event_time.timestamp() >= cutoff:
+            if (
+                event_time is not None
+                and cutoff <= event_time.timestamp() <= precise_now_ts
+            ):
                 trades.append(item)
         active_buy = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_buy")
         active_sell = sum(float(item.get("amount") or 0) for item in trades if item.get("direction") == "active_sell")
@@ -654,7 +680,10 @@ class LargeOrderService:
             event_time = _as_datetime(
                 item.get("timestamp") or item.get("event_time") or item.get("time")
             )
-            if event_time is not None and event_time.timestamp() >= cutoff:
+            if (
+                event_time is not None
+                and cutoff <= event_time.timestamp() <= precise_now_ts
+            ):
                 intents.append(item)
         cancel_count = sum(bool(item.get("cancel_flag")) for item in intents)
         buy, sell = (active_buy, active_sell) if precise else (proxy_buy, proxy_sell)
@@ -848,10 +877,17 @@ class LargeOrderService:
                 for symbol in watchlist
                 if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
             ]
+            score_symbols = [
+                symbol
+                for symbol in sorted(self._score_symbols)
+                if not self._is_filtered_symbol(symbol, self._states.get(symbol, {}).get("name"))
+            ]
             symbols = (
-                sorted(scope_symbols or set())
+                score_symbols + sorted(set(scope_symbols or set()) - set(score_symbols))
                 if scope_symbols is not None
-                else list(dict.fromkeys(eligible_watchlist + [str(row["symbol"]) for row in ranked]))
+                else list(dict.fromkeys(
+                    eligible_watchlist + score_symbols + [str(row["symbol"]) for row in ranked]
+                ))
             )
             limit = max(0, int(self._config.get("max_deep_dive_symbols", 3)))
             interval = max(15.0, float(self._config.get("deep_dive_interval_seconds", 60)))
@@ -1007,6 +1043,10 @@ class LargeOrderService:
                 self._quote_service.push_alerts(alerts)
                 self._persist_alerts(alerts)
                 self._dispatch_alert_notifications(alerts)
+        limit_board = getattr(self._app_state, "limit_board_service", None)
+        notify_limit_board = getattr(limit_board, "notify_large_orders_updated", None)
+        if callable(notify_limit_board):
+            notify_limit_board()
 
     def _build_alerts_locked(self, symbol: str) -> list[dict]:
         if self._quote_service is not None:

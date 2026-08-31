@@ -143,6 +143,65 @@ def test_limit_board_score_symbols_share_realtime_flow_scope_with_positions():
     assert service._scope_symbols() == {"000001.SZ", "600000.SH", "600001.SZ"}
 
 
+def test_score_symbols_are_deep_dived_immediately_after_service_is_running(monkeypatch):
+    service = LargeOrderService(FakeQuoteService())
+    service._running = True
+    service._config["max_deep_dive_symbols"] = 1
+    submitted = []
+
+    class CaptureExecutor:
+        def submit(self, _function, symbol):
+            submitted.append(symbol)
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    service._deep_executor = CaptureExecutor()
+    monkeypatch.setattr(large_order_service, "load_credentials", lambda: object())
+    monkeypatch.setattr(
+        "app.services.preferences.get_realtime_watchlist_symbols", lambda: [],
+    )
+
+    service.set_score_symbols({"600126.SH"})
+
+    assert submitted == ["600126.SH"]
+    service._deep_pending.clear()
+    service.stop()
+
+
+def test_score_symbols_are_prioritized_over_positions_for_deep_dive(monkeypatch):
+    service = LargeOrderService(FakeQuoteService())
+    service._running = True
+    service._config["max_deep_dive_symbols"] = 1
+    service._app_state = SimpleNamespace(
+        position_risk_service=SimpleNamespace(
+            store=SimpleNamespace(load=lambda: {
+                "positions": [
+                    {"symbol": "000001.SZ"},
+                    {"symbol": "000002.SZ"},
+                ],
+            }),
+        ),
+    )
+    submitted = []
+
+    class CaptureExecutor:
+        def submit(self, _function, symbol):
+            submitted.append(symbol)
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    service._deep_executor = CaptureExecutor()
+    monkeypatch.setattr(large_order_service, "load_credentials", lambda: object())
+
+    service.set_score_symbols({"600126.SH"})
+
+    assert submitted == ["600126.SH"]
+    service._deep_pending.clear()
+    service.stop()
+
+
 @pytest.mark.parametrize(
     ("symbol", "name", "expected"),
     [
@@ -232,6 +291,7 @@ def test_snapshot_storage_only_keeps_effective_deltas(tmp_path, monkeypatch):
 
 def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
     requests = []
+    notifications = []
     monkeypatch.setattr(large_order_service.time, "time", lambda: 1785807062.0)
 
     class FakeClient:
@@ -256,6 +316,11 @@ def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
     storage = LargeOrderStore(tmp_path, flush_interval=0.01)
     storage.start()
     service = LargeOrderService(quote)
+    service._app_state = SimpleNamespace(
+        limit_board_service=SimpleNamespace(
+            notify_large_orders_updated=lambda: notifications.append(True),
+        ),
+    )
     service._storage = storage
     service._trade_date = date(2026, 8, 4)
     monkeypatch.setattr("app.services.large_order_service.load_credentials", lambda: object())
@@ -276,6 +341,7 @@ def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
     assert ranking["buy_ratio"] == pytest.approx(2 / 3, abs=0.0001)
     assert service.status()["precise_count"] == 1
     assert service.tape("000001.SZ")["trades"][0]["direction"] == "active_buy"
+    assert notifications == [True]
     assert requests == [
         (13, {"StockID": "000001"}),
         (14, {"StockID": "000001"}),
@@ -355,6 +421,7 @@ def test_each_window_uses_its_own_cached_score_and_expires(monkeypatch):
 def test_deep_dive_scheduler_has_no_local_daily_quota(monkeypatch):
     service = LargeOrderService(FakeQuoteService())
     service._config["max_deep_dive_symbols"] = 3
+    service.set_score_symbols({"600126.SH"})
     service._rankings[60] = tuple(
         {"symbol": f"00000{index}.SZ"}
         for index in range(1, 5)
@@ -376,6 +443,7 @@ def test_deep_dive_scheduler_has_no_local_daily_quota(monkeypatch):
     service._schedule_deep_dive()
 
     assert len(submitted) == 3
+    assert "600126.SH" in submitted
     assert service._deep_calls_used == 66
     status = service.status()
     assert status["deep_dive_request_count"] == 66
@@ -416,6 +484,47 @@ def test_precise_trade_expires_and_window_falls_back_to_proxy(monkeypatch):
     assert row["data_quality"] == "proxy_only"
     assert row["active_buy_amount"] == 2_000_000
     assert row["max_order_amount"] == 0
+    service.stop()
+
+
+def test_precise_trade_uses_latest_same_day_tape_during_lunch(monkeypatch):
+    clock = MutableClock()
+    clock.value = datetime(2026, 8, 5, 12, 4, tzinfo=large_order_service.CN_TZ)
+    monkeypatch.setattr(large_order_service, "cn_now", clock)
+    monkeypatch.setattr(large_order_service, "cn_today", lambda: clock.value.date())
+    service = LargeOrderService(FakeQuoteService())
+    service._trade_date = clock.value.date()
+    service._running = True
+    service._config["max_deep_dive_symbols"] = 0
+
+    service._process_snapshot([_quote()])
+    state = service._states["000001.SZ"]
+    latest_trade = datetime(2026, 8, 5, 10, 51, 26, tzinfo=large_order_service.CN_TZ)
+    state["trade_events"].extend([
+        {
+            "event_id": "precise-buy",
+            "timestamp": latest_trade.timestamp(),
+            "direction": "active_buy",
+            "amount": 3_000_000,
+        },
+        {
+            "event_id": "precise-sell",
+            "timestamp": (latest_trade - timedelta(seconds=10)).timestamp(),
+            "direction": "active_sell",
+            "amount": 1_000_000,
+        },
+    ])
+
+    rankings, filtered, unassessable = service._build_rankings_locked(clock.value.timestamp())
+    service._rankings = rankings
+    service._filtered_near_limit_count = filtered
+    service._unassessable_count = unassessable
+
+    row = service.ranking(60)["rows"][0]
+    assert row["data_quality"] == "precise"
+    assert row["active_buy_amount"] == 3_000_000
+    assert row["active_sell_amount"] == 1_000_000
+    assert row["buy_ratio"] == pytest.approx(0.75)
     service.stop()
 
 

@@ -110,6 +110,14 @@ def _is_current_score_snapshot(value: dict[str, Any] | None) -> bool:
     if not isinstance(value, dict):
         return False
     detail = value.get("candidate_score_detail") or {}
+    intraday_flow = detail.get("intraday_flow") if isinstance(detail, dict) else None
+    if isinstance(intraday_flow, dict) and (
+        intraday_flow.get("flow_source") == "kaipanla_net_flow"
+        or intraday_flow.get("flow_metric") == "main_net_speed"
+    ):
+        # The old cumulative-net-flow endpoint is no longer the active capital
+        # source. Do not restore its persisted result after the endpoint switch.
+        return False
     comprehensive = detail.get("comprehensive") if isinstance(detail, dict) else None
     # Older candidate-score snapshots predate the comprehensive projection and
     # remain valid for the independent candidate ranking score.
@@ -2931,6 +2939,11 @@ class LimitBoardService:
         notify = getattr(self.quote_service, "notify_limit_board_updated", None)
         if callable(notify):
             notify()
+
+    def notify_large_orders_updated(self) -> None:
+        """Invalidate candidate scores after an asynchronous precise tape update."""
+        self._score_refresh_at = 0.0
+        self._notify_updated()
 
     def _schedule_pool_refresh(self, runtime: dict[str, Any] | None, config: dict[str, Any]) -> None:
         """Run subscription and market refresh work after the API response path."""
