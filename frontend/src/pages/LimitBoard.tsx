@@ -1428,6 +1428,17 @@ function maAlignmentVerdict(
   return '非多头排列'
 }
 
+const FLOW_STATE_LABELS: Record<string, string> = {
+  inflow: '资金流入',
+  outflow: '资金流出',
+  balanced: '资金均衡',
+  unavailable: '暂无数据',
+}
+
+function flowStateLabel(value: string | null | undefined): string {
+  return value ? FLOW_STATE_LABELS[value] || '暂无数据' : '暂无数据'
+}
+
 function scoreDetailRows(
   detail: NonNullable<LimitBoardRow['candidate_score_detail']>,
 ): ComprehensiveScoreDetails {
@@ -1463,7 +1474,7 @@ function scoreDetailRows(
         { label: '分时涨幅', value: scoreDetailSignedPercent(flow.trend_pct, 2) },
         { label: '水下比例', value: ratioPct(flow.underwater_ratio, 1) },
         { label: '净流向比例', value: flow.sealed_now ? '封板后失真' : scoreDetailSignedPercent(flow.net_flow_ratio, 1), tone: flow.sealed_now ? 'text-warning' : undefined },
-        { label: '资金状态', value: flow.flow_state || '不可用' },
+        { label: '资金状态', value: flowStateLabel(flow.flow_state) },
         { label: '分时样本', value: flow.bars == null ? '--' : `${flow.bars} 根` },
       ] : []),
       ...(technical ? [
