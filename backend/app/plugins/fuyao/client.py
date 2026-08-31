@@ -29,6 +29,10 @@ _PAGE_INTERVAL_S = 0.15  # 页间隔, 降低触发限频 (code=4001) 的概率
 class FuyaoError(Exception):
     """扶摇接口错误(配置缺失 / 网络失败 / 信封 code != 0)。"""
 
+    def __init__(self, message: str, *, code: int | str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class FuyaoClient:
     """扶摇 REST 客户端 (线程安全: httpx.Client 可并发复用)。"""
@@ -54,14 +58,17 @@ class FuyaoClient:
         except httpx.HTTPError as e:
             raise FuyaoError(f"网络请求失败: {e}") from e
         if resp.status_code != 200:
-            raise FuyaoError(f"HTTP {resp.status_code}: {path}")
+            raise FuyaoError(f"HTTP {resp.status_code}: {path}", code=resp.status_code)
         try:
             payload = resp.json()
         except ValueError as e:
             raise FuyaoError(f"响应不是 JSON: {path}") from e
         code = payload.get("code")
         if code not in (0, "0", None):
-            raise FuyaoError(f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})")
+            raise FuyaoError(
+                f"扶摇接口错误 code={code}: {payload.get('message', '')} ({path})",
+                code=code,
+            )
         return payload.get("data") or {}
 
     # ---- 快照 ----
@@ -114,6 +121,28 @@ class FuyaoClient:
         if not out:
             raise FuyaoError("全市场快照为空")
         return out, server_ts
+
+    def auction_snapshot(self, thscodes: list[str] | str, stage: str = "final") -> dict:
+        """拉取集合竞价快照，返回官方 data 对象。
+
+        扶摇接口要求完整 ``thscode``（例如 ``600519.SH``）。调用方负责
+        控制批量大小；这里仅负责参数校验和统一信封解包。
+        """
+        if stage not in {"live", "final"}:
+            raise ValueError(f"不支持的集合竞价阶段: {stage}")
+        if isinstance(thscodes, str):
+            values = [item.strip().upper() for item in thscodes.split(",") if item.strip()]
+        else:
+            values = [str(item).strip().upper() for item in thscodes if str(item).strip()]
+        if not values:
+            raise ValueError("集合竞价请求缺少 thscodes")
+        data = self._get(
+            "/api/a-share/auction/snapshot",
+            {"thscodes": ",".join(values), "stage": stage},
+        )
+        if not isinstance(data, dict):
+            return {}
+        return data
 
     # ---- 历史日K ----
     def historical_kline(
