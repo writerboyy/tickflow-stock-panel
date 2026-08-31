@@ -67,6 +67,8 @@ type AuctionComparisonRow = {
   name?: string
   snapshots: Record<string, Record<string, any>>
 }
+const LIMIT_BOARD_MARKET_REFRESH_SECONDS = 6
+const LIMIT_BOARD_MARKET_REFRESH_MS = LIMIT_BOARD_MARKET_REFRESH_SECONDS * 1000
 const AUCTION_COLUMNS = [
   'checkpoint', 'auction_price', 'auction_pct', 'auction_volume', 'auction_amount',
   'auction_unmatched', 'auction_turnover_pct', 'auction_volume_ratio', 'pre_close_price',
@@ -1477,7 +1479,7 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
   hotSectorLinks = {},
   hotLoading = false,
   hotError = false,
-  refreshIntervalSeconds = 5,
+  refreshIntervalSeconds = LIMIT_BOARD_MARKET_REFRESH_SECONDS,
   refreshCycleUpdatedAt = 0,
   onOpenStock,
   onAddPool,
@@ -1518,7 +1520,6 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
   const constituentRowRefs = useRef(new Map<string, HTMLTableRowElement>())
   const lastScrolledSector = useRef<string | null>(null)
   const lastScrolledConstituent = useRef<string | null>(null)
-  const constituentOrder = useRef<{ key: string; symbols: string[] }>({ key: '', symbols: [] })
   const timeline = snapshot?.timeline ?? []
   const latestIndex = Math.max(0, timeline.length - 1)
   const activeIndex = cursorIndex == null ? latestIndex : Math.min(cursorIndex, latestIndex)
@@ -1639,45 +1640,52 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
     ),
     enabled: selectedPlate != null && activeCapturedAt != null && activeSnapshotReady,
     placeholderData: previous => previous,
-    refetchInterval: isLive ? Math.max(5_000, refreshIntervalSeconds * 3_000) : false,
-    staleTime: isLive ? Math.max(1_000, refreshIntervalSeconds * 1_000 - 1_000) : 60_000,
+    refetchInterval: isLive ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
+    staleTime: isLive ? LIMIT_BOARD_MARKET_REFRESH_MS - 1_000 : 60_000,
   })
   const constituentData = constituents.data?.plate_id === selectedPlate?.plate_id
     ? constituents.data
     : null
   const constituentRows = useMemo(() => {
-    const values = constituentData?.rows ?? []
-    const orderKey = `${selectedPlate?.plate_id ?? ''}:${isLive ? 'live' : activeCapturedAt ?? ''}`
-    const available = new Set(values.map(row => row.symbol))
-    if (constituentOrder.current.key !== orderKey) {
-      constituentOrder.current = { key: orderKey, symbols: values.map(row => row.symbol) }
-    } else {
-      const retained = constituentOrder.current.symbols.filter(symbol => available.has(symbol))
-      const retainedSet = new Set(retained)
-      constituentOrder.current.symbols = [
-        ...retained,
-        ...values.map(row => row.symbol).filter(symbol => !retainedSet.has(symbol)),
-      ]
-    }
-    const bySymbol = new Map(values.map(row => [row.symbol, row]))
-    return constituentOrder.current.symbols
-      .map(symbol => bySymbol.get(symbol))
-      .filter((row): row is LimitBoardSectorConstituent => row != null)
-  }, [activeCapturedAt, constituentData?.rows, isLive, selectedPlate?.plate_id])
+    return constituentData?.rows ?? []
+  }, [constituentData?.rows])
   const visibleConstituentRows = useMemo(
     () => mainBoardOnly ? constituentRows.filter(row => isMainBoardSymbol(row.symbol)) : constituentRows,
     [constituentRows, mainBoardOnly],
   )
+  const constituentTableRef = useRef<HTMLDivElement>(null)
+  const constituentVirtualized = visibleConstituentRows.length > VIRTUAL_LIST_THRESHOLD
+  const constituentVirtualizer = useVirtualizer({
+    count: constituentVirtualized ? visibleConstituentRows.length : 0,
+    getScrollElement: () => constituentTableRef.current,
+    estimateSize: () => 42,
+    getItemKey: index => visibleConstituentRows[index]?.symbol ?? index,
+    overscan: 12,
+  })
+  const virtualConstituentRows = constituentVirtualized ? constituentVirtualizer.getVirtualItems() : []
+  const constituentTotalSize = constituentVirtualized ? constituentVirtualizer.getTotalSize() : 0
+  const firstConstituentRow = virtualConstituentRows[0]
+  const lastConstituentRow = virtualConstituentRows[virtualConstituentRows.length - 1]
+  const constituentTopPadding = firstConstituentRow?.start ?? 0
+  const constituentBottomPadding = lastConstituentRow
+    ? constituentTotalSize - lastConstituentRow.end
+    : constituentTotalSize
+  const selectedConstituentIndex = visibleConstituentRows.findIndex(row => row.symbol === selectedStockSymbol)
   useEffect(() => {
-    if (!selectedStockSymbol || !selectedPlate || !constituentData?.rows.some(row => row.symbol === selectedStockSymbol)) return
+    if (!selectedStockSymbol || !selectedPlate || selectedConstituentIndex < 0) return
     const scrollKey = `${selectedPlate.plate_id}:${selectedStockSymbol}`
     if (lastScrolledConstituent.current === scrollKey) return
+    if (constituentVirtualized) {
+      constituentVirtualizer.scrollToIndex(selectedConstituentIndex, { align: 'center' })
+      lastScrolledConstituent.current = scrollKey
+      return
+    }
     const frame = window.requestAnimationFrame(() => {
       constituentRowRefs.current.get(selectedStockSymbol)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
       lastScrolledConstituent.current = scrollKey
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [constituentData?.rows, selectedPlate, selectedStockSymbol])
+  }, [constituentVirtualized, constituentVirtualizer, selectedConstituentIndex, selectedPlate, selectedStockSymbol])
   const changeSort = (key: SectorSortKey) => {
     if (sortKey === key) setDescending(value => !value)
     else {
@@ -1882,10 +1890,15 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
             主板
           </button>
         </div>
-        {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : visibleConstituentRows.length ? <div className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
+        {constituents.isError && !constituentData && !constituents.isFetching ? <div className="flex flex-col items-center gap-2 px-4 py-12 text-center text-xs text-danger"><span>{selectedPlate?.plate_name || '实时板块'}成分股加载失败</span><button type="button" onClick={() => constituents.refetch()} className="inline-flex h-7 items-center gap-1 rounded-btn border border-danger/40 px-2.5 text-[10px] text-danger hover:bg-danger/10"><RefreshCw className="h-3 w-3" />重试</button></div> : visibleConstituentRows.length ? <div ref={constituentTableRef} className="max-h-[62vh] max-w-full overflow-auto overscroll-contain">
           <table className="w-full min-w-[540px] table-fixed border-collapse">
             <thead className="sticky top-0 z-10 bg-surface text-left text-[9px] text-muted"><tr><th className="w-[6%] px-2 py-1.5 text-right">序号</th><th className="w-[23%] px-2 py-1.5">股票</th><th className="w-[11%] px-2 py-1.5 text-right">现价</th><th className="w-[11%] px-2 py-1.5 text-right">涨幅</th><th className="w-[13%] px-2 py-1.5 text-right">板状态</th><th className="w-[13%] px-2 py-1.5 text-right">换手率</th><th className="w-[13%] px-2 py-1.5 text-right">成交额</th><th className="w-[10%] px-2 py-1.5 text-right">操作</th></tr></thead>
-            <tbody>{visibleConstituentRows.map(row => {
+            <tbody>
+              {constituentVirtualized && constituentTopPadding > 0 ? <tr aria-hidden="true"><td colSpan={8} className="border-0 p-0" style={{ height: constituentTopPadding }} /></tr> : null}
+              {(constituentVirtualized
+                ? virtualConstituentRows.map(virtualRow => ({ row: visibleConstituentRows[virtualRow.index], virtualRow }))
+                : visibleConstituentRows.map(row => ({ row, virtualRow: undefined })))
+                .map(({ row, virtualRow }) => {
               const linked = row.symbol === selectedStockSymbol
               const visual = hotQuoteVisual({ symbol: row.symbol, last_price: row.last_price, limit_up: row.limit_up, change_pct: row.change_pct })
               return <tr
@@ -1893,7 +1906,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
                 ref={element => {
                   if (element) constituentRowRefs.current.set(row.symbol, element)
                   else constituentRowRefs.current.delete(row.symbol)
+                  if (element && virtualRow) constituentVirtualizer.measureElement(element)
                 }}
+                data-index={virtualRow?.index}
                 className={`border-t border-border/70 hover:bg-elevated/30 ${linked ? 'bg-warning/20 ring-1 ring-inset ring-warning/60' : ''}`}
               >
               <td className="px-2 py-1.5 text-right font-mono text-[10px] tabular-nums text-muted">#{row.rank}</td>
@@ -1910,7 +1925,9 @@ const SectorStrengthTable = memo(function SectorStrengthTable({
                 </div>
               </td>
               </tr>
-            })}</tbody>
+                })}
+              {constituentVirtualized && constituentBottomPadding > 0 ? <tr aria-hidden="true"><td colSpan={8} className="border-0 p-0" style={{ height: constituentBottomPadding }} /></tr> : null}
+            </tbody>
           </table>
         </div> : <div className="px-4 py-12 text-center text-xs text-muted">{constituents.isPending || constituents.isFetching ? '正在读取实时板块成分股' : mainBoardOnly && constituentRows.length ? '当前板块没有主板成分股' : '该时间点没有可用的成分股数据'}</div>}
       </div>
@@ -2142,27 +2159,16 @@ export function LimitBoard() {
     refetchOnMount: 'always',
     retry: 5,
     retryDelay: attemptIndex => Math.min(5_000, 1_000 * 2 ** attemptIndex),
-    refetchInterval: query => {
-      if (!query.state.data) return 5_000
-      return isTradingHours
-        ? Math.max(
-          1,
-          query.state.data.runtime.refresh_cycle.interval_seconds ?? 5,
-        ) * 1000
-        : false
-    },
+    refetchInterval: isTradingHours ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
     placeholderData: previous => previous,
   })
-  const unifiedRefreshIntervalMs = Math.max(
-    1,
-    view.data?.runtime.refresh_cycle.interval_seconds ?? 5,
-  ) * 1000
+  const unifiedRefreshIntervalMs = LIMIT_BOARD_MARKET_REFRESH_MS
   const approachingLimitUp = useQuery({
     queryKey: QK.limitBoardApproachingLimitUp,
     queryFn: () => api.limitBoardApproachingLimitUp(true),
     enabled: tab === 'sector',
     refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
-    staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
+    staleTime: unifiedRefreshIntervalMs - 1000,
     placeholderData: previous => previous,
   })
   const heatRows = useMemo(() => approachingLimitUp.data?.rows ?? [], [approachingLimitUp.data?.rows])
@@ -2175,15 +2181,15 @@ export function LimitBoard() {
     queryFn: () => api.limitBoardQuotes(heatSymbols, true),
     enabled: tab === 'sector' && heatSymbols.length > 0,
     refetchInterval: tab === 'sector' && isTradingHours ? unifiedRefreshIntervalMs : false,
-    staleTime: Math.max(1000, unifiedRefreshIntervalMs - 1000),
+    staleTime: unifiedRefreshIntervalMs - 1000,
     placeholderData: previous => previous,
   })
   const fuyaoAuctionStatus = useQuery({
     queryKey: QK.fuyaoAuctionStatus,
     queryFn: api.fuyaoAuctionStatus,
     enabled: tab === 'auction',
-    staleTime: 15_000,
-    refetchInterval: 15_000,
+    staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
+    refetchInterval: LIMIT_BOARD_MARKET_REFRESH_MS,
     placeholderData: previous => previous,
   })
   const auctionTradingDates = fuyaoAuctionStatus.data?.trading_dates ?? []
@@ -2207,8 +2213,8 @@ export function LimitBoard() {
       columns: AUCTION_COLUMNS,
     }),
     enabled: tab === 'auction' && Boolean(auctionDate),
-    staleTime: 15_000,
-    refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
+    staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
+    refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
   })
   const conceptExtData = useQuery({
     queryKey: QK.extDataRows('ext_gn_ths', undefined, 6_000, '所属概念'),
@@ -2247,8 +2253,8 @@ export function LimitBoard() {
         columns: AUCTION_COLUMNS,
       }),
       enabled: tab === 'auction' && auctionComparison && Boolean(auctionDate) && comparisonSymbols.length > 0,
-      staleTime: 15_000,
-      refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? 15_000 : false,
+      staleTime: LIMIT_BOARD_MARKET_REFRESH_MS - 1_000,
+      refetchInterval: auctionDate === fuyaoAuctionStatus.data?.trade_date ? LIMIT_BOARD_MARKET_REFRESH_MS : false,
     })),
   })
   const auctionComparisonRows = useMemo<AuctionComparisonRow[]>(() => {
@@ -2542,7 +2548,7 @@ export function LimitBoard() {
           loading={fuyaoAuctionRows.isLoading || fuyaoAuctionStatus.isLoading}
           comparisonLoading={auctionComparisonLoading}
           onOpen={(symbol, name) => setPreview({ symbol, name })}
-        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={runtime.refresh_cycle.interval_seconds} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={handleOpenStockPreview} onAddPool={handleAddPoolFromRow} onAddBuyPool={handleAddBuyPoolFromRow} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
+        /> : tab === 'sector' ? <SectorStrengthTable snapshot={data.sector_strength} hotRows={heatRows} hotQuotes={heatQuotes.data?.quotes} hotBreakCounts={hotBreakCounts} hotSectorLinks={heatQuotes.data?.sector_links} hotLoading={approachingLimitUp.isPending} hotError={approachingLimitUp.isError || approachingLimitUp.data?.state === 'unavailable'} refreshIntervalSeconds={LIMIT_BOARD_MARKET_REFRESH_SECONDS} refreshCycleUpdatedAt={view.dataUpdatedAt} onOpenStock={handleOpenStockPreview} onAddPool={handleAddPoolFromRow} onAddBuyPool={handleAddBuyPoolFromRow} poolSymbols={poolSymbols} buyPoolSymbols={buyPoolSymbols} busy={busy} /> : tab !== 'events' ? (
           <section className="overflow-hidden rounded-btn border border-border bg-surface">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2.5">
               <div><div className="text-xs font-medium">{tableTitle}</div><div className="mt-0.5 text-[10px] text-muted">{tableHint}</div></div>
