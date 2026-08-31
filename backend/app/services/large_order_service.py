@@ -24,7 +24,7 @@ from app.plugins.kaipanla.credentials import load_credentials
 from app.plugins.kaipanla.parsers import (
     ResponseShapeError,
     parse_large_order_intents,
-    parse_large_order_net_flow,
+    parse_large_order_trades,
 )
 from app.services.large_order_store import LargeOrderStore, SCHEMA_VERSION
 from app.services.ingestion_manifest import stable_content_hash
@@ -876,12 +876,12 @@ class LargeOrderService:
         credentials = load_credentials()
         if credentials is None:
             return
-        net_flow_payload: dict[str, Any] | None = None
+        trade_payload: dict[str, Any] | None = None
         intent_payload: dict[str, Any] | None = None
         stock_id = symbol.split(".", 1)[0]
         try:
             async with KaipanlaClient(credentials=credentials, attempts=1) as client:
-                net_flow_payload = await client.request(13, {"StockID": stock_id})
+                trade_payload = await client.request(13, {"StockID": stock_id})
                 intent_payload = await client.request(14, {"StockID": stock_id})
         except (KaipanlaRequestError, ValueError) as exc:
             with self._lock:
@@ -894,7 +894,7 @@ class LargeOrderService:
         if self._storage is not None:
             raw_batch = int(time.time() * 1000)
             for kind, payload, endpoint in (
-                ("kaipanla_net_flow", net_flow_payload, 13),
+                ("kaipanla_trade", trade_payload, 13),
                 ("kaipanla_intent", intent_payload, 14),
             ):
                 if payload is None:
@@ -911,12 +911,7 @@ class LargeOrderService:
                     self._last_error = f"开盘啦原始响应归档失败: {exc}"
                     logger.exception("开盘啦原始响应归档失败 symbol=%s endpoint=%s", symbol, endpoint)
         try:
-            net_flow_points = parse_large_order_net_flow(net_flow_payload or {}, symbol)
-            if any(
-                point.get("trade_date") != self._trade_date.isoformat()
-                for point in net_flow_points
-            ):
-                raise ResponseShapeError("开盘啦主力净额非当前交易日")
+            trades = parse_large_order_trades(trade_payload or {}, symbol)
         except (ResponseShapeError, ValueError) as exc:
             with self._lock:
                 state = self._states.get(symbol)
@@ -932,6 +927,7 @@ class LargeOrderService:
             intents = []
             intent_error = str(exc)
         now_ms = int(time.time() * 1000)
+        trade_rows: list[dict[str, Any]] = []
         intent_rows: list[dict[str, Any]] = []
         calculation_started = time.perf_counter()
         with self._lock:
@@ -939,22 +935,29 @@ class LargeOrderService:
             if state is None:
                 state = self._new_state(symbol, symbol, time.time())
                 self._states[symbol] = state
-            for event in net_flow_points:
-                event_time = _session_datetime(event.get("time"), self._trade_date)
-                if event_time is None:
+            for event in trades:
+                if event["event_id"] in state["trade_ids"]:
                     continue
-                normalized = {**event, "timestamp": event_time.timestamp()}
-                if event["event_id"] in state["net_flow_ids"]:
-                    state["net_flow_points"] = deque(
-                        (
-                            normalized if item["event_id"] == event["event_id"] else item
-                            for item in state["net_flow_points"]
-                        ),
-                        maxlen=360,
-                    )
-                else:
-                    state["net_flow_ids"].add(event["event_id"])
-                    state["net_flow_points"].append(normalized)
+                state["trade_ids"].add(event["event_id"])
+                state["trade_events"].append({**event, "event_time": event.get("time")})
+                event_time = _as_datetime(event.get("timestamp") or event.get("time"))
+                trade_rows.append({
+                    "trade_date": self._trade_date,
+                    "event_ts_ms": int(event_time.timestamp() * 1000) if event_time else now_ms,
+                    "symbol": symbol,
+                    "name": state["name"],
+                    "price": event.get("price"),
+                    "amount": event.get("amount"),
+                    "volume": event.get("volume"),
+                    "source": "kaipanla_13",
+                    "event_id": event["event_id"],
+                    "received_at_ms": now_ms,
+                    "schema_version": SCHEMA_VERSION,
+                    "parser_version": "kaipanla_v1",
+                    "direction": event.get("direction"),
+                    "direction_code": event.get("direction_code"),
+                    "event_time": event.get("time"),
+                })
             for event in intents:
                 if event["event_id"] not in state["intent_ids"]:
                     state["intent_ids"].add(event["event_id"])
@@ -983,10 +986,8 @@ class LargeOrderService:
                         "event_time": event.get("time"),
                         "raw_tail": event.get("raw_tail"),
                     })
-            state["trade_ids"] = {item["event_id"] for item in state["trade_events"]}
             state["intent_ids"] = {item["event_id"] for item in state["intent_events"]}
-            state["net_flow_ids"] = {item["event_id"] for item in state["net_flow_points"]}
-            state["deep_source"] = "kaipanla_net_flow"
+            state["deep_source"] = "kaipanla"
             state["deep_error"] = intent_error
             state["last_deep_ms"] = now_ms
             rankings, filtered_near_limit, unassessable = self._build_rankings_locked(time.time())
@@ -998,6 +999,7 @@ class LargeOrderService:
             self._last_calculation_ms = (time.perf_counter() - calculation_started) * 1000
             self._last_error = "开盘啦委托响应解析失败" if intent_error else None
         if self._storage is not None:
+            self._storage.submit("kaipanla_trade", trade_rows)
             self._storage.submit("kaipanla_intent", intent_rows)
         if self._quote_service is not None:
             self._quote_service.notify_large_orders_updated()

@@ -21,12 +21,15 @@ _ROUTES: dict[int | str, tuple[str, str, dict[str, str]]] = {
         "apphq.longhuvip.com",
         {
             "Order": "0",
-            "a": "GetStockDaDanTrendIncremental",
-            "c": "StockL2Data",
+            "st": "20",
+            "a": "GetMainMonitor_w30",
+            "c": "StockYiDongKanPan",
+            "PhoneOSNew": "1",
+            "VerSion": "5.7.0.12",
             "Index": "0",
             "Money": "2",
-            "IsBS": "0",
             "apiv": "w31",
+            "IsBS": "0",
         },
     ),
     14: (

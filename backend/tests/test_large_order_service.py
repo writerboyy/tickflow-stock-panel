@@ -232,6 +232,7 @@ def test_snapshot_storage_only_keeps_effective_deltas(tmp_path, monkeypatch):
 
 def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
     requests = []
+    monkeypatch.setattr(large_order_service.time, "time", lambda: 1785807062.0)
 
     class FakeClient:
         async def __aenter__(self):
@@ -244,11 +245,9 @@ def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
             requests.append((endpoint, params))
             if endpoint == 13:
                 return {
-                    "code": "000001",
-                    "day": "20260804",
-                    "dadanjinge": [
-                        [f"09:{minute:02d}", minute * 1_000_000]
-                        for minute in range(30, 36)
+                    "List": [
+                        ["2", "1785807061", "100", "1200", "12.0", "09:31:01"],
+                        ["4", "1785807062", "50", "600", "12.0", "09:31:02"],
                     ],
                 }
             return {"List": [["09:31:01", "order-1", 12.0, 100, 12_000, 1, "", 0, 1, 1_754_280_661]]}
@@ -265,29 +264,31 @@ def test_deep_dive_stores_parsed_events_and_raw_payloads(tmp_path, monkeypatch):
     asyncio.run(service._deep_dive_async("000001.SZ"))
     storage.flush_now()
 
+    trades = storage.query("kaipanla_trade", date(2026, 8, 4))
+    assert trades["count"] == 2
+    assert trades["rows"][0]["direction"] == "active_buy"
     intents = storage.query("kaipanla_intent", date(2026, 8, 4))
     assert intents["count"] == 1
     assert intents["rows"][0]["cancel_flag"] is True
     ranking = service.ranking(60)["rows"][0]
-    assert ranking["source"] == "kaipanla_net_flow"
-    assert ranking["data_quality"] == "net_flow"
-    assert ranking["net_flow_amount"] == 35_000_000
-    assert ranking["net_flow_delta"] == 5_000_000
-    assert ranking["net_flow_speed"] == 1_000_000
-    assert service.status()["net_flow_count"] == 1
-    assert service.tape("000001.SZ")["net_flow"][-1]["time"] == "09:35"
+    assert ranking["source"] == "kaipanla"
+    assert ranking["data_quality"] == "precise"
+    assert ranking["buy_ratio"] == pytest.approx(2 / 3, abs=0.0001)
+    assert service.status()["precise_count"] == 1
+    assert service.tape("000001.SZ")["trades"][0]["direction"] == "active_buy"
     assert requests == [
         (13, {"StockID": "000001"}),
         (14, {"StockID": "000001"}),
     ]
     raw_root = tmp_path / "ext_data" / "_kaipanla_raw"
-    assert len(list(raw_root.glob("snapshot=*/large_order_net_flow/*.json.gz"))) == 1
+    assert len(list(raw_root.glob("snapshot=*/large_order_trades/*.json.gz"))) == 1
     assert len(list(raw_root.glob("snapshot=*/large_order_intents/*.json.gz"))) == 1
-    assert list(raw_root.glob("snapshot=*/large_order_trades/*.json.gz")) == []
     storage.stop()
 
 
 def test_intent_parse_failure_does_not_discard_main_net_flow(monkeypatch):
+    monkeypatch.setattr(large_order_service.time, "time", lambda: 1785807061.0)
+
     class FakeClient:
         async def __aenter__(self):
             return self
@@ -298,11 +299,7 @@ def test_intent_parse_failure_does_not_discard_main_net_flow(monkeypatch):
         async def request(self, endpoint, _params):
             if endpoint == 13:
                 return {
-                    "day": "20260804",
-                    "dadanjinge": [
-                        [f"09:{minute:02d}", minute * 1_000_000]
-                        for minute in range(30, 36)
-                    ],
+                    "List": [["2", "1785807061", "100", "1200", "12.0", "09:31:01"]],
                 }
             return {
                 "List": [[
@@ -320,11 +317,11 @@ def test_intent_parse_failure_does_not_discard_main_net_flow(monkeypatch):
 
     asyncio.run(service._deep_dive_async("000001.SZ"))
 
-    assert service.ranking(60)["rows"][0]["data_quality"] == "net_flow"
+    assert service.ranking(60)["rows"][0]["data_quality"] == "precise"
     tape = service.tape("000001.SZ")
-    assert len(tape["net_flow"]) == 6
+    assert len(tape["trades"]) == 1
     assert tape["intents"] == []
-    assert tape["source"] == "kaipanla_net_flow"
+    assert tape["source"] == "kaipanla"
     assert tape["error"] == "List[0] 撤单标记无效"
     assert service.status()["last_error"] == "开盘啦委托响应解析失败"
     service.stop()
