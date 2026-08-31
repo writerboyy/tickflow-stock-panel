@@ -17,25 +17,19 @@ from app.market_time import cn_now, cn_today
 from app.plugins.kaipanla.client import KaipanlaClient
 from app.plugins.kaipanla.credentials import load_credentials, load_socket_login_packet
 from app.plugins.kaipanla.parsers import (
-    parse_capital_net,
     parse_auction,
     parse_bid_detail,
     parse_dragon_tiger_details,
     parse_dragon_tiger_movement,
     parse_lhb_detail,
     parse_lhb_list,
-    parse_interval_stock,
-    parse_large_order_statistics,
     parse_market_performance,
     parse_market_sentiment_statistics,
     parse_rise_fall_analysis,
-    parse_limitup,
     parse_northbound_sector,
-    parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
     parse_trade_date,
-    parse_sector_constituents,
     parse_sector_strength,
     parse_shareholder_changes,
     parse_shareholder_count_changes,
@@ -43,14 +37,10 @@ from app.plugins.kaipanla.parsers import (
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     LHB_TABLE,
-    LIMITUP_TABLE,
-    FUNDS_TABLE,
     LHB_DETAIL_TABLE,
     LHB_MOVEMENT_TABLE,
     NORTHBOUND_SECTOR_TABLE,
-    NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
-    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
     append_sector_strength_snapshot,
@@ -60,8 +50,6 @@ from app.plugins.kaipanla.storage import (
     ensure_configs,
     has_auction_0925,
     recent_trading_dates,
-    read_sector_constituent_memberships,
-    read_sector_constituents,
     read_sector_strength_snapshot,
     read_sector_strength_timeline,
 )
@@ -78,7 +66,6 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE = {115: 200, 30: 200, 100: 500}
 _ROW_KEY = {115: "info", 30: "info", 100: "list"}
 _MAX_PAGES = 100
-_FUND_INTERVAL_PAGE_SIZE = 1000
 _REFERENCE_PAGE_SIZE = 1000
 # 板块强度榜分页：厂商对超大 st 会静默降级到个位数默认页（实测 st=1000 只回 8 行，
 # st=60 正常返回 60 行），必须用文档页大小 60 顺序翻页；10 页封顶防异常循环。
@@ -149,8 +136,6 @@ class KaipanlaCollector:
         self._market_sentiment_history: list[dict[str, Any]] = []
         self._sector_strength_lock = threading.Lock()
         self._sector_strength: dict | None = None
-        self._sector_constituents_lock = threading.Lock()
-        self._sector_constituents_cache: dict[tuple[date, str], list[dict]] = {}
         self._shortline_constituents_lock = threading.Lock()
         self._shortline_constituents: dict | None = None
         self._jijiang_lock = threading.Lock()
@@ -194,18 +179,6 @@ class KaipanlaCollector:
                 ),
                 id="kaipanla_four_mode_targets",
                 misfire_grace_time=600,
-                replace_existing=True,
-            )
-            scheduler.add_job(
-                self._scheduled_limitup,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour=15,
-                    minute=30,
-                    timezone="Asia/Shanghai",
-                ),
-                id="kaipanla_limitup",
-                misfire_grace_time=7200,
                 replace_existing=True,
             )
             scheduler.add_job(
@@ -270,18 +243,6 @@ class KaipanlaCollector:
                 ),
                 id="kaipanla_auction_catch_up",
                 misfire_grace_time=7200,
-                replace_existing=True,
-            )
-            scheduler.add_job(
-                self._scheduled_funds,
-                trigger=CronTrigger(
-                    day_of_week="mon-fri",
-                    hour=15,
-                    minute=6,
-                    timezone="Asia/Shanghai",
-                ),
-                id="kaipanla_funds",
-                misfire_grace_time=14400,
                 replace_existing=True,
             )
             scheduler.add_job(
@@ -486,9 +447,6 @@ class KaipanlaCollector:
             logger.warning("强者恒强 /31 目标股票准备失败 (%s)", type(exc).__name__)
             return None
 
-    async def _scheduled_limitup(self) -> int:
-        return await self._run_safely("limitup", self.collect_limitup, cn_today())
-
     async def _scheduled_market_sentiment(self) -> int:
         now = cn_now()
         current = now.timetz().replace(tzinfo=None)
@@ -592,18 +550,6 @@ class KaipanlaCollector:
     async def _scheduled_catch_up(self) -> int:
         return await self._run_safely("auction_catch_up", self.catch_up_auction)
 
-    async def _scheduled_funds(self) -> int:
-        today = cn_today()
-        completed_dates = [
-            trade_date
-            for trade_date in recent_trading_dates(self.data_dir, 60)
-            if trade_date < today
-        ]
-        if not completed_dates:
-            logger.warning("开盘啦资金采集缺少已完成交易日")
-            return 0
-        return await self._run_safely("funds", self.collect_funds, max(completed_dates))
-
     def market_sentiment_snapshot(self) -> dict | None:
         """Return the latest in-memory Kaipanla sentiment snapshot."""
         with self._sentiment_lock:
@@ -636,10 +582,6 @@ class KaipanlaCollector:
             (value for value in reversed(recent_trading_dates(self.data_dir)) if value < trade_date),
             None,
         )
-
-    def sector_constituent_memberships(self, trade_date: date):
-        """Return the completed-day membership table for batched consumers."""
-        return read_sector_constituent_memberships(self.data_dir, trade_date)
 
     def shortline_constituents_snapshot(self) -> dict | None:
         """Return the current socket snapshot used by the shortline workspace."""
@@ -922,71 +864,6 @@ class KaipanlaCollector:
             self._jijiang_snapshot = snapshot
         return len(rows)
 
-    async def sector_constituents_at(
-        self,
-        trade_date: date,
-        plate_id: str,
-        end_hhmm: str | None = None,
-    ) -> list[dict]:
-        """Fetch one board's historical members, optionally at an intraday minute."""
-        cache_key = (trade_date, plate_id)
-        if end_hhmm is None:
-            with self._sector_constituents_lock:
-                cached = self._sector_constituents_cache.get(cache_key)
-            if cached is not None:
-                return [dict(row) for row in cached]
-            persisted = await asyncio.to_thread(
-                read_sector_constituents,
-                self.data_dir,
-                trade_date,
-                plate_id,
-            )
-            if persisted:
-                with self._sector_constituents_lock:
-                    self._sector_constituents_cache[cache_key] = [dict(row) for row in persisted]
-                return persisted
-        rows = []
-        seen_codes: set[str] = set()
-        async with self._client_factory() as client:
-            for offset in range(0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE):
-                params: dict[str, object] = {
-                    "PlateID": plate_id,
-                    "Date": trade_date.isoformat(),
-                    "Index": offset,
-                    "st": _REFERENCE_PAGE_SIZE,
-                }
-                if end_hhmm is not None:
-                    params.update({"RStart": "0925", "REnd": end_hhmm, "Type": "1"})
-                payload = await client.request(
-                    "sector_constituents",
-                    params,
-                )
-                parsed = parse_sector_constituents(payload, plate_id)
-                fresh = [row for row in parsed if row["code"] not in seen_codes]
-                if not fresh:
-                    break
-                seen_codes.update(row["code"] for row in fresh)
-                rows.extend(fresh)
-                if len(parsed) < _REFERENCE_PAGE_SIZE:
-                    break
-            else:
-                raise RuntimeError("开盘啦板块成分分页超过安全上限")
-        if end_hhmm is None:
-            if rows:
-                self._write_records(
-                    SECTOR_CONSTITUENT_TABLE,
-                    [
-                        {**row, "report_date": trade_date.isoformat()}
-                        for row in rows
-                    ],
-                    ("plate_id", "symbol"),
-                )
-            with self._sector_constituents_lock:
-                if len(self._sector_constituents_cache) >= 128:
-                    self._sector_constituents_cache.pop(next(iter(self._sector_constituents_cache)))
-                self._sector_constituents_cache[cache_key] = [dict(row) for row in rows]
-        return rows
-
     async def refresh_market_sentiment(self, trade_date: date) -> int:
         """Collect the five sentiment cards from their documented KPL endpoints."""
         selected: dict[str, Any] = {}
@@ -1145,273 +1022,6 @@ class KaipanlaCollector:
             logger.warning("开盘啦资金池读取失败 (%s)", type(exc).__name__)
             return []
 
-    async def collect_funds(self, trade_date: date) -> int:
-        """盘后采集全市场资金排名，并补全逐股大单日频快照。"""
-        collected_at = cn_now().isoformat()
-        interval_rows: list[dict] = []
-        interval_codes: set[str] = set()
-        completed_pages = 0
-        async with self._client_factory() as client:
-            for offset in range(0, _MAX_PAGES * _FUND_INTERVAL_PAGE_SIZE, _FUND_INTERVAL_PAGE_SIZE):
-                batch_id = f"offset-{offset:06d}"
-                try:
-                    payload = await client.request(
-                        "fund_interval",
-                        {
-                            "DStart": trade_date.strftime("%Y-%m-%d"),
-                            "DEnd": trade_date.strftime("%Y-%m-%d"),
-                            "Index": offset,
-                            "st": _FUND_INTERVAL_PAGE_SIZE,
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "kaipanla",
-                        "fund_interval",
-                        trade_date.isoformat(),
-                        batch_id,
-                        status="source_error",
-                        error_code=type(exc).__name__,
-                        parser_version="kaipanla_v1",
-                        schema_version=1,
-                        page_size=_FUND_INTERVAL_PAGE_SIZE,
-                    )
-                    raise
-                archive_raw(self.data_dir, "fund_interval", trade_date, payload, f"offset-{offset}")
-                try:
-                    parsed = parse_interval_stock(payload)
-                except Exception as exc:  # noqa: BLE001
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "kaipanla",
-                        "fund_interval",
-                        trade_date.isoformat(),
-                        batch_id,
-                        status="parse_rejected",
-                        error_code=type(exc).__name__,
-                        source_content_hash=stable_content_hash(payload),
-                        parser_version="kaipanla_v1",
-                        schema_version=1,
-                        page_size=_FUND_INTERVAL_PAGE_SIZE,
-                    )
-                    raise
-                record_ingestion_batch(
-                    self.data_dir,
-                    "kaipanla",
-                    "fund_interval",
-                    trade_date.isoformat(),
-                    batch_id,
-                    status="completed" if parsed else "valid_empty",
-                    row_count=len(parsed),
-                    content_hash=stable_content_hash(parsed),
-                    source_content_hash=stable_content_hash(payload),
-                    empty_reason=None if parsed else "valid_empty",
-                    parser_version="kaipanla_v1",
-                    schema_version=1,
-                    page_size=_FUND_INTERVAL_PAGE_SIZE,
-                )
-                completed_pages += 1
-                fresh = []
-                for row in parsed:
-                    code = row["code"]
-                    if code not in interval_codes:
-                        interval_codes.add(code)
-                        fresh.append(row)
-                if not fresh:
-                    break
-                interval_rows.extend(fresh)
-                if len(parsed) < _FUND_INTERVAL_PAGE_SIZE:
-                    break
-            else:
-                update_ingestion_manifest(
-                    self.data_dir,
-                    "kaipanla",
-                    "fund_interval",
-                    trade_date.isoformat(),
-                    status="page_limit_reached",
-                    error_code="page_limit_reached",
-                    published_rows=0,
-                )
-                raise RuntimeError("开盘啦资金排名分页超过安全上限")
-            update_ingestion_manifest(
-                self.data_dir,
-                "kaipanla",
-                "fund_interval",
-                trade_date.isoformat(),
-                status="complete" if interval_rows else "valid_empty",
-                completed_pages=completed_pages,
-                published_rows=len(interval_rows),
-                empty_reason=None if interval_rows else "valid_empty",
-                error_code=None,
-                parser_version="kaipanla_v1",
-                schema_version=1,
-            )
-
-            codes = self._stock_codes(trade_date)
-            semaphore = asyncio.Semaphore(16)
-            capital_failures: set[str] = set()
-            statistics_failures: set[str] = set()
-
-            async def collect_one(
-                code: str,
-                *,
-                collect_capital: bool = True,
-                collect_statistics: bool = True,
-            ) -> tuple[dict | None, dict | None]:
-                async with semaphore:
-                    capital_row: dict | None = None
-                    statistics_row: dict | None = None
-                    if collect_capital:
-                        try:
-                            capital = await client.request(
-                                "fund_capital_net",
-                                {"StockID": code, "Date": trade_date.strftime("%Y-%m-%d")},
-                            )
-                            archive_raw(
-                                self.data_dir, "fund_capital_net", trade_date, capital, code
-                            )
-                            capital_row = parse_capital_net(capital, code)
-                            capital_failures.discard(code)
-                            record_ingestion_batch(
-                                self.data_dir,
-                                "kaipanla",
-                                "fund_capital_net",
-                                trade_date.isoformat(),
-                                code,
-                                status="completed",
-                                row_count=1,
-                                content_hash=stable_content_hash(capital_row),
-                                source_content_hash=stable_content_hash(capital),
-                                parser_version="kaipanla_v1",
-                                schema_version=1,
-                                expected_batches=codes,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            capital_failures.add(code)
-                            record_ingestion_batch(
-                                self.data_dir,
-                                "kaipanla",
-                                "fund_capital_net",
-                                trade_date.isoformat(),
-                                code,
-                                status="source_error",
-                                error_code=type(exc).__name__,
-                                parser_version="kaipanla_v1",
-                                schema_version=1,
-                                expected_batches=codes,
-                            )
-                            logger.warning("开盘啦分时大单采集失败 (%s)", type(exc).__name__)
-                    if collect_statistics:
-                        try:
-                            stats = await client.request(
-                                "fund_large_order_statistics",
-                                {"StockID": code, "Index": 0, "st": 120},
-                            )
-                            archive_raw(
-                                self.data_dir,
-                                "fund_large_order_statistics",
-                                trade_date,
-                                stats,
-                                code,
-                            )
-                            statistics_row = parse_large_order_statistics(
-                                stats, code, trade_date
-                            )
-                            statistics_failures.discard(code)
-                            record_ingestion_batch(
-                                self.data_dir,
-                                "kaipanla",
-                                "fund_large_order_statistics",
-                                trade_date.isoformat(),
-                                code,
-                                status="completed" if statistics_row else "valid_empty",
-                                row_count=1 if statistics_row else 0,
-                                content_hash=(
-                                    stable_content_hash(statistics_row)
-                                    if statistics_row
-                                    else None
-                                ),
-                                source_content_hash=stable_content_hash(stats),
-                                empty_reason=None if statistics_row else "valid_empty",
-                                parser_version="kaipanla_v1",
-                                schema_version=1,
-                                expected_batches=codes,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            statistics_failures.add(code)
-                            record_ingestion_batch(
-                                self.data_dir,
-                                "kaipanla",
-                                "fund_large_order_statistics",
-                                trade_date.isoformat(),
-                                code,
-                                status="source_error",
-                                error_code=type(exc).__name__,
-                                parser_version="kaipanla_v1",
-                                schema_version=1,
-                                expected_batches=codes,
-                            )
-                            logger.warning("开盘啦日度大单采集失败 (%s)", type(exc).__name__)
-                    return capital_row, statistics_row
-
-            details = list(await asyncio.gather(*(collect_one(code) for code in codes)))
-            retry_codes = sorted(capital_failures | statistics_failures)
-            if retry_codes:
-                semaphore = asyncio.Semaphore(4)
-                details.extend(await asyncio.gather(*(
-                    collect_one(
-                        code,
-                        collect_capital=code in capital_failures,
-                        collect_statistics=code in statistics_failures,
-                    )
-                    for code in retry_codes
-                )))
-
-        capital_rows = [row for row, _ in details if row] if not capital_failures else []
-        statistics_rows = [row for _, row in details if row] if not statistics_failures else []
-        for dataset, failures, rows in (
-            ("fund_capital_net", capital_failures, capital_rows),
-            ("fund_large_order_statistics", statistics_failures, statistics_rows),
-        ):
-            current_batches = (
-                load_ingestion_manifest(
-                    self.data_dir,
-                    "kaipanla",
-                    dataset,
-                    trade_date.isoformat(),
-                ).get("batches")
-                or {}
-            )
-            update_ingestion_manifest(
-                self.data_dir,
-                "kaipanla",
-                dataset,
-                trade_date.isoformat(),
-                status="incomplete" if failures else "complete",
-                expected_batches=codes,
-                failed_batches=sorted(failures),
-                published_rows=len(rows),
-                batches={code: current_batches[code] for code in codes},
-                parser_version="kaipanla_v1",
-                schema_version=1,
-            )
-        merged_details: dict[str, dict] = {}
-        for row in capital_rows + statistics_rows:
-            code = str(row.get("code") or row.get("symbol") or "")
-            if code:
-                merged_details.setdefault(code, {}).update(row)
-        count = atomic_upsert(
-            self.data_dir,
-            FUNDS_TABLE,
-            trade_date,
-            [
-                {**row, "collected_at": collected_at}
-                for row in interval_rows + list(merged_details.values())
-            ],
-        )
-        return count
-
     def _write_records(
         self,
         table_id: str,
@@ -1431,9 +1041,8 @@ class KaipanlaCollector:
         )
 
     async def collect_northbound(self, report_date: date | None = None) -> int:
-        """采集北向季度板块及个股持仓，不混作每日资金流。"""
+        """采集北向季度板块持仓，不混作每日资金流。"""
         sector_endpoint = "northbound_sector_history" if report_date else "northbound_sector_latest"
-        stock_endpoint = "northbound_stocks_history" if report_date else "northbound_stocks_latest"
         logical_snapshot = (report_date or cn_today()).isoformat()
         sector_rows: list[dict] = []
         seen_plates: set[str] = set()
@@ -1526,73 +1135,7 @@ class KaipanlaCollector:
                 schema_version=1,
                 endpoint=sector_endpoint,
             )
-
-            semaphore = asyncio.Semaphore(8)
-            failed_plates: set[str] = set()
-
-            async def collect_plate(plate_id: str) -> list[dict]:
-                async with semaphore:
-                    try:
-                        params = {"IndexID": plate_id, "Index": 0, "st": _REFERENCE_PAGE_SIZE}
-                        if report_date:
-                            params["Date"] = report_date.isoformat()
-                        payload = await client.request(stock_endpoint, params)
-                        archive_raw(self.data_dir, stock_endpoint, report_date or cn_today(), payload, plate_id)
-                        _, parsed = parse_northbound_stocks(payload, plate_id)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            NORTHBOUND_STOCK_TABLE,
-                            (report_date or cn_today()).isoformat(),
-                            plate_id,
-                            status="completed" if parsed else "valid_empty",
-                            row_count=len(parsed),
-                            content_hash=stable_content_hash(parsed),
-                            source_content_hash=stable_content_hash(payload),
-                            empty_reason=None if parsed else "valid_empty",
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=sorted(seen_plates),
-                        )
-                        return parsed
-                    except Exception as exc:  # noqa: BLE001
-                        failed_plates.add(plate_id)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            NORTHBOUND_STOCK_TABLE,
-                            (report_date or cn_today()).isoformat(),
-                            plate_id,
-                            status="source_error",
-                            error_code=type(exc).__name__,
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=sorted(seen_plates),
-                        )
-                        logger.warning("开盘啦北向个股采集失败 (%s)", type(exc).__name__)
-                        return []
-
-            stock_rows = [
-                row
-                for rows in await asyncio.gather(*(collect_plate(code) for code in sorted(seen_plates)))
-                for row in rows
-            ]
-        stock_rows_to_publish = [] if failed_plates else stock_rows
-        update_ingestion_manifest(
-            self.data_dir,
-            "kaipanla",
-            NORTHBOUND_STOCK_TABLE,
-            (report_date or cn_today()).isoformat(),
-            status="incomplete" if failed_plates else "complete",
-            expected_batches=sorted(seen_plates),
-            failed_batches=sorted(failed_plates),
-            published_rows=len(stock_rows_to_publish),
-            parser_version="kaipanla_v1",
-            schema_version=1,
-        )
-        return self._write_records(NORTHBOUND_SECTOR_TABLE, sector_rows, ("plate_id",)) + self._write_records(
-            NORTHBOUND_STOCK_TABLE, stock_rows_to_publish, ("plate_id", "symbol")
-        )
+        return self._write_records(NORTHBOUND_SECTOR_TABLE, sector_rows, ("plate_id",))
 
     async def collect_shareholder_counts(self, start_date: date, end_date: date) -> int:
         """采集指定统计区间的股东人数变更，日期取上游每行 Day。"""
@@ -1821,170 +1364,6 @@ class KaipanlaCollector:
             rows_to_publish,
             ("symbol", "snapshot_kind", "shareholder_id"),
         )
-
-    async def collect_sector_constituents(
-        self, trade_date: date, plate_ids: list[str] | None = None
-    ) -> int:
-        """由板块强度榜发现板块，再抓取目标日完整历史成分。"""
-        async with self._client_factory() as client:
-            if plate_ids is None:
-                try:
-                    payload = await client.request(
-                        "sector_strength",
-                        {
-                            "Day": trade_date.isoformat(),
-                            "Index": 0,
-                            "st": _REFERENCE_PAGE_SIZE,
-                        },
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "kaipanla",
-                        "sector_strength_discovery",
-                        trade_date.isoformat(),
-                        "page-000",
-                        status="source_error",
-                        error_code=type(exc).__name__,
-                        parser_version="kaipanla_v1",
-                        schema_version=1,
-                    )
-                    raise
-                archive_raw(self.data_dir, "sector_strength", trade_date, payload)
-                try:
-                    strength_rows = parse_sector_strength(payload)
-                except Exception as exc:  # noqa: BLE001
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "kaipanla",
-                        "sector_strength_discovery",
-                        trade_date.isoformat(),
-                        "page-000",
-                        status="parse_rejected",
-                        error_code=type(exc).__name__,
-                        source_content_hash=stable_content_hash(payload),
-                        parser_version="kaipanla_v1",
-                        schema_version=1,
-                    )
-                    raise
-                record_ingestion_batch(
-                    self.data_dir,
-                    "kaipanla",
-                    "sector_strength_discovery",
-                    trade_date.isoformat(),
-                    "page-000",
-                    status="completed" if strength_rows else "valid_empty",
-                    row_count=len(strength_rows),
-                    content_hash=stable_content_hash(strength_rows),
-                    source_content_hash=stable_content_hash(payload),
-                    empty_reason=None if strength_rows else "valid_empty",
-                    parser_version="kaipanla_v1",
-                    schema_version=1,
-                )
-                update_ingestion_manifest(
-                    self.data_dir,
-                    "kaipanla",
-                    "sector_strength_discovery",
-                    trade_date.isoformat(),
-                    status="complete" if strength_rows else "valid_empty",
-                    published_rows=len(strength_rows),
-                    empty_reason=None if strength_rows else "valid_empty",
-                    error_code=None,
-                )
-                plate_ids = [row["plate_id"] for row in strength_rows]
-            requested_plates = sorted(set(plate_ids))
-            failed_plates: set[str] = set()
-            semaphore = asyncio.Semaphore(8)
-
-            async def collect_one(plate_id: str) -> list[dict]:
-                async with semaphore:
-                    try:
-                        rows = []
-                        seen_codes: set[str] = set()
-                        for offset in range(
-                            0, _MAX_PAGES * _REFERENCE_PAGE_SIZE, _REFERENCE_PAGE_SIZE
-                        ):
-                            payload = await client.request(
-                                "sector_constituents",
-                                {
-                                    "PlateID": plate_id,
-                                    "Date": trade_date.isoformat(),
-                                    "Index": offset,
-                                    "st": _REFERENCE_PAGE_SIZE,
-                                },
-                            )
-                            archive_raw(
-                                self.data_dir,
-                                "sector_constituents",
-                                trade_date,
-                                payload,
-                                f"{plate_id}-{offset}",
-                            )
-                            parsed = parse_sector_constituents(payload, plate_id)
-                            fresh = [row for row in parsed if row["code"] not in seen_codes]
-                            if not fresh:
-                                break
-                            seen_codes.update(row["code"] for row in fresh)
-                            rows.extend(fresh)
-                            if len(parsed) < _REFERENCE_PAGE_SIZE:
-                                break
-                        else:
-                            raise RuntimeError("开盘啦板块成分分页超过安全上限")
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            SECTOR_CONSTITUENT_TABLE,
-                            trade_date.isoformat(),
-                            plate_id,
-                            status="completed" if rows else "valid_empty",
-                            row_count=len(rows),
-                            content_hash=stable_content_hash(rows),
-                            empty_reason=None if rows else "valid_empty",
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=requested_plates,
-                        )
-                        return rows
-                    except Exception as exc:  # noqa: BLE001
-                        failed_plates.add(plate_id)
-                        record_ingestion_batch(
-                            self.data_dir,
-                            "kaipanla",
-                            SECTOR_CONSTITUENT_TABLE,
-                            trade_date.isoformat(),
-                            plate_id,
-                            status="source_error",
-                            error_code=type(exc).__name__,
-                            parser_version="kaipanla_v1",
-                            schema_version=1,
-                            expected_batches=requested_plates,
-                        )
-                        logger.warning("开盘啦板块成分采集失败 (%s)", type(exc).__name__)
-                        return []
-
-            rows = [
-                row
-                for values in await asyncio.gather(*(collect_one(plate_id) for plate_id in requested_plates))
-                for row in values
-            ]
-        stamped = (
-            []
-            if failed_plates
-            else [{**row, "report_date": trade_date.isoformat()} for row in rows]
-        )
-        update_ingestion_manifest(
-            self.data_dir,
-            "kaipanla",
-            SECTOR_CONSTITUENT_TABLE,
-            trade_date.isoformat(),
-            status="incomplete" if failed_plates else "complete",
-            expected_batches=requested_plates,
-            failed_batches=sorted(failed_plates),
-            published_rows=len(stamped),
-            parser_version="kaipanla_v1",
-            schema_version=1,
-        )
-        return self._write_records(SECTOR_CONSTITUENT_TABLE, stamped, ("plate_id", "symbol"))
 
     async def collect_lhb_reference(self, trade_date: date, codes: list[str]) -> int:
         """补充龙虎榜游资动向和股票席位明细。"""
@@ -2533,68 +1912,6 @@ class KaipanlaCollector:
             component="strong_momentum_bid_detail",
             label="强者恒强",
         )
-
-    async def collect_limitup(self, trade_date: date) -> int:
-        async with self._client_factory() as client:
-            try:
-                payload = await client.request(15, {"Index": 0, "st": 1000})
-            except Exception as exc:  # noqa: BLE001
-                record_ingestion_batch(
-                    self.data_dir,
-                    "kaipanla",
-                    "endpoint_15",
-                    trade_date.isoformat(),
-                    "page-000",
-                    status="source_error",
-                    error_code=type(exc).__name__,
-                    parser_version="kaipanla_v1",
-                    schema_version=1,
-                )
-                raise
-        archive_raw(self.data_dir, 15, trade_date, payload)
-        collected_at = cn_now().isoformat()
-        try:
-            parsed = parse_limitup(payload)
-        except Exception as exc:  # noqa: BLE001
-            record_ingestion_batch(
-                self.data_dir,
-                "kaipanla",
-                "endpoint_15",
-                trade_date.isoformat(),
-                "page-000",
-                status="parse_rejected",
-                error_code=type(exc).__name__,
-                source_content_hash=stable_content_hash(payload),
-                parser_version="kaipanla_v1",
-                schema_version=1,
-            )
-            raise
-        record_ingestion_batch(
-            self.data_dir,
-            "kaipanla",
-            "endpoint_15",
-            trade_date.isoformat(),
-            "page-000",
-            status="completed" if parsed else "valid_empty",
-            row_count=len(parsed),
-            content_hash=stable_content_hash(parsed),
-            source_content_hash=stable_content_hash(payload),
-            empty_reason=None if parsed else "valid_empty",
-            parser_version="kaipanla_v1",
-            schema_version=1,
-        )
-        update_ingestion_manifest(
-            self.data_dir,
-            "kaipanla",
-            "endpoint_15",
-            trade_date.isoformat(),
-            status="complete" if parsed else "valid_empty",
-            published_rows=len(parsed),
-            empty_reason=None if parsed else "valid_empty",
-            error_code=None,
-        )
-        rows = [{**row, "collected_at": collected_at} for row in parsed]
-        return atomic_upsert(self.data_dir, LIMITUP_TABLE, trade_date, rows)
 
     async def collect_lhb(self) -> int:
         requested_date = cn_today()

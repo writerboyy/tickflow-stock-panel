@@ -12,15 +12,11 @@ from app.plugins.kaipanla.collector import KaipanlaCollector
 from app.plugins.kaipanla.credentials import KaipanlaCredentials
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
-    FUNDS_TABLE,
     LHB_DETAIL_TABLE,
     LHB_MOVEMENT_TABLE,
     LHB_TABLE,
-    LIMITUP_TABLE,
     NORTHBOUND_SECTOR_TABLE,
-    NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
-    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
 )
@@ -777,70 +773,6 @@ async def test_regulatory_endpoints_fail_independently(tmp_path, monkeypatch):
     assert stored["pre_monitor_category"] is None
 
 
-@pytest.mark.asyncio
-async def test_fund_collection_pages_market_flow_and_fans_out_all_stock_codes(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    (tmp_path / "instruments").mkdir()
-    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
-        tmp_path / "instruments" / "instruments.parquet"
-    )
-    calls = []
-    responses = {
-        "fund_interval": {
-            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
-        },
-        "fund_capital_net": {"trend": [["15:00", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]},
-        "fund_large_order_statistics": {
-            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
-        },
-    }
-    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, calls))
-
-    rows = await collector.collect_funds(date(2026, 7, 10))
-
-    assert rows == 2
-    assert [endpoint for endpoint, _ in calls] == [
-        "fund_interval",
-        "fund_capital_net",
-        "fund_large_order_statistics",
-    ]
-    path = tmp_path / "ext_data" / FUNDS_TABLE / "timeseries" / "date=2026-07-10" / "part.parquet"
-    stored = pl.read_parquet(path).to_dicts()[0]
-    assert stored["main_net"] == 60
-    assert stored["capital_net_close"] == 2
-    assert stored["main_net_amount_over_300k"] == 50
-
-
-@pytest.mark.asyncio
-async def test_scheduled_funds_collects_latest_completed_trading_date(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    monkeypatch.setattr(collector_module, "cn_today", lambda: date(2026, 8, 3))
-    monkeypatch.setattr(
-        collector_module,
-        "recent_trading_dates",
-        lambda _data_dir, _limit: [date(2026, 7, 31), date(2026, 8, 3)],
-    )
-    calls = []
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"fund_interval": {"List": []}}, calls),
-    )
-
-    assert await collector._scheduled_funds() == 0
-
-    assert calls == [
-        (
-            "fund_interval",
-            {
-                "DStart": "2026-07-31",
-                "DEnd": "2026-07-31",
-                "Index": 0,
-                "st": 1000,
-            },
-        )
-    ]
-
-
 def test_stock_codes_exclude_symbols_outside_target_trading_window(tmp_path):
     (tmp_path / "instruments").mkdir()
     pl.DataFrame({
@@ -856,7 +788,7 @@ def test_stock_codes_exclude_symbols_outside_target_trading_window(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_northbound_collection_writes_report_period_sector_and_stock_records(tmp_path, monkeypatch):
+async def test_northbound_collection_writes_report_period_sector_records(tmp_path, monkeypatch):
     _configured(monkeypatch)
     calls = []
     collector = KaipanlaCollector(
@@ -869,10 +801,6 @@ async def test_northbound_collection_writes_report_period_sector_and_stock_recor
                     "Sum_ZCC": 20,
                     "List": [["P1", "板块", 1, 2, 3, 4, 5, 6, 7]],
                 },
-                "northbound_stocks_latest": {
-                    "Date": "20260630",
-                    "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
-                },
             },
             calls,
         ),
@@ -880,12 +808,10 @@ async def test_northbound_collection_writes_report_period_sector_and_stock_recor
 
     rows = await collector.collect_northbound()
 
-    assert rows == 2
-    assert [endpoint for endpoint, _ in calls] == ["northbound_sector_latest", "northbound_stocks_latest"]
+    assert rows == 1
+    assert [endpoint for endpoint, _ in calls] == ["northbound_sector_latest"]
     sector_path = tmp_path / "ext_data" / NORTHBOUND_SECTOR_TABLE / "timeseries" / "date=2026-06-30" / "part.parquet"
-    stock_path = tmp_path / "ext_data" / NORTHBOUND_STOCK_TABLE / "timeseries" / "date=2026-06-30" / "part.parquet"
     assert pl.read_parquet(sector_path).to_dicts()[0]["holding_amount"] == 3
-    assert pl.read_parquet(stock_path).to_dicts()[0]["symbol"] == "600126.SH"
 
 
 @pytest.mark.asyncio
@@ -912,182 +838,6 @@ async def test_shareholder_counts_expands_documented_date_windows(tmp_path, monk
     assert [params["StratDate"] for _, params in calls] == ["2026-07-31", "2026-07-16"]
     path = tmp_path / "ext_data" / SHAREHOLDER_COUNT_TABLE / "timeseries" / "date=2026-07-31" / "part.parquet"
     assert pl.read_parquet(path).to_dicts()[0]["chip_concentration"] == 2
-
-
-@pytest.mark.asyncio
-async def test_fund_interval_uses_offsets_and_stops_on_a_duplicate_page(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    calls = []
-    rows = [[f"{600000 + index:06d}", "测试", 1, 1, 1, 1, 0, 1, 1, 1, "", "", "", 0] for index in range(1000)]
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"fund_interval": lambda _params: {"List": rows}}, calls),
-    )
-
-    count = await collector.collect_funds(date(2026, 7, 10))
-
-    assert count == 1000
-    assert [(endpoint, params["Index"]) for endpoint, params in calls] == [
-        ("fund_interval", 0),
-        ("fund_interval", 1000),
-    ]
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "fund_interval" / "2026-07-10.json"
-    ).read_text())
-    assert manifest["status"] == "complete"
-    assert manifest["completed_pages"] == 2
-
-
-@pytest.mark.asyncio
-async def test_fund_interval_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"fund_interval": RuntimeError("unavailable")}, []),
-    )
-
-    with pytest.raises(RuntimeError, match="unavailable"):
-        await collector.collect_funds(date(2026, 7, 10))
-
-    assert not (
-        tmp_path / "ext_data" / FUNDS_TABLE
-        / "timeseries" / "date=2026-07-10" / "part.parquet"
-    ).exists()
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "fund_interval" / "2026-07-10.json"
-    ).read_text())
-    assert manifest["batches"]["offset-000000"]["status"] == "source_error"
-
-
-@pytest.mark.asyncio
-async def test_fund_detail_endpoints_fail_independently(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    (tmp_path / "instruments").mkdir()
-    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
-        tmp_path / "instruments" / "instruments.parquet"
-    )
-    responses = {
-        "fund_interval": {
-            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
-        },
-        "fund_capital_net": RuntimeError("unavailable"),
-        "fund_large_order_statistics": {
-            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
-        },
-    }
-    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
-
-    await collector.collect_funds(date(2026, 7, 10))
-
-    path = tmp_path / "ext_data" / FUNDS_TABLE / "timeseries" / "date=2026-07-10" / "part.parquet"
-    stored = pl.read_parquet(path).to_dicts()[0]
-    assert stored["capital_net_close"] is None
-    assert stored["main_net_amount_over_300k"] == 50
-    capital_manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "fund_capital_net" / "2026-07-10.json"
-    ).read_text())
-    statistics_manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "fund_large_order_statistics" / "2026-07-10.json"
-    ).read_text())
-    assert capital_manifest["status"] == "incomplete"
-    assert capital_manifest["failed_batches"] == ["600126"]
-    assert statistics_manifest["status"] == "complete"
-
-
-@pytest.mark.asyncio
-async def test_fund_detail_retries_transient_source_error_at_lower_concurrency(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    (tmp_path / "instruments").mkdir()
-    pl.DataFrame({"code": ["600126"], "type": ["stock"]}).write_parquet(
-        tmp_path / "instruments" / "instruments.parquet"
-    )
-    attempts = 0
-
-    def capital_response(_params):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise RuntimeError("transient")
-        return {"trend": [["15:00", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]}
-
-    responses = {
-        "fund_interval": {
-            "List": [["600126", "杭钢股份", 9.2, 1.5, 100, 40, 60, 3.2, 1000, 2000, "算力", "", "流入", 3]]
-        },
-        "fund_capital_net": capital_response,
-        "fund_large_order_statistics": {
-            "Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]
-        },
-    }
-    update_ingestion_manifest(
-        tmp_path,
-        "kaipanla",
-        "fund_capital_net",
-        "2026-07-10",
-        status="incomplete",
-        batches={"000003": {"status": "source_error"}},
-    )
-    collector = KaipanlaCollector(tmp_path, lambda: FakeClient(responses, []))
-
-    await collector.collect_funds(date(2026, 7, 10))
-
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "fund_capital_net" / "2026-07-10.json"
-    ).read_text())
-    assert attempts == 2
-    assert manifest["status"] == "complete"
-    assert manifest["failed_batches"] == []
-    assert set(manifest["batches"]) == {"600126"}
-
-
-@pytest.mark.asyncio
-async def test_northbound_partial_stock_batch_preserves_sector_only(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-
-    def stock_response(params):
-        if params["IndexID"] == "P2":
-            raise RuntimeError("unavailable")
-        return {
-            "Date": "20260630",
-            "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]],
-        }
-
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient(
-            {
-                "northbound_sector_latest": {
-                    "Date": "20260630",
-                    "Sum_ZCJE": 10,
-                    "Sum_ZCC": 20,
-                    "List": [
-                        ["P1", "板块一", 1, 2, 3, 4, 5, 6, 7],
-                        ["P2", "板块二", 1, 2, 3, 4, 5, 6, 7],
-                    ],
-                },
-                "northbound_stocks_latest": stock_response,
-            },
-            [],
-        ),
-    )
-
-    assert await collector.collect_northbound() == 2
-    stock_path = (
-        tmp_path / "ext_data" / NORTHBOUND_STOCK_TABLE
-        / "timeseries" / "date=2026-06-30" / "part.parquet"
-    )
-    assert not stock_path.exists()
-    manifest = json.loads(next((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla" / NORTHBOUND_STOCK_TABLE
-    ).glob("*.json")).read_text())
-    assert manifest["status"] == "incomplete"
-    assert manifest["failed_batches"] == ["P2"]
 
 
 @pytest.mark.asyncio
@@ -1144,48 +894,6 @@ async def test_shareholder_count_page_failure_is_manifested_without_publishing(
 
 
 @pytest.mark.asyncio
-async def test_sector_discovery_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"sector_strength": RuntimeError("unavailable")}, []),
-    )
-
-    with pytest.raises(RuntimeError, match="unavailable"):
-        await collector.collect_sector_constituents(date(2026, 7, 31))
-
-    assert not (
-        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE / "timeseries"
-    ).exists()
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "sector_strength_discovery" / "2026-07-31.json"
-    ).read_text())
-    assert manifest["batches"]["page-000"]["status"] == "source_error"
-
-
-@pytest.mark.asyncio
-async def test_limitup_failure_is_manifested_without_publishing(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({15: RuntimeError("unavailable")}, []),
-    )
-
-    with pytest.raises(RuntimeError, match="unavailable"):
-        await collector.collect_limitup(date(2026, 7, 31))
-
-    assert not (
-        tmp_path / "ext_data" / LIMITUP_TABLE / "timeseries"
-    ).exists()
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / "endpoint_15" / "2026-07-31.json"
-    ).read_text())
-    assert manifest["batches"]["page-000"]["status"] == "source_error"
-
-
-@pytest.mark.asyncio
 async def test_shareholder_partial_symbol_batch_does_not_publish(tmp_path, monkeypatch):
     _configured(monkeypatch)
     (tmp_path / "instruments").mkdir()
@@ -1228,99 +936,6 @@ async def test_shareholder_partial_symbol_batch_does_not_publish(tmp_path, monke
     assert manifest["failed_batches"] == ["600127"]
 
 
-@pytest.mark.asyncio
-async def test_sector_partial_plate_batch_does_not_publish(tmp_path, monkeypatch):
-    _configured(monkeypatch)
-
-    def response(params):
-        if params["PlateID"] == "801002":
-            raise RuntimeError("unavailable")
-        row = [None] * 41
-        row[0], row[1] = "600126", "杭钢股份"
-        return {"list": [row]}
-
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"sector_constituents": response}, []),
-    )
-
-    assert await collector.collect_sector_constituents(
-        date(2026, 7, 31), ["801001", "801002"]
-    ) == 0
-    partition = (
-        tmp_path / "ext_data" / SECTOR_CONSTITUENT_TABLE
-        / "timeseries" / "date=2026-07-31" / "part.parquet"
-    )
-    assert not partition.exists()
-    manifest = json.loads((
-        tmp_path / "ext_data" / "_ingestion" / "kaipanla"
-        / SECTOR_CONSTITUENT_TABLE / "2026-07-31.json"
-    ).read_text())
-    assert manifest["status"] == "incomplete"
-    assert manifest["failed_batches"] == ["801002"]
-
-
-@pytest.mark.asyncio
-async def test_sector_constituents_at_uses_selected_intraday_window(tmp_path):
-    row = [None] * 41
-    row[0], row[1], row[5], row[6] = "600126", "杭钢股份", 9.2, 2.18
-    row[7], row[8], row[13], row[23], row[40] = 1000, 3.5, 60, "首板", 1
-    calls = []
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"sector_constituents": {"list": [row]}}, calls),
-    )
-
-    result = await collector.sector_constituents_at(
-        date(2026, 8, 17),
-        "801001",
-        "1035",
-    )
-
-    assert result[0]["code"] == "600126"
-    assert result[0]["change_pct"] == 2.18
-    assert calls == [(
-        "sector_constituents",
-        {
-            "PlateID": "801001",
-            "Date": "2026-08-17",
-            "RStart": "0925",
-            "REnd": "1035",
-            "Index": 0,
-            "st": 1000,
-            "Type": "1",
-        },
-    )]
-
-
-@pytest.mark.asyncio
-async def test_sector_constituents_at_persists_and_reuses_completed_membership(tmp_path):
-    row = [None] * 41
-    row[0], row[1] = "600126", "杭钢股份"
-    calls = []
-    collector = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"sector_constituents": {"list": [row]}}, calls),
-    )
-
-    first = await collector.sector_constituents_at(date(2026, 8, 14), "801001")
-    restored_calls = []
-    restored = KaipanlaCollector(
-        tmp_path,
-        lambda: FakeClient({"sector_constituents": RuntimeError("must not fetch")}, restored_calls),
-    )
-    second = await restored.sector_constituents_at(date(2026, 8, 14), "801001")
-    memberships = restored.sector_constituent_memberships(date(2026, 8, 14))
-
-    assert first[0]["code"] == "600126"
-    assert second[0]["symbol"] == "600126.SH"
-    assert memberships.select("plate_id", "symbol").to_dicts() == [{
-        "plate_id": "801001",
-        "symbol": "600126.SH",
-    }]
-    assert restored_calls == []
-
-
 def test_fund_stock_pool_requires_current_code_and_type_schema(tmp_path):
     (tmp_path / "instruments").mkdir()
     pl.DataFrame({"code": ["600126", "510300"], "type": ["stock", "etf"]}).write_parquet(
@@ -1354,7 +969,7 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     collector = KaipanlaCollector(tmp_path)
     collector.start(scheduler)
 
-    assert len(scheduler.jobs) == 16
+    assert len(scheduler.jobs) == 14
     assert "kaipanla_four_mode_targets" in scheduler.jobs
     assert "kaipanla_market_sentiment" in scheduler.jobs
     assert "kaipanla_sector_strength" in scheduler.jobs
@@ -1362,7 +977,6 @@ def test_start_without_credentials_registers_jobs_but_does_not_start_backfill(
     assert "kaipanla_sector_strength_close" in scheduler.jobs
     assert "minute='0-1'" in str(scheduler.triggers["kaipanla_sector_strength_close"])
     assert "second='5'" in str(scheduler.triggers["kaipanla_sector_strength_close"])
-    assert "kaipanla_funds" in scheduler.jobs
     assert "kaipanla_northbound" in scheduler.jobs
     assert "kaipanla_shareholder_counts" in scheduler.jobs
     assert "kaipanla_sector_constituents" not in scheduler.jobs
@@ -1429,5 +1043,5 @@ def test_start_can_register_jobs_without_running_catch_up(tmp_path, monkeypatch)
 
     collector.start(scheduler, bootstrap=False)
 
-    assert len(scheduler.jobs) == 16
+    assert len(scheduler.jobs) == 14
     assert collector._bootstrap_task is None

@@ -14,13 +14,11 @@ from apscheduler.triggers.cron import CronTrigger
 from app.market_time import cn_now
 from app.plugins.easy_tdx.bridge import availability
 from app.plugins.easy_tdx.client import (
-    fetch_dividend_history_rows,
     fetch_f10_texts,
     fetch_industry_rows,
     parse_f10_reference,
 )
 from app.plugins.easy_tdx.storage import (
-    DIVIDEND_HISTORY_TABLE,
     EXPRESS_TABLE,
     FORECAST_TABLE,
     INDUSTRY_TABLE,
@@ -49,7 +47,6 @@ _F10_DATASETS = {
     MARGIN_TABLE: ("symbol",),
     FORECAST_TABLE: ("symbol", "announcement_date"),
     EXPRESS_TABLE: ("symbol", "announcement_date"),
-    DIVIDEND_HISTORY_TABLE: ("symbol", "record_date", "plan"),
 }
 
 
@@ -59,13 +56,11 @@ class EasyTdxCollector:
         data_dir: Path,
         fetcher: Callable[[], list[dict]] = fetch_industry_rows,
         f10_fetcher: Callable[[list[str]], list[tuple[str, str]]] = fetch_f10_texts,
-        dividend_fetcher: Callable[[list[str]], list[dict]] = fetch_dividend_history_rows,
         availability_check: Callable[[], tuple[bool, str]] = availability,
     ) -> None:
         self.data_dir = Path(data_dir)
         self._fetcher = fetcher
         self._f10_fetcher = f10_fetcher
-        self._dividend_fetcher = dividend_fetcher
         self._availability_check = availability_check
         self._bootstrap_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -327,59 +322,6 @@ class EasyTdxCollector:
                             retry_count=2,
                             **run_metadata,
                         )
-
-            dividend_state = load_ingestion_manifest(
-                self.data_dir, "easy_tdx", DIVIDEND_HISTORY_TABLE, logical_snapshot
-            )
-            if not self._batch_completed(dividend_state, batch_id):
-                try:
-                    dividends, retry_count = await self._fetch_with_retry(
-                        self._dividend_fetcher, batch_codes
-                    )
-                    _, source_hash = archive_source_payload(
-                        self.data_dir,
-                        "easy_tdx",
-                        "dividend_rows",
-                        logical_snapshot,
-                        batch_id,
-                        dividends,
-                        parser_version=_F10_PARSER_VERSION,
-                    )
-                    staged = [{**row, "collected_at": collected_at} for row in dividends]
-                    write_staging_rows(
-                        self.data_dir,
-                        "easy_tdx",
-                        DIVIDEND_HISTORY_TABLE,
-                        staging_snapshot,
-                        batch_id,
-                        staged,
-                    )
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "easy_tdx",
-                        DIVIDEND_HISTORY_TABLE,
-                        logical_snapshot,
-                        batch_id,
-                        status="valid_empty" if not staged else "completed",
-                        row_count=len(staged),
-                        content_hash=stable_content_hash(staged),
-                        source_content_hash=source_hash,
-                        empty_reason="valid_empty" if not staged else None,
-                        retry_count=retry_count,
-                        **run_metadata,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    record_ingestion_batch(
-                        self.data_dir,
-                        "easy_tdx",
-                        DIVIDEND_HISTORY_TABLE,
-                        logical_snapshot,
-                        batch_id,
-                        status="source_error",
-                        error_code=type(exc).__name__,
-                        retry_count=2,
-                        **run_metadata,
-                    )
 
         published = 0
         for dataset, key_fields in _F10_DATASETS.items():

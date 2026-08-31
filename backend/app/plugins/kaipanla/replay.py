@@ -15,56 +15,42 @@ import polars as pl
 from app.plugins.kaipanla.parsers import (
     parse_auction,
     parse_bid_detail,
-    parse_capital_net,
     parse_dragon_tiger_details,
     parse_dragon_tiger_movement,
-    parse_interval_stock,
-    parse_large_order_statistics,
     parse_lhb_detail,
     parse_lhb_list,
-    parse_limitup,
     parse_northbound_sector,
-    parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
-    parse_sector_constituents,
     parse_sector_strength,
     parse_shareholder_changes,
     parse_shareholder_count_changes,
 )
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
-    FUNDS_TABLE,
     LHB_DETAIL_TABLE,
     LHB_MOVEMENT_TABLE,
     LHB_TABLE,
-    LIMITUP_TABLE,
     NORTHBOUND_SECTOR_TABLE,
-    NORTHBOUND_STOCK_TABLE,
     REGULATORY_TABLE,
-    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     SHAREHOLDER_TABLE,
     TABLE_IDS,
     _normalize_rows,
 )
 from app.services.ext_data import ExtConfigStore
-from app.services.ingestion_manifest import load_ingestion_manifest, stable_content_hash
+from app.services.ingestion_manifest import stable_content_hash
 
 
 _PRIMARY_KEYS: dict[str, tuple[str, ...]] = {
     AUCTION_TABLE: ("symbol",),
-    FUNDS_TABLE: ("symbol",),
     LHB_TABLE: ("symbol",),
-    LIMITUP_TABLE: ("symbol",),
     REGULATORY_TABLE: ("symbol",),
     NORTHBOUND_SECTOR_TABLE: ("plate_id",),
-    NORTHBOUND_STOCK_TABLE: ("plate_id", "symbol"),
     SHAREHOLDER_TABLE: ("symbol", "snapshot_kind", "shareholder_id"),
     SHAREHOLDER_COUNT_TABLE: ("symbol",),
     LHB_MOVEMENT_TABLE: ("participant_id", "side", "symbol"),
     LHB_DETAIL_TABLE: ("symbol", "side", "log_id"),
-    SECTOR_CONSTITUENT_TABLE: ("plate_id", "symbol"),
 }
 _IGNORED_COMPARE_FIELDS = {
     "collected_at",
@@ -74,10 +60,6 @@ _IGNORED_COMPARE_FIELDS = {
     "post_collected_at",
 }
 _VIRTUAL_PARTITION_FIELDS = {"report_date"}
-_FAIL_CLOSED_FUND_ENDPOINTS = frozenset({
-    "fund_capital_net",
-    "fund_large_order_statistics",
-})
 _EXPECTED_DTYPES = {
     "string": pl.String,
     "int": pl.Int64,
@@ -91,28 +73,6 @@ def _archive_files(root: Path) -> list[Path]:
         path
         for path in root.rglob("*")
         if path.is_file() and (path.name.endswith(".json") or path.name.endswith(".json.gz"))
-    )
-
-
-def _fund_reconciliation_policy(
-    data_dir: Path,
-    endpoint: str,
-    archive_date: date,
-) -> tuple[bool, frozenset[str] | None]:
-    manifest = load_ingestion_manifest(
-        data_dir,
-        "kaipanla",
-        endpoint,
-        archive_date.isoformat(),
-    )
-    expected = manifest.get("expected_batches")
-    expected_batches = (
-        frozenset(str(batch) for batch in expected) if isinstance(expected, list) else None
-    )
-    return (
-        manifest.get("status") == "incomplete"
-        and not int(manifest.get("published_rows") or 0),
-        expected_batches,
     )
 
 
@@ -203,8 +163,6 @@ def _parse_archive(
         table, rows = AUCTION_TABLE, _auction_rows(endpoint, payload, path)
     elif endpoint == "31":
         table, rows = AUCTION_TABLE, [parse_bid_detail(payload)]
-    elif endpoint == "15":
-        table, rows = LIMITUP_TABLE, parse_limitup(payload)
     elif endpoint == "100":
         parsed_date, rows = parse_lhb_list(payload)
         table, partition = LHB_TABLE, parsed_date or archive_date
@@ -240,19 +198,9 @@ def _parse_archive(
             }
             for row in rows
         ]
-    elif endpoint == "fund_interval":
-        table, rows = FUNDS_TABLE, parse_interval_stock(payload)
-    elif endpoint == "fund_capital_net":
-        table, rows = FUNDS_TABLE, [parse_capital_net(payload, _code_context(path))]
-    elif endpoint == "fund_large_order_statistics":
-        row = parse_large_order_statistics(payload, _code_context(path), archive_date)
-        table, rows = FUNDS_TABLE, [row] if row else []
     elif endpoint.startswith("northbound_sector_"):
         partition, rows = parse_northbound_sector(payload)
         table = NORTHBOUND_SECTOR_TABLE
-    elif endpoint.startswith("northbound_stocks_"):
-        partition, rows = parse_northbound_stocks(payload, _code_context(path))
-        table = NORTHBOUND_STOCK_TABLE
     elif endpoint == "shareholder_changes":
         table = SHAREHOLDER_TABLE
         rows = parse_shareholder_changes(payload, _code_context(path), archive_date)
@@ -265,11 +213,6 @@ def _parse_archive(
         table = LHB_DETAIL_TABLE
         rows = _stamp_report_date(
             parse_dragon_tiger_details(payload, _code_context(path)), archive_date
-        )
-    elif endpoint == "sector_constituents":
-        table = SECTOR_CONSTITUENT_TABLE
-        rows = _stamp_report_date(
-            parse_sector_constituents(payload, _code_context(path)), archive_date
         )
     elif endpoint == "sector_strength":
         parse_sector_strength(payload)
@@ -429,7 +372,6 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
     conflicting_field_updates: dict[str, int] = defaultdict(int)
     errors: list[dict[str, str]] = []
     parser_versions: set[str] = set()
-    fund_policies: dict[tuple[str, date], tuple[bool, frozenset[str] | None]] = {}
 
     for path in files:
         endpoint = path.parent.name
@@ -444,25 +386,6 @@ def replay_archives(data_dir: Path, *, compare_parquet: bool = True) -> dict[str
             stats["parsed_rows"] += len(records)
             if not records:
                 stats["valid_empty"] += 1
-            exclude_archive = False
-            if endpoint in _FAIL_CLOSED_FUND_ENDPOINTS:
-                policy_key = (endpoint, archive_date)
-                if policy_key not in fund_policies:
-                    fund_policies[policy_key] = _fund_reconciliation_policy(
-                        data_dir,
-                        endpoint,
-                        archive_date,
-                    )
-                exclude_all, expected_batches = fund_policies[policy_key]
-                exclude_archive = exclude_all or (
-                    expected_batches is not None
-                    and _code_context(path) not in expected_batches
-                )
-            if exclude_archive:
-                stats["excluded_from_reconciliation"] = (
-                    stats.get("excluded_from_reconciliation", 0) + 1
-                )
-                continue
             for table, partition, row in records:
                 key = _row_key(table, partition, row)
                 current = dict(replay_rows[table].get(key, {}))

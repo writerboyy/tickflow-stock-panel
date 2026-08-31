@@ -1,6 +1,5 @@
 from datetime import date, datetime
 
-import polars as pl
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -185,7 +184,7 @@ def test_large_order_analysis_returns_evidence_and_snapshot_history(tmp_path):
     storage.stop()
 
 
-def test_large_order_reconciliation_aggregates_minute_and_daily_reference(tmp_path):
+def test_large_order_reconciliation_aggregates_minute_events(tmp_path):
     client, storage = _client(tmp_path)
     day = date(2026, 8, 4)
     storage.submit(
@@ -245,13 +244,8 @@ def test_large_order_reconciliation_aggregates_minute_and_daily_reference(tmp_pa
             },
         ],
     )
-    reference = tmp_path / "ext_data" / "ext_kpl_funds" / "timeseries" / f"date={day}"
-    reference.mkdir(parents=True)
-    pl.DataFrame({
-        "symbol": ["000001.SZ"],
-        "main_net_amount_over_300k": [123_456.0],
-    }).write_parquet(reference / "part.parquet")
-
+    # ext_kpl_funds 参考表已随 deprecated-overlap 清理移除，
+    # 对账行恒报 reference_missing，日线参考净额恒为空。
     response = client.get(
         "/api/large-orders/reconciliation",
         params={"date": day.isoformat(), "symbol": "000001.SZ"},
@@ -264,8 +258,8 @@ def test_large_order_reconciliation_aggregates_minute_and_daily_reference(tmp_pa
     assert payload["rows"][0]["precise_net_amount"] == 700
     assert payload["rows"][0]["net_difference"] == -100
     assert payload["rows"][0]["cancel_rate"] == 0.5
-    assert payload["rows"][0]["status"] == "matched"
-    assert payload["summary"]["daily_reference_net"] == 123_456
+    assert payload["rows"][0]["status"] == "reference_missing"
+    assert payload["summary"]["daily_reference_net"] is None
     storage.stop()
 
 

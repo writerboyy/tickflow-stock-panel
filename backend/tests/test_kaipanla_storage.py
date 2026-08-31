@@ -9,7 +9,6 @@ import polars as pl
 from app.plugins.kaipanla.storage import (
     AUCTION_TABLE,
     NORTHBOUND_SECTOR_TABLE,
-    SECTOR_CONSTITUENT_TABLE,
     SHAREHOLDER_COUNT_TABLE,
     TABLE_IDS,
     append_sector_strength_snapshot,
@@ -17,7 +16,6 @@ from app.plugins.kaipanla.storage import (
     atomic_upsert,
     atomic_upsert_records,
     ensure_configs,
-    read_sector_constituents,
     read_sector_strength_snapshot,
     read_sector_strength_timeline,
 )
@@ -28,7 +26,7 @@ def test_plugin_registers_timeseries_configs_without_generic_pull(tmp_path):
     ensure_configs(tmp_path)
     configs = [ExtConfigStore(tmp_path).get(table_id) for table_id in TABLE_IDS]
     assert all(config is not None for config in configs)
-    assert len(configs) == 12
+    assert len(configs) == 8
     assert all(config.mode == "timeseries" for config in configs if config)
     assert all(config.pull is None for config in configs if config)
 
@@ -112,26 +110,6 @@ def test_atomic_upsert_records_keeps_multiple_plate_rows(tmp_path):
     assert rows[0]["plate_name"] == "板块甲"
     assert rows[0]["holding_amount"] == 12.5
     assert rows[1]["plate_name"] == "板块乙"
-
-
-def test_read_sector_constituents_filters_persisted_membership(tmp_path):
-    trade_date = date(2026, 8, 14)
-    atomic_upsert_records(
-        tmp_path,
-        SECTOR_CONSTITUENT_TABLE,
-        trade_date,
-        [
-            {"plate_id": "P1", "code": "600000", "name": "浦发银行"},
-            {"plate_id": "P2", "code": "600001", "name": "邯郸钢铁"},
-        ],
-        ("plate_id", "symbol"),
-    )
-
-    rows = read_sector_constituents(tmp_path, trade_date, "P1")
-    assert len(rows) == 1
-    assert rows[0]["symbol"] == "600000.SH"
-    assert rows[0]["name"] == "浦发银行"
-    assert read_sector_constituents(tmp_path, trade_date, "missing") == []
 
 
 def test_atomic_upsert_records_repairs_stale_exchange_suffix(tmp_path):

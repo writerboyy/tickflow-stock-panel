@@ -13,8 +13,6 @@ from app.plugins.kaipanla.parsers import (
     parse_dragon_tiger_details,
     parse_dragon_tiger_movement,
     parse_interval_stock,
-    parse_large_order_statistics,
-    parse_large_order_net_flow,
     parse_large_order_trades,
     parse_large_order_intents,
     parse_lhb_detail,
@@ -23,14 +21,11 @@ from app.plugins.kaipanla.parsers import (
     parse_limit_up_ladder_height,
     parse_market_performance,
     parse_market_sentiment_statistics,
-    parse_limitup,
     parse_premium_gene,
     parse_northbound_sector,
-    parse_northbound_stocks,
     parse_regulatory_anomaly,
     parse_regulatory_monitor,
     parse_rise_fall_analysis,
-    parse_sector_constituents,
     parse_sector_strength,
     parse_shareholder_changes,
     parse_shareholder_count_changes,
@@ -54,40 +49,6 @@ def test_large_order_trade_parser_maps_direction_and_deduplicates():
     assert rows[0]["event_id"].startswith("600126:")
     with pytest.raises(ResponseShapeError, match="6 列"):
         parse_large_order_trades({"List": [["2"]]}, "600126")
-
-
-def test_large_order_net_flow_parser_keeps_cumulative_main_net_contract():
-    rows = parse_large_order_net_flow(
-        {
-            "code": "600309",
-            "day": "20260818",
-            "dadanjinge": [["09:30", -2_213_928], ["09:31", -6_751_311]],
-        },
-        "600309.SH",
-    )
-
-    assert rows == [
-        {
-            "event_id": "600309.SH:2026-08-18:09:30",
-            "symbol": "600309.SH",
-            "code": "600309.SH",
-            "trade_date": "2026-08-18",
-            "time": "09:30",
-            "net_amount": -2_213_928.0,
-            "source": "kaipanla_13_net_flow",
-        },
-        {
-            "event_id": "600309.SH:2026-08-18:09:31",
-            "symbol": "600309.SH",
-            "code": "600309.SH",
-            "trade_date": "2026-08-18",
-            "time": "09:31",
-            "net_amount": -6_751_311.0,
-            "source": "kaipanla_13_net_flow",
-        },
-    ]
-    with pytest.raises(ResponseShapeError, match="dadanjinge"):
-        parse_large_order_net_flow({"List": []}, "600309.SH")
 
 
 def test_large_order_intent_parser_keeps_cancel_and_limit_flags():
@@ -180,42 +141,6 @@ def test_bid_parser_omits_unknown_direction_position_from_standard_json():
     ]
     assert row["bid_last_price"] == 3.06
     assert row["auction_change_pct"] == pytest.approx(0.0)
-
-
-def test_limitup_parser_flattens_nested_plates_to_one_row_per_stock():
-    stock = [
-        "000777",
-        "中核科技",
-        0,
-        "",
-        0,
-        0,
-        1_759_973_841,
-        0,
-        70_447_232,
-        "首板",
-        1,
-        "可控核聚变、核电",
-        239_159_833,
-        682_199_256,
-        11.73,
-        5_877_917_502,
-        "可控核聚变",
-        "详细原因",
-        1,
-    ]
-    payload = {
-        "nums": {"SZJS": 2990, "XDJS": 2036, "ZT": 97, "DT": 24, "ZBL": 28.3333, "yestRase": 1.389},
-        "list": [
-            {"ZSCode": "801074", "ZSName": "核电", "StockList": [stock]},
-            {"ZSCode": "801075", "ZSName": "聚变", "StockList": [stock]},
-        ],
-    }
-    rows = parse_limitup(payload)
-    assert len(rows) == 1
-    assert rows[0]["plate_names"] == "核电;聚变"
-    assert rows[0]["reason_detail"] == "详细原因"
-    assert rows[0]["market_limitup_count"] == 97
 
 
 def test_limit_up_expression_parser_maps_kaipanla_sentiment_fields():
@@ -388,25 +313,14 @@ def test_fund_parsers_keep_main_flow_and_big_order_contracts_separate():
         {"trend": [["09:30", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]]},
         "600126",
     )
-    statistics = parse_large_order_statistics(
-        {"Date": ["20260710"], "TDJL": [30], "DDJL": [20], "ZDJL": [10], "XDJL": [-5]},
-        "600126",
-        date(2026, 7, 10),
-    )
     assert interval["main_net"] == 60
     assert capital["capital_net_close"] == 2
     assert capital["capital_net_points"] == 1
-    assert statistics is not None
-    assert statistics["main_net_amount_over_300k"] == 50
 
 
 def test_reference_parsers_keep_report_periods_and_composite_rows():
     report_date, sectors = parse_northbound_sector(
         {"Date": "20260630", "Sum_ZCJE": 10, "Sum_ZCC": 20, "List": [["P1", "板块", 1, 2, 3, 4, 5, 6, 7]]}
-    )
-    _, stocks = parse_northbound_stocks(
-        {"Date": "20260630", "List": [["600126", "杭钢股份", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]},
-        "P1",
     )
     shareholders = parse_shareholder_changes(
         {
@@ -423,9 +337,6 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
         {"List": [{"BID": "P", "BName": "席位", "Buy": [{"Sto": "600126", "StoN": "杭钢股份", "Money": 1, "Three": 0}], "Sell": []}]},
         date(2026, 7, 10),
     )
-    constituent_row = [None] * 41
-    constituent_row[0], constituent_row[1], constituent_row[40] = "600126", "杭钢股份", 2
-    constituents = parse_sector_constituents({"list": [constituent_row]}, "P1")
     strength_row = ["P1", "板块", 88.5, 3.2, 0.6, 100, 12, 60, 48, 1.4, 500, 20, 900, 2.1, 35, 30]
     child_strength_row = ["P2", "子板块", 77.0, 2.1, 0.3, 80, 8, 40, 32, 1.2, 400]
     strengths = parse_sector_strength({
@@ -436,11 +347,9 @@ def test_reference_parsers_keep_report_periods_and_composite_rows():
 
     assert report_date == date(2026, 6, 30)
     assert sectors[0]["holding_amount"] == 3
-    assert stocks[0]["symbol"] == "600126"
     assert shareholders[0]["holding_change_pct"] is None
     assert counts[0]["updated_date"] == "2026-07-01"
     assert movements[0]["side"] == "buy"
-    assert constituents[0]["limit_count"] == 2
     assert strengths[0]["plate_id"] == "P1"
     assert strengths[0]["strength"] == 88.5
     assert strengths[0]["change_pct_pct"] == 3.2
