@@ -29,14 +29,24 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, time as dt_time
+from typing import Callable
 
 import polars as pl
 
-from app.market_time import cn_now, cn_today
+from app.market_time import CN_TZ, cn_now, cn_today
 from app.parquet import scan_daily_parquet
 from app.strategy.intraday_signals import IntradaySignalEvaluator
 
 logger = logging.getLogger(__name__)
+
+
+def _finite(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
 
 # Webhook(飞书等)投递专用线程池 —— 与行情轮询线程隔离。
 # send_feishu 内置重试(最坏 ~3×5s 超时 + 退避), 若在 _poll_loop 上同步投递,
@@ -62,6 +72,9 @@ class QuoteSubscriber:
         self._quote_updated = False
         self._strategy_results_updated = False
         self._depth_updated = False
+        self._large_orders_updated = False
+        self._position_risk_updated = False
+        self._limit_board_updated = False
         self._alerts: list[dict] = []
         self._reviews: list[str] = []
 
@@ -77,12 +90,18 @@ class QuoteSubscriber:
                 "quote_updated": self._quote_updated,
                 "strategy_results_updated": self._strategy_results_updated,
                 "depth_updated": self._depth_updated,
+                "large_orders_updated": self._large_orders_updated,
+                "position_risk_updated": self._position_risk_updated,
+                "limit_board_updated": self._limit_board_updated,
                 "alerts": self._alerts,
                 "reviews": self._reviews,
             }
             self._quote_updated = False
             self._strategy_results_updated = False
             self._depth_updated = False
+            self._large_orders_updated = False
+            self._position_risk_updated = False
+            self._limit_board_updated = False
             self._alerts = []
             self._reviews = []
             self._event.clear()
@@ -110,6 +129,9 @@ class QuoteSubscriber:
                 not self._quote_updated
                 and not self._strategy_results_updated
                 and not self._depth_updated
+                and not self._large_orders_updated
+                and not self._position_risk_updated
+                and not self._limit_board_updated
                 and not self._reviews
             ):
                 self._event.clear()
@@ -127,6 +149,21 @@ class QuoteSubscriber:
     def notify_depth(self) -> None:
         with self._lock:
             self._depth_updated = True
+            self._event.set()
+
+    def notify_large_orders(self) -> None:
+        with self._lock:
+            self._large_orders_updated = True
+            self._event.set()
+
+    def notify_position_risk(self) -> None:
+        with self._lock:
+            self._position_risk_updated = True
+            self._event.set()
+
+    def notify_limit_board(self) -> None:
+        with self._lock:
+            self._limit_board_updated = True
             self._event.set()
 
 
@@ -192,6 +229,13 @@ class QuoteService:
         self._paused = False
         self._interval = self.DEFAULT_INTERVAL
         self._thread: threading.Thread | None = None
+        self._temporary_consumers = 0
+        self._temporary_original: tuple[bool, bool, float] | None = None
+        self._symbol_consumers: dict[str, set[str]] = {}
+        self._symbol_consumer_revision = 0
+        self._latest_quotes: dict[str, dict] = {}
+        self._fetch_listeners: set[Callable[[], None]] = set()
+        self._alert_listeners: set[Callable[[list[dict]], None]] = set()
         self._repo = None          # 延迟注入, 避免循环导入
         # SSE 订阅者集合: 每个 /stream 连接一个 QuoteSubscriber, 事件广播到所有订阅者
         self._subscribers: set[QuoteSubscriber] = set()
@@ -253,13 +297,18 @@ class QuoteService:
 
     def stop(self) -> None:
         """停止后台行情轮询线程。"""
+        self.shutdown()
+        self._save_enabled(False)
+        logger.info("行情服务已停止")
+
+    def shutdown(self) -> None:
+        """仅停止运行时线程，保留用户的实时行情开关偏好。"""
         self._running = False
         self._enabled = False
         if self._thread:
             self._thread.join(timeout=10)
             self._thread = None
-        self._save_enabled(False)
-        logger.info("行情服务已停止")
+        logger.info("行情服务运行时已关闭")
 
     def enable(self) -> bool:
         """开启自动行情 (不立即启动线程，等下一个交易时段)。
@@ -360,6 +409,175 @@ class QuoteService:
         """返回当前档位允许的最小间隔。"""
         return self._tier_min_interval()
 
+    def acquire_temporary_polling(self, interval: float) -> None:
+        """临时启用/加速轮询，不写入用户偏好。"""
+        requested = float(interval)
+        minimum = self.get_min_interval()
+        if requested < minimum:
+            raise ValueError(f"当前套餐最小行情间隔为 {minimum:g} 秒")
+        with self._lock:
+            if self._temporary_consumers == 0:
+                self._temporary_original = (self._running, self._enabled, self._interval)
+            self._temporary_consumers += 1
+            self._interval = min(self._interval, requested)
+            self._enabled = True
+            if not self._running:
+                self._running = True
+                self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+                self._thread.start()
+
+    def release_temporary_polling(self) -> None:
+        """释放临时行情租约，并恢复首个租约前的运行态。"""
+        thread = None
+        with self._lock:
+            if self._temporary_consumers <= 0:
+                return
+            self._temporary_consumers -= 1
+            if self._temporary_consumers:
+                return
+            original = self._temporary_original
+            self._temporary_original = None
+            if original is None:
+                return
+            was_running, was_enabled, original_interval = original
+            self._interval = original_interval
+            self._enabled = was_enabled
+            if not was_running:
+                self._running = False
+                thread = self._thread
+                self._thread = None
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=10)
+
+    def add_fetch_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._fetch_listeners.add(callback)
+
+    def remove_fetch_listener(self, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._fetch_listeners.discard(callback)
+
+    def get_latest_quotes(self, symbols: set[str] | None = None) -> list[dict]:
+        """返回行情轮询已经缓存的快照，不触发任何数据源请求。"""
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in symbols or set()
+            if str(symbol).strip()
+        }
+        with self._lock:
+            values = list(self._latest_quotes.values())
+        return [
+            {
+                key: value
+                for key, value in quote.items()
+                if not key.startswith("_")
+            }
+            for quote in values
+            if (symbol := str(quote.get("symbol") or "").strip().upper())
+            and (not requested or symbol in requested)
+        ]
+
+    def get_fresh_quotes(self, symbols: set[str]) -> dict:
+        """返回当前交易日的最新报价快照，不触发网络请求。"""
+        requested = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        with self._lock:
+            cached = {
+                symbol: dict(self._latest_quotes[symbol])
+                for symbol in requested
+                if symbol in self._latest_quotes
+            }
+            interval = self._interval
+        today = cn_today()
+        max_age_s = max(interval * 2, 30.0)
+        now_mono = time.monotonic()
+        quotes = {
+            symbol: {
+                key: value
+                for key, value in quote.items()
+                if not key.startswith("_")
+            }
+            for symbol, quote in cached.items()
+            if quote.get("_quote_date") == today
+            and (
+                not self._should_poll_for_phase(self._market_phase())
+                or now_mono - float(quote.get("_received_at") or 0) <= max_age_s
+            )
+        }
+        missing = sorted(requested - quotes.keys())
+        timestamps = [
+            str(quote.get("timestamp"))
+            for quote in quotes.values()
+            if quote.get("timestamp")
+        ]
+        return {
+            "live": not missing,
+            "quotes": quotes,
+            "missing_symbols": missing,
+            "as_of": max(timestamps) if timestamps else None,
+            "date": today.isoformat(),
+        }
+
+    def set_symbol_consumer(self, consumer_id: str, symbols: set[str]) -> None:
+        """注册需要随现有轮询补拉的少量标的。"""
+        cleaned = {
+            str(symbol).strip().upper()
+            for symbol in symbols
+            if str(symbol).strip()
+        }
+        with self._lock:
+            previous = (
+                set().union(*self._symbol_consumers.values())
+                if self._symbol_consumers
+                else set()
+            )
+            if cleaned:
+                self._symbol_consumers[consumer_id] = cleaned
+            else:
+                self._symbol_consumers.pop(consumer_id, None)
+            current = (
+                set().union(*self._symbol_consumers.values())
+                if self._symbol_consumers
+                else set()
+            )
+            if current - previous:
+                self._symbol_consumer_revision += 1
+
+    def remove_symbol_consumer(self, consumer_id: str) -> None:
+        with self._lock:
+            self._symbol_consumers.pop(consumer_id, None)
+
+    def _consumer_symbols(self) -> set[str]:
+        with self._lock:
+            return (
+                set().union(*self._symbol_consumers.values())
+                if self._symbol_consumers
+                else set()
+            )
+
+    def add_alert_listener(self, callback: Callable[[list[dict]], None]) -> None:
+        with self._lock:
+            self._alert_listeners.add(callback)
+
+    def remove_alert_listener(self, callback: Callable[[list[dict]], None]) -> None:
+        with self._lock:
+            self._alert_listeners.discard(callback)
+
+    def notify_large_orders_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_large_orders()
+
+    def notify_position_risk_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_position_risk()
+
+    def notify_limit_board_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_limit_board()
+
     # ================================================================
     # SSE 订阅管理 — 每个 /stream 连接一个订阅者, 事件广播
     # ================================================================
@@ -405,8 +623,24 @@ class QuoteService:
             sub.notify_depth()
 
     def _broadcast_alerts(self, alerts: list[dict]) -> None:
+        with self._lock:
+            listeners = list(self._alert_listeners)
+        for listener in listeners:
+            try:
+                listener(alerts)
+            except Exception:  # noqa: BLE001
+                logger.exception("告警监听器执行失败")
         for sub in self._snapshot_subscribers():
             sub.push_alerts(alerts)
+
+    def _notify_fetch_listeners(self) -> None:
+        with self._lock:
+            listeners = list(self._fetch_listeners)
+        for callback in listeners:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                logger.exception("行情监听器执行失败")
 
     def push_alerts(self, alerts: list[dict]) -> None:
         self._broadcast_alerts(alerts)
@@ -711,6 +945,7 @@ class QuoteService:
         if not records:
             logger.warning("行情数据为空")
             return
+        self._cache_latest_quotes(records)
 
         index_records = [r for r in records if r.get("symbol") in all_index_symbols]
         etf_records = [r for r in records if r.get("symbol") in all_etf_symbols]
@@ -783,6 +1018,50 @@ class QuoteService:
 
         # ---- 策略监控 + 告警评估 ----
         self._evaluate_monitors(daily_df, quote_extra)
+
+    @staticmethod
+    def _quote_datetime(value: object) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.astimezone(CN_TZ) if value.tzinfo else value.replace(tzinfo=CN_TZ)
+        if isinstance(value, (int, float)):
+            try:
+                seconds = float(value) / 1000 if float(value) > 10_000_000_000 else float(value)
+                return datetime.fromtimestamp(seconds, tz=CN_TZ)
+            except (OverflowError, OSError, ValueError):
+                return None
+        if value:
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                return parsed.astimezone(CN_TZ) if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
+            except ValueError:
+                return None
+        return None
+
+    def _cache_latest_quotes(self, records: list[dict]) -> None:
+        received_at = time.monotonic()
+        fallback_time = cn_now()
+        updates: dict[str, dict] = {}
+        for raw in records:
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            price = raw.get("last_price", raw.get("close"))
+            if not symbol or price is None:
+                continue
+            quote_time = self._quote_datetime(raw.get("timestamp")) or fallback_time
+            updates[symbol] = {
+                **raw,
+                "symbol": symbol,
+                "last_price": float(price),
+                "timestamp": quote_time.isoformat(),
+                "_quote_date": quote_time.date(),
+                "_received_at": received_at,
+            }
+        if updates:
+            with self._lock:
+                self._latest_quotes.update(updates)
+
+    def record_quotes(self, records: list[dict]) -> None:
+        """把其他共享行情通道收到的报价并入只读快照。"""
+        self._cache_latest_quotes(records)
 
     # ================================================================
     # 工具
