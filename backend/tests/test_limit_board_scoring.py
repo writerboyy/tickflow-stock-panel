@@ -555,6 +555,10 @@ def test_comprehensive_score_marks_all_missing_data_as_unavailable():
         assert dimension["max_score"] == 0.0
         assert dimension["components"] == {}
         assert dimension["unavailable_components"]
+        assert set(dimension["unavailable_reasons"]) == set(
+            dimension["unavailable_components"]
+        )
+        assert all(dimension["unavailable_reasons"].values())
     # 缺数据不允许产生任何警示/优势（旧版会报「板块涨幅不大，安全」等假信号）
     assert result["warnings"] == []
     assert result["strengths"] == []
@@ -789,6 +793,11 @@ def test_rotation_only_detail_scores_daily_rotation_and_gates_realtime_parts():
     assert sentiment["unavailable_components"] == [
         "breadth", "money_flow", "liquidity",
     ]
+    assert sentiment["unavailable_reasons"] == {
+        "breadth": "实时板块成分涨跌数据未返回",
+        "money_flow": "实时板块主力净额或成交额未返回",
+        "liquidity": "实时板块量比未返回",
+    }
     health = result["dimensions"]["health"]
     assert "sector_position" in health["unavailable_components"]
     assert "板块相对强度高" in result["strengths"]
@@ -826,6 +835,48 @@ def test_comprehensive_score_uses_institutional_sector_components_without_leader
     assert sentiment["components"]["relative_momentum"] == pytest.approx(4.4)
     assert sentiment["components"]["money_flow"] == pytest.approx(3.3)
     assert "leadership" not in sentiment["components"]
+
+
+def test_comprehensive_score_explains_missing_rotation_components():
+    result = comprehensive_score({
+        "sector": {
+            "rotation_available": False,
+            "rotation_matrix_available": False,
+            "rotation_history_sessions": 0,
+            "institutional_components": {
+                "breadth": 12.0,
+                "money_flow": 8.0,
+                "liquidity": 3.0,
+            },
+            "institutional_component_max": {
+                "breadth": 20.0,
+                "money_flow": 15.0,
+                "liquidity": 5.0,
+            },
+        },
+    })
+
+    sentiment = result["dimensions"]["sentiment"]
+    for key in ("relative_momentum", "trend", "persistence", "stability"):
+        assert sentiment["unavailable_reasons"][key] == "无板块历史轮动矩阵"
+
+
+def test_comprehensive_score_explains_short_rotation_history_and_live_gaps():
+    result = comprehensive_score({
+        "sector": {
+            "rotation_available": False,
+            "rotation_matrix_available": True,
+            "rotation_history_sessions": 2,
+            "institutional_components": {"breadth": 12.0},
+            "institutional_component_max": {"breadth": 20.0},
+        },
+    })
+
+    reasons = result["dimensions"]["sentiment"]["unavailable_reasons"]
+    assert reasons["relative_momentum"] == "板块历史仅 2 个交易日，至少需要 3 个"
+    assert reasons["persistence"] == "板块历史仅 2 个交易日，至少需要 5 个"
+    assert reasons["money_flow"] == "实时板块主力净额或成交额未返回"
+    assert reasons["liquidity"] == "实时板块量比未返回"
 
 
 def test_rotation_only_detail_returns_none_without_five_completed_days():

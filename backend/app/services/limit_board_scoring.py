@@ -595,6 +595,31 @@ def rotation_detail(
     }
 
 
+def _rotation_session_count(
+    rotation: dict[str, Any], sector_name: str, today: date,
+) -> int:
+    """Count completed rotation sessions containing the target sector."""
+    columns = rotation.get("columns") or {}
+    sessions: set[date] = set()
+    for raw_date in rotation.get("dates") or []:
+        try:
+            trading_date = date.fromisoformat(str(raw_date))
+        except ValueError:
+            continue
+        if trading_date >= today:
+            continue
+        rows = columns.get(trading_date.isoformat()) or []
+        if any(
+            isinstance(item, (list, tuple))
+            and len(item) >= 2
+            and str(item[0]) == sector_name
+            and finite(item[1]) is not None
+            for item in rows
+        ):
+            sessions.add(trading_date)
+    return len(sessions)
+
+
 def sector_detail(
     *,
     symbol: str,
@@ -616,6 +641,12 @@ def sector_detail(
     ) < 0.8:
         return None
     history = rotation_detail(rotation, _rotation_name(target), today)
+    rotation_matrix_available = bool(rotation.get("dates") and rotation.get("columns"))
+    rotation_history_sessions = (
+        len(history.get("days") or [])
+        if history is not None
+        else _rotation_session_count(rotation, _rotation_name(target), today)
+    )
     stock = stock_rows.get(symbol)
     if stock is None:
         return None
@@ -759,6 +790,8 @@ def sector_detail(
         "leadership": leadership,
         "is_sector_leader": is_leader,
         "rotation_available": rotation_available,
+        "rotation_matrix_available": rotation_matrix_available,
+        "rotation_history_sessions": rotation_history_sessions,
         "realtime_available": realtime_sector_change is not None,
         "realtime_rank": (realtime or {}).get("rank"),
         "realtime_rank_count": (realtime or {}).get("rank_count"),
@@ -821,6 +854,8 @@ def rotation_only_detail(
         "stock_rank": None,
         "is_sector_leader": False,
         "rotation_available": True,
+        "rotation_matrix_available": bool(rotation.get("dates") and rotation.get("columns")),
+        "rotation_history_sessions": len(history.get("days") or []),
         "realtime_available": False,
         "rotation_components": history["components"],
         **rotation_fields,
@@ -843,20 +878,23 @@ def _dimension_result(
     label: str,
     full_max: float,
     components: list[tuple[str, float, float, bool]],
+    unavailable_reasons: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """装配一个评分维度。
 
     components 为 (key, score, available_max, available) 四元组，score 和
     available_max 统一使用 100 分内部刻度；full_max 是该卡片在综合评分中的
     外层满分，最终按比例缩放到 full_max：
-    - available=False 的组件不计分、不出现在 components 里，
-      只列入 unavailable_components，由前端显示「数据不足」而不是 0 分；
+    - available=False 的组件不计分、不出现在 components 里，列入
+      unavailable_components，并通过 unavailable_reasons 解释缺失原因；
     - max_score 是「可得满分」，缺项时小于 full_max_score，总分按它折算。
     """
     internal_max = 100.0
     scale = full_max / internal_max
     score = sum(item[1] for item in components if item[3]) * scale
     available_max = sum(item[2] for item in components if item[3]) * scale
+    unavailable = [item[0] for item in components if not item[3]]
+    reason_map = unavailable_reasons or {}
     return {
         "score": round(score, 1),
         "max_score": round(available_max, 1),
@@ -867,7 +905,10 @@ def _dimension_result(
         "components": {
             item[0]: round(item[1] * scale, 1) for item in components if item[3]
         },
-        "unavailable_components": [item[0] for item in components if not item[3]],
+        "unavailable_components": unavailable,
+        "unavailable_reasons": {
+            key: reason_map.get(key, "评分所需数据未返回") for key in unavailable
+        },
         "data_complete": available_max >= full_max - 1e-9,
         "label": label,
     }
@@ -913,7 +954,11 @@ def comprehensive_score(
         ("next_day_red", _clamp(next_day_red_rate or 0.0) * 40.0, 40.0, next_day_red_rate is not None),
         ("seal_success", _clamp(first_board_seal_rate or 0.0) * 40.0, 40.0, first_board_seal_rate is not None),
         ("consecutive_ability", _clamp(consecutive_rate or 0.0) * 20.0, 20.0, consecutive_rate is not None),
-    ])
+    ], {
+        "next_day_red": "无足够历史涨停后的次日表现样本",
+        "seal_success": "无首板封板或炸板历史样本",
+        "consecutive_ability": "无连板历史样本",
+    })
 
     # ========================================
     # 二、板块强度（20分）；内部按 100 分制计算
@@ -954,6 +999,34 @@ def comprehensive_score(
         finite(institutional_component_values.get(key)) is not None
         for key in institutional_keys
     )
+    rotation_history_sessions = int(
+        finite(sector.get("rotation_history_sessions")) or len(days)
+    )
+    rotation_matrix_available = bool(
+        sector.get("rotation_matrix_available", rotation_available)
+    )
+
+    def rotation_reason(required_sessions: int) -> str:
+        if not rotation_matrix_available:
+            return "无板块历史轮动矩阵"
+        if rotation_history_sessions <= 0:
+            return "当前板块未匹配到历史轮动数据"
+        if rotation_history_sessions < required_sessions:
+            return (
+                f"板块历史仅 {rotation_history_sessions} 个交易日，"
+                f"至少需要 {required_sessions} 个"
+            )
+        return "板块历史轮动分项未生成"
+
+    institutional_unavailable_reasons = {
+        "relative_momentum": rotation_reason(3),
+        "trend": rotation_reason(3),
+        "persistence": rotation_reason(5),
+        "stability": rotation_reason(3),
+        "breadth": "实时板块成分涨跌数据未返回",
+        "money_flow": "实时板块主力净额或成交额未返回",
+        "liquidity": "实时板块量比未返回",
+    }
 
     if has_institutional_components:
         institutional_raw_total_max = sum(institutional_component_defaults.values())
@@ -982,6 +1055,7 @@ def comprehensive_score(
             )
         sentiment = _dimension_result(
             "板块强度", 20.0, institutional_dimension_components,
+            institutional_unavailable_reasons,
         )
     else:
         # 兼容没有机构分项的历史缓存，继续使用旧的日频/实时三项评分。
@@ -1087,7 +1161,11 @@ def comprehensive_score(
             ("sector_pattern", sector_pattern, 50.0, sector_pattern_available),
             ("overheat_risk", overheat_score, overheat_max, overheat_available),
             ("sector_current", sector_current_score, sector_current_max, sector_current_available),
-        ])
+        ], {
+            "sector_pattern": rotation_reason(3),
+            "overheat_risk": "缺少板块历史涨幅、连涨天数或实时排名",
+            "sector_current": "实时板块涨幅和上涨广度未返回",
+        })
 
     # ========================================
     # 三、拉升健康度（20分）；内部按 100 分制计算
@@ -1228,7 +1306,15 @@ def comprehensive_score(
         ("pullup_form", pullup_score, pullup_max, pullup_available),
         ("capital_flow", capital_flow, 25.6, capital_available),
         ("ma_alignment", ma_alignment, 7.6, ma_available),
-    ])
+    ], {
+        "sector_position": "未取得个股在板块内的实时排名",
+        "pullup_form": "分钟行情不足，无法识别拉升区间",
+        "capital_flow": (
+            "已封板，主动资金流指标失真，不参与评分"
+            if sealed_now else "实时主动资金流数据未返回"
+        ),
+        "ma_alignment": "日线数据不足，需收盘价及 MA5/MA10/MA20/MA60",
+    })
 
     # ========================================
     # 综合评分与评级：按可得满分折算，数据不完整时评级封顶 B

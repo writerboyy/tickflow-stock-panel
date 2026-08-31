@@ -1031,6 +1031,7 @@ function LimitBoardAllocationDialog({
                 maxScore: comprehensive.dimensions.history.max_score,
                 fullMaxScore: comprehensive.dimensions.history.full_max_score,
                 unavailableComponents: comprehensive.dimensions.history.unavailable_components,
+                unavailableReasons: comprehensive.dimensions.history.unavailable_reasons,
               },
               sentiment: {
                 ...comprehensive.dimensions.sentiment,
@@ -1040,6 +1041,9 @@ function LimitBoardAllocationDialog({
                   Object.entries(comprehensive.dimensions.sentiment.components).filter(([key]) => key !== 'leadership'),
                 ),
                 unavailableComponents: comprehensive.dimensions.sentiment.unavailable_components?.filter(key => key !== 'leadership'),
+                unavailableReasons: Object.fromEntries(
+                  Object.entries(comprehensive.dimensions.sentiment.unavailable_reasons ?? {}).filter(([key]) => key !== 'leadership'),
+                ),
                 label: '板块强度',
               },
               health: {
@@ -1047,6 +1051,7 @@ function LimitBoardAllocationDialog({
                 maxScore: comprehensive.dimensions.health.max_score,
                 fullMaxScore: comprehensive.dimensions.health.full_max_score,
                 unavailableComponents: comprehensive.dimensions.health.unavailable_components,
+                unavailableReasons: comprehensive.dimensions.health.unavailable_reasons,
               },
             }}
             warnings={comprehensive.warnings}

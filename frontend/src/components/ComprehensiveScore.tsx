@@ -36,6 +36,7 @@ interface DimensionScore {
   percentage: number
   components: Record<string, number>
   unavailableComponents?: string[]
+  unavailableReasons?: Record<string, string>
   label: string
 }
 
@@ -119,9 +120,14 @@ function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: Dim
               </div>
             ))}
             {unavailable.map(key => (
-              <div key={key} className="flex items-center justify-between gap-2 text-[9px]">
-                <span className="min-w-0 truncate text-muted">{COMPONENT_LABELS[key] || key}</span>
-                <span className="shrink-0 text-warning">数据不足</span>
+              <div key={key} className="flex items-start justify-between gap-2 text-[9px]">
+                <span className="min-w-0 shrink-0 text-muted">{COMPONENT_LABELS[key] || key}</span>
+                <span
+                  className="min-w-0 flex-1 break-words text-right leading-3 text-warning"
+                  title={dimension.unavailableReasons?.[key] || '数据不足'}
+                >
+                  {dimension.unavailableReasons?.[key] || '数据不足'}
+                </span>
               </div>
             ))}
             {noData ? <div className="text-[9px] text-muted">缺项不计分，等数据返回后自动刷新</div> : null}

@@ -1789,6 +1789,7 @@ export interface LimitBoardRow {
             consecutive_ability?: number
           }
           unavailable_components?: string[]
+          unavailable_reasons?: Record<string, string>
           data_complete?: boolean
           label: string
         }
@@ -1812,6 +1813,7 @@ export interface LimitBoardRow {
             sector_current?: number
           }
           unavailable_components?: string[]
+          unavailable_reasons?: Record<string, string>
           data_complete?: boolean
           label: string
         }
@@ -1828,6 +1830,7 @@ export interface LimitBoardRow {
             daily_k_pattern?: number
           }
           unavailable_components?: string[]
+          unavailable_reasons?: Record<string, string>
           data_complete?: boolean
           label: string
         }
