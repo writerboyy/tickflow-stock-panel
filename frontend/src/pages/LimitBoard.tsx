@@ -39,7 +39,11 @@ import {
   type QmtTradeAllocationMode,
 } from '@/components/QmtTradeAllocation'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
-import { ComprehensiveScore, type ComprehensiveScoreDetails } from '@/components/ComprehensiveScore'
+import {
+  ComprehensiveScore,
+  ComprehensiveScoreSkeleton,
+  type ComprehensiveScoreDetails,
+} from '@/components/ComprehensiveScore'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import {
@@ -1067,7 +1071,7 @@ function LimitBoardAllocationDialog({
             warnings={comprehensive.warnings}
             strengths={comprehensive.strengths}
             details={scoreDetails}
-          /> : <div className="flex h-full min-h-0 flex-col gap-3 py-3">
+          /> : scorePending ? <ComprehensiveScoreSkeleton /> : <div className="flex h-full min-h-0 flex-col gap-3 py-3">
             <div className="rounded-btn border border-warning/30 bg-warning/5 px-3 py-3">
               <div className="text-sm font-semibold text-warning">综合评分暂不可用</div>
               <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>

@@ -1,4 +1,5 @@
 import { AlertTriangle, CheckCircle } from 'lucide-react'
+import { Skeleton } from '@/components/data/Skeleton'
 
 export interface ScoreDetailRow {
   label: string
@@ -140,6 +141,63 @@ function DimensionCard({ dimension, compact, detailRows = [] }: { dimension: Dim
           </div> : null}
         </>
       )}
+    </div>
+  )
+}
+
+function DimensionCardSkeleton({ label, rows }: { label: string; rows: number }) {
+  return (
+    <div className="min-w-0 rounded border border-border bg-surface p-2.5">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <span className="text-[10px] font-medium text-secondary">{label}</span>
+        <Skeleton w="w-16" h="h-3" />
+      </div>
+      <Skeleton h="h-1.5" rounded="rounded-full" />
+      <div className="mt-2 space-y-2 border-t border-border/70 pt-2">
+        {Array.from({ length: rows }, (_, index) => (
+          <div key={index} className="flex items-center justify-between gap-3">
+            <Skeleton w={index % 3 === 0 ? 'w-16' : 'w-12'} h="h-2.5" />
+            <Skeleton w={index % 2 === 0 ? 'w-14' : 'w-20'} h="h-2.5" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+export function ComprehensiveScoreSkeleton() {
+  return (
+    <div className="space-y-3" role="status" aria-label="正在计算综合评分">
+      <div className="rounded-lg border border-border bg-surface p-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] text-muted">综合评分</div>
+            <div className="mt-1 flex items-baseline gap-2">
+              <Skeleton w="w-20" h="h-7" />
+              <Skeleton w="w-10" h="h-3" />
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <Skeleton w="w-8" h="h-7" />
+            <Skeleton w="w-12" h="h-2.5" />
+          </div>
+        </div>
+        <Skeleton h="h-1.5" rounded="rounded-full" className="mt-2" />
+        <div className="mt-2 border-t border-border/50 pt-1.5">
+          <Skeleton w="w-52" h="h-2.5" />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5">
+        <Skeleton w="w-3" h="h-3" rounded="rounded-full" />
+        <Skeleton w="w-24" h="h-2.5" />
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <DimensionCardSkeleton label="历史涨停基因" rows={12} />
+        <DimensionCardSkeleton label="板块强度" rows={16} />
+        <DimensionCardSkeleton label="拉升健康度" rows={7} />
+      </div>
     </div>
   )
 }
