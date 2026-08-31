@@ -391,6 +391,8 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
     qc.invalidateQueries({ queryKey: QK.capabilityMatrix })
     qc.invalidateQueries({ queryKey: QK.capabilities })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
+    qc.invalidateQueries({ queryKey: QK.fuyaoAuctionStatus })
+    qc.invalidateQueries({ queryKey: QK.extData })
   }
 
   const save = useMutation({
@@ -534,6 +536,52 @@ function PluginKeyConfig({ plugin }: { plugin: PluginDataSourceItem }) {
         <div className="mt-3 text-xs text-danger">
           保存失败:{String((save.error as Error).message)}
         </div>
+      )}
+    </div>
+  )
+}
+
+/** 扶摇官方插件附带的集合竞价采集状态 (共用官方 API Key) */
+function FuyaoAuctionStatusSection() {
+  const status = useQuery({
+    queryKey: QK.fuyaoAuctionStatus,
+    queryFn: api.fuyaoAuctionStatus,
+  })
+  const data = status.data
+  const configured = data?.configured ?? false
+
+  return (
+    <div className="mt-5 pt-5 border-t border-border/60">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-medium text-foreground">集合竞价</h3>
+            <span className="text-[9px] uppercase tracking-wider text-muted/50 border border-border rounded px-1.5 py-0.5">辅助数据</span>
+          </div>
+          <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
+            <span className={`h-1.5 w-1.5 rounded-full ${configured ? 'bg-accent' : 'bg-muted/40'}`} />
+            {status.isLoading
+              ? '检查中'
+              : status.isError
+                ? '状态不可用'
+                : configured
+                  ? '已连接 · 自动采集'
+                  : '未连接'}
+          </div>
+        </div>
+      </div>
+      {data && configured && (
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[10px] text-muted font-mono">
+          <span>表 {data.table_id}</span>
+          <span>记录 {data.rows}</span>
+          <span>标的 {data.symbols}</span>
+        </div>
+      )}
+      {!status.isLoading && !status.isError && data && !configured && (
+        <p className="mt-2 text-[10px] text-muted/60">配置官方 API Key 后自动启用集合竞价采集。</p>
+      )}
+      {status.isError && (
+        <p className="mt-2 text-[10px] text-warning/80">集合竞价采集器状态暂时无法读取。</p>
       )}
     </div>
   )
@@ -1056,6 +1104,7 @@ function PluginDetail({ plugin, isActive, matrixCaps, servingSet }: {
               <PluginKeyConfig plugin={plugin} />
             </div>
           )}
+          {plugin.name === 'fuyao' && <FuyaoAuctionStatusSection />}
         </div>
 
         {/* 能力适配表: 全部能力 × 该源适配状态 (样式对齐 TickFlow 能力档位表) */}
