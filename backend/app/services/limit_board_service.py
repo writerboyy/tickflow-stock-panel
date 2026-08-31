@@ -50,6 +50,7 @@ _PREMIUM_FILTER_COLUMNS = {
 }
 _SCORE_REFRESH_SECONDS = 5.0
 _SCORE_DISPLAY_CACHE_SECONDS = 60.0
+_SCORE_ON_DEMAND_WAIT_SECONDS = 15.0
 _SECTOR_CANDIDATE_LIMIT = 15
 _AUTOMATIC_CANDIDATES_PER_SECTOR = 10
 _AUTOMATIC_NEAR_LIMIT_PER_SECTOR = 5
@@ -3696,6 +3697,8 @@ class LimitBoardService:
         runtime: dict[str, Any],
         candidates: list[dict[str, Any]],
         now: datetime,
+        *,
+        wait_for_lock: bool = False,
     ) -> bool:
         symbols = {
             str(item.get("symbol") or "").strip().upper()
@@ -3706,7 +3709,12 @@ class LimitBoardService:
         now_mono = time.monotonic()
         if not missing and now_mono - self._score_refresh_at < _SCORE_REFRESH_SECONDS:
             return False
-        if not self._score_lock.acquire(blocking=False):
+        acquired = (
+            self._score_lock.acquire(timeout=_SCORE_ON_DEMAND_WAIT_SECONDS)
+            if wait_for_lock
+            else self._score_lock.acquire(blocking=False)
+        )
+        if not acquired:
             return False
         try:
             now_mono = time.monotonic()
@@ -4179,7 +4187,9 @@ class LimitBoardService:
                 None,
             )
             scoring = [*scoring, row or {"symbol": cleaned}]
-        self._refresh_candidate_scores(runtime, scoring, cn_now())
+        self._refresh_candidate_scores(
+            runtime, scoring, cn_now(), wait_for_lock=True,
+        )
         entry = (runtime.get("candidate_scores") or {}).get(cleaned) or {}
         return {
             "symbol": cleaned,

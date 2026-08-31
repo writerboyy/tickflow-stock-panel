@@ -745,6 +745,9 @@ function LimitBoardAllocationDialog({
     staleTime: 5_000,
     gcTime: 60_000,
     retry: false,
+    // 撞上后台评分锁时旧接口可能先返回一个没有生成时间的空快照。
+    // 仅对这种临时结果重试；已完成计算但数据不足时不重复请求。
+    refetchInterval: query => query.state.data?.candidate_score_as_of === null ? 1_500 : false,
   })
   // 行上数据（打板池快照）优先于按需端点结果。
   const mergedDetail: LimitBoardRow['candidate_score_detail'] = {
@@ -992,7 +995,13 @@ function LimitBoardAllocationDialog({
   const title = kind === 'buy' ? '确认加入买入池' : kind === 'edit' ? '设置打板交易金额' : '确认加入打板池'
   const comprehensive = mergedDetail.comprehensive
   const scoreDetails = comprehensive ? scoreDetailRows(mergedDetail) : undefined
-  const scoreUnavailableReason = '后端尚未生成 v5 评分快照，等待板块强度、分时或资金数据返回后自动刷新。'
+  const scorePending = candidateScoreQuery.isFetching
+    || candidateScoreQuery.data?.candidate_score_as_of === null
+  const scoreUnavailableReason = scorePending
+    ? '正在读取板块强度、分时和资金数据并计算综合评分。'
+    : candidateScoreQuery.isError
+      ? '综合评分读取失败，请稍后重试。'
+      : '当前数据不足，暂时无法生成综合评分。'
   const allocationOptions: ReadonlyArray<{ value: QmtTradeAllocationMode; label: string }> = [
     { value: 'available', label: poolAllocationLabel('available') },
     { value: 'sixth', label: poolAllocationLabel('sixth') },
@@ -1018,7 +1027,8 @@ function LimitBoardAllocationDialog({
     </div>
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs">
       <div className={kind === 'board' ? 'grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]' : ''}>
-        {kind === 'board' ? <section className="min-w-0 rounded-btn border border-border bg-base p-3">
+        {kind === 'board' ? <section className="h-[min(64vh,680px)] min-h-[480px] min-w-0 overflow-hidden rounded-btn border border-border bg-base p-3">
+          <div className="h-full min-h-0 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
           {comprehensive ? <ComprehensiveScore
             score={comprehensive.comprehensive_score}
             maxScore={comprehensive.max_score}
@@ -1057,17 +1067,17 @@ function LimitBoardAllocationDialog({
             warnings={comprehensive.warnings}
             strengths={comprehensive.strengths}
             details={scoreDetails}
-          /> : <div className="space-y-3 py-3">
+          /> : <div className="flex h-full min-h-0 flex-col gap-3 py-3">
             <div className="rounded-btn border border-warning/30 bg-warning/5 px-3 py-3">
               <div className="text-sm font-semibold text-warning">综合评分暂不可用</div>
               <p className="mt-1 text-[10px] leading-4 text-muted">{scoreUnavailableReason}</p>
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 sm:auto-rows-fr sm:grid-cols-3">
               {(() => {
                 const premiumGene = geneDetail ?? geneData
                 if (!premiumGene) {
                   return (
-                    <div className="rounded-btn border border-border bg-surface p-2.5">
+                    <div className="h-full rounded-btn border border-border bg-surface p-2.5">
                       <div className="text-[10px] text-muted">历史涨停基因</div>
                       <div className="mt-2 font-mono text-sm text-secondary">{premiumGeneQuery.isLoading ? '读取中' : '暂无数据'}</div>
                       <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">
@@ -1081,7 +1091,7 @@ function LimitBoardAllocationDialog({
                 const genePct = geneMax > 0 ? Math.min(100, Math.max(0, (geneScore / geneMax) * 100)) : 0
                 const geneColor = genePct >= 80 ? 'bg-bull' : genePct >= 60 ? 'bg-accent' : 'bg-warning'
                 return (
-                  <div className="rounded border border-border bg-surface p-2.5">
+                  <div className="h-full rounded border border-border bg-surface p-2.5">
                     <div className="mb-1.5 flex items-center justify-between">
                       <span className="min-w-0 truncate text-[10px] font-medium text-secondary">历史涨停基因</span>
                       <span className="shrink-0 font-mono text-xs text-foreground">
@@ -1114,13 +1124,16 @@ function LimitBoardAllocationDialog({
               {[
                 { label: '板块强度', hint: '暂无板块实时数据' },
                 { label: '拉升健康度', hint: '暂无分时/资金数据' },
-              ].map(({ label, hint }) => <div key={label} className="rounded-btn border border-border bg-surface p-2.5">
+              ].map(({ label, hint }) => <div key={label} className="h-full rounded-btn border border-border bg-surface p-2.5">
                 <div className="text-[10px] text-muted">{label}</div>
-                <div className="mt-2 font-mono text-sm text-secondary">待计算</div>
-                <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">{hint}</div>
+                <div className="mt-2 font-mono text-sm text-secondary">{scorePending ? '计算中' : '待计算'}</div>
+                <div className="mt-2 border-t border-border/70 pt-1.5 text-[9px] text-muted">
+                  {scorePending ? '正在读取评分所需数据' : hint}
+                </div>
               </div>)}
             </div>
           </div>}
+          </div>
         </section> : null}
         <section className="min-w-0">
           <div className="mb-3 grid grid-cols-2 gap-3 border-b border-border pb-3">
