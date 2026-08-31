@@ -8,16 +8,54 @@ from functools import lru_cache
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field, model_validator
 
 from app.indicators.pipeline import compute_enriched, compute_enriched_single
-from app.market_time import cn_now, cn_today, in_continuous_session
+from app.market_time import CN_TZ, cn_now, cn_today, in_continuous_session
 from app.price_limits import is_risk_warning_name, price_limit_pct
 from app.db_safe import is_valid_ext_ident
 from app.services import kline_sync
+from app.services.minute_quality import minute_frame_is_canonical
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/kline", tags=["kline"])
+
+MINUTE_TRADING_DAYS_PER_YEAR = 250
+
+
+class EtfDataCheckWrite(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=2_000)
+    start: date
+    end: date
+    require_minute: bool = True
+    persist_scan: bool = True
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.start > self.end:
+            raise ValueError("开始日期不能晚于结束日期")
+        if (self.end - self.start).days > 1_095:
+            raise ValueError("单次最多检查三年数据")
+        return self
+
+
+class EtfDataRepairWrite(BaseModel):
+    scan_id: str = Field(min_length=1, max_length=32)
+    issue_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+def _normalize_minute_sync_request(days: int, extend: object) -> tuple[int, bool]:
+    """归一化手动分钟同步范围。
+
+    历史前端把“一年”发送为 365,而后端的 extend days 语义是交易日,会再次按
+    7/5 放大。兼容旧请求并按约 250 个交易日处理。
+    """
+    normalized = max(1, int(days))
+    extend_backward = bool(extend) or normalized >= 365
+    if normalized == 365:
+        normalized = MINUTE_TRADING_DAYS_PER_YEAR
+    return normalized, extend_backward
 
 
 def _minute_allowed(capset) -> bool:
@@ -599,12 +637,15 @@ def get_minute_batch(request: Request, body: dict):
     # 不落库 (见下方 sync_minute_batch 无 on_segment), 盘中它恒返回上次全量同步日,
     # 用它做判据会导致 trade_date 永久回退到昨天, 再因 expected=240 判定昨日"完整"
     # 而不再补拉今天, 形成永远显示昨日的死循环。
-    # 判据改为: 周末必回退; 工作日收盘后(>=15:30)仍无今日日K → 节假日, 回退。
+    # 判据改为: 周末/工作日开盘前回退; 收盘后(>=15:30)仍无今日日K → 节假日, 回退。
     if not trade_date_str:
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        # 开盘前当天尚未产生分钟K，即使是工作日也必须先展示最近完整交易日。
+        # 盘中不能依赖本地 latest_minute_date_global()，否则实时补拉会被误判为休市。
+        now_cn = cn_now()
+        before_open = (now_cn.hour, now_cn.minute) < (9, 30)
+        need_fallback = today.weekday() >= 5 or before_open  # 周末/盘前回退
         if not need_fallback:
-            now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
             if after_close:
                 latest_daily = repo.latest_daily_date()
@@ -654,15 +695,17 @@ def get_minute_batch(request: Request, body: dict):
             local_parts[part["symbol"][0]] = part.sort("datetime")
     for sym in symbols:
         sub = local_parts.get(sym, pl.DataFrame())
-        if expected > 0 and (sub.is_empty() or len(sub) < expected * 0.9):
+        if sub.is_empty() or not minute_frame_is_canonical(sub) or (
+            expected > 0 and len(sub) < expected * 0.9
+        ):
             incomplete.append(sym)
         elif not sub.is_empty():
             result[sym] = sub.to_dicts()
 
     # Step 2: 缺失的 symbol 批量实时拉取 (不落库)
     if incomplete:
-        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0)
-        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0)
+        start_time = datetime(trade_date.year, trade_date.month, trade_date.day, 9, 25, 0, tzinfo=CN_TZ)
+        end_time = datetime(trade_date.year, trade_date.month, trade_date.day, 15, 5, 0, tzinfo=CN_TZ)
         lim = capset.limits(Cap.KLINE_MINUTE_BATCH)
         # etf_set 已在上方获取, 直接复用 — 按 asset_type 拆分调用 sync_minute_batch
         # (自定义源 / TickFlow 路由均依赖 asset_type 正确传递)
@@ -744,7 +787,16 @@ def get_minute_range(
     minute = minute.with_columns(
         pl.col("datetime").dt.date().alias("_trade_date"),
     )
-    trade_dates = sorted(minute["_trade_date"].unique().to_list())[-days:]
+    canonical_dates = [
+        trade_date
+        for trade_date in sorted(minute["_trade_date"].unique().to_list())
+        if minute_frame_is_canonical(
+            minute.filter(pl.col("_trade_date") == trade_date).drop("_trade_date")
+        )
+    ]
+    trade_dates = canonical_dates[-days:]
+    if not trade_dates:
+        return {**base_response, "sessions": [], "source": "none"}
     previous_closes = _get_previous_closes(repo, symbol, trade_dates, asset_type)
     row_columns = [
         column
@@ -797,11 +849,12 @@ def get_minute(
 
     if trade_date is None:
         # 默认看今天, 而不是本地落盘的最近日 (盘中后者是昨天)。
-        # 非交易日(周末/节假日)才回退到本地最近有数据的交易日。
+        # 非交易日或开盘前回退到本地最近有数据的交易日。
         today = cn_today()
-        need_fallback = today.weekday() >= 5  # 周六/周日必非交易日
+        now_cn = cn_now()
+        before_open = (now_cn.hour, now_cn.minute) < (9, 30)
+        need_fallback = today.weekday() >= 5 or before_open  # 周末/盘前回退
         if not need_fallback:
-            now_cn = cn_now()
             after_close = now_cn.hour > 15 or (now_cn.hour == 15 and now_cn.minute >= 30)
             if after_close:
                 latest_daily = repo.latest_daily_date()
@@ -870,6 +923,9 @@ def get_minute(
         else:
             expected = 240
 
+    # 保持详情接口的 custom 本地优先契约: 行数足够即直接返回本地帧。
+    # 完整 schema/时钟校验在分钟同步落盘和 minute-range 聚合边界执行，避免
+    # 旧版插件或轻量 repository 返回的兼容帧被误判为缺失而触发实时请求。
     is_complete = not df.is_empty() and len(df) >= expected * 0.9  # 允许 10% 容差
 
     if is_complete:
@@ -931,14 +987,14 @@ def refresh_views(request: Request):
 async def sync_minute(request: Request):
     """手动触发分钟 K 同步(全市场)。返回 pipeline job_id 可轮询进度。
 
-    body 可选: { "days": int } — 指定拉取天数 (不传则用偏好设置)。
+    body 可选: { "days": int, "extend": bool, "latest_year": bool,
+    "asset_type": "stock" | "etf" }。
     """
     import asyncio
 
     from app.services.pipeline_jobs import JobCancelledError, job_store, release_run_slot, try_acquire_run_slot
     from app.api.data import invalidate_storage_cache
     from app.services.preferences import get_minute_sync_days
-    from app.tickflow.capabilities import Cap
     from app.tickflow.pools import get_pool
 
     repo = request.app.state.repo
@@ -947,8 +1003,8 @@ async def sync_minute(request: Request):
     if not _minute_allowed(capset):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
-    # 可选 body: { "days": int, "extend": bool }
-    # days: 拉取天数; extend: 向前扩展模式 (从最早数据往前补)
+    # days: 拉取天数; extend: 从最早数据往前补;
+    # latest_year: 按最新交易日回溯一年并补齐整个窗口。
     body = {}
     try:
         body = await request.json()
@@ -956,6 +1012,10 @@ async def sync_minute(request: Request):
         pass
     override_days = body.get("days")
     extend_flag = body.get("extend")
+    latest_year = bool(body.get("latest_year"))
+    asset_type = str(body.get("asset_type", "stock")).lower()
+    if asset_type not in ("stock", "etf"):
+        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
 
     # 分钟K全市场同步是长任务(数据量是日K的 ~240 倍),用更宽松的卡死阈值
     job_id, is_new = job_store.create(long_running=True)
@@ -973,46 +1033,70 @@ async def sync_minute(request: Request):
 
         try:
             job_store.start(job_id)
-            progress("sync_minute", 5, "解析标的池…")
-            universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
-            # 补充 instruments 全量标的，覆盖北交所、新股等
-            inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
-            if inst_path.exists():
-                try:
-                    import polars as pl
-                    inst = pl.read_parquet(inst_path, columns=["symbol"])
-                    universe = sorted(set(universe) | set(inst["symbol"].to_list()))
-                except Exception:  # noqa: BLE001
-                    pass
-            # 剔除指数 symbol: 指数分钟K无本地存储, 落库会污染 kline_minute
-            index_set = repo.get_index_symbol_set()
-            universe = [s for s in universe if s not in index_set]
-            progress("sync_minute", 10, f"标的池 {len(universe)} 只")
+            stage = "sync_etf_minute" if asset_type == "etf" else "sync_minute"
+            label = "ETF分钟K" if asset_type == "etf" else "分钟K"
+            progress(stage, 5, "解析标的池…")
+            if asset_type == "etf":
+                etf_instruments = repo.get_etf_instruments()
+                universe = (
+                    sorted({str(symbol) for symbol in etf_instruments["symbol"].to_list() if symbol})
+                    if not etf_instruments.is_empty() and "symbol" in etf_instruments.columns
+                    else []
+                )
+                if not universe:
+                    job_store.fail(job_id, "没有可同步的 ETF 标的，请先同步 ETF 基础数据")
+                    return
+            else:
+                universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
+                # 补充 instruments 全量标的，覆盖北交所、新股等
+                inst_path = repo.store.data_dir / "instruments" / "instruments.parquet"
+                if inst_path.exists():
+                    try:
+                        import polars as pl
+                        inst = pl.read_parquet(inst_path, columns=["symbol"])
+                        universe = sorted(set(universe) | set(inst["symbol"].to_list()))
+                    except Exception:  # noqa: BLE001
+                        pass
+                # 指数分钟K无本地存储，不能写入股票分钟表。
+                index_set = repo.get_index_symbol_set()
+                universe = [symbol for symbol in universe if symbol not in index_set]
+            progress(stage, 10, f"标的池 {len(universe)} 只")
 
-            days = override_days if override_days else get_minute_sync_days()
-            # extend=1 → 向前扩展; days>=365 也自动向前扩展
-            extend_backward = bool(extend_flag) or days >= 365
+            requested_days = override_days if override_days else get_minute_sync_days()
+            days, extend_backward = _normalize_minute_sync_request(
+                requested_days,
+                extend_flag,
+            )
 
             def _on_chunk(done: int, total: int, seg_label: str) -> None:
                 # 进度映射: 10% (标的池解析完) → 95%, 留 5% 给写入+刷新
                 pct = 10 + int((done / max(total, 1)) * 85)
-                progress("sync_minute", pct, f"拉取分钟K… {done}/{total} 批 [{seg_label}]")
+                progress(stage, pct, f"拉取{label}… {done}/{total} 批 [{seg_label}]")
 
             def _run():
                 return kline_sync.sync_and_persist_minute(
                     universe, repo, capset, days=days,
                     extend_backward=extend_backward,
                     on_chunk_done=_on_chunk,
+                    should_cancel=lambda: not job_store.is_active(job_id),
+                    latest_year=latest_year,
+                    asset_type=asset_type,
                 )
 
             written = await loop.run_in_executor(_long_task_executor, _run)
+            if not job_store.is_active(job_id):
+                return
 
             # 刷新视图
             from app.jobs.daily_pipeline import _refresh_single_view
-            _refresh_single_view(repo, "kline_minute")
+            _refresh_single_view(repo, "kline_etf_minute" if asset_type == "etf" else "kline_minute")
 
-            progress("done", 100, f"分钟 K 同步完成,{written} 行")
-            job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
+            progress("done", 100, f"{label}同步完成,{written} 行")
+            job_store.succeed(job_id, {
+                "minute_rows": written,
+                "universe_size": len(universe),
+                "asset_type": asset_type,
+            })
             invalidate_storage_cache()
         except JobCancelledError:
             # 已由 terminate() 标记失败, 拉取线程在分块回调处自行退出
@@ -1029,9 +1113,9 @@ async def sync_minute(request: Request):
 
 @router.post("/sync_minute_single")
 async def sync_minute_single(request: Request, body: dict):
-    """手动拉取单只股票的分钟K并落库 (前复权)。
+    """手动拉取单只股票或 ETF 的分钟K并落库 (前复权)。
 
-    body: { "symbol": "000001.SZ" }
+    body: { "symbol": "000001.SZ", "asset_type": "stock" | "etf" }
     用于个股分时图"获取数据"按钮: 本地无数据时单独拉取并持久化。
     """
     import asyncio
@@ -1041,6 +1125,9 @@ async def sync_minute_single(request: Request, body: dict):
     symbol = body.get("symbol", "").strip()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol 不能为空")
+    asset_type = str(body.get("asset_type", "stock")).lower()
+    if asset_type not in ("stock", "etf"):
+        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
 
     requested_days = body.get("days")
     if requested_days is not None:
@@ -1070,26 +1157,30 @@ async def sync_minute_single(request: Request, body: dict):
 
     # 刷新视图
     from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, "kline_minute")
+    _refresh_single_view(repo, "kline_etf_minute" if asset_type == "etf" else "kline_minute")
 
-    return {"status": "ok", "symbol": symbol, "rows": written}
+    return {"status": "ok", "symbol": symbol, "rows": written, "asset_type": asset_type}
 
 
 @router.post("/clear_minute")
 async def clear_minute(request: Request):
-    """清空全部分钟K数据 (仅 kline_minute, 不影响其他数据)。
+    """清空指定资产的分钟K数据，不影响其他数据。
 
-    删除 data/kline_minute/ 下所有分区 parquet, 刷新视图。
-    需二次确认: body { "confirm": true }。
+    删除相应分钟K目录下所有分区 parquet, 刷新视图。
+    需二次确认: body { "confirm": true, "asset_type": "stock" | "etf" }。
     """
     import shutil
 
     body = await request.json() if request.method == "POST" else {}
     if not body.get("confirm"):
         raise HTTPException(status_code=400, detail="需传 confirm: true 以确认清空")
+    asset_type = str(body.get("asset_type", "stock")).lower()
+    if asset_type not in ("stock", "etf"):
+        raise HTTPException(status_code=400, detail="asset_type 只支持 stock 或 etf")
 
     repo = request.app.state.repo
-    minute_dir = repo.store.data_dir / "kline_minute"
+    minute_table = "kline_etf_minute" if asset_type == "etf" else "kline_minute"
+    minute_dir = repo.store.data_dir / minute_table
 
     # 统计待删除行数 (用于返回)
     removed = 0
@@ -1097,22 +1188,22 @@ async def clear_minute(request: Request):
         try:
             # execute_one (cursor+close): 直连 db.execute 的未消费结果集会在 Windows 上
             # 钉住分区句柄, 导致下方 rmtree 静默删不掉被钉文件
-            result = repo.execute_one("SELECT COUNT(*) AS cnt FROM kline_minute")
+            result = repo.execute_one(f"SELECT COUNT(*) AS cnt FROM {minute_table}")
             removed = result[0] if result else 0
         except Exception:
             pass
-        # 仅删 kline_minute 目录, 绝不触碰其他目录
+        # 仅删对应分钟K目录, 绝不触碰其他目录
         shutil.rmtree(minute_dir, ignore_errors=True)
 
     # 刷新视图 (重建空视图)
     from app.jobs.daily_pipeline import _refresh_single_view
-    _refresh_single_view(repo, "kline_minute")
+    _refresh_single_view(repo, minute_table)
 
     from app.api.data import invalidate_storage_cache
     invalidate_storage_cache()
 
-    logger.info("minute K cleared: %d rows removed", removed)
-    return {"status": "ok", "removed": removed}
+    logger.info("%s minute K cleared: %d rows removed", asset_type, removed)
+    return {"status": "ok", "removed": removed, "asset_type": asset_type}
 
 
 @router.post("/extend_history")
@@ -1276,6 +1367,114 @@ async def repair_daily(request: Request):
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@router.post("/etf-data/check")
+async def check_etf_backtest_data(req: EtfDataCheckWrite, request: Request):
+    """Read-only ETF daily/minute/factor inspection."""
+    import asyncio
+
+    from app.services.etf_data_repair import inspect_etf_data
+
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _long_task_executor,
+            lambda: inspect_etf_data(
+                request.app.state.repo,
+                req.symbols,
+                req.start,
+                req.end,
+                require_minute=req.require_minute,
+                persist_scan=req.persist_scan,
+            ),
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/etf-data/repairs")
+def etf_data_repair_history(request: Request, limit: int = Query(30, ge=1, le=100)):
+    from app.services.etf_data_repair import list_repair_records
+
+    return {"records": list_repair_records(request.app.state.repo.store.data_dir, limit)}
+
+
+@router.post("/etf-data/repair")
+async def repair_etf_backtest_data(req: EtfDataRepairWrite, request: Request):
+    """Repair persisted ETF minute gaps through the configured data source."""
+    import asyncio
+
+    from app.api.data import invalidate_storage_cache
+    from app.services.etf_data_repair import repair_etf_data, validate_repair_request
+    from app.services.pipeline_jobs import (
+        LONG_JOB_TIMEOUT_S,
+        job_store,
+        release_run_slot,
+        try_acquire_run_slot,
+    )
+
+    repo = request.app.state.repo
+    if not _minute_allowed(request.app.state.capabilities):
+        raise HTTPException(status_code=403, detail="当前数据源不支持分钟K补齐")
+    try:
+        validate_repair_request(
+            repo.store.data_dir,
+            req.scan_id,
+            req.issue_ids,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job_id, is_new = job_store.create(timeout_s=LONG_JOB_TIMEOUT_S)
+    if not is_new:
+        return {"status": "reused", "job_id": job_id}
+
+    async def task() -> None:
+        if not try_acquire_run_slot():
+            job_store.fail(job_id, "已有数据任务在运行，请稍后再试")
+            return
+        loop = asyncio.get_event_loop()
+        quote_service = getattr(request.app.state, "quote_service", None)
+
+        def progress(done: int, total: int, message: str) -> None:
+            pct = 10 + int(done / max(total, 1) * 80)
+            job_store.progress(job_id, "repair_etf_data", pct, message)
+
+        def run_repair():
+            operation = lambda: repair_etf_data(
+                repo,
+                req.scan_id,
+                req.issue_ids,
+                on_progress=progress,
+                should_cancel=lambda: not job_store.is_active(job_id),
+            )
+            if quote_service:
+                with quote_service.paused():
+                    return operation()
+            return operation()
+
+        try:
+            job_store.start(job_id)
+            job_store.progress(job_id, "repair_etf_data", 5, "正在连接当前分钟数据源")
+            result = await loop.run_in_executor(_long_task_executor, run_repair)
+            from app.jobs.daily_pipeline import _refresh_single_view
+
+            _refresh_single_view(repo, "kline_etf_minute")
+            repo.refresh_cache()
+            job_store.succeed(job_id, {**result, "repair_type": "etf_data"})
+            invalidate_storage_cache()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ETF data repair failed: job_id=%s", job_id)
+            job_store.fail(job_id, str(exc))
+            invalidate_storage_cache()
+        finally:
+            release_run_slot()
+
+    asyncio.create_task(task())
+    return {"status": "started", "job_id": job_id}
+
+
 @router.post("/rebuild_enriched")
 async def rebuild_enriched(request: Request):
     """全量重算 enriched 表 — 不获取任何数据,仅基于已有 kline_daily + adj_factor 重算复权+指标。
@@ -1320,6 +1519,14 @@ async def rebuild_enriched(request: Request):
                     lambda: run_pipeline(on_batch_done=_batch_progress),
                 )
 
+                progress("rebuild_valuation", 96, "重建日度估值…")
+                from app.services.daily_valuation import build_daily_valuation
+
+                valuation = await loop.run_in_executor(
+                    _long_task_executor,
+                    lambda: build_daily_valuation(repo.store.data_dir),
+                )
+
                 enriched_dir = repo.store.data_dir / "kline_daily_enriched"
                 enriched_days = len(list(enriched_dir.glob("date=*"))) if enriched_dir.exists() else 0
 
@@ -1327,6 +1534,7 @@ async def rebuild_enriched(request: Request):
                 d = repo.store.data_dir.as_posix()
                 for view_name, glob in [
                     ("kline_enriched", f"{d}/kline_daily_enriched/**/*.parquet"),
+                    ("valuation_daily", f"{d}/valuation_daily/**/*.parquet"),
                 ]:
                     try:
                         repo.db.execute(
@@ -1340,6 +1548,7 @@ async def rebuild_enriched(request: Request):
                 job_store.succeed(job_id, {
                     "enriched_days": enriched_days,
                     "enriched_rows": written,
+                    "valuation_rows": valuation["rows"],
                 })
                 invalidate_storage_cache()
             except JobCancelledError:

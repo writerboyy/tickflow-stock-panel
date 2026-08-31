@@ -18,14 +18,15 @@ from datetime import time as dtime
 import polars as pl
 
 from app.data_providers.base import AssetType
-from app.data_providers.normalizer import normalize_adj_factors, normalize_daily
+from app.data_providers.normalizer import normalize_daily
 from app.plugins.stocksdk import bridge
 from app.tickflow.rate_limits import chunked
 
 logger = logging.getLogger(__name__)
 
-# stock-sdk 支持的数据集(financial 不支持 → 不声明, 自动回退 tickflow)
-_DATASETS = ("daily", "adj_factor", "minute", "realtime")
+# stock-sdk 的 qfq/hfq 日线可用于只读校验，但无法无损还原系统要求的
+# “单次除权事件倍率”，因此不对 provider 声明 adj_factor 能力。
+_DATASETS = ("daily", "minute", "realtime")
 
 # 每次桥接调用的符号数。桥接内部按 concurrency 并发, 分批仅为进度反馈与超时控制。
 _BATCH = 40
@@ -93,42 +94,6 @@ class StockSDKProvider:
                 if not rows:
                     continue
                 df = normalize_daily(rows, default_symbol=sym, source=self.name)
-                if not df.is_empty():
-                    frames.append(df)
-            if on_chunk_done:
-                on_chunk_done(i + 1, len(chunks))
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
-
-    # ---- adj_factor ----
-    def get_adj_factors(
-        self,
-        symbols: list[str],
-        start_time: datetime | None,
-        end_time: datetime | None,
-        asset_type: str = "stock",  # noqa: ARG002
-        on_chunk_done=None,
-    ) -> pl.DataFrame:
-        if not symbols:
-            return pl.DataFrame()
-        frames: list[pl.DataFrame] = []
-        chunks = chunked(symbols, _BATCH)
-        for i, chunk in enumerate(chunks):
-            job = {
-                "op": "adj",
-                "symbols": chunk,
-                "start": _yyyymmdd(start_time),
-                "end": _yyyymmdd(end_time),
-            }
-            try:
-                result = bridge.run_job(job, timeout=240)
-            except bridge.StockSDKBridgeError as e:
-                logger.warning("stock-sdk adj 拉取失败(%d symbols): %s", len(chunk), e)
-                result = {"rows": {}}
-            flat: list[dict] = []
-            for rows in (result.get("rows") or {}).values():
-                flat.extend(rows or [])
-            if flat:
-                df = normalize_adj_factors(flat, source=self.name)
                 if not df.is_empty():
                     frames.append(df)
             if on_chunk_done:
@@ -264,6 +229,33 @@ class StockSDKProvider:
             if col in df.columns:
                 df = df.with_columns(pl.col(col).cast(pl.Float64, strict=False))
         df = StockSDKProvider._null_degenerate_opens(df)
+        price_columns = {"high", "low", "close"}
+        if price_columns.issubset(df.columns):
+            before = df.height
+            valid = pl.all_horizontal(
+                pl.col(column).is_not_null()
+                & pl.col(column).is_finite()
+                & (pl.col(column) > 0)
+                for column in sorted(price_columns)
+            )
+            if "open" in df.columns:
+                valid &= (
+                    pl.col("open").is_null()
+                    | (
+                        pl.col("open").is_finite()
+                        & (pl.col("open") > 0)
+                        & (pl.col("high") >= pl.col("open"))
+                        & (pl.col("low") <= pl.col("open"))
+                    )
+                )
+            valid &= (pl.col("high") >= pl.col("close")) & (pl.col("low") <= pl.col("close"))
+            df = df.filter(valid)
+            if df.height != before:
+                logger.warning(
+                    "stock-sdk minute 拒绝 %s 的 %d 条非法 OHLC",
+                    symbol,
+                    before - df.height,
+                )
         keep = [c for c in _MINUTE_CANONICAL if c in df.columns]
         return df.select(keep) if "datetime" in keep else pl.DataFrame()
 
@@ -299,9 +291,6 @@ class StockSDKProvider:
         if dataset == "daily":
             df = self.get_daily(symbols, None, None)
             return _preview("daily", df)
-        if dataset == "adj_factor":
-            df = self.get_adj_factors(symbols, None, None)
-            return _preview("adj_factor", df)
         if dataset == "minute":
             df = self.get_minute(symbols, None, None)
             return _preview("minute", df)

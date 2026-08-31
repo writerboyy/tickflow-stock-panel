@@ -91,6 +91,24 @@ def get_realtime_quote_interval() -> float:
     return load().get("realtime_quote_interval", 6.0)
 
 
+def get_realtime_watchlist_symbols() -> list[str]:
+    """Free 档自选实时监控标的:直接取自选页前 5 个。"""
+    try:
+        from app.services import watchlist
+        rows = watchlist.list_symbols()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load watchlist for realtime failed: %s", e)
+        return []
+    out: list[str] = []
+    for row in rows:
+        symbol = str((row or {}).get("symbol") or "").strip().upper()
+        if symbol and symbol not in out:
+            out.append(symbol)
+        if len(out) >= 5:
+            break
+    return out
+
+
 def set_realtime_quote_interval(interval: float) -> float:
     """保存行情轮询间隔（不在此做 min/max 校验，由调用方按档位限制）。"""
     current = load()
@@ -542,6 +560,11 @@ def get_limit_ladder_monitor_enabled() -> bool:
 def get_depth_polling_interval() -> float:
     """depth 盘中轮询间隔(秒)。默认 10(Pro/Expert 都适用)。"""
     return float(load().get("depth_polling_interval", 10.0))
+
+
+def get_kaipanla_raw_archive_compression() -> bool:
+    """开盘啦原始响应归档是否 gzip 压缩。默认压缩, 不删除历史文件。"""
+    return bool(load().get("kaipanla_raw_archive_compression", True))
 
 
 def set_depth_polling_interval(interval: float) -> float:
@@ -1156,6 +1179,7 @@ def set_financial_sync_time(table: str, iso_ts: str) -> None:
 
 
 # ===== QMT 交易快捷金额预设 =====
+# 交易面板中快捷金额按钮的 4 个档位,用户可编辑,重启后仍保留。
 
 _QMT_QUICK_AMOUNT_PRESETS_DEFAULT = [10_000, 20_000, 30_000, 40_000]
 _QMT_QUICK_AMOUNT_MIN = 100
@@ -1172,11 +1196,11 @@ def _normalize_quick_amount(value, index: int) -> int:
 
 
 def get_qmt_quick_amount_presets() -> list[int]:
-    """返回 QMT 交易快捷金额预设，长度固定为 4。"""
+    """返回 QMT 交易快捷金额预设,长度固定为 4。"""
     raw = load().get("qmt_quick_amount_presets")
     if not isinstance(raw, list):
         return list(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT)
-    cleaned = [_normalize_quick_amount(value, index) for index, value in enumerate(raw[:4])]
+    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(raw[:4])]
     while len(cleaned) < 4:
         cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
     return cleaned
@@ -1184,7 +1208,7 @@ def get_qmt_quick_amount_presets() -> list[int]:
 
 def set_qmt_quick_amount_presets(presets: list) -> list[int]:
     """保存并返回规范后的 QMT 交易快捷金额预设。"""
-    cleaned = [_normalize_quick_amount(value, index) for index, value in enumerate(presets[:4])]
+    cleaned = [_normalize_quick_amount(v, i) for i, v in enumerate(presets[:4])]
     while len(cleaned) < 4:
         cleaned.append(_QMT_QUICK_AMOUNT_PRESETS_DEFAULT[len(cleaned)])
     save({"qmt_quick_amount_presets": cleaned})

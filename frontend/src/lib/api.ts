@@ -177,6 +177,39 @@ export interface StockLevels {
   series?: LevelSeries
 }
 
+export interface PremiumGene {
+  available: boolean
+  symbol: string
+  as_of: string | null
+  window_days: number
+  score?: number
+  max_score?: number
+  passed?: boolean
+  components?: {
+    limit_frequency?: number
+    next_day_red?: number
+    first_board_broken?: number
+  }
+  criteria?: {
+    limit_up_count?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+    next_day_red_rate?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+    first_board_broken_rate?: { value: number; threshold: number; operator: '<='; passed: boolean; score: number; max_score: number }
+  }
+  limit_up_count?: number
+  premium_5_count?: number
+  premium_5_rate?: number
+  next_day_observation_count?: number
+  next_day_red_count?: number
+  next_day_red_rate?: number
+  first_board_attempt_count?: number
+  first_board_sealed_count?: number
+  first_board_broken_count?: number
+  first_board_seal_rate?: number
+  first_board_broken_rate?: number
+  consecutive_limit_up_count?: number
+  consecutive_rate?: number
+}
+
 export interface AiStockReport {
   id: string
   symbol: string
@@ -311,7 +344,211 @@ export interface IndexQuote {
   volume?: number | null
   amount?: number | null
   timestamp?: number | null
+  source?: string | null
   [key: string]: any
+}
+
+export interface LargeOrderStatus {
+  enabled: boolean
+  running: boolean
+  data_source: 'kaipanla' | 'proxy_only' | string
+  mode: 'live' | 'stale' | string
+  stale: boolean
+  coverage_count: number
+  candidate_count: number
+  precise_count: number
+  net_flow_count?: number
+  filtered_near_limit_count: number
+  unassessable_count: number
+  last_updated_ms: number | null
+  last_calculation_ms?: number
+  last_error?: string | null
+  market_phase?: string | null
+  is_trading_hours?: boolean
+  config_version?: string
+  deep_dive_symbol_limit?: number
+  deep_dive_request_count?: number
+  storage?: {
+    enabled: boolean
+    queued_rows: number
+    written_rows: number
+    dropped_rows: number
+    invalid_rows: number
+    last_flush_ms: number | null
+    last_error: string | null
+    storage_root: string | null
+  }
+}
+
+export interface LargeOrderRow {
+  symbol: string
+  name: string
+  score: number
+  confidence: 'high' | 'medium' | 'low' | string
+  source: 'kaipanla' | 'kaipanla_net_flow' | 'tick_proxy' | string
+  data_quality: 'precise' | 'net_flow' | 'proxy_only' | string
+  active_buy_amount: number
+  active_sell_amount: number
+  net_buy_amount: number
+  buy_ratio: number
+  max_order_amount: number
+  cancel_rate: number
+  intent_count?: number
+  change_pct: number | null
+  limit_up_price: number | null
+  limit_up_gap_pct: number | null
+  last_seen_ts: number | null
+  freshness_ms: number
+  large_threshold: number
+  zscore: number
+  ofi?: number
+  book_imbalance?: number
+  net_flow_amount?: number | null
+  net_flow_delta?: number | null
+  net_flow_speed?: number | null
+  net_flow_direction?: 'rising' | 'falling' | 'flat' | string
+  net_flow_as_of?: string | null
+  net_flow_window_minutes?: number | null
+  explanation: string
+  windows?: Record<string, {
+    amount: number
+    buy: number
+    sell: number
+    net: number
+    buy_ratio: number
+    zscore: number
+    threshold: number
+    max_order: number
+  }>
+}
+
+export interface LargeOrderTape {
+  symbol: string
+  name?: string
+  source: string
+  last_deep_ms?: number | null
+  error?: string | null
+  trades: Array<Record<string, any>>
+  intents: Array<Record<string, any>>
+  net_flow: Array<Record<string, any>>
+  timeline: Array<{ ts: number; amount: number; buy: number; sell: number; price: number }>
+}
+
+export interface OrderBookSnapshot {
+  symbol: string
+  bid_prices: number[]
+  bid_volumes: number[]
+  ask_prices: number[]
+  ask_volumes: number[]
+  book_imbalance: number
+  ofi: number
+  fetched_at_ms: number
+  freshness_ms: number
+}
+
+export interface LargeOrderAnalysis {
+  symbol: string
+  name: string
+  ranking: LargeOrderRow | null
+  orderbook: OrderBookSnapshot | null
+  orderbook_history: Array<OrderBookSnapshot & { event_ts_ms: number; trade_date: string }>
+  tape: LargeOrderTape
+  evidence: { proxy: boolean; execution: boolean; intent: boolean; orderbook: boolean }
+  degraded_reason: string | null
+}
+
+export type LargeOrderHistoryKind = 'proxy_flow' | 'kaipanla_trade' | 'kaipanla_intent' | 'orderbook_snapshot'
+export type LargeOrderEvidenceMode = 'combined' | 'execution' | 'intent'
+
+export interface LargeOrderHistoryEvent {
+  trade_date: string
+  event_ts_ms: number
+  symbol: string
+  name: string
+  price: number | null
+  amount: number | null
+  volume: number | null
+  source: string
+  event_id: string
+  received_at_ms: number | null
+  schema_version?: string
+  parser_version?: string
+  event_kind: LargeOrderHistoryKind
+  delta_amount?: number | null
+  delta_volume?: number | null
+  buy_amount?: number | null
+  sell_amount?: number | null
+  side?: number | string | null
+  direction?: string | null
+  direction_code?: number | null
+  event_time?: string | null
+  order_id?: string | null
+  limit_flag?: boolean | null
+  limit_flag_code?: number | null
+  cancel_flag?: boolean | null
+  cancel_flag_code?: number | null
+  raw_tail?: string | null
+  bid_prices?: number[] | null
+  bid_volumes?: number[] | null
+  ask_prices?: number[] | null
+  ask_volumes?: number[] | null
+  book_imbalance?: number | null
+  ofi?: number | null
+  freshness_ms?: number | null
+  target_kind?: string | null
+}
+
+export interface LargeOrderHistoryResponse {
+  rows: LargeOrderHistoryEvent[]
+  count: number
+  has_more: boolean
+  next_cursor: string | null
+  truncated: boolean
+  kind: LargeOrderHistoryKind | null
+  kinds: LargeOrderHistoryKind[]
+  mode: LargeOrderEvidenceMode
+  date: string
+}
+
+export type LargeOrderReconciliationStatus = 'matched' | 'proxy_only' | 'precise_only' | 'intent_only' | 'reference_missing'
+
+export interface LargeOrderReconciliationRow {
+  symbol: string
+  name: string
+  bucket_start_ms: number
+  proxy_buy_amount: number
+  proxy_sell_amount: number
+  proxy_net_amount: number
+  proxy_event_count: number
+  precise_buy_amount: number
+  precise_sell_amount: number
+  precise_net_amount: number
+  precise_event_count: number
+  intent_count: number
+  cancel_count: number
+  cancel_rate: number
+  precise_coverage: number | null
+  net_difference: number
+  main_net_amount_over_300k: number | null
+  status: LargeOrderReconciliationStatus
+}
+
+export interface LargeOrderReconciliationSummary {
+  proxy_net_amount: number
+  precise_net_amount: number
+  net_difference: number
+  matched_buckets: number
+  precise_coverage: number
+  daily_reference_net: number | null
+  reference_status: 'available' | 'reference_missing' | string
+}
+
+export interface LargeOrderReconciliationResponse {
+  rows: LargeOrderReconciliationRow[]
+  count: number
+  truncated: boolean
+  date: string
+  summary: LargeOrderReconciliationSummary
 }
 
 // ===== Screener =====
@@ -935,8 +1172,1013 @@ export interface MonitorRuleOptions {
   sector_targets: Record<SectorKind, SectorMonitorTarget[]>
 }
 
+// ===== Position Risk (持仓风控) =====
+export type PositionRiskStatus = 'idle' | 'websocket' | 'polling_degraded' | 'reconnecting' | 'data_unavailable'
+
+export interface PositionRiskEvent {
+  ts: number
+  fingerprint?: string
+  first_ts?: number
+  last_ts?: number
+  occurrence_count?: number
+  source: 'position_risk' | string
+  type: string
+  rule_id?: string
+  rule_name?: string
+  symbol?: string
+  name?: string | null
+  message: string
+  price?: number | null
+  severity?: string
+  action_pct?: number
+  trade_action?: 'BUY' | 'SELL' | string | null
+  context_state?: 'supportive' | 'neutral' | 'weakening' | 'divergent' | 'unavailable' | string | null
+  emotion_phase?: string | null
+  action_eligible?: boolean
+  stage?: string | null
+  risk_stage?: string | null
+  initial_r?: number | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
+  holding_day?: number | null
+  auto_order_status?: string | null
+  auto_order_idempotency_key?: string | null
+  auto_order_error?: string | null
+  feature_snapshot_at?: string | null
+  timeline_origin?: 'position_risk' | 'monitor_rule' | string
+  triggered_rules?: string[]
+  priority?: number
+  bundle_id?: string
+  blocked_reason?: string | null
+  exit_evidence?: string[]
+  manual_confirmation?: boolean
+}
+export interface PositionRiskPosition {
+  symbol: string
+  name: string
+  asset_type: 'stock' | 'etf'
+  quantity: number
+  available: number
+  cost_price: number
+  import_price: number | null
+  price_source: string | null
+  entry_date?: string | null
+  opened_at?: string | null
+  holding_day?: number | null
+  risk_stage?: string | null
+  initial_r?: number | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
+  price: number | null
+  market_value: number | null
+  profit_loss: number | null
+  profit_loss_pct: number | null
+  weight: number | null
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  latest_signal: string | null
+  data_status: 'ready' | 'insufficient'
+}
+
+export interface PositionRiskPortfolio {
+  schema_version: number
+  revision: number
+  account: {
+    name: string
+    cash: number | null
+    total_asset: number | null
+    previous_close_total_asset: number | null
+    high_watermark: number | null
+  }
+  positions: PositionRiskPosition[]
+  overrides: Record<string, Record<string, any>>
+  imported_at: string | null
+  updated_at: string | null
+  runtime: {
+    status: PositionRiskStatus
+    reason: string
+    last_processed_at: string | null
+  }
+}
+
+export interface QmtStatus {
+  configured: boolean
+  trade_authorized: boolean
+  trade_enabled: boolean
+  account_id: string | null
+  account_type: string
+  connection_mode: 'remote' | 'local'
+  remote_rpc_address?: string | null
+  local_rpc_address?: string | null
+  remote_configured?: boolean
+  local_configured?: boolean
+  auto_sync_enabled: boolean
+  auto_sync_running: boolean
+  auto_sync_interval_seconds: number
+  last_probe_at: string | null
+  last_sync_at: string | null
+  account_age_ms?: number | null
+  account_stale?: boolean
+  state: 'not_configured' | 'unknown' | 'ready' | 'error'
+  reason: string
+  latency_ms?: number
+  account?: {
+    cash?: number | null
+    total_asset?: number | null
+    market_value?: number | null
+    account_type?: string | null
+    assure_enbuy_balance?: number | null
+    credit_assure_buying_power?: number | null
+    fin_enbuy_balance?: number | null
+    credit_financing_buying_power?: number | null
+    fin_enable_balance?: number | null
+    fin_enable_quota?: number | null
+    financing_available_amount?: number | null
+    [key: string]: number | string | null | undefined
+  } | null
+}
+
+export interface QmtOrder {
+  idempotency_key?: string
+  action?: 'BUY' | 'SELL' | string
+  symbol?: string
+  stock_code?: string
+  volume?: number
+  price?: number
+  price_type?: string
+  credit_buy_mode?: QmtCreditBuyMode | null
+  status?: string
+  order_sys_id?: string | null
+  user_order_id?: string | null
+  created_at?: string
+  updated_at?: string
+  [key: string]: any
+}
+
+export type QmtCreditBuyMode = 'collateral' | 'financing'
+
+export interface QmtOrderPreview {
+  action: 'BUY' | 'SELL' | string
+  symbol: string
+  price: number
+  price_type: string
+  credit_buy_mode?: QmtCreditBuyMode | null
+  requested_credit_buy_mode?: QmtCreditBuyMode | null
+  credit_buy_mode_switched?: boolean
+  credit_buy_mode_reason?: string | null
+  allocation_mode: string
+  allocation_value: number | null
+  basis_label: string
+  basis_amount: number
+  cash_amount?: number | null
+  financing_available_amount?: number | null
+  financing_buying_power_amount?: number | null
+  credit_opvolume?: {
+    status?: 'ready' | 'pending' | 'unavailable' | 'error' | string
+    stock_code?: string | null
+    max_volume?: number | null
+    max_amount?: number | null
+    ret?: number | null
+  } | null
+  buying_power_amount?: number | null
+  target_amount: number
+  actual_amount: number
+  volume: number
+  available_volume: number | null
+  capped: boolean
+  reason: string | null
+}
+
+export interface PositionRiskOcrRow {
+  code: string
+  symbol: string | null
+  name: string | null
+  entry_date?: string | null
+  quantity: number | null
+  available: number | null
+  cost_price: number | null
+  current_price: number | null
+  market_value: number | null
+  profit_loss: number | null
+  field_confidence: Record<string, number>
+  requires_review: boolean
+  issues: string[]
+}
+
+export interface PositionRiskOcrResult {
+  provider: string
+  template_version: string
+  account_candidates: Record<string, { value: string | number; confidence: number }>
+  positions: PositionRiskOcrRow[]
+  issues: Array<{ level: string; code: string; message: string }>
+}
+
+export interface PositionRiskPreview {
+  revision: number
+  account: Record<string, any>
+  positions: Array<Record<string, any>>
+  reconciliation: {
+    cash: number
+    holding_value: number
+    computed_total: number
+    reported_total: number | null
+    difference: number | null
+    difference_pct: number | null
+  }
+  replacement: { added: string[]; removed: string[]; changed: string[]; unchanged: string[] }
+  issues: Array<{ level: 'error' | 'warning'; field?: string; row?: number; message: string }>
+  can_confirm: boolean
+}
+
+export interface PositionRiskOptions {
+  rules: Record<string, Record<string, any>>
+  builtin_signals: Array<{ id: string; label: string; direction: 'entry' | 'exit' | 'both'; enabled: boolean; group: string }>
+  custom_signals: Array<{ id: string; label: string; direction: 'entry' | 'exit' | 'both'; enabled: boolean; available: boolean; group: string }>
+  monitor_rules: Array<{ id: string; name: string; enabled: boolean; conditions: MonitorCondition[]; severity: string; default_action_pct: number }>
+  capabilities: {
+    websocket: boolean
+    websocket_capacity: number
+    depth: boolean
+    intraday: { available: boolean; source: string | null; max_symbols: number; reason: string }
+  }
+}
+
+export interface PositionRiskFeatureSnapshot {
+  symbol: string
+  available: boolean
+  fresh: boolean
+  reason: string
+  source: string | null
+  as_of: string | null
+  data_as_of?: string | null
+  data_status?: 'current' | 'historical' | 'unavailable' | string
+  data_reason?: string | null
+  age_seconds?: number | null
+  bars_1m?: number
+  bars_5m?: number
+  last_price?: number | null
+  limit_up?: number | null
+  limit_down?: number | null
+  session_vwap?: number | null
+  opening_range_high?: number | null
+  opening_range_low?: number | null
+  ema9_1m?: number | null
+  ema20_1m?: number | null
+  ema9_5m?: number | null
+  ema20_5m?: number | null
+  atr14_1m?: number | null
+  atr14_5m?: number | null
+  five_minute_high?: number | null
+  five_minute_low?: number | null
+  previous_day_high?: number | null
+  previous_day_low?: number | null
+  momentum_1m?: number | null
+  momentum_5m?: number | null
+  relative_volume?: number | null
+  buy_ratio?: number | null
+  sell_ratio?: number | null
+  flow_samples?: number
+  orderbook_imbalance?: number | null
+  stage?: string | null
+  r_multiple?: number | null
+  effective_stop_price?: number | null
+  hard_stop_price?: number | null
+  hard_stop_enabled?: boolean
+  feature_snapshot_at?: string | null
+  position_started_at?: number | null
+  t_trade_count?: number
+  t_trade_date?: string | null
+  closed_bars_5m?: Array<{
+    datetime?: string
+    open?: number | null
+    high?: number | null
+    low?: number | null
+    close?: number | null
+    volume?: number | null
+    obv?: number | null
+    closed?: boolean
+  }>
+  latest_closed_5m_token?: string | null
+  dynamic_exit_rules?: string[]
+  sector_relative_returns?: number[]
+  minute_proxy_available?: boolean
+  minute_proxy_kind?: 'leader' | 'sector_members' | string | null
+  minute_proxy_symbols?: string[]
+  opening_five_minute?: {
+    available?: boolean
+    volume_valid?: boolean
+    as_of?: string | null
+    open?: number | null
+    close?: number | null
+    high?: number | null
+    low?: number | null
+    volume?: number | null
+    baseline_median_volume?: number | null
+    baseline_samples?: number
+    baseline_available?: boolean
+    volume_ratio?: number | null
+  }
+  daily?: {
+    available?: boolean
+    reason?: string
+    as_of?: string | null
+    latest_signal?: string | null
+  }
+  decision?: PositionRiskDecision
+  context?: PositionRiskContext
+}
+
+export interface PositionRiskDataQualityBlock {
+  status: 'available' | 'partial' | 'missing' | 'not_supported' | string
+  reason: string
+  as_of?: string | null
+  samples?: number
+  missing?: string[]
+}
+
+export interface PositionRiskDecision {
+  action: 'hold' | 'observe' | 'reduce_25' | 'reduce_50' | 'exit' | string
+  action_label: string
+  suggested_pct: number
+  risk_level: 'low' | 'medium' | 'high' | 'unknown' | string
+  confidence: number
+  reason: string
+  evidence: Array<{ source: string; label: string; detail: string; tone?: string }>
+  watch_conditions: string[]
+  data_quality: Record<string, PositionRiskDataQualityBlock>
+  missing: string[]
+  event?: { kind: string; label: string; optional_action_pct?: number } | null
+  manual_confirmation: boolean
+}
+
+export interface PositionRiskContext {
+  state?: 'supportive' | 'neutral' | 'weakening' | 'divergent' | 'unavailable' | string
+  gate_open?: boolean
+  missing?: string[]
+  as_of?: string | null
+  data_as_of?: string | null
+  data_status?: 'current' | 'historical' | 'unavailable' | string
+  data_reason?: string | null
+  market_state?: string | null
+  emotion_phase?: string | null
+  sector_kind?: 'concept' | 'industry' | string | null
+  sector_name?: string | null
+  sector_change_pct?: number | null
+  sector_five_day_change_pct?: number | null
+  sector_yesterday_change_pct?: number | null
+  sector_coverage_ratio?: number | null
+  leader?: { symbol?: string | null; name?: string | null; change_pct?: number | null } | null
+  sector_correlation?: number | null
+  leader_correlation?: number | null
+  correlation_samples?: number
+  leader_correlation_samples?: number
+  sector_correlation_current?: number | null
+  sector_correlation_baseline?: number | null
+  sector_correlation_samples?: number
+  leader_correlation_current?: number | null
+  leader_correlation_baseline?: number | null
+  minute_proxy_available?: boolean
+  minute_proxy_kind?: string | null
+  minute_proxy_symbols?: string[]
+  sector_relative_returns?: number[]
+  auction?: { available?: boolean; price?: number | null; volume?: number | null; amount?: number | null; as_of?: string | null }
+  opening_five_minute?: {
+    available?: boolean
+    volume?: number | null
+    amount?: number | null
+    relative_volume?: number | null
+    buy_ratio?: number | null
+    sell_ratio?: number | null
+    flow_samples?: number
+  }
+}
+
+export interface PositionRiskFeaturesResponse {
+  features: Record<string, PositionRiskFeatureSnapshot>
+  count: number
+}
+
+export interface LimitBoardRow {
+  symbol: string
+  name?: string
+  concept?: string | string[]
+  status?: string
+  last_price?: number
+  change_pct?: number | null
+  limit_up?: number
+  limit_gap_pct?: number
+  break_count?: number
+  bid1_volume?: number
+  ask1_volume?: number
+  last_depth_at?: string
+  ws_active?: boolean
+  source_modes?: string[]
+  top_sector_ids?: string[]
+  top_sector_names?: string[]
+  blacklisted?: boolean
+  source?: 'first_board' | 'rebound_board' | 'selected' | 'manual'
+  auto_trade?: boolean
+  order_mode?: 'sweep' | 'queue'
+  allocation_mode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
+  allocation_value?: number | null
+  credit_buy_mode?: QmtCreditBuyMode
+  order_price?: number | null
+  order_volume?: number | null
+  order_amount?: number | null
+  order_idempotency_key?: string | null
+  order_status?: string | null
+  order_sys_id?: string | null
+  order_error?: string | null
+  order_at?: string | null
+  order_updated_at?: string | null
+  auto_order_key?: string
+  auto_order_status?: string
+  auto_order_sys_id?: string | null
+  auto_order_error?: string | null
+  auto_order_at?: string
+  auto_order_updated_at?: string
+  auto_order_allocation_mode?: 'sixth' | 'fifth' | 'quarter' | 'third' | 'half' | 'available' | 'fixed' | 'volume'
+  auto_order_allocation_value?: number | null
+  auto_order_volume?: number | null
+  auto_order_amount?: number | null
+  candidate_score?: number | null
+  candidate_rank?: number | null
+  entry_score?: number | null
+  entry_rank?: number | null
+  candidate_score_velocity?: number | null
+  candidate_score_rising_rounds?: number
+  tradability_state?: 'tradable' | 'warming' | 'weakening' | 'too_close' | 'too_far' | 'stale' | 'closed' | 'limit_reached' | 'unavailable'
+  tradability_reason?: string
+  entry_reasons?: string[]
+  entry_score_detail?: {
+    strength?: number
+    velocity?: number
+    intraday_flow?: number
+    limit_gap?: number
+    quote_age_seconds?: number | null
+  }
+  candidate_score_state?: 'live' | 'cached' | 'unavailable'
+  candidate_score_as_of?: string | null
+  candidate_score_detail?: {
+    intraday_flow?: {
+      score: number
+      max_score: number
+      components?: {
+        trend?: number
+        vwap?: number
+        underwater?: number
+        price_volume?: number
+        net_flow?: number
+        outflow_continuity?: number
+      }
+      trend_score?: number
+      trend_max_score?: number
+      trend_state?: 'strong' | 'neutral' | 'weak'
+      price_volume_rising?: boolean
+      capital_score?: number
+      capital_max_score?: number
+      flow_state?: 'inflow' | 'outflow' | 'balanced' | 'unavailable'
+      capital_source_label?: string
+      trend_pct?: number
+      underwater_ratio?: number
+      vwap_gap_pct?: number | null
+      buy_ratio?: number
+      sell_ratio?: number
+      net_flow_ratio?: number
+      net_flow_amount?: number | null
+      net_flow_delta?: number | null
+      net_flow_speed?: number | null
+      net_flow_speed_ratio?: number | null
+      net_flow_window_minutes?: number | null
+      net_flow_as_of?: string | null
+      flow_metric?: 'active_ratio' | 'main_net_speed'
+      outflow_streak?: number
+      flow_source?: 'kaipanla' | 'kaipanla_net_flow' | 'large_order' | 'tick_proxy' | 'unavailable'
+      capital_available?: boolean
+      amount_growth?: number | null
+      bars?: number
+      last_price?: number
+      limit_up?: number | null
+      touch_index?: number | null
+      sealed_now?: boolean
+      pull_up_start_index?: number | null
+      pull_up_minutes?: number | null
+      pull_up_max_drawdown?: number | null
+      pull_up_gain?: number | null
+      pre_seal_amount_growth?: number | null
+      day_open?: number
+      day_high?: number
+      day_low?: number
+      as_of?: string
+    }
+    sector?: {
+      score: number
+      max_score: number
+      current_score: number
+      rotation_score: number
+      data_source?: 'kaipanla_socket' | 'daily_close' | 'rps_rotation' | string
+      close_frozen?: boolean
+      kind?: 'concept' | 'industry'
+      name?: string
+      change_pct?: number | null
+      up_ratio?: number | null
+      coverage_ratio?: number | null
+      member_count?: number
+      leader?: { symbol?: string; name?: string; change_pct?: number; amount?: number }
+      stock_rank?: number
+      stock_change_pct?: number
+      leader_gap_pct?: number
+      leadership?: 'leader' | 'front' | 'follower'
+      is_sector_leader?: boolean
+      rotation_available?: boolean
+      realtime_available?: boolean
+      realtime_rank?: number
+      realtime_rank_count?: number
+      realtime_strength?: number | null
+      realtime_change_pct?: number | null
+      realtime_speed_pct?: number | null
+      realtime_amount?: number | null
+      realtime_main_net?: number | null
+      realtime_main_buy?: number | null
+      realtime_main_sell?: number | null
+      realtime_volume_ratio?: number | null
+      institutional_score?: number
+      institutional_max_score?: number
+      institutional_components?: Record<string, number>
+      institutional_component_max?: Record<string, number>
+      days?: Array<{ date: string; change_pct: number; rank: number; rank_count: number; rank_percentile: number }>
+      one_day_change_pct?: number | null
+      three_day_change_pct?: number | null
+      five_day_change_pct?: number
+      twenty_day_change_pct?: number | null
+      momentum_1d_percentile?: number | null
+      momentum_3d_percentile?: number | null
+      momentum_5d_percentile?: number | null
+      momentum_20d_percentile?: number | null
+      trend_slope?: number
+      rank_change?: number
+      top_20_days?: number
+      yesterday_change_pct?: number
+      rotation_label?: '主线' | '上升' | '退潮' | '震荡' | '数据不足' | null
+      as_of?: string
+    }
+    premium_gene?: {
+      score: number
+      max_score: number
+      passed?: boolean
+      components?: {
+        limit_frequency?: number
+        next_day_red?: number
+        first_board_broken?: number
+      }
+      criteria?: {
+        limit_up_count?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+        next_day_red_rate?: { value: number; threshold: number; operator: '>='; passed: boolean; score: number; max_score: number }
+        first_board_broken_rate?: { value: number; threshold: number; operator: '<='; passed: boolean; score: number; max_score: number }
+      }
+      as_of?: string | null
+      window_days?: number
+      limit_up_count?: number
+      premium_5_count?: number
+      premium_5_rate?: number
+      next_day_observation_count?: number
+      next_day_red_rate?: number
+      first_board_attempt_count?: number
+      first_board_seal_rate?: number
+      first_board_broken_rate?: number
+      consecutive_rate?: number
+    }
+    technical?: {
+      score: number
+      max_score: number
+      components?: { trend?: number; momentum?: number; volume?: number; macd?: number; rsi?: number }
+      price?: number
+      ma5?: number
+      ma10?: number
+      ma20?: number
+      ma60?: number
+      momentum_5d?: number
+      momentum_20d?: number
+      vol_ratio_5d?: number
+      macd_dif?: number
+      macd_dea?: number
+      macd_hist?: number
+      rsi_14?: number
+      as_of?: string
+      // 仅明细展示，不参与技术面打分
+      kdj_k?: number
+      kdj_d?: number
+      kdj_j?: number
+    }
+    comprehensive?: {
+      comprehensive_score: number
+      max_score: number
+      data_completeness?: number
+      grade: string
+      grade_label: string
+      dimensions: {
+        history: {
+          score: number
+          max_score: number
+          full_max_score?: number
+          percentage: number
+          components: {
+            next_day_red?: number
+            seal_success?: number
+            consecutive_ability?: number
+          }
+          unavailable_components?: string[]
+          data_complete?: boolean
+          label: string
+        }
+        sentiment: {
+          score: number
+          max_score: number
+          full_max_score?: number
+          percentage: number
+          components: {
+            relative_momentum?: number
+            trend?: number
+            persistence?: number
+            stability?: number
+            breadth?: number
+            money_flow?: number
+            leadership?: number
+            liquidity?: number
+            // 旧缓存兼容字段
+            sector_pattern?: number
+            overheat_risk?: number
+            sector_current?: number
+          }
+          unavailable_components?: string[]
+          data_complete?: boolean
+          label: string
+        }
+        health: {
+          score: number
+          max_score: number
+          full_max_score?: number
+          percentage: number
+          components: {
+            sector_position?: number
+            pullup_form?: number
+            intraday_volume_price?: number
+            capital_flow?: number
+            daily_k_pattern?: number
+          }
+          unavailable_components?: string[]
+          data_complete?: boolean
+          label: string
+        }
+      }
+      warnings?: string[]
+      strengths?: string[]
+      detail_available?: {
+        premium_gene?: boolean
+        intraday_flow?: boolean
+        technical?: boolean
+        sector?: boolean
+        board_quality?: boolean
+      }
+    }
+  }
+  candidate_reasons?: string[]
+  limit_up_count?: number
+  next_day_red_rate?: number
+  first_board_broken_rate?: number
+  queue?: LimitUpQueueSnapshot | null
+}
+
+export interface LimitUpQueueSnapshot {
+  state: 'live' | string
+  code?: string
+  price?: number | null
+  as_of?: string | null
+  first?: { count: number; volume: number; amount: number }
+  current?: { count: number; volume: number; amount: number }
+  new_add?: { count: number; volume: number; amount: number }
+  cancelled?: { count: number; volume: number; amount: number }
+  executed?: { count: number; volume: number; amount: number }
+  net_change_amount?: number
+  inflow_streak?: number
+  outflow_streak?: number
+  limit_up_gone?: boolean
+  limit_up_may_gone?: boolean
+  order_status?: 'watching' | 'queueing_unmatched' | 'queueing' | 'cancelled' | 'filled_estimate' | string
+  order?: {
+    hand_count: number
+    front: { volume: number; count: number; amount: number; last_reduction: number }
+    back: { volume: number; count: number; amount: number; last_reduction: number }
+    elapsed_ms: number
+  } | null
+}
+
+export interface LimitBoardQuoteSnapshot {
+  state: 'live' | 'snapshot' | 'partial' | 'unavailable'
+  as_of: string | null
+  quotes: Record<string, {
+    symbol: string
+    name?: string | null
+    last_price?: number | null
+    change_pct?: number | null
+    limit_up?: number | null
+    timestamp?: string | number | null
+    source?: 'tickflow' | 'daily_snapshot'
+  }>
+  sector_links: Record<string, Array<{ plate_id: string; plate_name: string }>>
+  missing_symbols: string[]
+}
+
+export interface LimitBoardApproachingLimitUpItem {
+  thscode: string
+  ticker: string
+  name: string
+  rank: number
+  last_price?: number | null
+  change_pct?: number | null
+  rise_speed_pct?: number | null
+  sector?: string | null
+  main_force?: number | null
+  turnover_amount?: number | null
+  yesterday_boards?: number
+  tags?: string[]
+}
+
+export interface LimitBoardApproachingLimitUpSnapshot {
+  provider: 'kaipanla_socket' | string
+  state: 'live' | 'unavailable' | string
+  as_of: string | null
+  refreshed_at: string | null
+  rows: LimitBoardApproachingLimitUpItem[]
+}
+
+export interface LimitBoardCandidateScore {
+  symbol: string
+  candidate_score: number | null
+  candidate_score_state: 'live' | 'cached' | 'unavailable' | string
+  candidate_score_as_of: string | null
+  candidate_score_detail: NonNullable<LimitBoardRow['candidate_score_detail']>
+  candidate_reasons: string[]
+}
+
+export interface LimitBoardSectorStrengthRow {
+  plate_id: string
+  plate_name?: string | null
+  parent_plate_id?: string | null
+  is_child?: boolean
+  strength?: number | null
+  change_pct?: number | null
+  speed_pct?: number | null
+  amount?: number | null
+  main_net?: number | null
+  main_buy?: number | null
+  main_sell?: number | null
+  volume_ratio?: number | null
+  institution_increase?: number | null
+  institutional_score?: number | null
+  institutional_max_score?: number | null
+  institutional_components?: Record<string, number>
+  institutional_component_max?: Record<string, number>
+  one_day_change_pct?: number | null
+  three_day_change_pct?: number | null
+  five_day_change_pct?: number | null
+  twenty_day_change_pct?: number | null
+  top_20_days?: number | null
+  strength_delta_5m?: number | null
+  main_net_delta_5m?: number | null
+  strength_speed_per_min_5m?: number | null
+  main_net_speed_per_min_5m?: number | null
+  trend_5m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
+  strength_delta_30m?: number | null
+  main_net_delta_30m?: number | null
+  strength_speed_per_min_30m?: number | null
+  main_net_speed_per_min_30m?: number | null
+  trend_30m_state?: 'accelerating' | 'stable' | 'weakening' | 'divergent' | 'unavailable'
+  rank?: number
+  rank_count?: number
+}
+
+export interface LimitBoardSectorWindowTrend {
+  state: 'accelerating' | 'stable' | 'weakening' | 'divergent'
+  window_minutes: number
+  elapsed_minutes: number
+  captured_at: string
+  base_at: string
+  strength_delta: number
+  main_net_delta: number
+  comparable_count: number
+}
+
+export interface LimitBoardSectorStrengthSnapshot {
+  provider: 'kaipanla'
+  state: 'live' | 'unavailable'
+  as_of: string
+  refreshed_at?: string | null
+  institution_label?: string | null
+  history_state: 'live' | 'closed' | 'unavailable'
+  timeline: string[]
+  trend_5m?: LimitBoardSectorWindowTrend | null
+  trend_30m?: LimitBoardSectorWindowTrend | null
+  rows: LimitBoardSectorStrengthRow[]
+}
+
+export interface LimitBoardSectorConstituent {
+  plate_id: string
+  symbol: string
+  code: string
+  name?: string | null
+  tags?: string | null
+  last_price?: number | null
+  limit_up?: number | null
+  change_pct?: number | null
+  amount?: number | null
+  turnover_rate?: number | null
+  float_market_value?: number | null
+  main_net?: number | null
+  limit_tag?: string | null
+  rank_tag?: string | null
+  limit_count?: number | null
+  quote_available: boolean
+  rank: number
+  rank_count: number
+}
+
+export interface LimitBoardSectorConstituents {
+  provider: 'kaipanla'
+  state: 'live' | 'unavailable'
+  as_of: string
+  captured_at: string
+  membership_as_of: string
+  quote_provider: 'tickflow' | 'kaipanla_socket'
+  quote_state: 'live' | 'partial' | 'paused' | 'closed' | 'historical_unavailable' | 'unavailable'
+  quote_as_of?: string | null
+  quote_available: boolean
+  plate_id: string
+  plate_name?: string | null
+  rows: LimitBoardSectorConstituent[]
+}
+
+export interface LimitBoardOrderTimeline {
+  idempotency_key?: string | null
+  status?: string | null
+  order_sys_id?: string | null
+  trigger_at?: string | null
+  system_order_at?: string | null
+  qmt_submit_at?: string | null
+  qmt_response_at?: string | null
+  qmt_accepted_at?: string | null
+  broker_order_at?: string | null
+  broker_order_time_raw?: string | number | null
+  broker_order_time_field?: string | null
+  system_to_broker_delay_ms?: number | null
+  error?: string | null
+}
+
+export interface LimitBoardEvent {
+  ts: number
+  trigger_at?: string | null
+  trading_date?: string
+  type: string
+  symbol: string
+  name: string
+  concept?: string | string[]
+  rule_name?: string
+  message?: string
+  reasons?: string[]
+  break_count?: number
+  order_timeline?: LimitBoardOrderTimeline
+}
+
+export interface LimitBoardSentimentPoint {
+  as_of: string
+  emotion_strength?: number | null
+  limit_up_count?: number | null
+  max_consecutive?: number | null
+  pullback_count?: number | null
+}
+
+export interface LimitBoardView {
+  revision: number
+  settings: {
+    sweep_price_levels: number
+    queue_wait_seconds: number
+    queue_confirm_snapshots: number
+    max_auto_board_count: number
+    max_market_broken_rate_pct: number
+    main_board_only: boolean
+    near_limit_pct: number
+    exit_limit_pct: number
+    exit_sustain_seconds: number
+    first_board_lookback_days: number
+    blacklist_after_breaks: number
+  }
+  first_board: LimitBoardRow[]
+  rebound_board: LimitBoardRow[]
+  selected: LimitBoardRow[]
+  candidate_pool: LimitBoardRow[]
+  opportunity_pool: LimitBoardRow[]
+  board_pool: LimitBoardRow[]
+  buy_pool: LimitBoardRow[]
+  blacklist: string[]
+  market_sentiment: {
+    provider: 'kaipanla'
+    state: 'live' | 'stale' | 'unavailable'
+    as_of: string
+    refreshed_at: string
+    market_broken_rate_pct?: number | null
+    yesterday_limitup_change_pct?: number | null
+    yesterday_consecutive_change_pct?: number | null
+    yesterday_broken_change_pct?: number | null
+    market_evaluation?: string | null
+    max_consecutive?: number | null
+    emotion_strength?: number | null
+    emotion_limit_up_count?: number | null
+    emotion_pullback_count?: number | null
+    emotion_max_consecutive?: number | null
+    emotion_history?: LimitBoardSentimentPoint[]
+  } | null
+  sector_strength: LimitBoardSectorStrengthSnapshot | null
+  events: LimitBoardEvent[]
+  runtime: {
+    trading_date: string
+    history_ready: boolean
+    history_reason: string
+    candidate_scope: {
+      state: 'live' | 'partial' | 'unavailable'
+      as_of?: string | null
+      membership_as_of?: string | null
+      plate_count: number
+      symbol_count: number
+      plate_ids?: string[]
+      reason: string
+    }
+    last_scan_at: string | null
+    last_error: string | null
+    websocket_status: string
+    websocket_symbols: number
+    websocket_capacity: number
+    trading_enabled: boolean
+    trading_reason: string
+    sentiment_guard: {
+      state: 'live' | 'stale' | 'unavailable'
+      blocked: boolean
+      threshold_pct: number
+      broken_rate_pct?: number | null
+      reason: string
+    }
+    market_mode: string
+    refresh_cycle: {
+      as_of?: string | null
+      interval_seconds: number
+    }
+    first_board_enabled: boolean
+    limit_up_queue: {
+      state: string
+      url: string
+      symbols: number
+      last_error?: string | null
+    }
+  }
+}
+
+export interface LimitBoardConfig {
+  schema_version: number
+  revision: number
+  settings: LimitBoardView['settings']
+  selected: Array<{ symbol: string; name?: string; added_at?: string }>
+  board_pool: Array<{
+    symbol: string
+    name?: string
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
+    auto_trade: boolean
+    order_mode?: 'sweep' | 'queue'
+    allocation_mode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
+    allocation_value?: number
+    credit_buy_mode?: QmtCreditBuyMode
+    added_at?: string
+  }>
+  buy_pool: Array<{
+    symbol: string
+    name?: string
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual'
+    allocation_mode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume'
+    allocation_value?: number
+    credit_buy_mode?: QmtCreditBuyMode
+    order_price?: number
+    order_volume?: number
+    order_amount?: number
+    order_idempotency_key?: string
+    added_at?: string
+  }>
+}
+
 export interface AlertEvent {
   ts: number
+  fingerprint?: string
+  first_ts?: number
+  last_ts?: number
+  occurrence_count?: number
   rule_id?: string
   rule_name?: string
   source: string
@@ -946,6 +2188,8 @@ export interface AlertEvent {
   message: string
   price?: number | null
   change_pct?: number | null
+  reasons?: string[]
+  source_ids?: string[]
   signals?: string[]
   severity?: string
   strategy_id?: string
@@ -1020,6 +2264,97 @@ export interface LimitLadderResult {
   sealed_counts_up?: { real: number; fake: number; pending: number }
   /** 跌停侧 sealed 明细 */
   sealed_counts_down?: { real: number; fake: number; pending: number }
+}
+
+// ===== Market Heat / Skyrocket Radar =====
+export type MarketHeatListKey = 'hot_day' | 'hot_hour' | 'skyrocket_day' | 'skyrocket_hour'
+export type MarketHeatListType = 'hot' | 'skyrocket'
+export type MarketHeatPeriod = 'day' | 'hour'
+
+export interface MarketHeatItem {
+  thscode: string
+  ticker: string
+  name: string
+  rank: number | null
+  heat: number | null
+  rank_change: number | null
+  rank_trend: string
+}
+
+export interface MarketHeatSummary {
+  count: number
+  top_heat: number | null
+  avg_heat: number | null
+  positive_rank_change_count: number
+  negative_rank_change_count: number
+  flat_rank_change_count: number
+  trend_counts: Record<string, number>
+}
+
+export interface MarketHeatList {
+  key: MarketHeatListKey
+  list_type: MarketHeatListType
+  period: MarketHeatPeriod
+  title: string
+  timestamp: number | string | null
+  timestamp_iso: string | null
+  items: MarketHeatItem[]
+  summary: MarketHeatSummary
+}
+
+export interface MarketHeatTrendPoint {
+  thscode: string
+  ticker: string
+  date: string
+  date_ms?: number | null
+  rank: number | null
+}
+
+export interface MarketHeatTrend {
+  thscode: string
+  ticker: string
+  name: string
+  timestamp: number | string | null
+  timestamp_iso: string | null
+  points: MarketHeatTrendPoint[]
+  analysis: {
+    direction: 'improving' | 'weakening' | 'flat' | 'insufficient' | string
+    first_rank: number | null
+    latest_rank: number | null
+    rank_delta: number | null
+    points: number
+  }
+}
+
+export interface MarketHeatOverlapItem {
+  thscode: string
+  ticker: string
+  name: string
+  left: Pick<MarketHeatItem, 'rank' | 'heat' | 'rank_change' | 'rank_trend'>
+  right: Pick<MarketHeatItem, 'rank' | 'heat' | 'rank_change' | 'rank_trend'>
+}
+
+export interface MarketHeatOverlap {
+  key: string
+  label: string
+  left_key: MarketHeatListKey
+  right_key: MarketHeatListKey
+  count: number
+  ratio: number
+  items: MarketHeatOverlapItem[]
+}
+
+export interface MarketHeatRadar {
+  source: string
+  source_label: string
+  generated_at: string
+  delay_boundary: string
+  disclaimer: string
+  trend_window: { start_date: string; end_date: string; natural_days: number }
+  lists: Record<MarketHeatListKey, MarketHeatList>
+  overlaps: MarketHeatOverlap[]
+  trend_targets: MarketHeatItem[]
+  trends: Record<string, MarketHeatTrend>
 }
 
 // ===== Backtest =====
@@ -1445,6 +2780,15 @@ export interface SettingsState {
   ai_context_window?: number
 }
 
+export interface KaipanlaStatus {
+  configured: boolean
+  token_masked: string
+  user_id_masked: string
+  device_id_masked: string
+  tables: string[]
+  automatic: boolean
+}
+
 /** 保存 TickFlow Key 的响应(先探后存) */
 export interface SaveTickflowKeyResult {
   ok: boolean
@@ -1598,6 +2942,7 @@ export interface Preferences {
   indices_nav_pinned: boolean
   watchlist_groups_in_nav: boolean
   minute_sync_enabled: boolean
+  etf_minute_sync_enabled: boolean
   minute_sync_days: number
   minute_sync_segment_days: number
   minute_refresh_enabled: boolean
@@ -1652,7 +2997,24 @@ export interface Preferences {
   minute_intraday_refresh: boolean
   minute_intraday_refresh_interval: number
   monitor_ext_fields: { concept: MonitorExtFieldItem | null; industry: MonitorExtFieldItem | null }
+  /** QMT 交易面板「快捷金额」按钮的 4 个档位(元), 用户可编辑 */
+  qmt_quick_amount_presets?: number[]
+  large_orders?: {
+    enabled: boolean
+    score_threshold: number
+    cooldown_seconds: number
+    deep_dive_interval_seconds: number
+    max_deep_dive_symbols: number
+    candidate_limit: number
+    min_limit_up_gap_pct: number
+    market_segments: LargeOrderMarketSegment[]
+    exclude_bse: boolean
+    exclude_st: boolean
+    version: string
+  }
 }
+
+export type LargeOrderMarketSegment = 'main' | 'star' | 'chinext' | 'bse' | 'st'
 
 /** 监控中心 ext 字段单项配置 (行业/概念标签的来源 + 显示裁剪) */
 export interface MonitorExtFieldItem {
@@ -1664,8 +3026,9 @@ export interface MonitorExtFieldItem {
   hiddenIndices?: number[]
 }
 export interface StrategyAlertEvent {
-  source: 'strategy' | 'depth'
+  source: 'strategy' | 'depth' | 'large_order' | string
   type: string
+  rule_id?: string
   strategy_id?: string
   symbol?: string
   name?: string | null
@@ -1677,9 +3040,489 @@ export interface StrategyAlertEvent {
   [key: string]: unknown
 }
 
+// ===== 量化策略 =====
+export type StrategyDialect = 'native' | 'joinquant'
+
+export interface StrategyCompatibilityReport {
+  version: string | null
+  dialect: StrategyDialect
+  summary_status: 'supported' | 'degraded' | 'unavailable'
+  source_sha256?: string
+  apis: Array<{
+    name: string
+    status: 'supported' | 'emulated' | 'degraded' | 'unavailable'
+    detail: string
+  }>
+}
+
+export interface FreeStrategySummary {
+  id: string
+  name: string
+  revision: number
+  config: Record<string, any>
+  dialect?: StrategyDialect
+  compatibility_report?: StrategyCompatibilityReport
+  created_at?: string
+  updated_at?: string
+  source?: string
+  execution_mode_hint?: 'full_bar' | 'scheduled' | 'quote' | null
+}
+
+export interface FreeBacktestConfig {
+  strategy_id: string
+  symbols?: string[]
+  timeframe: '1d' | '30m' | '5m' | '1m' | 'tick'
+  start?: string
+  end?: string
+  asset_type: 'stock' | 'etf'
+  initial_capital: number
+  fees_pct: number
+  commission_pct?: number | null
+  sell_commission_pct?: number | null
+  min_commission: number
+  reserve_buy_fees?: boolean
+  stamp_tax_pct: number
+  transfer_fee_pct: number
+  slippage_bps: number
+  price_tick: number | null
+  callback_timeout_seconds?: number
+  lot_size: number
+  max_exposure_pct: number
+  settlement: 't1' | 't0'
+  t0_symbols?: string[]
+  allow_stale_fills?: boolean
+  fill_policy: 'next_open' | 'close'
+  limit_up_touch_fill?: boolean
+  benchmark_symbol: string
+}
+
+export type PaperMarketMode = 'bar_1m' | 'bar_1d' | 'poll_3s' | 'websocket'
+
+export interface PaperRiskConfig {
+  max_symbol_exposure_pct: number
+  daily_loss_pct: number
+  max_drawdown_pct: number
+  max_orders_per_minute: number
+}
+
+export interface PaperSyncState {
+  phase: 'idle' | 'catching_up' | 'live' | 'waiting_market' | 'error'
+  from?: string | null
+  target?: string | null
+  through?: string | null
+  processed_days?: number
+  total_days?: number
+  missing_symbols?: string[]
+  queue_delay_seconds?: number
+  error?: string | null
+  reason?: string | null
+  source?: 'realtime' | string
+  updated_at?: string
+}
+
+export interface PaperAccount {
+  id: string
+  name: string
+  strategy_id: string
+  source_revision: number
+  source_hash: string
+  dialect?: StrategyDialect
+  compatibility_report?: StrategyCompatibilityReport
+  market_mode: PaperMarketMode | 'bar_5m' | 'bar_30m'
+  status: 'running' | 'paused' | 'stopped'
+  system_notify_enabled?: boolean
+  sync?: PaperSyncState
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
+  scheduled_times?: string[]
+  universe?: string[]
+  cash: number
+  equity?: number
+  return_pct?: number
+  today_return_pct?: number | null
+  today_return_date?: string | null
+  drawdown_pct?: number
+  max_drawdown_pct?: number
+  valuation?: {
+    live: boolean
+    as_of?: string | null
+    date?: string | null
+    missing_symbols?: string[]
+    equity?: number
+    return_pct?: number
+    drawdown_pct?: number
+    max_drawdown_pct?: number
+  }
+  positions?: Record<string, number>
+  config?: {
+    initial_capital?: number
+    benchmark_symbol?: string
+    fill_policy?: 'close' | 'next_open'
+    settlement?: 't0' | 't1'
+    slippage_bps?: number
+  }
+  algorithm?: {
+    summary: string
+    inputs?: string[]
+    steps: Array<{ title: string; detail: string }>
+    parameters?: string[]
+    pseudocode?: string[]
+    runtime: string[]
+  }
+  account?: {
+    cash: number
+    positions: Record<string, number>
+    avg_cost: Record<string, number>
+    orders: PaperOrder[]
+    fills: PaperFill[]
+    equity_curve: {
+      timestamp: string
+      equity: number
+      cash: number
+      nav: number
+      drawdown_pct: number
+      positions: Record<string, number>
+      avg_cost?: Record<string, number>
+    }[]
+  }
+  risk_config: PaperRiskConfig
+  risk_status?: { daily_loss_locked?: boolean; drawdown_locked?: boolean; reason?: string | null; triggered_at?: string | null }
+  last_quote?: string
+  last_bar?: string
+  last_error?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PaperOrder {
+  id: string
+  symbol: string
+  side: string
+  executed_side?: 'buy' | 'sell' | null
+  quantity?: number | null
+  value?: number | null
+  target_quantity?: number | null
+  target_value?: number | null
+  target_percent?: number | null
+  submitted_at: string
+  status: string
+  reason?: string
+}
+
+export interface PaperFill {
+  order_id: string
+  symbol: string
+  side: string
+  quantity: number
+  price: number
+  value: number
+  timestamp: string
+  commission: number
+  stamp_tax: number
+  transfer_fee: number
+  dividend_tax: number
+  total_fee: number
+  status: string
+  reason: string
+  submitted_at: string
+  market_amount?: number | null
+  market_volume?: number | null
+  participation_pct?: number | null
+}
+
+export interface PaperEvent {
+  id: string
+  sequence: number
+  timestamp: string
+  type: string
+  symbol?: string
+  side?: string
+  executed_side?: 'buy' | 'sell' | null
+  submitted_at?: string
+  status?: string
+  reason?: string
+  message?: string
+  price?: number
+  quantity?: number
+  value?: number
+  level?: string
+  source?: string
+  signal_type?: string
+  strategy?: string
+  trading_date?: string
+  decision?: 'rebalance' | 'hold' | 'empty' | 'risk_off'
+  regime?: string
+  raw_regime?: string
+  target_symbols?: string[]
+  holding_symbols?: string[]
+  candidates?: { symbol: string; score?: number | null }[]
+  reason_code?: string
+  trigger_reason_code?: string
+  trigger_reason?: string
+  correlation_check?: {
+    adjusted_correlation?: number | null
+    result?: 'passed' | 'blocked'
+    reason_code?: string
+    reason?: string
+  }
+  [key: string]: unknown
+}
+
+export interface PaperStatus {
+  running_accounts: number
+  mode_counts: Record<string, number>
+  poll_3s: { active: boolean; available: boolean; min_interval_s: number | null; interval_s: number | null; actual_fetch_ms: number | null }
+  websocket: { status: string; symbols: number; depth_symbols: number; depth_supported: boolean; capacity: number; last_error: string | null }
+  last_quote_at: string | null
+  last_depth_at: string | null
+}
+
+export type CreatePaperAccount = FreeBacktestConfig & {
+  name: string
+  market_mode: PaperMarketMode
+  continuation_job_id?: string | null
+  risk_config: PaperRiskConfig
+}
+
+export interface FreeBacktestResult {
+  initial_capital: number
+  final_equity: number
+  return_pct: number
+  max_drawdown_pct: number
+  capacity_analysis?: {
+    model: 'bar_volume_participation'
+    diagnostic_only: true
+    total_fills: number
+    covered_fills: number
+    max_participation_pct: number | null
+    p95_participation_pct: number | null
+    fills_over_1_pct: number
+    fills_over_5_pct: number
+    fills_over_10_pct: number
+  }
+  entry_analysis?: {
+    model: string
+    training_period: { start: string; end: string }
+    out_of_sample_period: { start: string; end: string }
+    parameters_frozen_after: string
+    benchmark_symbol: string
+    intraday_benchmark_available: boolean
+    summaries: Array<{
+      segment: 'all' | 'train' | 'out_of_sample'
+      signal_count: number
+      average_mfe_pct: number | null
+      average_mae_pct: number | null
+      horizons: Array<{
+        horizon: '30m' | 'close' | 'next_day' | '3d' | '5d'
+        count: number
+        average_return_pct: number | null
+        average_excess_pct: number | null
+        win_rate_pct: number | null
+      }>
+    }>
+    events: Array<{
+      id: string
+      timestamp: string
+      symbol: string
+      model: string
+      entry_price: number
+      l1_name?: string | null
+      l2_name?: string | null
+      segment: 'train' | 'out_of_sample'
+      returns: Record<string, number | null>
+      excess: Record<string, number | null>
+      mfe_pct: number | null
+      mae_pct: number | null
+    }>
+    money_flow: {
+      mode: 'prior_trading_day_matched_sample'
+      changes_primary_universe: false
+      excluded_sources: string[]
+      sources: Array<{
+        source: string
+        matched_signals: number
+        groups: Array<{
+          confirmed: boolean
+          signal_count: number
+          horizons: Array<{ horizon: string; count: number; average_return_pct: number | null }>
+        }>
+      }>
+    }
+  } | null
+  equity_curve: { timestamp: string; equity: number; cash: number; positions: Record<string, number> }[]
+  daily_equity_curve?: Array<{
+    date: string
+    timestamp: string
+    equity: number
+    cash: number
+    positions: Record<string, number>
+    strategy_nav: number
+    benchmark_nav: number | null
+    excess_nav: number | null
+    drawdown_pct: number
+    exposure_pct: number
+    position_values?: Record<string, number>
+    daily_return_pct?: number
+    benchmark_daily_return_pct?: number | null
+    excess_daily_return_pct?: number | null
+  }>
+  performance?: Record<string, number | string>
+  benchmark_symbol?: string
+  orders: Record<string, any>[]
+  signals?: Record<string, any>[]
+  transactions?: Record<string, any>[]
+  fills: Record<string, any>[]
+  attribution?: Record<string, any>[]
+  positions: Record<string, number>
+  logs: { timestamp: string; level: string; message: string }[]
+  state?: Record<string, any>
+  metadata?: Record<string, any>
+}
+
+export interface FreeBacktestRunSummary {
+  job_id: string
+  name: string
+  final_equity: number
+  return_pct: number
+  max_drawdown_pct: number
+  fills: number
+  metadata?: Record<string, any>
+}
+
+export interface EtfDataIssue {
+  id: string
+  type: 'daily_missing' | 'daily_tail_stale' | 'daily_history_short' | 'minute_gap' | 'split_rounding'
+  symbol: string
+  start: string
+  end: string
+  severity: 'error' | 'warning'
+  title: string
+  detail: string
+  action: string
+  repairable: boolean
+  missing_dates?: string[]
+  latest_date?: string
+  expected_date?: string
+  available_bars?: number
+  required_bars?: number
+}
+
+export interface EtfDataScan {
+  scan_id: string | null
+  status: 'healthy' | 'issues' | 'not_applicable'
+  checked_at?: string
+  start?: string
+  end?: string
+  symbols?: string[]
+  symbol_count: number
+  require_minute?: boolean
+  min_daily_bars?: number
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
+  universe_source?: string
+  issues: EtfDataIssue[]
+}
+
+export interface TickDataIssue {
+  type: 'missing_partition' | 'invalid_partition' | 'missing_fields' | 'invalid_schema' | 'wrong_partition_date' | 'missing_symbol_date' | 'invalid_rows' | 'out_of_order'
+  detail: string
+  action: string
+  repairable: false
+  missing_dates?: string[]
+}
+
+export interface TickDataScan {
+  scan_id: null
+  status: 'healthy' | 'issues'
+  checked_at: string
+  start: string
+  end: string
+  symbols: string[]
+  symbol_count: number
+  timeframe: 'tick'
+  provider?: 'qmt' | string
+  rows: number
+  sources: string[]
+  coverage: Record<string, string[]>
+  execution_mode?: 'full_bar' | 'scheduled' | 'quote'
+  universe_source?: string
+  issues: TickDataIssue[]
+}
+
+export type BacktestDataScan = EtfDataScan | TickDataScan
+
+export interface EtfRepairRecord {
+  id: string
+  status: 'succeeded' | 'failed'
+  started_at: string
+  source: string
+  scan_id: string
+  symbols: string[]
+  start: string
+  end: string
+  issue_types: string[]
+  issues_repaired?: number
+  minute_rows?: number
+  error?: string
+}
+
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  freeStrategies: () => request<{ strategies: FreeStrategySummary[]; templates: { id: string; name: string }[] }>('/api/free-strategies'),
+  freeStrategy: (id: string) => request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`),
+  freeTemplates: () => request<{ templates: (FreeStrategySummary & { id: string; name: string; source: string })[] }>('/api/free-strategies/templates'),
+  saveFreeStrategy: (payload: { id?: string; name: string; source: string; config?: Record<string, any>; dialect?: StrategyDialect }) =>
+    request<FreeStrategySummary>('/api/free-strategies', { method: 'POST', body: JSON.stringify(payload) }),
+  updateFreeStrategy: (id: string, payload: { name: string; source: string; config?: Record<string, any>; dialect?: StrategyDialect }) =>
+    request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  renameFreeStrategy: (id: string, name: string) =>
+    request<FreeStrategySummary>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteFreeStrategy: (id: string) => request<{ ok: boolean }>(`/api/free-strategies/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  startFreeBacktest: (payload: FreeBacktestConfig) =>
+    request<{ job_id: string; status: string; source_revision: number }>('/api/free-strategies/backtest', { method: 'POST', body: JSON.stringify(payload) }),
+  cancelFreeBacktest: (jobId: string) => request<{ ok: boolean }>(`/api/free-strategies/backtest/${jobId}/cancel`, { method: 'POST' }),
+  freeBacktestRuns: () => request<{ runs: FreeBacktestRunSummary[] }>('/api/free-strategies/backtest'),
+  freeBacktestResult: (jobId: string) => request<FreeBacktestResult>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`),
+  renameFreeBacktest: (jobId: string, name: string) =>
+    request<{ job_id: string; name: string }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteFreeBacktest: (jobId: string) =>
+    request<{ ok: boolean }>(`/api/free-strategies/backtest/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
+  freeBacktestDataHealth: (
+    payload: Pick<FreeBacktestConfig, 'strategy_id' | 'asset_type' | 'timeframe'>
+      & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>
+      & { persist_scan?: boolean },
+  ) => request<EtfDataScan>('/api/free-strategies/backtest/data-health', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  freeTickBacktestDataHealth: (
+    payload: Pick<FreeBacktestConfig, 'strategy_id' | 'asset_type' | 'timeframe'>
+      & Partial<Pick<FreeBacktestConfig, 'start' | 'end'>>,
+  ) => request<TickDataScan>('/api/free-strategies/backtest/data-health', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  paperAccounts: () => request<{ accounts: PaperAccount[] }>('/api/free-strategies/paper/accounts'),
+  paperStatus: () => request<PaperStatus>('/api/free-strategies/paper/status'),
+  createPaperAccount: (payload: CreatePaperAccount) =>
+    request<PaperAccount>('/api/free-strategies/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
+  paperAccount: (id: string) => request<PaperAccount & { events?: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}`),
+  renamePaperAccount: (id: string, name: string) =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  updatePaperSystemNotify: (id: string, enabled: boolean) =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name: undefined, system_notify_enabled: enabled }) }),
+  paperEvents: (id: string, cursor?: number, types?: string) => {
+    const query = new URLSearchParams({ limit: '500' })
+    if (cursor != null) query.set('cursor', String(cursor))
+    if (types) query.set('types', types)
+    return request<{ events: PaperEvent[]; next_cursor: number | null }>(`/api/free-strategies/paper/accounts/${id}/events?${query}`)
+  },
+  paperSignals: (id: string) => request<{ signals: PaperEvent[]; total: number }>(`/api/free-strategies/paper/accounts/${id}/signals`),
+  paperOrders: (id: string) => request<{ orders: PaperOrder[] }>(`/api/free-strategies/paper/accounts/${id}/orders`),
+  paperFills: (id: string) => request<{ fills: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/fills`),
+  paperLogs: (id: string) => request<{ logs: PaperEvent[] }>(`/api/free-strategies/paper/accounts/${id}/logs`),
+  paperAction: (id: string, action: 'start' | 'pause' | 'resume' | 'stop' | 'unlock-risk') =>
+    request<PaperAccount>(`/api/free-strategies/paper/accounts/${id}/${action}`, { method: 'POST' }),
+  deletePaperAccount: (id: string) =>
+    request<{ ok: boolean }>(`/api/free-strategies/paper/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // ===== Auth (访问认证) =====
   authStatus: () =>
@@ -1731,6 +3574,27 @@ export const api = {
   preferences: () => request<Preferences>('/api/settings/preferences'),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
+  kaipanlaStatus: () => request<KaipanlaStatus>('/api/settings/kaipanla'),
+  fuyaoAuctionStatus: () => request<FuyaoAuctionStatus>('/api/settings/fuyao-auction/status'),
+  collectFuyaoAuction: (checkpoint?: string) =>
+    request<{ ok: boolean; rows: number; status: FuyaoAuctionStatus }>(
+      '/api/settings/fuyao-auction/collect',
+      { method: 'POST', body: JSON.stringify({ checkpoint }) },
+    ),
+  saveKaipanlaConnection: (sourceUrl: string) =>
+    request<KaipanlaStatus>('/api/settings/kaipanla', {
+      method: 'PUT',
+      body: JSON.stringify({ source_url: sourceUrl }),
+    }),
+  clearKaipanlaConnection: () =>
+    request<KaipanlaStatus>('/api/settings/kaipanla', { method: 'DELETE' }),
+  saveFuyaoAuctionKey: (apiKey: string) =>
+    request<FuyaoAuctionKeyResult>('/api/settings/fuyao-auction', {
+      method: 'PUT',
+      body: JSON.stringify({ api_key: apiKey }),
+    }),
+  clearFuyaoAuctionKey: () =>
+    request<FuyaoAuctionKeyResult>('/api/settings/fuyao-auction', { method: 'DELETE' }),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
     request<DataSourcesResponse>('/api/settings/data-sources', {
@@ -1792,13 +3656,14 @@ export const api = {
         }),
       },
     ),
-  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number) =>
+  updateMinuteSync: (enabled: boolean, days: number, segmentDays?: number, assetType = 'stock') =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
       body: JSON.stringify({
         minute_sync_enabled: enabled,
         minute_sync_days: days,
         ...(segmentDays != null ? { minute_sync_segment_days: segmentDays } : {}),
+        asset_type: assetType,
       }),
     }),
 
@@ -1897,9 +3762,188 @@ export const api = {
     ),
   intradayRefresh: () => request<{ status: string }>('/api/intraday/refresh', { method: 'POST' }),
   indexQuotes: (symbols?: string[]) =>
-    request<{ rows: IndexQuote[]; count: number }>(
+    request<{ rows: IndexQuote[]; count: number; source?: string }>(
       `/api/intraday/indices${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
     ),
+  positionRiskPortfolio: () => request<PositionRiskPortfolio>('/api/position-risk/portfolio'),
+  positionRiskFeatures: (symbols?: string[]) => request<PositionRiskFeaturesResponse>(
+    `/api/position-risk/features${symbols?.length ? `?symbols=${encodeURIComponent(symbols.join(','))}` : ''}`,
+  ),
+  positionRiskOptions: () => request<PositionRiskOptions>('/api/position-risk/options'),
+  positionRiskImportImage: (file: File, signal?: AbortSignal, quiet = false) => {
+    const data = new FormData()
+    data.append('file', file)
+    return request<PositionRiskOcrResult>('/api/position-risk/import-image', {
+      method: 'POST', body: data, signal, quiet,
+    })
+  },
+  positionRiskPreview: (payload: { revision: number; account: Record<string, any>; positions: Array<Record<string, any>> }) =>
+    request<PositionRiskPreview>('/api/position-risk/portfolio/preview', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  positionRiskReplace: (payload: { revision: number; account: Record<string, any>; positions: Array<Record<string, any>> }) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio; message: string }>('/api/position-risk/portfolio', {
+      method: 'PUT', body: JSON.stringify(payload),
+    }),
+  positionRiskUpdateOverride: (symbol: string, revision: number, override: Record<string, any>) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio }>(`/api/position-risk/overrides/${encodeURIComponent(symbol)}`, {
+      method: 'PUT', body: JSON.stringify({ revision, override }),
+    }),
+  positionRiskBatchUpdateOverrides: (payload: { revision: number; scope: 'selected' | 'all'; symbols?: string[]; rules: Record<string, Record<string, any>>; clear_rule_ids?: string[] }) =>
+    request<{ ok: boolean; portfolio: PositionRiskPortfolio; affected_symbols: string[]; revision: number }>('/api/position-risk/overrides/batch', {
+      method: 'PUT', body: JSON.stringify(payload),
+    }),
+  positionRiskEvents: () =>
+    request<{ events: PositionRiskEvent[]; count: number }>('/api/position-risk/events'),
+  qmtStatus: () => request<QmtStatus>('/api/position-risk/qmt/status'),
+  qmtProbe: (quiet = false) => request<QmtStatus>('/api/position-risk/qmt/probe', { method: 'POST', quiet }),
+  qmtSync: () => request<{ ok: boolean; portfolio: PositionRiskPortfolio; snapshot: Record<string, any>; message: string }>('/api/position-risk/qmt/sync', { method: 'POST' }),
+  qmtTradingToggle: (enabled: boolean) => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/trading-toggle', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  qmtConnectionMode: (mode: 'remote' | 'local') => request<{ ok: boolean; status: QmtStatus }>('/api/position-risk/qmt/connection-mode', { method: 'POST', body: JSON.stringify({ mode }) }),
+  qmtOrders: () => request<{ orders: QmtOrder[] }>('/api/position-risk/qmt/orders'),
+  qmtPreviewOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode: string; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode }, quiet = false) =>
+    request<{ ok: boolean; preview: QmtOrderPreview }>('/api/position-risk/qmt/orders/preview', { method: 'POST', body: JSON.stringify(payload), quiet }),
+  qmtSubmitOrder: (payload: { action: 'BUY' | 'SELL'; symbol: string; volume?: number | null; price?: number | null; price_type: string; reference_price?: number | null; allocation_mode?: string | null; allocation_value?: number | null; credit_buy_mode?: QmtCreditBuyMode; idempotency_key: string }) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  qmtConfirmRiskAction: (payload: { fingerprint: string; symbol: string; action: 'BUY' | 'SELL'; volume: number; credit_buy_mode?: QmtCreditBuyMode }) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/confirm-action', { method: 'POST', body: JSON.stringify(payload) }),
+  qmtCancelOrder: (order_sys_id: string) =>
+    request<{ ok: boolean; order: QmtOrder }>('/api/position-risk/qmt/orders/cancel', { method: 'POST', body: JSON.stringify({ order_sys_id }) }),
+  limitBoard: () => request<LimitBoardView>('/api/limit-board'),
+  limitBoardSectorStrength: (capturedAt: string) =>
+    request<LimitBoardSectorStrengthSnapshot>(
+      `/api/limit-board/sector-strength?captured_at=${encodeURIComponent(capturedAt)}`,
+    ),
+  limitBoardSectorConstituents: (plateId: string, capturedAt?: string) =>
+    request<LimitBoardSectorConstituents>(
+      `/api/limit-board/sector-strength/${encodeURIComponent(plateId)}/constituents${capturedAt ? `?captured_at=${encodeURIComponent(capturedAt)}` : ''}`,
+      { quiet: true },
+    ),
+  limitBoardQuotes: (symbols: string[], quiet = false) =>
+    request<LimitBoardQuoteSnapshot>('/api/limit-board/quotes', {
+      method: 'POST', body: JSON.stringify({ symbols }),
+      quiet,
+    }),
+  limitBoardApproachingLimitUp: (quiet = false) =>
+    request<LimitBoardApproachingLimitUpSnapshot>('/api/limit-board/approaching-limit-up', { quiet }),
+  limitBoardCandidateScore: (symbol: string, quiet = true) =>
+    request<LimitBoardCandidateScore>(`/api/limit-board/candidate-score/${encodeURIComponent(symbol)}`, { quiet }),
+  limitBoardAdvancedSettingsUpdate: (
+    settings: LimitBoardView['settings'], revision: number,
+  ) => request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/settings/advanced', {
+    method: 'PUT', body: JSON.stringify({ settings, revision }),
+  }),
+  limitBoardCandidateAdd: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/candidate', {
+      method: 'POST', body: JSON.stringify({ symbol, revision }),
+    }),
+  limitBoardCandidateRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/candidate/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
+  limitBoardPoolAdd: (symbol: string, source: 'first_board' | 'rebound_board' | 'selected' | 'manual', revision: number, allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume' = 'fixed', allocationValue?: number | null, creditBuyMode: QmtCreditBuyMode = 'collateral') =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
+      method: 'POST', body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode }),
+    }),
+  limitBoardPoolUpdate: (symbol: string, autoTrade: boolean, orderMode: 'sweep' | 'queue', revision: number, allocationMode?: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume', allocationValue?: number | null, creditBuyMode?: QmtCreditBuyMode) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(`/api/limit-board/pool/${encodeURIComponent(symbol)}`, {
+      method: 'PUT', body: JSON.stringify({ auto_trade: autoTrade, order_mode: orderMode, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode ?? null }),
+    }),
+  limitBoardPoolRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/pool/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
+  limitBoardPoolBatchRemove: (symbols: string[], revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/pool', {
+      method: 'DELETE', body: JSON.stringify({ symbols, revision }),
+    }),
+  limitBoardBuyPoolAdd: (
+    symbol: string,
+    source: 'first_board' | 'rebound_board' | 'selected' | 'manual',
+    revision: number,
+    allocationMode: 'available' | 'sixth' | 'fifth' | 'quarter' | 'fixed' | 'volume' = 'fixed',
+    allocationValue?: number | null,
+    creditBuyMode: QmtCreditBuyMode = 'collateral',
+    orderPrice?: number | null,
+  ) => request<{ ok: boolean; config: LimitBoardConfig; order: QmtOrder }>('/api/limit-board/buy-pool', {
+    method: 'POST',
+    body: JSON.stringify({ symbol, source, revision, allocation_mode: allocationMode, allocation_value: allocationValue ?? null, credit_buy_mode: creditBuyMode, order_price: orderPrice ?? null }),
+  }),
+  limitBoardBuyPoolRemove: (symbol: string, revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>(
+      `/api/limit-board/buy-pool/${encodeURIComponent(symbol)}?revision=${revision}`,
+      { method: 'DELETE' },
+    ),
+  limitBoardBuyPoolBatchRemove: (symbols: string[], revision: number) =>
+    request<{ ok: boolean; config: LimitBoardConfig }>('/api/limit-board/buy-pool', {
+      method: 'DELETE', body: JSON.stringify({ symbols, revision }),
+    }),
+  largeOrdersStatus: () => request<LargeOrderStatus>('/api/large-orders/status'),
+  largeOrdersRanking: (window = 60, scope: 'all' | 'watchlist' = 'all', mode: LargeOrderEvidenceMode = 'combined') =>
+    request<{ rows: LargeOrderRow[]; count: number; window: number; scope: string; mode: LargeOrderEvidenceMode; stale: boolean; last_updated_ms: number | null }>(
+      `/api/large-orders/ranking?window=${window}&scope=${scope}&mode=${mode}`,
+    ),
+  largeOrdersDates: (limit = 30) =>
+    request<{ dates: string[]; count: number }>(`/api/large-orders/dates?limit=${limit}`),
+  largeOrdersHistory: (params: {
+    date: string
+    kind?: LargeOrderHistoryKind
+    mode?: LargeOrderEvidenceMode
+    symbol?: string
+    from_ms?: number
+    to_ms?: number
+    cursor?: string
+    limit?: number
+    order?: 'asc' | 'desc'
+  }) => {
+    const query = new URLSearchParams({ date: params.date })
+    if (params.kind) query.set('kind', params.kind)
+    if (params.mode) query.set('mode', params.mode)
+    if (params.symbol) query.set('symbol', params.symbol)
+    if (params.from_ms != null) query.set('from_ms', String(params.from_ms))
+    if (params.to_ms != null) query.set('to_ms', String(params.to_ms))
+    if (params.cursor) query.set('cursor', params.cursor)
+    if (params.limit != null) query.set('limit', String(params.limit))
+    if (params.order) query.set('order', params.order)
+    return request<LargeOrderHistoryResponse>(`/api/large-orders/history?${query.toString()}`)
+  },
+  largeOrdersReconciliation: (params: {
+    date: string
+    symbol?: string
+    from_ms?: number
+    to_ms?: number
+    limit?: number
+    order?: 'asc' | 'desc'
+  }) => {
+    const query = new URLSearchParams({ date: params.date })
+    if (params.symbol) query.set('symbol', params.symbol)
+    if (params.from_ms != null) query.set('from_ms', String(params.from_ms))
+    if (params.to_ms != null) query.set('to_ms', String(params.to_ms))
+    if (params.limit != null) query.set('limit', String(params.limit))
+    if (params.order) query.set('order', params.order)
+    return request<LargeOrderReconciliationResponse>(`/api/large-orders/reconciliation?${query.toString()}`)
+  },
+  largeOrdersTape: (symbol: string) =>
+    request<LargeOrderTape>(`/api/large-orders/${encodeURIComponent(symbol)}/tape`),
+  largeOrdersAnalysis: (symbol: string, limit = 120) =>
+    request<LargeOrderAnalysis>(`/api/large-orders/${encodeURIComponent(symbol)}/analysis?limit=${limit}`),
+  updateLargeOrdersPreferences: (payload: {
+    enabled?: boolean
+    score_threshold?: number
+    cooldown_seconds?: number
+    deep_dive_interval_seconds?: number
+    max_deep_dive_symbols?: number
+    candidate_limit?: number
+    min_limit_up_gap_pct?: number
+    market_segments?: LargeOrderMarketSegment[]
+    exclude_bse?: boolean
+    exclude_st?: boolean
+  }) => request<{ large_orders: NonNullable<Preferences['large_orders']> }>(
+    '/api/large-orders/preferences',
+    { method: 'POST', body: JSON.stringify(payload) },
+  ),
   updateRealtimeMonitorConfig: (cfg: {
     sse_refresh_pages?: Record<string, boolean>
     strategy_monitor_enabled?: boolean
@@ -1982,6 +4026,12 @@ export const api = {
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
       method: 'PUT',
       body: JSON.stringify({ interval }),
+    }),
+  /** 保存 QMT 交易面板的快捷金额预设(4 个档位, 元) */
+  updateQmtQuickAmountPresets: (presets: number[]) =>
+    request<{ qmt_quick_amount_presets: number[] }>('/api/settings/preferences/qmt-quick-amount-presets', {
+      method: 'PUT',
+      body: JSON.stringify({ presets }),
     }),
   updateLimitLadderMonitor: (enabled: boolean) =>
     request<{ limit_ladder_monitor_enabled: boolean }>('/api/settings/preferences/limit-ladder-monitor', {
@@ -2145,20 +4195,25 @@ export const api = {
       `/api/kline/sync?symbol=${encodeURIComponent(symbol)}&days=${days}`,
       { method: 'POST' },
     ),
-  syncMinute: (days?: number, extend?: boolean) =>
+  syncMinute: (days?: number, extend?: boolean, latestYear?: boolean, assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; job_id: string }>('/api/kline/sync_minute', {
       method: 'POST',
-      body: JSON.stringify({ ...(days ? { days } : {}), ...(extend ? { extend: true } : {}) }),
+      body: JSON.stringify({
+        ...(days ? { days } : {}),
+        ...(extend ? { extend: true } : {}),
+        ...(latestYear ? { latest_year: true } : {}),
+        asset_type: assetType,
+      }),
     }),
   syncMinuteSingle: (symbol: string, days?: number) =>
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
       body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
     }),
-  clearMinute: () =>
+  clearMinute: (assetType: 'stock' | 'etf' = 'stock') =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
       method: 'POST',
-      body: JSON.stringify({ confirm: true }),
+      body: JSON.stringify({ confirm: true, asset_type: assetType }),
     }),
   extendHistory: (value: number, unit: 'day' | 'month' | 'year') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
@@ -2170,6 +4225,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ start_date: startDate }),
     }),
+  checkEtfData: (payload: {
+    symbols: string[]
+    start: string
+    end: string
+    require_minute: boolean
+    persist_scan?: boolean
+  }) => request<EtfDataScan>('/api/kline/etf-data/check', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+  repairEtfData: (payload: { scan_id: string; issue_ids: string[] }) =>
+    request<{ status: string; job_id: string }>('/api/kline/etf-data/repair', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  etfRepairHistory: () => request<{ records: EtfRepairRecord[] }>('/api/kline/etf-data/repairs'),
   rebuildEnriched: () =>
     request<{ status: string; job_id: string }>('/api/kline/rebuild_enriched', {
       method: 'POST',
@@ -2298,6 +4367,17 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+  marketHeatRadar: (trendDays = 30, quiet = false) =>
+    request<MarketHeatRadar>(`/api/market-heat/radar?trend_days=${trendDays}`, { quiet }),
+  marketHeatRankTrend: (item: Pick<MarketHeatItem, 'thscode' | 'ticker' | 'name'>, trendDays = 30) => {
+    const params = new URLSearchParams({
+      thscode: item.thscode,
+      trend_days: String(trendDays),
+    })
+    if (item.ticker) params.set('ticker', item.ticker)
+    if (item.name) params.set('name', item.name)
+    return request<MarketHeatTrend>('/api/market-heat/trend?' + params.toString())
+  },
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
   rpsRotation: (days: number, kind?: 'concept' | 'industry', level?: number) =>
@@ -2525,6 +4605,9 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  pitReferenceStatus: () => request<PitReferenceStatus>('/api/pit-reference/status'),
+  syncPitReferenceSnapshots: () =>
+    request<PitReferenceSyncResult>('/api/pit-reference/sync-snapshots', { method: 'POST' }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -2564,11 +4647,13 @@ export const api = {
   extDataList: () =>
     request<{ items: ExtDataConfig[] }>('/api/ext-data'),
 
-  extDataRows: (id: string, opts?: { date?: string; limit?: number; columns?: string[] }) => {
+  extDataRows: (id: string, opts?: { date?: string; limit?: number; columns?: string[]; checkpoint?: string; symbols?: string[] }) => {
     const qs = new URLSearchParams()
     if (opts?.date) qs.set('date', opts.date)
     if (opts?.limit) qs.set('limit', String(opts.limit))
     if (opts?.columns?.length) qs.set('columns', opts.columns.join(','))
+    if (opts?.checkpoint) qs.set('checkpoint', opts.checkpoint)
+    if (opts?.symbols?.length) qs.set('symbols', opts.symbols.join(','))
     const suffix = qs.toString()
     return request<ExtDataRowsResult>(`/api/ext-data/${encodeURIComponent(id)}/rows${suffix ? `?${suffix}` : ''}`)
   },
@@ -2803,9 +4888,15 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+  stockAnalysisPremiumGene: (symbol: string, live = true) =>
+    request<PremiumGene>(`/api/stock-analysis/premium-gene?symbol=${encodeURIComponent(symbol)}&live=${live ? 'true' : 'false'}`),
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),
+  stockAnalysisReportsLatest: (symbols: string[]) =>
+    request<{ reports: Record<string, AiStockReport> }>(
+      `/api/stock-analysis/reports/latest?symbols=${encodeURIComponent(symbols.join(','))}`,
+    ),
 
   stockAnalysisReportSave: (r: {
     symbol: string; name?: string; focus?: string; content: string
@@ -3128,10 +5219,6 @@ export const api = {
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),
 
-  /** 生成演示触发记录 (Dev 页用) */
-  alertSeed: (count = 12, recent = true) =>
-    request<{ ok: boolean; generated: number }>(`/api/alerts/seed?count=${count}&recent=${recent}`, { method: 'POST' }),
-
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>
     request<{ configured: boolean; has_key: boolean; has_model: boolean; provider?: string }>('/api/strategies/ai/status'),
@@ -3247,7 +5334,12 @@ export interface PipelineJob {
     enriched_days: number
     index_count?: number
     index_daily_rows?: number
+    pit_reference_rows?: number
+    pit_reference_index_membership_rows?: number
+    pit_reference_crosschecked_snapshots?: number
+    pit_reference_baostock_lifecycle_rows?: number
     minute_rows: number
+    premium_gene_rows?: number
     skipped_stages?: string[]
   } | null
   error: string | null
@@ -3280,6 +5372,7 @@ export interface DataStatus {
   etf_daily: TableStats | null
   etf_enriched: TableStats | null
   etf_instruments: InstrumentsStats | null
+  etf_minute: TableStats | null
   minute: TableStats | null
   adj_factor: TableStats | null
   instruments: InstrumentsStats | null
@@ -3303,6 +5396,8 @@ export interface DataStatus {
     etf_instruments_size_mb?: number
     etf_adj_factor_files?: number
     etf_adj_factor_size_mb?: number
+    etf_minute_files?: number
+    etf_minute_size_mb?: number
     minute_files: number
     minute_size_mb: number
     adj_factor_files: number
@@ -3311,6 +5406,10 @@ export interface DataStatus {
     instruments_size_mb: number
     financials_files?: number
     financials_size_mb?: number
+    valuation_daily_files?: number
+    valuation_daily_size_mb?: number
+    pit_reference_files?: number
+    pit_reference_size_mb?: number
     ext_data_files?: number
     ext_data_size_mb?: number
     total_size_mb: number
@@ -3321,6 +5420,97 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface PitReferenceTableStatus {
+  label: string
+  rows: number
+  earliest_date?: string | null
+  latest_date?: string | null
+  symbols_covered: number
+  path_exists?: boolean
+  sources?: string[]
+  provenance_counts?: Record<string, number>
+  latest_snapshot_date?: string | null
+  earliest_snapshot_date?: string | null
+  snapshots?: number
+  membership_validation?: {
+    index_symbol: string | null
+    status: 'usable' | 'incomplete' | 'invalid'
+    usable: boolean
+    rows: number
+    snapshot_dates: number
+    duplicate_keys: number
+    invalid_snapshot_dates: Array<{
+      index_symbol: string
+      snapshot_date: string
+      members: number
+      expected_members: number | null
+    }>
+    message: string
+  }
+  industry_join?: {
+    requires_industry_standard: boolean
+    usable_with_single_standard: boolean
+    standards: Array<{
+      industry_standard: string
+      rows: number
+      symbols_covered: number
+      earliest_date: string | null
+      latest_date: string | null
+    }>
+    message: string
+  }
+  lifecycle_completeness?: {
+    status: 'complete' | 'partial'
+    complete_lifecycle: boolean
+    required_event_types: string[]
+    available_event_types: string[]
+    missing_event_types: string[]
+    delisted_symbols: number
+    complete_delisted_symbols: number
+    reason_event_rows: number
+    message: string
+  }
+  manifest?: {
+    logical_snapshot?: string | null
+    status?: string | null
+    published_rows?: number
+    provenance?: string | null
+    empty_reason?: string | null
+  } | null
+}
+
+export interface PitReferenceStatus {
+  history: Record<string, PitReferenceTableStatus>
+  snapshots: Record<string, PitReferenceTableStatus>
+  summary: {
+    source: 'canonical'
+    historical_default_source: 'baostock'
+    daily_snapshot_primary_source: 'hithink'
+    history_rows: number
+    snapshot_rows: number
+    rows: number
+    earliest_date: string | null
+    latest_date: string | null
+    latest_snapshot_date: string | null
+    strict_index_membership_usable: boolean
+  }
+}
+
+export interface PitReferenceSyncResult {
+  status: 'published' | 'skipped' | 'failed'
+  source?: 'hithink' | 'baostock_fallback' | 'unavailable'
+  reason?: string
+  message?: string
+  snapshot_date: string
+  tables: Record<string, number>
+  published_rows: number
+  index_membership_rows?: number
+  crosschecked_snapshots?: number
+  lifecycle_rows?: number
+  warnings?: string[]
+  errors?: string[]
 }
 
 export interface EnrichedField {
@@ -3387,6 +5577,32 @@ export interface ExtDataConfig {
   latest_sync_date?: string | null
   date_range?: string[] | null
   pull?: PullConfig | null
+}
+
+export interface FuyaoAuctionStatus {
+  configured: boolean
+  api_key_masked?: string
+  state: string
+  trade_date: string
+  table_id: string
+  checkpoint?: string | null
+  stage?: string | null
+  rows: number
+  symbols: number
+  checkpoints: string[]
+  latest_collected_at?: string | null
+  collected_at?: string | null
+  message?: string | null
+  error_code?: string | number | null
+  server_timestamp?: number | null
+  auction_phase?: string | null
+  partition_exists?: boolean
+  trading_dates?: string[]
+}
+
+export interface FuyaoAuctionKeyResult extends FuyaoAuctionStatus {
+  ok: boolean
+  error?: string
 }
 
 export interface ExtDataRowsResult {

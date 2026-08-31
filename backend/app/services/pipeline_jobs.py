@@ -19,7 +19,7 @@ import logging
 import os
 import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -99,6 +99,10 @@ def _default_store_dir() -> Path:
 
 
 _STORE_DIR = _default_store_dir()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 class JobStore:
@@ -272,7 +276,7 @@ class JobStore:
             if not j:
                 return
             j["status"] = "succeeded"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = _utc_now_iso()
             j["progress"] = 100
             j["result"] = result
             j["duration_s"] = _duration_s(j)
@@ -281,19 +285,30 @@ class JobStore:
             self._delete_oldest()
             self._write_file(j)
 
-    def fail(self, job_id: str, error: str) -> None:
+    def fail(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        expected_last_progress_at: str | None = None,
+    ) -> bool:
         with self._lock:
-            j = self._active_jobs.pop(job_id, None)
+            j = self._active_jobs.get(job_id)
             if not j:
-                return
+                return False
+            current_activity = j.get("last_progress_at") or j.get("started_at")
+            if expected_last_progress_at is not None and current_activity != expected_last_progress_at:
+                return False
+            self._active_jobs.pop(job_id, None)
             j["status"] = "failed"
-            j["finished_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            j["finished_at"] = _utc_now_iso()
             j["error"] = error
             j["duration_s"] = _duration_s(j)
             if self._active_id == job_id:
                 self._active_id = None
             self._delete_oldest()
             self._write_file(j)
+            return True
 
     # ===== progress =====
 
@@ -308,15 +323,18 @@ class JobStore:
                 if cancelled is not None and cancelled.is_set():
                     raise JobCancelledError(job_id)
                 return
+            previous_stage = j["stage"]
             j["stage"] = stage
             j["progress"] = max(0, min(100, int(pct)))
             j["last_progress_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             if stage_pct is not None:
                 j["stage_pct"] = max(0, min(100, int(stage_pct)))
-            elif j["stage"] != stage:
+            elif previous_stage != stage:
                 j["stage_pct"] = 0
+            now = _utc_now_iso()
+            j["last_progress_at"] = now
             entry = {
-                "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "ts": now,
                 "stage": stage,
                 "msg": msg,
             }
@@ -364,6 +382,12 @@ class JobStore:
     def active_id(self) -> str | None:
         return self._active_id
 
+    def is_active(self, job_id: str) -> bool:
+        """任务记录仍处于 pending/running 时返回 True,供 worker 协作式取消检查。"""
+        with self._lock:
+            j = self._active_jobs.get(job_id)
+            return bool(j and j.get("status") in ("pending", "running"))
+
     def reap_stale(self, timeout_s: int | None = None) -> None:
         """回收卡死的 running job。两种判定:
 
@@ -401,7 +425,7 @@ class JobStore:
             started_at = started
             last_alive_at = last_alive
         # 时间计算放到锁外(避免 datetime 解析持锁)。
-        # started_at 形如 "2026-07-04T12:00:00Z"(start() 用 datetime.utcnow 存)。
+        # 时间形如 "2026-07-04T12:00:00Z"。
         # 两端都用 timezone-aware UTC 比较,避免 naive/aware 混用导致 TypeError。
         try:
             start_dt = _parse_utc(started_at)
@@ -458,6 +482,7 @@ def _summary(j: dict[str, Any]) -> dict[str, Any]:
         "progress": j["progress"],
         "stage_pct": j.get("stage_pct", 0),
         "started_at": j["started_at"],
+        "last_progress_at": j.get("last_progress_at"),
         "finished_at": j["finished_at"],
         "duration_s": j["duration_s"],
         "result": j["result"],
